@@ -475,13 +475,13 @@ std::size_t check_sequence_abi(settings_t const& settings);
 std::size_t check_shapes_abi(settings_t const& settings);
 std::size_t check_geospatial_abi(settings_t const& settings);
 
-/** Rows each insert or search call of a cell takes, so a build spans several calls. */
+/** Entries or queries each call of a cell takes, so a build spans several calls. */
 inline constexpr std::size_t cell_batch_k = 384;
 
 /** Matches a cell judges per query. */
 inline constexpr std::size_t cell_wanted_k = 10;
 
-/** Inserts @p count rows of @p inputs into the empty @p index under their keys, which must land
+/** Inserts @p count entries of @p inputs into the empty @p index under their keys, which must land
  *  across the cell's shards and each count once where the residency serves a count. */
 template <typename verbs_type_>
 std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs,
@@ -493,10 +493,11 @@ std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, t
     failures += check(built.size == count && built.shards_count == cell.shards);
     failures += check(stats.computed_distances > 0);
     std::size_t miscounted = 0;
-    for (std::size_t row = 0; row != count; ++row) {
+    for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
         std::size_t entries = 0;
-        verbs_type_::count(index.get(), index.executor(), key_of_row(index.session->seed, row), &entries, &outcome);
+        verbs_type_::count(index.get(), index.executor(), key_of_offset(index.session->seed, offset), &entries,
+                           &outcome);
         // A residency that serves no count yet leaves the keys to the walks' recall.
         if (outcome.status == usearch_status_unsupported_k) break;
         if (outcome.status == usearch_status_success_k && entries == 1) continue;
@@ -527,16 +528,16 @@ std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_:
 }
 
 /** The index round-trips through all residencies under @p stem, as @ref check_checkpoint_round_trip
- *  judges it on the first @p count queries of @p queries, within @p score_band where stored rows
+ *  judges it on the first @p count queries of @p queries, within @p score_band where stored entries
  *  round; in an NVMe cell its saved view then answers the same walk and refuses every write, one
- *  row of @p inputs included. */
+ *  entry of @p inputs included. */
 template <typename verbs_type_>
 std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& index,
                                typename verbs_type_::inputs_t inputs, typename verbs_type_::queries_t queries,
                                std::size_t count, std::size_t expansion, double floor, std::string const& stem,
                                saved_bytes_t bytes, double score_band) {
-    // Rows that round on the way may steer a walk down another path, so they compare by exact scans
-    // wherever the residency serves one.
+    // Entries that round on the way may steer a walk down another path, so they compare by exact
+    // scans wherever the residency serves one.
     auto const search = [&](handle<verbs_type_>& searched) {
         landed_matches_t found;
         usearch_traversal_stats_t stats {};
@@ -556,7 +557,7 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
     if (view) {
         failures += expect_walk_recall(view, queries, count, expansion, floor);
         usearch_outcome_t outcome {};
-        usearch_key_t const key = key_of_row(view.session->seed, 0);
+        usearch_key_t const key = key_of_offset(view.session->seed, 0);
         verbs_type_::insert(view.get(), view.executor(), 1, keys_view({&key, 1}), inputs, 0, nullptr, &outcome);
         failures += check(outcome.status == usearch_status_read_only_k);
         verbs_type_::clear(view.get(), view.executor(), &outcome);
@@ -582,23 +583,23 @@ std::size_t expect_refined(handle<verbs_type_>& index, usearch_status_t on_devic
     return failures + check(changed[1] <= changed[0]);
 }
 
-/** A donor of @p count rows of @p inputs, keyed past the index's own @p first_row rows, absorbs
- *  whole: its slot is consumed and the sizes add up; a device index answers @p on_device instead,
- *  where absorption is not implemented yet. */
+/** A donor of @p count entries of @p inputs, keyed past the index's own @p first_offset entries,
+ *  absorbs whole: its slot is consumed and the sizes add up; a device index answers @p on_device
+ *  instead, where absorption is not implemented yet. */
 template <typename verbs_type_>
 std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
-                            std::size_t first_row, usearch_status_t on_device) {
+                            std::size_t first_offset, usearch_status_t on_device) {
     handle<verbs_type_> donor = open_index<verbs_type_>(*index.session, index.geometry, 1);
     if (!donor) return 1;
     usearch_traversal_stats_t stats {};
-    std::size_t failures = check(insert_entries(donor, inputs, count, first_row, cell_batch_k, 0, stats));
+    std::size_t failures = check(insert_entries(donor, inputs, count, first_offset, cell_batch_k, 0, stats));
     if (failures) return failures;
     usearch_outcome_t outcome {};
     verbs_type_::absorb(index.get(), index.executor(), &donor.index, 1, &outcome);
     if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
         return check(outcome.status == on_device);
     failures += check(outcome) + check(!donor);
-    return failures + check(describe(index).size == first_row + count);
+    return failures + check(describe(index).size == first_offset + count);
 }
 
 /** A cleared index holds nothing. */

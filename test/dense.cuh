@@ -1291,18 +1291,18 @@ status_t dense_load(index_type_& index, make_index_type_ const& make_index,
     else return index.load(columns, rows, source_range);
 }
 
-/** Rows a plan spans - the bound of its last step. */
+/** Nodes a plan spans - the bound of its last step. */
 template <typename plan_type_>
 std::size_t dense_plan_rows(plan_type_ const& plan) noexcept {
     auto const steps = plan.steps();
-    return steps.size() ? static_cast<std::size_t>(steps[steps.size() - 1].index_rows.bound) : 0;
+    return steps.size() ? static_cast<std::size_t>(steps[steps.size() - 1].index_nodes.bound) : 0;
 }
 
 /** Widest chunk of a plan - what one neighbors scratch must hold. */
 template <typename plan_type_>
 std::size_t dense_plan_widest_step(plan_type_ const& plan) noexcept {
     std::size_t widest = 0;
-    for (auto const step : plan.steps()) widest = std::max(widest, step.index_rows.size());
+    for (auto const step : plan.steps()) widest = std::max(widest, step.index_nodes.size());
     return widest;
 }
 
@@ -1487,9 +1487,9 @@ std::size_t dense_expect_moved_plan_refuses(index_type_& index, std::size_t node
     return failures;
 }
 
-/** A load plan that dies before its finish releases the rows it claimed, once even when
- *  moved: the next plan appends at the same base, in the rows the reservation hosts, and lands
- *  the whole checkpoint. */
+/** A load plan that dies before its finish releases the nodes it claimed, once even when moved: the
+ *  next plan appends at the same base, in the nodes the reservation hosts, and lands the whole
+ *  checkpoint. */
 template <typename index_type_, typename node_id_type_, typename make_index_type_>
 std::size_t dense_expect_abandoned_load(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                         typename index_type_::columns_view_t source, std::size_t nodes_count,
@@ -1522,7 +1522,7 @@ std::size_t dense_expect_save_plan_misuse(index_type_& index, nk::matrix<scalar_
     return failures;
 }
 
-/** Hostile load submissions: an unfrozen target refuses before any row lands, a source
+/** Hostile load submissions: an unfrozen target refuses before any entry lands, a source
  *  failing on a later chunk publishes nothing, a misused plan refuses, a count past the
  *  reservation grows by design, and an out-of-range neighbor ID rides the sentinel
  *  convention - stored, but never surfaced by any search. */
@@ -1531,7 +1531,7 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
-    // Enough rows for the walk to span two storage chunks, so a second run exists to fail on.
+    // Enough nodes for the walk to span two storage chunks, so a second run exists to fail on.
     std::size_t const nodes_count = dense_growth_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
@@ -1571,7 +1571,8 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
     failures += expect(growing.reserve({1, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect_eq(growing.load(source, nodes_count, local), status_t::success_k);
     failures += expect_eq(growing.size(), nodes_count);
-    // A reservation one row above the hosted ones grows them, though that one row fits the free rows.
+    // A reservation one node above the hosted ones grows them, though that one node fits the free
+    // nodes.
     std::size_t const hosted_rows = growing.capacity();
     failures += expect(growing.reserve({hosted_rows + 1, connectivity_16_k, dimensions}).value > hosted_rows);
 
@@ -1610,8 +1611,8 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index, u64_t se
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** Loads append: an ID space past the source's rows lands nothing, the same payload landed twice
- *  doubles the index, the second copy's IDs shift by the first copy's rows with sentinels intact,
+/** Loads append: an ID space past the source's nodes lands nothing, the same payload landed twice
+ *  doubles the index, the second copy's IDs shift by the first copy's nodes with sentinels intact,
  *  and a self-query lands on either copy. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
@@ -1642,7 +1643,8 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     std::unique_ptr<index_type_> const doubled_ptr = make_index(ledger);
     index_type_& doubled = *doubled_ptr;
     failures += expect(doubled.reserve({2 * nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
-    // An ID space past the source's rows would rebase IDs beyond the landed ones, so nothing lands.
+    // An ID space past the source's nodes would rebase IDs beyond the landed ones, so nothing
+    // lands.
     iota_view<node_id_t> const overreaching {0, static_cast<node_id_t>(nodes_count + 1)};
     failures += expect_eq(dense_load(doubled, make_index, source, nodes_count, overreaching),
                           status_t::config_mismatch_k);
@@ -1740,7 +1742,7 @@ auto dense_audit_health(index_type_& index, typename index_type_::traversal_cont
  *      sweep, the second finds far less, and recall never falls for the trouble.
  *
  *  The bound on the second sweep is a ratio rather than zero, since the walks re-seed from random
- *  landmarks and a later back-link can still disturb a row a earlier step already settled.
+ *  landmarks and a later back-link can still disturb a node an earlier step already settled.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
@@ -1768,7 +1770,8 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
                                         : 0;
     auto const [first_refinement, first_status] = index.refine({0, published}, context);
     failures += expect(first_status == status_t::success_k);
-    // Every pass heals what it strands, so islands add their re-selections to the range's, and only then.
+    // Every pass heals the islands it leaves, so islands add their re-selections to the range's,
+    // and only then.
     failures += expect(first_refinement.reselected_nodes >= dense_growth_nodes_k &&
                        (first_refinement.reselected_nodes == dense_growth_nodes_k) == !first_refinement.islands_found);
     failures += expect(first_refinement.changed_nodes > 0 &&
@@ -1810,10 +1813,10 @@ std::size_t test_dense_refine_settles(make_index_type_ const& make_index, u64_t 
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** Builds and refines distinct rows of which every stride-th repeats the first, a duplicate class
- *  of a hundred rows: every member must reach a row outside the class within two hops, no member
- *  may draw a quarter of the class's links, and a search for the vector, unlike an insertion walk,
- *  must keep more than one member. */
+/** Builds and refines distinct vectors of which every stride-th repeats the first, a duplicate
+ *  class of a hundred entries: every member must reach an entry outside the class within two hops,
+ *  no member may draw a quarter of the class's links, and a search for the vector, unlike an
+ *  insertion walk, must keep more than one member. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -1863,9 +1866,9 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
             return found;
         };
         std::vector<std::size_t> class_links(shape.nodes, 0);
-        std::size_t stranded = 0;
-        for (std::size_t row = 0; row < dense_growth_nodes_k; row += stride_k) {
-            node_id_t const member = assigned_ids[row];
+        std::size_t trapped = 0;
+        for (std::size_t offset = 0; offset < dense_growth_nodes_k; offset += stride_k) {
+            node_id_t const member = assigned_ids[offset];
             auto const links = saved_neighbors.row(member).as_vector();
             bool reached = escapes(member);
             for (std::size_t slot = 0; slot != links.size(); ++slot) {
@@ -1874,9 +1877,9 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
                 ++class_links[neighbor];
                 reached |= escapes(neighbor);
             }
-            stranded += !reached;
+            trapped += !reached;
         }
-        failures += expect_eq(stranded, 0u);
+        failures += expect_eq(trapped, 0u);
         failures += expect(*std::max_element(class_links.begin(), class_links.end()) * 4 < duplicate_rows_k);
 
         auto const [found, found_status] = index.search(vectors.row(0).as_vector(), context);
@@ -1888,7 +1891,7 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** The audit's contract on a graph nothing stranded: an empty index reaches nothing, a
+/** The audit's contract on a graph without islands: an empty index reaches nothing, a
  *  healthy one reaches everything, and two audits of one graph agree - the landmarks are
  *  stride-spread, so the answer is a property of the graph rather than of the draw. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
@@ -1935,10 +1938,10 @@ std::size_t test_dense_health_audits(make_index_type_ const& make_index, u64_t s
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** Strands the rows from @p first_island on: every reference to the tail leaves the graph,
- *  and each stranded row keeps only the published-empty self-loop, pointed at by nothing. */
+/** Makes islands of the nodes from @p first_island on: every reference to the tail leaves the
+ *  graph, and each island keeps only the published-empty self-loop, pointed at by nothing. */
 template <typename node_id_type_>
-void dense_strand_islands(nk::matrix_span<node_id_type_> neighbors, node_id_type_ first_island) {
+void dense_make_islands(nk::matrix_span<node_id_type_> neighbors, node_id_type_ first_island) {
     for (std::size_t node = 0; node != first_island; ++node) {
         auto mainland_row = neighbors.row(node).as_vector();
         for (std::size_t slot = 0; slot != mainland_row.size(); ++slot)
@@ -1954,7 +1957,7 @@ void dense_strand_islands(nk::matrix_span<node_id_type_> neighbors, node_id_type
 
 /**
  *  @brief The repair's contract, against islands planted by construction rather than coaxed out
- *      of a build: a checkpoint's neighbor rows are rewritten so a tail of nodes points only at
+ *      of a build: a checkpoint's neighbor lists are rewritten so a tail of nodes points only at
  *      itself, which no walk can enter, and the load's own compaction keeps that encoding.
  *
  *  Healing must then reach every node, and a second pass must find nothing left to do.
@@ -1968,8 +1971,8 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "heal"));
 
-    // Build every node, then strand the tail: its rows become self-loops, the "published with
-    // no neighbors" encoding, so nothing points into them and they point nowhere.
+    // Build every node, then make islands of the tail: its neighbor lists become self-loops, the
+    // "published with no neighbors" encoding, so nothing points into them and they point nowhere.
     std::unique_ptr<index_type_> const built_ptr = make_index(ledger);
     index_type_& built = *built_ptr;
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
@@ -1988,7 +1991,7 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
                    synchronization_t::exclusive_k, scratch.span()),
         status_t::success_k);
     failures += expect_eq(built.size(), nodes_count);
-    dense_strand_islands(saved_neighbors.span(), static_cast<node_id_t>(nodes_count - islands_count));
+    dense_make_islands(saved_neighbors.span(), static_cast<node_id_t>(nodes_count - islands_count));
 
     std::unique_ptr<index_type_> const islanded_ptr = make_index(ledger);
     index_type_& islanded = *islanded_ptr;
@@ -2030,7 +2033,7 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t se
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** Of the ten nearest rows by @p index 's own exact scan, how many its walks return, summed over
+/** Of the ten nearest entries by @p index 's own exact scan, how many its walks return, summed over
  *  the rows of @p queries; a match within the tenth's distance counts, so ties never punish one. */
 template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
 std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ queries) {
@@ -2054,11 +2057,11 @@ std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make
 }
 
 /**
- *  @brief A built index splits into two and, refilled, into three graph-local parts: every row
- *      lands in exactly one receiver, the source empties and takes rows from zero again, and every
- *      receiver reaches all its rows and walks within noise of the source's recall at ten.
+ *  @brief A built index splits into two and, refilled, into three graph-local parts: every entry
+ *      lands in exactly one receiver, the source empties and takes entries from zero again, and
+ *      every receiver reaches all its rows and walks within noise of the source's recall at ten.
  *
- *  Equal graphs split under one seed place every row alike. Refusals leave every index whole:
+ *  Equal graphs split under one seed place every entry alike. Refusals leave every index whole:
  *  fewer than two receivers, a repeated or non-empty one, the source among them, another metric
  *  or another geometry.
  */
@@ -2075,7 +2078,7 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
     auto const vectors = make_vectors<scalar_t>(rows_k, dimensions, stream_key(seed, "split"));
     auto const queries = make_vectors<scalar_t>(samples_k, dimensions, stream_key(seed, "split", 1));
     std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
-    // Equal rows under fresh contexts build equal graphs.
+    // Equal vectors under fresh contexts build equal graphs.
     auto build = [&](index_type_& index) {
         typename index_type_::traversal_context_t building = dense_make_context<index_type_>(make_index);
         failures += expect(succeeded(index.reserve({rows_k, connectivity_16_k, dimensions}).status));
@@ -2092,8 +2095,8 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
     auto recall_close = [&](std::size_t found, std::size_t baseline) {
         return expect(found * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
     };
-    // Drives one split, then checks that every source row lands in exactly one receiver, byte for
-    // byte, and that every receiver reaches its rows.
+    // Drives one split, then checks that every source entry lands in exactly one receiver, byte for
+    // byte, and that every receiver reaches its nodes.
     auto split = [&](index_type_& source, std::vector<index_type_*>& receivers, u64_t split_seed) {
         {
             failures += expect_eq(source.reserve_traversal(context, {}), status_t::success_k);
@@ -2152,7 +2155,7 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
         failures += expect(source->size() == rows_k && receivers[0]->size() == 0 && receivers[1]->size() == 1);
     }
 
-    // Two parts, twice over equal graphs: every row lands at the same node of the same receiver.
+    // Two parts, twice over equal graphs: every entry lands at the same node of the same receiver.
     std::vector<std::unique_ptr<index_type_>> halves_owned, twin_halves_owned;
     std::vector<index_type_*> halves = make_receivers(halves_owned, 2);
     std::vector<index_type_*> twin_halves = make_receivers(twin_halves_owned, 2);
@@ -2169,7 +2172,7 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
         failures += recall_close(dense_recall_at_ten(*halves[half], make_index, queries.view()), source_recall);
     }
 
-    // The emptied source takes rows from zero again, so it refills and splits into three.
+    // The emptied source takes entries from zero again, so it refills and splits into three.
     std::vector<std::unique_ptr<index_type_>> thirds_owned;
     std::vector<index_type_*> thirds = make_receivers(thirds_owned, 3);
     failures += expect(succeeded(source->insert(vectors.view(), {}, context).status));
@@ -2984,7 +2987,7 @@ std::size_t test_dense_indexes_guards(u64_t seed, placement_types_&... placement
     failures += expect_eq(rows_in_shards, rows);
 
     // A batch past the reservation grows into it - whole, with no ID holes - and the capacity
-    // reported afterwards covers every row that landed.
+    // reported afterwards covers every entry that landed.
     failures += expect(succeeded(indexes
                                      .insert(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
                                              executor)
@@ -2994,8 +2997,8 @@ std::size_t test_dense_indexes_guards(u64_t seed, placement_types_&... placement
     return failures;
 }
 
-/** A composition grows past any reservation: rows well beyond it land one at a time and batched, every key stays
- *  findable, and a second, larger reservation is a hint rather than a refusal. */
+/** A composition grows past any reservation: entries well beyond it land one at a time and batched,
+ *  every key stays findable, and a second, larger reservation is a hint rather than a refusal. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_growth(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -3037,8 +3040,8 @@ std::size_t test_dense_indexes_growth(u64_t seed) {
 }
 
 /** A sharded pass under narrow build candidates: the first re-wires nodes, the second fewer, each
- *  heals what it strands without losing reach, and the audit after them counts what the last pass
- *  ended on. */
+ *  heals the islands it leaves without losing reach, and the audit after them counts what the last
+ *  pass ended on. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3152,7 +3155,7 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     return failures;
 }
 
-/** One key, several rows: the locator map's whole reason to exist, driven through
+/** One key, several entries: the locator map's whole reason to exist, driven through
  *  the single-row @c insert with a caller-built arena context. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... placement) {
@@ -3173,7 +3176,7 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
     if (failed(rows_driver.status)) return failures + expect(false);
 
-    // Every second row lands under one shared key; the rest keep distinct ones.
+    // Every second entry lands under one shared key; the rest keep distinct ones.
     key_t const shared = dense_key<key_t>(1000);
     for (std::size_t row = 0; row != rows; ++row) {
         key_t const key = row % 2 ? shared : dense_key<key_t>(1 + row);
@@ -3193,7 +3196,7 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
     failures += expect_eq(indexes.get(dense_key<key_t>(2), fetched.span(), 2, driver.executor), 0u);
 
     // The batched verbs answer what the single-key ones do, repeats and absent keys included, and
-    // every key's rows land in its own band of the batch, in the single-key order.
+    // every key's entries land in its own band of the batch, in the single-key order.
     std::array<key_t, 4> const probes {shared, dense_key<key_t>(1), dense_key<key_t>(2), shared};
     std::span<key_t const> const probed {probes};
     std::array<std::size_t, 4> counted {}, contained {}, gotten {};
@@ -3267,7 +3270,7 @@ std::size_t dense_indexes_build(indexes_type_& indexes, executor_type_& executor
     return failures;
 }
 
-/** Every key of @p keys resolves to exactly one row of @p indexes, and sampled rows read back
+/** Every key of @p keys resolves to exactly one entry of @p indexes, and sampled entries read back
  *  through @p executor come back byte-identical to @p vectors. */
 template <typename indexes_type_, typename vectors_type_, typename keys_type_>
 std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ const& vectors, keys_type_ const& keys,
@@ -3297,8 +3300,9 @@ std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ 
 
 /** Two indexes built over the halves of one dataset merge into one, the second half passing through
  *  an index never reserved, which takes its geometry: the donors end empty, every key resolves to
- *  one row with its vector intact, the refine re-selects at least every appended row while the rest
- *  heal, and the merged search finds rows of either half - while absorbing itself refuses. */
+ *  one entry with its vector intact, the refine re-selects at least every appended entry while the
+ *  rest heal, and the merged search finds entries of either half; an index absorbing itself
+ *  refuses. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3341,17 +3345,17 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     failures += expect(succeeded(absorbed_status));
     failures += expect_eq(relay.size(), 0u);
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
-    // Every appended row re-selects, whatever shard it landed in.
+    // Every appended entry re-selects, whatever shard it landed in.
     failures += expect(absorbed.reselected_nodes >= rows - half && absorbed.changed_nodes > 0);
     // The refine heals while its island count shrinks, which a dot graph's hubs can stall short of
-    // every row.
+    // every node.
     auto const [health, health_status] = recipient.health(executor);
     failures += expect(succeeded(health_status));
     failures += expect_eq(health.reachable_nodes, absorbed.health.reachable_nodes);
     failures += expect(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
 
     // Sampled self-recall through the merged search, judged by distance band on each half alone, so
-    // donor rows the refine strands cannot hide behind the recipient's.
+    // donor entries the refine leaves as islands cannot hide behind the recipient's.
     if constexpr (kernel_ != nk_kernel_dot_k) {
         dense_indexes_row_driver<indexes_type_> rows_driver {recipient, driver};
         failures += expect(succeeded(rows_driver.status));
@@ -3379,12 +3383,12 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
     return failures;
 }
 
-/** Four indexes over the quarters of one dataset merge into an empty recipient through one plan:
- *  a group naming a null donor refuses before any lands, leaving every donor whole; a plan whose
+/** Four indexes over the quarters of one dataset merge into an empty recipient through one plan: a
+ *  group naming a null donor refuses before any lands, leaving every donor whole; a plan whose
  *  first run is cancelled mid re-selection has consumed every donor and refuses insertions, and on
  *  a GPU saves, while it lives; the next run continues it, and it finishes having re-selected
- *  exactly as many nodes as an uncancelled absorb of the same quarters, its rows spread evenly over
- *  the recipient's shards and every key resolving to its own row. */
+ *  exactly as many nodes as an uncancelled absorb of the same quarters, its entries spread evenly
+ *  over the recipient's shards and every key resolving to its own entry. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3476,7 +3480,8 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         failures += expect(absorbed.reselected_nodes >= baseline_visited);
     }
     failures += expect_eq(recipient.size(), rows);
-    // Donor shards differ by a row at most, and each lands on the recipient shard with the fewest.
+    // Donor shards differ by an entry at most, and each lands on the recipient shard with the
+    // fewest.
     std::size_t fewest = rows, most = 0;
     for (std::size_t shard = 0; shard != recipient.shards_count(); ++shard)
         fewest = std::min(fewest, recipient.shard(shard).size()), most = std::max(most, recipient.shard(shard).size());
@@ -3493,10 +3498,10 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
  *      and recall at ten against the exact oracle stays within noise of the source's throughout.
  *
  *  Shard @c s lands in every receiver's shard @c s, every key resolves in exactly one receiver with
- *  its vector intact, the source empties and takes rows again, and every receiver reaches its rows.
- *  While a split's plan lives, an insertion into a receiver refuses. Refusals leave every index
- *  whole: fewer than two receivers, a repeated or non-empty one, the source among them, another
- *  metric or another shard count.
+ *  its vector intact, the source empties and takes entries again, and every receiver reaches its
+ *  nodes. While a split's plan lives, an insertion into a receiver refuses. Refusals leave every
+ *  index whole: fewer than two receivers, a repeated or non-empty one, the source among them,
+ *  another metric or another shard count.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement) {
@@ -3529,7 +3534,7 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
                                                         norms<oracle_kit_t>(row_vector));
         }
     }
-    // Of the ten nearest rows `indexes` holds by the oracle, how many its walks return; a match
+    // Of the ten nearest entries `indexes` holds by the oracle, how many its walks return; a match
     // within the tenth's distance counts, so ties never punish a walk.
     auto recall_at_ten = [&](indexes_type_& indexes) {
         dense_indexes_row_driver<indexes_type_> walker {indexes, driver};
@@ -3567,7 +3572,7 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
         return receivers;
     };
     // Every key in exactly one receiver, sampled vectors intact, and every receiver reaching its
-    // rows and walking within noise of the source.
+    // nodes and walking within noise of the source.
     auto fetched = make_vectors<scalar_t>(1, dimensions, stream_key(seed, "indexes_split", 2));
     std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
     auto expect_parts = [&](std::vector<indexes_type_*> const& receivers, std::size_t baseline) {
@@ -3660,7 +3665,7 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
     failures += dense_indexes_expect_restored(*thirds[0], vectors, keys, dimensions, executor, seed);
     failures += recall_close(recall_at_ten(*thirds[0]), source_recall);
 
-    // The emptied source takes rows again.
+    // The emptied source takes entries again.
     failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
     failures += expect(succeeded(source.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
     failures += expect_eq(source.size(), rows);
@@ -4047,7 +4052,7 @@ std::size_t test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... p
  *
  *  A RAM index admits both batches at once. A VRAM index admits one mutation at a time and
  *  answers the overlapping one with @c contended_k, so a refused batch is retried once the
- *  threads join; either way every row lands exactly once.
+ *  threads join; either way every entry lands exactly once.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placement) {
@@ -4438,10 +4443,10 @@ std::size_t test_dense_immutable_parity(make_index_type_ const& make_index, u64_
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** The external reader's cursor, exercised across chunk seams: full-prefix parity
- *  of IDs & vector bytes, follow semantics on the staged row, refresh stickiness -
- *  past the end stays past the end - a thread racing live inserters, and the immutable
- *  mode agreeing with the concurrent one on the settled graph. */
+/** The external reader's cursor, exercised across chunk seams: full-prefix parity of IDs & vector
+ *  bytes, follow semantics on the staged neighbor list, refresh stickiness - past the end stays
+ *  past the end - a thread racing live inserters, and the immutable mode agreeing with the
+ *  concurrent one on the settled graph. */
 template <typename index_type_, typename concurrent_cursor_type_, typename immutable_cursor_type_,
           typename make_index_type_>
 std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
@@ -4481,7 +4486,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     }
     failures += expect_eq(visited, nodes_count);
 
-    // Follow semantics: every staged edge lands where the row said; misuse refuses.
+    // Follow semantics: every staged edge lands where the neighbor list said; misuse refuses.
     failures += expect_eq(cursor.seek(0), status_t::success_k);
     std::vector<node_id_t> first_row {cursor.neighbors().begin(), cursor.neighbors().end()};
     for (std::size_t slot = 0; slot != first_row.size(); ++slot) {
@@ -4546,7 +4551,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     failures += expect_eq(static_cast<std::size_t>(parked_cursor.id()), index.size());
     failures += expect_eq(parked_cursor.seek(0), status_t::success_k);
 
-    // The immutable mode sweeps the settled graph to the same count & the same rows.
+    // The immutable mode sweeps the settled graph to the same count & the same neighbor lists.
     immutable_cursor_type_ settled_cursor {index};
     failures += expect_eq(settled_cursor.reserve(counting_allocator<byte_t> {ledger}), status_t::success_k);
     failures += expect_eq(settled_cursor.seek(0), status_t::success_k);
@@ -4712,10 +4717,10 @@ std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index, u64
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** A refused re-table saturates the walk, it never fails it: under a frozen budget a
- *  search answers @c success_k with a short ascending ranking and one saturated walk, and
- *  an insertion still publishes its row, wired thinner. One-wide candidates make the first
- *  expansion's quad the re-table that is refused. */
+/** A refused re-table saturates the walk, it never fails it: under a frozen budget a search answers
+ *  @c success_k with a short ascending ranking and one saturated walk, and an insertion still
+ *  publishes its entry, wired thinner. One-wide candidates make the first expansion's quad the
+ *  re-table that is refused. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;

@@ -147,7 +147,7 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vector
                core.device_.shared_memory_per_multiprocessor_bytes;
 }
 
-/** Post-drain structural audit of the neighbors matrix: every row published, every ID in range,
+/** Post-drain structural audit of the neighbors matrix: every entry published, every ID in range,
  *  self-loop rows childless, no duplicate neighbors within a row. One warp scans one row, a
  *  warp-width of slots at a time; each bad row bumps @p violations once. */
 static __global__ void cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,

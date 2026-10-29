@@ -86,7 +86,7 @@ private func triangle(metric: DenseMetric = .euclidean) throws -> DenseIndex {
     return index
 }
 
-/// The two-row inner-product index over the identity basis the linear-algebra verbs score against.
+/// The two-entry inner-product index over the identity basis the linear-algebra verbs score against.
 private func basis() throws -> DenseIndex {
     let index = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .inner))
     try index.reserve(2)
@@ -365,7 +365,7 @@ struct ResultTests {
         #expect(try index.search(query, wanted: 3, arena: arena, config: rejected)[0].isEmpty)
     }
 
-    /// A scan scores every row exactly, so each row queried against its own index finds itself first.
+    /// A scan scores every entry exactly, so each vector queried against its own index finds itself first.
     @Test func scanFindsEveryRowItself() throws {
         let index = try triangle(metric: .angular)
         let queries = try rows([Float](arrayLiteral: 1, 0, 0, 1, 1, 1), columns: 2)
@@ -712,7 +712,7 @@ struct LinearAlgebraTests {
     @Test func maxSimScoresOverDocumentsRatherThanRows() throws {
         let index = try basis()
         // Two rows per query, so one query of two tokens scores against both indexed documents,
-        // written as one row.
+        // written as one run.
         let tokens = try rows([Float](arrayLiteral: 1, 0, 0, 1), columns: 2)
         let arena = try Arena()
         let documents = try index.maxsim(tokens, rowsPerQuery: 2, wanted: 2, arena: arena)
@@ -733,7 +733,7 @@ struct LinearAlgebraTests {
         let executor = try executor()
         let index = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .inner))
         try index.reserve(4)
-        // Every key and value is one a bf16 holds exactly, so the stored rows are these.
+        // Every key and value is one a bf16 holds exactly, so the stored vectors are these.
         let keys: [Float] = [1, 0, 0.5, 0.75, 0, 1, -0.75, 0.5]
         try index.insert(keys: [0, 1, 2, 3], vectors: try rows(keys, columns: 2))
         let queries: [Float] = [1, 0, 0, 1]

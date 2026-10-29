@@ -99,12 +99,12 @@ function poster(
 export const dense = {
   name: "dense",
 
-  /** The first `rows` vectors of a `.u8bin` file - SIFT by default - under Euclidean distance. */
+  /** The first `entries` vectors of a `.u8bin` file - SIFT by default - under Euclidean distance. */
   async develop(parameters, report) {
     const source = sourceOf("../data/sift-10m/base.10M.u8bin", parameters);
-    const rows = Number(parameters.get("rows") ?? 20000);
+    const entries = Number(parameters.get("entries") ?? 20000);
     const [, dimensions] = new Uint32Array((await bytesOf(source, 0, 7)).buffer);
-    report(`Reading ${rows.toLocaleString("en-US")} rows of ${dimensions} bytes…`);
+    report(`Reading ${entries.toLocaleString("en-US")} vectors of ${dimensions} bytes…`);
     return {
       options: {
         metric: "usearch_dense_metric_euclidean_k",
@@ -112,10 +112,10 @@ export const dense = {
         dimensions,
         connectivity: 16,
       },
-      identities: identitiesUpTo(rows),
+      identities: identitiesUpTo(entries),
       payload: {
-        count: rows,
-        bytes: await bytesOf(source, 8, 7 + rows * dimensions),
+        count: entries,
+        bytes: await bytesOf(source, 8, 7 + entries * dimensions),
         scalar: "usearch_scalar_u8_k",
         stride: dimensions,
         columns: dimensions,
@@ -152,15 +152,15 @@ const residueClasses = /** @type {Record<string, keyof Palette>} */ ({
 export const sequence = {
   name: "sequence",
 
-  /** `rows` sentences of 24 to 80 bytes from a text file sorted alphabetically - Leipzig by default - drawn from chunks
+  /** `entries` sentences of 24 to 80 bytes from a text file sorted alphabetically - Leipzig by default - drawn from chunks
    *  spread over the whole file, under byte-level Levenshtein distance. */
   async develop(parameters, report) {
     const source = sourceOf("../data/leipzig-1m/leipzig1M_en.txt", parameters);
-    const rows = Number(parameters.get("rows") ?? 5000);
+    const entries = Number(parameters.get("entries") ?? 5000);
     const size = Number(
       ((await fetch(source, { headers: { Range: "bytes=0-0" } })).headers.get("Content-Range") ?? "/0").split("/")[1],
     );
-    report(`Reading ${rows.toLocaleString("en-US")} sentences…`);
+    report(`Reading ${entries.toLocaleString("en-US")} sentences…`);
     const chunks = 64;
     const chunkBytes = 96 << 10;
     /** @type {string[]} */
@@ -175,9 +175,9 @@ export const sequence = {
           .filter((line) => line.length >= 24 && line.length <= 80),
       );
     }
-    const stride = Math.max(1, candidates.length / rows);
+    const stride = Math.max(1, candidates.length / entries);
     const encoder = new TextEncoder();
-    const encoded = Array.from({ length: Math.min(rows, Math.floor(candidates.length / stride)) }, (_, entry) =>
+    const encoded = Array.from({ length: Math.min(entries, Math.floor(candidates.length / stride)) }, (_, entry) =>
       encoder.encode(candidates[Math.floor(entry * stride)]),
     );
     const offsets = new Uint32Array(encoded.length + 1);
@@ -241,16 +241,16 @@ export const shapes = {
   name: "shapes",
   tapeColumns: 3,
 
-  /** The first `rows` conformers `prepare.py molecules` wrote, each molecule's under one key, under Chamfer distance. */
+  /** The first `entries` conformers `prepare.py molecules` wrote, each molecule's under one key, under Chamfer distance. */
   async develop(parameters, report) {
     const source = sourceOf("../data/usearch-molecules-explorer/conformers.bin", parameters);
     const file = new Uint8Array(await (await fetch(source)).arrayBuffer());
     const words = new Uint32Array(file.buffer, 0, 1);
     const stored = words[0];
-    const rows = Math.min(stored, Number(parameters.get("rows") ?? 600));
-    report(`Read ${rows.toLocaleString("en-US")} conformers…`);
-    const identities = new Uint32Array(file.buffer, 4, rows).slice();
-    const offsets = new Uint32Array(file.buffer, 4 + stored * 4, rows + 1).slice();
+    const entries = Math.min(stored, Number(parameters.get("entries") ?? 600));
+    report(`Read ${entries.toLocaleString("en-US")} conformers…`);
+    const identities = new Uint32Array(file.buffer, 4, entries).slice();
+    const offsets = new Uint32Array(file.buffer, 4 + stored * 4, entries + 1).slice();
     const points = 4 + stored * 4 + (stored + 1) * 4;
     return {
       options: {
@@ -261,8 +261,8 @@ export const shapes = {
       },
       identities,
       payload: {
-        count: rows,
-        bytes: file.slice(points, points + offsets[rows] * 12),
+        count: entries,
+        bytes: file.slice(points, points + offsets[entries] * 12),
         scalar: "usearch_scalar_f32_k",
         offsets,
         columns: 3,
@@ -374,20 +374,20 @@ export const geospatial = {
     return [...parallels, ...meridians];
   },
 
-  /** `rows` synthetic fixes, since no geotagged corpus ships with the repository: vehicles leave six European city
+  /** `entries` synthetic fixes, since no geotagged corpus ships with the repository: vehicles leave six European city
    *  centres on winding tracks, one fix every 50 m looking along the way, each vehicle's fixes under its own key. */
   async develop(parameters) {
-    const rows = Number(parameters.get("rows") ?? 8000);
+    const entries = Number(parameters.get("entries") ?? 8000);
     const random = randomFrom(7);
     /** @type {Records['records']} */
     const records = [];
-    const identities = new Uint32Array(rows);
-    for (let vehicle = 0; records.length < rows; vehicle++) {
+    const identities = new Uint32Array(entries);
+    for (let vehicle = 0; records.length < entries; vehicle++) {
       const [latitude, longitude] = hubs[vehicle % hubs.length];
       let north = latitude + (random() - 0.5) * 0.2;
       let east = longitude + (random() - 0.5) * 0.3;
       let heading = random() * 360;
-      for (let fix = 0; fix < fixesPerVehicle && records.length < rows; fix++) {
+      for (let fix = 0; fix < fixesPerVehicle && records.length < entries; fix++) {
         heading = (heading + (random() - 0.5) * 40 + 360) % 360;
         north += (50 * Math.cos((heading * Math.PI) / 180)) / metresPerDegree;
         east += (50 * Math.sin((heading * Math.PI) / 180)) / (metresPerDegree * Math.cos((north * Math.PI) / 180));
@@ -408,7 +408,7 @@ export const geospatial = {
         });
       }
     }
-    return { options: { values_per_key: fixesPerVehicle }, identities, payload: { count: rows, records } };
+    return { options: { values_per_key: fixesPerVehicle }, identities, payload: { count: entries, records } };
   },
 
   /** The view cone, north up, in a poster square, and the position beside it. */

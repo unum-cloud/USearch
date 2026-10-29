@@ -22,11 +22,11 @@ The verbs are named after the C interface they call:
 - `usearch dense insert <vectors> --save <address>` creates an index, inserts a slice of one RetriEval file on a GPU or in RAM, and saves it.
   Each row is keyed by the same row of `--keys`, or by its dataset row number without one, so slices built apart keep distinct keys when merged.
 - `usearch dense absorb <base> <donors>... --save <address>` loads the base, then loads and absorbs its donors one at a time, keeping their graphs rather than re-inserting their vectors, and saves the merged index.
-  Each donor reports its rows and absorb time, the rows the closing refinement changed and how many rows a search reaches.
-- `usearch dense refine <address> --save <address>` re-selects every row's neighbors against the finished graph, pass after pass until one changes nothing or `--max-refines` passes ran.
+  Each donor reports its entries and absorb time, the nodes the closing refinement changed and how many entries a search reaches.
+- `usearch dense refine <address> --save <address>` re-selects every node's neighbors against the finished graph, pass after pass until one changes nothing or `--max-refines` passes ran.
 - `usearch dense split <address> --parts N --save <manifest>` cuts one checkpoint into `N` graph-local parts and commits them as a manifest at `<manifest>`, the parts beside it.
   The library refuses every split today with `unsupported`, and the verb reports that status and exits.
-- `usearch dense health <address>` views a checkpoint from storage and audits how many of its rows a search reaches.
+- `usearch dense health <address>` views a checkpoint from storage and audits how many of its entries a search reaches.
 - `usearch metadata <address>` prints a monolith's or a manifest's nodes, parts, metric and keys, then reads its modality's metadata, picked by the metric its header names.
 - `usearch slots <drive>` maps a raw drive: every live file with its owner and extent, and every free run of slots.
 - `usearch copy <from> <to>` copies a checkpoint byte for byte, then reads it back and compares.
@@ -36,7 +36,7 @@ A RAM index lives in the machine's first memory domain, and a VRAM one on device
 Either way the index is one shard, so its monolith is one graph.
 
 Absorbing donors one at a time peaks at the base plus one donor, and pays one closing refinement per donor.
-One grouped `usearch_dense_absorb` naming all `k` donors refines in ⌈log₂ k⌉ rounds over every row instead, but holds every donor at once.
+One grouped `usearch_dense_absorb` naming all `k` donors refines in ⌈log₂ k⌉ rounds over every node instead, but holds every donor at once.
 
 ## Addresses
 
@@ -185,7 +185,7 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 - `--residency` defaults to `vram` when a GPU is listed, and `ram` otherwise.
 - `--connectivity`, `--expansion-add` and `--expansion-refine` default to the library's derivations.
 - `--max-refines` defaults to `0`: refinement passes after ingestion, stopping early once no neighbors change.
-- `--batch` defaults to `65536`: rows per insertion, with two batches staged at once, so one is read while the other is indexed.
+- `--batch` defaults to `65536`: entries per insertion, with two batches staged at once, so one is read while the other is indexed.
 - `--threads` defaults to 7/8 of the memory domain's cores: executor threads, `ram` only.
 - `USEARCH_DEVICES` is an environment variable, not a flag: comma-separated device ordinals the ranks of a node take in turn.
 

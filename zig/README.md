@@ -21,7 +21,7 @@ No C or C++ is compiled here: the engine is CMake's to build, and this module co
 
 ## Quickstart
 
-An index owns rows; an `Executor` owns the threads or streams a verb runs on; an `Arena` holds every output whose length scales with the call.
+An index owns entries; an `Executor` owns the threads or streams a verb runs on; an `Arena` holds every output whose length scales with the call.
 
 ```zig
 const usearch = @import("usearch");
@@ -42,7 +42,7 @@ const query = [_]f32{ 0.2, 0.1, 0.2, 0.1 };
 var arena = try usearch.Arena.init(null); // host pages, for calls on the calling thread
 defer arena.deinit();
 const matches = try index.search(try .of(f32, &query, 4), 10, &arena, .{}); // up to 10 matches per query
-for ((try matches.row(0)).keys) |key| std.debug.print("{f}\n", .{key});
+for ((try matches.query(0)).keys) |key| std.debug.print("{f}\n", .{key});
 
 var executor = try usearch.Executor.forRam(.{});
 defer executor.deinit();
@@ -120,15 +120,15 @@ var arena = try usearch.Arena.init(executor); // `Arena.init(null)` is host page
 defer arena.deinit();
 for (batches) |batch| {
     const matches = try index.on(executor).search(batch, 10, &arena, .{}); // rewinds: the last batch's matches are gone
-    total += (try matches.row(0)).scores[0];
+    total += (try matches.query(0)).scores[0];
 }
 
 var found = try usearch.Arena.init(null); // two live results, two arenas
 defer found.deinit();
-var rows = try usearch.Arena.init(null);
-defer rows.deinit();
+var fetched = try usearch.Arena.init(null);
+defer fetched.deinit();
 const nearest = try index.search(query, 10, &found, .{});
-for ((try nearest.row(0)).keys) |key| rerank(key, try index.get(key, .f32, &rows));
+for ((try nearest.query(0)).keys) |key| rerank(key, try index.get(key, .f32, &fetched));
 
 var calls: [shards.len]usearch.Deferred(usearch.DenseSearch) = undefined;
 for (&calls, shards, &arenas) |*call, shard, *own|
@@ -144,7 +144,7 @@ Only fixed-size reports like `DenseTraversalStats` stay your fields.
 ## Keys
 
 A key is 128 bits of opaque identity, and integer identities park in the low eight bytes, so a UUID rendering and an integer identity sort alike.
-Keys need not be unique: several entries may share one, `count` reports how many, `contains` whether any, and `get` returns their rows.
+Keys need not be unique: several entries may share one, `count` reports how many, `contains` whether any, and `get` returns their vectors.
 
 ```zig
 const key: usearch.Key = .fromInteger(42);
@@ -241,8 +241,8 @@ Every metric derives from a single inner-product kernel with pre-computed magnit
 - `.inner`: inner product, and the only kind the linear-algebra verbs accept.
 - `.angular`: cosine distance, over pre-computed magnitudes.
 - `.euclidean`: L2 distance.
-- `.hamming`: bit-level, over `.u1x8` rows alone.
-- `.jaccard`: bit-level, over `.u1x8` rows alone.
+- `.hamming`: bit-level, over `.u1x8` vectors alone.
+- `.jaccard`: bit-level, over `.u1x8` vectors alone.
 
 Arbitrary metrics belong to the C++ baseline tier; the C interface, and so this module, takes the built-in kinds alone.
 
@@ -259,14 +259,14 @@ const matches = try index.on(executor).search(try .of(f32, queries, 768), 10, &a
     .expansion_factor = 128,
     .stats = &stats,
 });
-for (0..matches.queries) |query| consume(try matches.row(query));
+for (0..matches.queries) |query| consume(try matches.query(query));
 std.debug.print("{d} distances computed\n", .{stats.computed_distances});
 ```
 
-`Matches.row` answers one query's keys and distances, nearest first, as many as the walk found up to the "k" asked for.
+`Matches.query` answers one query's keys and distances, nearest first, as many as the walk found up to the "k" asked for.
 
 The breadth of the candidates rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
-`.traversal = .scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle answers it with `Error.Unsupported`.
+`.traversal = .scan` scores every entry instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle answers it with `Error.Unsupported`.
 
 ### Filtered Search
 
@@ -312,14 +312,14 @@ _ = try index.on(executor).refine(.{
 
 Like a predicate, the handler is a `comptime` function whose trampoline is generated per call site, and its context travels as one pointer, `{}` where none is needed.
 It arrives on whichever thread advanced the work and never on two at once, so a counter or a deadline needs no synchronization of its own.
-Reports are denominated in whatever the verb consumes, such as rows for an insertion, queries for a search, donors for an absorb and shards for a checkpoint, and how often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
+Reports are denominated in whatever the verb consumes, such as entries for an insertion, queries for a search, donors for an absorb and shards for a checkpoint, and how often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
-An `insert` cannot be stopped: it claims every row before its first report and publishes the whole batch at once, so a batch is all-or-nothing with or without a handler.
+An `insert` cannot be stopped: it claims every entry before its first report and publishes the whole batch at once, so a batch is all-or-nothing with or without a handler.
 A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, so the graph stays correct and merely less improved, and the next call sweeps again, so calling under a time budget still converges.
 
 ### Retrieval and Streaming
 
-`get` lands every row stored under a key in the arena, one packed row per entry in insertion order, as the scalar you name; an absent key yields no rows.
+`get` lands every vector stored under a key in the arena, one packed row per entry in insertion order, as the scalar you name; an absent key yields no rows.
 
 ```zig
 const vectors = try index.get(key, .f32, &arena);
@@ -329,9 +329,9 @@ for (0..vectors.rows) |row| consume(try vectors.row(f32, row));
 `DenseVectors.stride` is the byte pitch of each row and `columns` its dimensions, as the call reported them, which is how a sub-byte kind like `.u1x8` is read without arithmetic on its packing.
 `row` refuses an element type other than the kind the rows were written as with `Error.InvalidArgument`, rather than reinterpreting them.
 
-A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-Without start keys it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
-Each pull lands up to `wanted` keys in the arena, and the keys each links to when `links` is true; the rows themselves come from `get`.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so an entry once passed is never revisited.
+Without start keys it yields every entry as stored; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
+Each pull lands up to `wanted` keys in the arena, and the keys each links to when `links` is true; the vectors themselves come from `get`.
 
 ```zig
 var cursor = try usearch.DenseCursor.init(index, &.{});
@@ -352,13 +352,13 @@ var stream = try usearch.DenseSearchStream.init(index, try .ofRow(f32, &query), 
 defer stream.deinit();
 
 while (true) {
-    const row = try (try index.on(executor).searchStreamNext(stream, 16, &arena)).row(0);
-    if (row.keys.len == 0) break; // drained
-    for (row.keys, row.scores) |key, distance| std.debug.print("{f} at {d}\n", .{ key, distance });
+    const found = try (try index.on(executor).searchStreamNext(stream, 16, &arena)).query(0);
+    if (found.keys.len == 0) break; // drained
+    for (found.keys, found.scores) |key, distance| std.debug.print("{f} at {d}\n", .{ key, distance });
 }
 ```
 
-A drained walk answers an empty row, as the C interface does, so a loop ends on the first pull that lands nothing.
+A drained walk answers an empty query, as the C interface does, so a loop ends on the first pull that lands nothing.
 
 ### Refinement
 
@@ -371,7 +371,7 @@ while (try index.on(executor).refine(.{ .expansion_factor = 128 }) != 0) {}
 
 ### Absorbing
 
-`absorb` moves donor handles into one index, one after another, keeping their graphs rather than re-inserting their rows, then refines every shard that took one across the appended part.
+`absorb` moves donor handles into one index, one after another, keeping their graphs rather than re-inserting their vectors, then refines every shard that took one across the appended part.
 A donor must share the index's residency, scalar, metric and geometry, or the call answers `Error.ConfigMismatch`.
 Each donor it absorbs is consumed and nulled in place, so freeing every donor afterwards is safe, and a stop between donors, or a failure, leaves the rest live for their `deinit` to free.
 
@@ -390,8 +390,8 @@ All three read logits rather than distances, so they refuse anything but an inne
 
 ```zig
 const products = try index.on(executor).multiply(try .of(f32, left, 768), &arena, .{ .wanted = 64 });
-for (0..products.rows) |row| {
-    const pairs = try products.row(row);
+for (0..products.queries) |row| {
+    const pairs = try products.query(row);
     accumulate(row, pairs.keys, pairs.scores);
 }
 ```
@@ -402,12 +402,12 @@ for (0..products.rows) |row| {
 
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the outputs are sized over documents rather than rows.
-The keys land as a `DenseProducts`, one row per query, largest score first, and a zero `wanted` keeps every key a query scored.
+The keys land as a `DenseProducts`, one run per query, largest score first, and a zero `wanted` keeps every key a query scored.
 
 ```zig
 const documents = try index.on(executor).maxsim(try .of(f32, tokens, 768), tokens_per_query, 10, &arena, .{});
-for (0..documents.rows) |query| {
-    const ranked = try documents.row(query);
+for (0..documents.queries) |query| {
+    const ranked = try documents.query(query);
     rerank(query, ranked.keys, ranked.scores);
 }
 ```

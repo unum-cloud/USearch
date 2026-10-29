@@ -672,15 +672,15 @@ struct vram_amd_indexes {
         plan.owner_ = this;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const placed = open.first + shard;
-            std::size_t const claimed_rows = plan.shares_[shard].first_id + plan.shares_[shard].rows;
+            std::size_t const claimed_entries = plan.shares_[shard].first_id + plan.shares_[shard].rows;
             if (!plan.shares_[shard].rows) continue;
             if (status_t const entered = fanout_t::enter(shards_, placed); failed(entered)) return {{}, entered};
-            reserve_capacity_t const grown {claimed_rows, static_cast<connectivity_t>(connectivity()), dimensions()};
+            reserve_capacity_t const grown {claimed_entries, static_cast<connectivity_t>(connectivity()), dimensions()};
             if (status_t const reserved = shards_[placed].index->reserve(grown).status; failed(reserved))
                 return {{}, reserved};
-            if (status_t const covered = shards_[placed].keys.host.cover(claimed_rows); failed(covered))
+            if (status_t const covered = shards_[placed].keys.host.cover(claimed_entries); failed(covered))
                 return {{}, covered};
-            if (status_t const covered = cover_device_keys_(placed, claimed_rows); failed(covered))
+            if (status_t const covered = cover_device_keys_(placed, claimed_entries); failed(covered))
                 return {{}, covered};
         }
         return {std::move(plan), status_t::success_k};
@@ -809,7 +809,7 @@ struct vram_amd_indexes {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished, or @ref status keeps it.
          *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, a
-         *    donor's rows never land, or @ref status keeps it.
+         *    donor's nodes never land, or @ref status keeps it.
          *  - @c contended_k Another call holds the @p executor or a donor's gate, or a shard has a
          *    batch or load in flight.
          *  - @c overflow_k The landed rows pass a shard's ceiling, reserved range, key columns or
@@ -1007,7 +1007,7 @@ struct vram_amd_indexes {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every stored node and heals whatever that strands:
+     *  @brief Re-selects the neighbors of every stored node and heals the islands that leaves:
      *      @ref plan_refine, then @c run and @c finish.
      *
      *  A stopped pass leaves the graph correct and merely less improved. Every shard's claim word
@@ -1054,7 +1054,7 @@ struct vram_amd_indexes {
      *  keys beside them; every part lands before any shard publishes, and only then do the keys
      *  resolve. The donor then forgets its rows in place inside its window, keeping its shards and
      *  their storage, its slot nulls, it stays closed and sealed, consumed, and its shards land
-     *  among the receiving shards' parts in the plan, so at most one donor's rows are ever held
+     *  among the receiving shards' parts in the plan, so at most one donor's nodes are ever held
      *  twice.
      *
      *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
@@ -1207,7 +1207,7 @@ struct vram_amd_indexes {
      *    @ref status says.
      *  - @c config_mismatch_k The @p donor is this index, has another metric or geometry, or
      *    sits on a device the @p executor does not drive or one of this index's devices cannot
-     *    reach; a shard refuses the geometry or its walk context, the donor's rows never land,
+     *    reach; a shard refuses the geometry or its walk context, the donor's nodes never land,
      *    or this index or @p donor keeps it.
      *  - @c contended_k A call, batch, load or save in flight on this index or @p donor, another
      *    refine or absorb holding either, or another call holding the @p executor.
@@ -2476,9 +2476,9 @@ struct vram_amd_indexes {
                 node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
                 if (!part_rows) continue;
                 typename index_t::load_plan_t::step_t step;
-                step.index_rows = {base, base + part_rows};
-                step.source_rows = {0, part_rows};
-                for (node_id_t row : step.source_rows) one.keys.host[base + row] = part.keys.host[row];
+                step.index_nodes = {base, base + part_rows};
+                step.source_nodes = {0, part_rows};
+                for (node_id_t row : step.source_nodes) one.keys.host[base + row] = part.keys.host[row];
                 queued = land_part_(into, plan, step, donor, from);
                 base += part_rows;
             }
@@ -2508,8 +2508,8 @@ struct vram_amd_indexes {
                         typename index_t::load_plan_t::step_t const& step, vram_amd_indexes const& donor,
                         std::size_t from) noexcept {
         index_t const& part = *donor.shards_[from].index;
-        if (status_t const queued = plan.load(step, part, step.source_rows); failed(queued)) return queued;
-        node_id_t const base = step.index_rows.first, rows = step.source_rows.bound;
+        if (status_t const queued = plan.load(step, part, step.source_nodes); failed(queued)) return queued;
+        node_id_t const base = step.index_nodes.first, rows = step.source_nodes.bound;
         if (part.device_specs().ordinal != shards_[into].index->device_specs().ordinal)
             return upload_keys_(into, {base, base + rows}, plan.stream);
         return part.api().copy_async(shards_[into].keys.device.base() + base, donor.shards_[from].keys.device.base(),

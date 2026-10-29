@@ -101,7 +101,7 @@ class Residency(IntEnum):
     NVME = 3
 
 class Traversal(IntEnum):
-    """How a search reaches the rows it scores, valued as `usearch_traversal_t`."""
+    """How a search reaches the entries it scores, valued as `usearch_traversal_t`."""
 
     WALK = 1
     SCAN = 2
@@ -343,12 +343,12 @@ class DenseProducts:
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
     def offsets(self) -> _ArenaBuffer:
-        """(rows + 1,) Apache Arrow offsets."""
+        """(queries + 1,) Apache Arrow offsets."""
         ...
 
     @property
     def keys(self) -> _ArenaBuffer:
-        """(pairs, 16) identities of the indexed rows."""
+        """(pairs, 16) identities of the indexed entries."""
         ...
 
     @property
@@ -361,8 +361,8 @@ class DenseProducts:
         """Pairs scored before the bound cut any."""
         ...
 
-    def row(self, row: int, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
-        """The (keys, scores) of left row `row`, viewing the arena. Python-only."""
+    def query(self, query: int, /) -> tuple[_ArenaBuffer, _ArenaBuffer]:
+        """The (keys, scores) of left row or query `query`, viewing the arena. Python-only."""
         ...
 
     def __len__(self) -> int: ...
@@ -498,8 +498,8 @@ class On[IndexT]:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it
             must be as wide as the buffer's items.
-          progress (callable, optional): Called with (completed, total) rows. It reports and
-            cannot stop the batch, every row being claimed before the first report; what it
+          progress (callable, optional): Called with (completed, total) entries. It reports and
+            cannot stop the batch, every entry being claimed before the first report; what it
             raises surfaces once the batch has landed. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
@@ -597,7 +597,7 @@ class On[IndexT]:
           arena (Arena): Where the matches land, rewound by the call.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
-            `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.
+            `Traversal.SCAN` scores every entry exactly, on RAM and NVMe handles.
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
             entries still route the traversal, so recall survives low selectivity. The
@@ -672,7 +672,7 @@ class On[IndexT]:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
-        """Approximate sparse product of a matrix against the indexed rows - the linear algebra
+        """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
         nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
@@ -692,9 +692,9 @@ class On[IndexT]:
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
         Returns:
-          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, row `i` spanning pairs
+          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, left row `i` spanning pairs
             `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's
-            indexed row; `scores`, the (pairs,) float64 products; and `required`, the pairs
+            indexed entry; `scores`, the (pairs,) float64 products; and `required`, the pairs
             scored before `wanted` cut any. All of them live in the arena.
         """
         ...
@@ -780,13 +780,13 @@ class On[IndexT]:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
-        """Late-interaction scoring of multi-row queries against multi-row entries: every query
-        row takes its best match within a key, and those maxima sum to that key's score.
+        """Late-interaction scoring of multi-row queries against multi-vector documents: every
+        query row takes its best match within a key, and those maxima sum to that key's score.
 
         A document is one key holding its token rows, which is what `values_per_key` above one
         exists for, and the walk stays over individual tokens under a plain inner product - so
-        an entry's rows need no ordering and two documents need not share a row count. The
-        result is sized over documents rather than over rows.
+        a document's vectors need no ordering and two documents need not share a vector count.
+        The result is sized over documents rather than over rows.
         Calls `usearch_dense_maxsim`.
 
         Args:
@@ -803,7 +803,7 @@ class On[IndexT]:
             walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
-            of its rows are scored, so a rejected document never scores.
+            of its vectors are scored, so a rejected document never scores.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -828,7 +828,7 @@ class On[IndexT]:
 
         Cancellation stops between donors, so a donor already absorbed stays absorbed and one
         not yet reached stays a live handle its caller still owns. A donor whose absorption
-        fails stays usable too, though its rows may already have landed in this index.
+        fails stays usable too, though its entries may already have landed in this index.
         Calls `usearch_dense_absorb`.
 
         Args:
@@ -973,8 +973,8 @@ class DeferredOn[IndexT]:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it
             must be as wide as the buffer's items.
-          progress (callable, optional): Called with (completed, total) rows. It reports and
-            cannot stop the batch, every row being claimed before the first report; what it
+          progress (callable, optional): Called with (completed, total) entries. It reports and
+            cannot stop the batch, every entry being claimed before the first report; what it
             raises surfaces once the batch has landed. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
@@ -1072,7 +1072,7 @@ class DeferredOn[IndexT]:
           arena (Arena): Where the matches land, rewound by the call.
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
           traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;
-            `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.
+            `Traversal.SCAN` scores every entry exactly, on RAM and NVMe handles.
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy. Non-matching
             entries still route the traversal, so recall survives low selectivity. The
@@ -1149,7 +1149,7 @@ class DeferredOn[IndexT]:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[DenseProducts]:
-        """Approximate sparse product of a matrix against the indexed rows - the linear algebra
+        """Approximate sparse product of a matrix against the indexed vectors - the linear algebra
         sibling of `search`, reporting every pair the traversal scored rather than only the
         nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
@@ -1169,9 +1169,9 @@ class DeferredOn[IndexT]:
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
         Returns:
-          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, row `i` spanning pairs
+          DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, left row `i` spanning pairs
             `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's
-            indexed row; `scores`, the (pairs,) float64 products; and `required`, the pairs
+            indexed entry; `scores`, the (pairs,) float64 products; and `required`, the pairs
             scored before `wanted` cut any. All of them live in the arena.
         """
         ...
@@ -1257,13 +1257,13 @@ class DeferredOn[IndexT]:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[DenseProducts]:
-        """Late-interaction scoring of multi-row queries against multi-row entries: every query
-        row takes its best match within a key, and those maxima sum to that key's score.
+        """Late-interaction scoring of multi-row queries against multi-vector documents: every
+        query row takes its best match within a key, and those maxima sum to that key's score.
 
         A document is one key holding its token rows, which is what `values_per_key` above one
         exists for, and the walk stays over individual tokens under a plain inner product - so
-        an entry's rows need no ordering and two documents need not share a row count. The
-        result is sized over documents rather than over rows.
+        a document's vectors need no ordering and two documents need not share a vector count.
+        The result is sized over documents rather than over rows.
         Calls `usearch_dense_maxsim`.
 
         Args:
@@ -1280,7 +1280,7 @@ class DeferredOn[IndexT]:
             walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.
           dtype (Scalar, optional): Names the query scalar type when the buffer cannot.
           predicate (callable, optional): Admits a Key when it returns truthy, asked before any
-            of its rows are scored, so a rejected document never scores.
+            of its vectors are scored, so a rejected document never scores.
           progress (callable, optional): Called with (completed, total) queries; returning
             False stops the batch and raises `CancelledError`, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
@@ -1305,7 +1305,7 @@ class DeferredOn[IndexT]:
 
         Cancellation stops between donors, so a donor already absorbed stays absorbed and one
         not yet reached stays a live handle its caller still owns. A donor whose absorption
-        fails stays usable too, though its rows may already have landed in this index.
+        fails stays usable too, though its entries may already have landed in this index.
         Calls `usearch_dense_absorb`.
 
         Args:
@@ -1365,7 +1365,7 @@ class DeferredOn[IndexT]:
 # region: Dense Index
 
 class DenseMetric(IntEnum):
-    """How a dense index scores two rows, valued as `usearch_dense_metric_t`."""
+    """How a dense index scores two vectors, valued as `usearch_dense_metric_t`."""
 
     INNER = 1
     ANGULAR = 2
@@ -1391,7 +1391,7 @@ class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
 
     @property
     def quantization(self) -> Scalar:
-        """The `Scalar` its rows are stored and quantized into."""
+        """The `Scalar` its vectors are stored and quantized into."""
         ...
 
     @property
@@ -1502,7 +1502,7 @@ class DenseTraversalStats:
 
 @final
 class DenseBatch:
-    """The rows one cursor step wrote into an `Arena`; empty, so falsy, once the scan is drained."""
+    """The entries one cursor step wrote into an `Arena`; empty, so falsy, once the scan is drained."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
@@ -1512,18 +1512,18 @@ class DenseBatch:
 
     @property
     def links(self) -> tuple[_ArenaBuffer, _ArenaBuffer] | None:
-        """(offsets, keys) of each row's linked identities, row `i` spanning `offsets[i]` to `offsets[i + 1]`, or None when the step asked for none."""
+        """(offsets, keys) of each entry's linked identities, entry `i` spanning `offsets[i]` to `offsets[i + 1]`, or None when the step asked for none."""
         ...
 
     def __len__(self) -> int: ...
 
 @final
 class DenseCursor:
-    """A sequential row scan over the entries an index holds, pulled in batches by `next`."""
+    """A sequential scan over the entries an index holds, pulled in batches by `next`."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def next(self, wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
-        """The next batch of at most `wanted` rows, in `arena`. Calls `usearch_dense_cursor_next`."""
+        """The next batch of at most `wanted` entries, in `arena`. Calls `usearch_dense_cursor_next`."""
         ...
 
     def close(self) -> None:
@@ -1541,7 +1541,7 @@ class DenseSearchStream:
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def next(self, wanted: int, arena: Arena, /) -> Matches:
-        """The next at most `wanted` matches, as one row in `arena`. Calls `usearch_dense_search_stream_next`."""
+        """The next at most `wanted` matches, as one query in `arena`. Calls `usearch_dense_search_stream_next`."""
         ...
 
     def close(self) -> None:

@@ -408,7 +408,7 @@ static usearch_continuation_t record_and_cancel(size_t completed, size_t total, 
 }
 
 /** A batch the handler hears about in several steps still lands whole: every step is reported in
- *  order up to the whole batch, and every row is published. */
+ *  order up to the whole batch, and every entry is published. */
 void test_add_progress(void) {
     printf("Test: Add Progress\n");
 
@@ -455,7 +455,7 @@ void test_add_progress(void) {
 }
 
 /** A RAM index bounded at a quarter of its rows holds four shards, and compacts in place under a
- *  bound of half its rows: nothing is consumed, and every key still resolves to one row. A fresh
+ *  bound of half its rows: nothing is consumed, and every key still resolves to one entry. A fresh
  *  index then compacts two halves into itself, which frees and nulls both sources. */
 void test_compact(size_t const dimensions) {
     printf("Test: Compact... %zu dimensions\n", dimensions);
@@ -482,7 +482,7 @@ void test_compact(size_t const dimensions) {
                                                             .ram = {.shard_capacity = shard_capacities[which]}});
         expect(!outcome.message, outcome.message);
     }
-    // The bounded index takes every row, one generation of shards per quarter.
+    // The bounded index takes every entry, one generation of shards per quarter.
     usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = indexes[0],
                                                       .executor = executor,
                                                       .outcome = &outcome,
@@ -1433,7 +1433,7 @@ size_t pull_to_end(usearch_dense_index_t index, usearch_executor_t executor, use
 }
 
 /** A cursor opened at a key yields that key's own entries, then the entries they link to, once
- *  each, and an absent key starts nothing, while a plain scan still yields every row once. An
+ *  each, and an absent key starts nothing, while a plain scan still yields every entry once. An
  *  implementation that cannot step yet says so, and that half skips. */
 void test_cursor_steps(void) {
     printf("Test: Cursor Steps\n");
@@ -1669,9 +1669,9 @@ void test_sequence_round_trip(void) {
     printf("Test: Sequence Round Trip - PASSED\n");
 }
 
-/** A sequence RAM index bounded at ten rows a shard takes twenty-five reads in one batch, opening
- *  three generations of shards on its one default domain: every key counts once, every read finds
- *  itself first across the shards, a cursor pulls every key once, and a checkpoint writes a
+/** A sequence RAM index bounded at ten entries a shard takes twenty-five reads in one batch,
+ *  opening three generations of shards on its one default domain: every key counts once, every read
+ *  finds itself first across the shards, a cursor pulls every key once, and a checkpoint writes a
  *  manifest beside one part per shard that reloads as many shards. */
 void test_sequence_shards(void) {
     printf("Test: Sequence Shards\n");
@@ -1811,8 +1811,8 @@ void test_sequence_shards(void) {
     printf("Test: Sequence Shards - PASSED\n");
 }
 
-/** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its rows, and lands
- *  a search's matches in its executor's device arena; local alignments, a global one without
+/** A GPU sequence index takes byte and rune Levenshtein, inserts and describes its entries, and
+ *  lands a search's matches in its executor's device arena; local alignments, a global one without
  *  weights and the verbs it lacks refuse. An overlap index lands its scores in a host arena on the
  *  scale a RAM one does, and a Needleman-Wunsch one its exact costs over packed codes. Skipped
  *  without a GPU. */
@@ -2296,9 +2296,9 @@ void test_geospatial_round_trip(void) {
     usearch_executor_t const executor = create_executor(0);
     usearch_arena_t const arena = create_arena(executor);
 
-    // Six rows about 56 m apart over flat ground, with a 100 m ridge along the third; every entry
-    // stands inside the grid, since one on its edge may round off it, and off the grid nothing
-    // blocks a sight line.
+    // Six positions about 56 m apart over flat ground, with a 100 m ridge along the third; every
+    // entry stands inside the grid, since one on its edge may round off it, and off the grid
+    // nothing blocks a sight line.
     enum { terrain_rows = 6, terrain_columns = 3 };
     float heights[terrain_rows * terrain_columns] = {0};
     for (size_t column = 0; column != terrain_columns; ++column) heights[2 * terrain_columns + column] = 100;
@@ -2396,8 +2396,8 @@ void test_geospatial_round_trip(void) {
     expect(!outcome.message, outcome.message);
     expect(description.size == 4 && description.metadata.connectivity == 12, "A loaded index describes the saved one");
 
-    // The same checkpoint served from storage judges every relation on the rows its walks read and
-    // answers reads and containment as RAM does, refusing writes and saves.
+    // The same checkpoint served from storage judges every relation on the entries its walks read
+    // and answers reads and containment as RAM does, refusing writes and saves.
     usearch_executor_t storage = NULL;
     usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 1});
     expect(!outcome.message, outcome.message);
@@ -2647,7 +2647,7 @@ static void fill_unknown_heights(size_t first_row, size_t first_column, size_t r
 }
 
 /** A GPU geospatial index refuses a terrain filled by a callback and lines of sight without a
- *  terrain, inserts and describes its rows, and finds every observation itself first, at zero
+ *  terrain, inserts and describes its entries, and finds every observation itself first, at zero
  *  metres, on host pages; the verbs it lacks refuse. Skipped without a GPU. */
 void test_geospatial_vram(void) {
     usearch_outcome_t outcome = {0};
@@ -3107,9 +3107,10 @@ void test_maxsim(void) {
     printf("Test: MaxSim - PASSED\n");
 }
 
-/** A RAM index saved as one monolith serves the same keys and rows from storage: an NVMe executor
- *  views the file, its search, count, get, health and cursor answer as the RAM index did, and every
- *  mutation is refused. An implementation without an NVMe residency says so, and the test skips. */
+/** A RAM index saved as one monolith serves the same keys and vectors from storage: an NVMe
+ *  executor views the file, its search, count, get, health and cursor answer as the RAM index did,
+ *  and every mutation is refused. An implementation without an NVMe residency says so, and the test
+ *  skips. */
 void test_nvme_view(size_t const dimensions) {
     printf("Test: NVMe View... %zu dimensions\n", dimensions);
 
@@ -3592,6 +3593,7 @@ void test_names(void) {
         {usearch_cpu_class_alibaba_c930_k, "alibaba-c930"},
         {usearch_cpu_class_wasm32_v128_k, "wasm32-v128"},
         {usearch_cpu_class_wasm64_extended_k, "wasm64-extended"},
+        {usearch_cpu_class_monoversioned_k, "monoversioned"},
     };
     named_value_t const gpu_classes[] = {
         {usearch_gpu_class_nvidia_ampere_k, "nvidia-ampere"},
@@ -3892,8 +3894,8 @@ void test_deferred_holds_arena(void) {
     printf("Test: Deferred Holds Arena - PASSED\n");
 }
 
-/** A three-part checkpoint loaded onto one GPU keeps a shard per part on it, loads every row, and
- *  reaches exactly the rows the saved graph reached. Skipped without a GPU. */
+/** A three-part checkpoint loaded onto one GPU keeps a shard per part on it, loads every entry, and
+ *  reaches exactly the nodes the saved graph reached. Skipped without a GPU. */
 void test_vram_parts_share_a_device(size_t const collection_size, size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -3939,7 +3941,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                     .keys = {keys, sizeof(usearch_key_t)},
                                                     .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
-    // Insertions may strand rows, so the reload is judged against the saved graph's own audit.
+    // Insertions may leave islands, so the reload is judged against the saved graph's own audit.
     usearch_reachability_t saved_reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = index,
                                                     .executor = executor,
@@ -4010,8 +4012,8 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
     printf("Test: VRAM Parts Share a Device - PASSED\n");
 }
 
-/** An exact scan on the first GPU scores every row once per query and refuses a predicate as a walk
- *  does where the vendor scans, and refuses with @c usearch_status_unsupported_k elsewhere. */
+/** An exact scan on the first GPU scores every entry once per query and refuses a predicate as a
+ *  walk does where the vendor scans, and refuses with @c usearch_status_unsupported_k elsewhere. */
 void test_vram_scan(size_t const collection_size, size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     usearch_gpu_device_t device = {0};

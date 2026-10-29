@@ -483,12 +483,12 @@ type MatchesView struct {
 // Queries reports how many queries the call resolved.
 func (matches MatchesView) Queries() uint { return matches.queries }
 
-// Columns reports the width of every row the call wrote, at most its wanted - the "k" in "kANN".
+// Columns reports the matches the call made room for per query, at most its wanted - the "k" in "kANN".
 func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Row borrows one query's keys and scores from the arena, trimmed to the count that query reported,
+// Query borrows one query's keys and scores from the arena, trimmed to the count that query reported,
 // and refused with StatusInvalidArgument when query is not below Queries.
-func (matches MatchesView) Row(query uint) ([]Key, []Distance, error) {
+func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
 	if err := matches.host(); err != nil {
 		return nil, nil, err
 	}
@@ -585,7 +585,7 @@ func (call *call) callback(value any) unsafe.Pointer {
 
 // Executor owns the host threads or device streams a fanned-out verb runs on.
 //
-// An executor owns workers; an index owns rows. Keeping them apart is what lets one pool serve
+// An executor owns workers; an index owns entries. Keeping them apart is what lets one pool serve
 // several indexes, and what makes the cost of spawning visible at the line that spawns it. Its
 // kind is fixed by the constructor that produced it and must match the residency of the handles
 // it drives, or the engine reports StatusDevice.
@@ -624,15 +624,15 @@ func (residency Residency) String() string {
 	return C.GoString(C.usearch_residency_name(C.usearch_residency_t(residency)))
 }
 
-// Traversal is how a search reaches the rows it scores.
+// Traversal is how a search reaches the entries it scores.
 //
 // Mirrors usearch_traversal_t.
 type Traversal int32
 
 const (
-	// TraversalWalk walks the graph, scoring the rows the expansion reaches - approximate, the default.
+	// TraversalWalk walks the graph, scoring the entries the expansion reaches - approximate, the default.
 	TraversalWalk Traversal = C.usearch_traversal_walk_k
-	// TraversalScan scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+	// TraversalScan scores every entry published when the query's scan starts - exact, on RAM and NVMe handles.
 	TraversalScan Traversal = C.usearch_traversal_scan_k
 )
 

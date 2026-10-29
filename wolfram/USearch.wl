@@ -118,7 +118,7 @@ rows[vectors_List] := Developer`ToPackedArray[N[vectors]]
 monolith[bytes_ByteArray] := NumericArray[Normal[bytes], "UnsignedInteger8"]
 monolith[bytes_NumericArray] := bytes
 
-(* Outputs arrive under their C names; found matches split by each row's count, and a lone output stands alone. *)
+(* Outputs arrive under their C names; found matches split by each query's count, and a lone output stands alone. *)
 answer[result_Developer`DataStore] := answer[Association @@ result]
 answer[LibraryFunctionError["LIBRARY_MEMORY_ERROR", _]] :=
     Failure["out-of-memory", <|"MessageTemplate" -> "the kernel could not allocate the answer"|>]

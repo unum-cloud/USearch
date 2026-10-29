@@ -27,7 +27,7 @@
 #include <type_traits>  // `std::is_same_v`, `std::invoke_result_t`
 #include <utility>      // `std::move`, `std::swap`
 
-#include <forkunion.h>           // `fu_memory_domain_id_t`
+#include <forkunion/forkunion.h> // `fu_memory_domain_id_t`
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include "usearch/utilities/types.hpp"
@@ -450,7 +450,7 @@ struct ram_indexes {
         insert_plan_t(insert_plan_t&& other) noexcept
             : claims_(std::move(other.claims_)), ranges_(std::move(other.ranges_)),
               executor_claim_(std::move(other.executor_claim_)), executor_(other.executor_), seats_(other.seats_),
-              config_(other.config_), batch_split_(other.batch_split_), landed_rows_(other.landed_rows_),
+              config_(other.config_), batch_split_(other.batch_split_), landed_entries_(other.landed_entries_),
               spent_(other.spent_), owner_(std::exchange(other.owner_, nullptr)) {}
         insert_plan_t& operator=(insert_plan_t&&) = delete;
         insert_plan_t(insert_plan_t const&) = delete;
@@ -512,7 +512,7 @@ struct ram_indexes {
                 one.index->wire_(locator.node, rows, task, traversals[thread], config_);
             };
             drain_in_order_(count, land_row);
-            landed_rows_ += count;
+            landed_entries_ += count;
             for (traversal_context_t const& traversal : traversals) {
                 spent_.visited_members += traversal.visited_members;
                 spent_.computed_distances += traversal.computed_distances;
@@ -540,7 +540,7 @@ struct ram_indexes {
             insert_result_t result = spent_;
             if (!owner_) return {result, status_t::uninitialized_k};
             result.new_size = owner_->size();
-            if (landed_rows_ != batch_split_.batch_entries) return {result, status_t::config_mismatch_k};
+            if (landed_entries_ != batch_split_.batch_entries) return {result, status_t::config_mismatch_k};
             shared_lock_t const held {owner_->gate_};
             std::size_t touched_shards = 0;
             for (iota_view<node_id_t> const range : ranges_) touched_shards += !range.empty();
@@ -620,7 +620,7 @@ struct ram_indexes {
         batch_split_t batch_split_ {};
 
         /** Rows landed so far. */
-        std::size_t landed_rows_ = 0;
+        std::size_t landed_entries_ = 0;
 
         /** What every step's walks spent, which @ref finish reports. */
         insert_result_t spent_ {};
@@ -1006,7 +1006,7 @@ struct ram_indexes {
 
     /**
      *  @brief Re-selects the neighbors of every published node across the shards, then heals
-     *      whatever that strands: @ref plan_refine, then @c run and @c finish.
+     *      the islands that leaves: @ref plan_refine, then @c run and @c finish.
      *
      *  Re-selection claims no identity and moves no watermark, so searches run throughout and a
      *  stopped pass leaves the graph correct. Every shard's dispenser stays closed for the pass, so
@@ -1550,8 +1550,8 @@ struct ram_indexes {
             return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
 
-        auto multiply_row = [&](std::size_t row, std::size_t, traversal_context_t& traversal,
-                                std::span<node_id_t const> watermarks, u64_t) noexcept {
+        auto multiply_query = [&](std::size_t row, std::size_t, traversal_context_t& traversal,
+                                  std::span<node_id_t const> watermarks, u64_t) noexcept {
             vector_view_t const left_row = shards_[0].index->import_rows_(left, row, 1, traversal).row(0).as_vector();
             fold_t fold {to_span(keys.row(row).as_vector()), to_span(products.row(row).as_vector()), {}, predicate};
             status_t refusal = status_t::success_k;
@@ -1568,7 +1568,7 @@ struct ram_indexes {
             return refusal;
         };
         return for_each_row_(rows_count, executor, traversals, config,
-                             staged_rows_bytes(vector_dtype_k, 1, left.columns), multiply_row, counts);
+                             staged_rows_bytes(vector_dtype_k, 1, left.columns), multiply_query, counts);
     }
 
     /** NumKong's aggregation over the stored scalar's dots, what a MaxSim total sums in. */
@@ -1696,7 +1696,7 @@ struct ram_indexes {
                                  thread_predicate(predicate, thread), thread, land);
         };
         std::size_t const candidates = max_of(index_t::round_capacity(connectivity()),
-                                              index_t::chunk_schedule_t::rows_in(0));
+                                              index_t::chunk_schedule_t::nodes_in(0));
         return for_each_row_(divide_round_up(queries_count, block_queries), executor, traversals, config, staged_bytes,
                              maxsim_block, {}, predicate, candidates);
     }
@@ -2569,7 +2569,7 @@ struct ram_indexes {
         // at a time and settled once per first chunk's width of rows, or a walk's keys by bytes.
         auto nominate = [&]<typename visit_type_>(visit_type_&& visit) noexcept {
             if (nominating == traversal_t::scan_k) {
-                std::size_t const settled_rows = index_t::chunk_schedule_t::rows_in(0);
+                std::size_t const settled_rows = index_t::chunk_schedule_t::nodes_in(0);
                 for (std::size_t shard = 0; shard != watermarks.size(); ++shard) {
                     shard_t const& one = shards_[shard];
                     auto const key_of = [&one](node_id_t node) noexcept { return one.keys[node]; };
@@ -2934,19 +2934,19 @@ struct ram_indexes {
         auto land = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk, std::size_t,
                         nk::matrix_span<node_id_t>) noexcept -> status_t {
             iota_view<node_id_t> landing {plans[into].base, plans[into].base};
-            for (std::size_t from = 0; from != donors && landing.bound < chunk.index_rows.bound; ++from) {
+            for (std::size_t from = 0; from != donors && landing.bound < chunk.index_nodes.bound; ++from) {
                 if (!lands(from, into)) continue;
                 shard_t const& part = donor.shards_[from];
                 iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(part.index->size())};
                 landing = {landing.bound, landing.bound + source_range.bound};
                 typename index_t::load_plan_t::step_t step = chunk;
-                step.index_rows = {max_of(chunk.index_rows.first, landing.first),
-                                   min_of(chunk.index_rows.bound, landing.bound)};
-                if (step.index_rows.first >= step.index_rows.bound) continue;
-                step.source_rows = {step.index_rows.first - landing.first, step.index_rows.bound - landing.first};
+                step.index_nodes = {max_of(chunk.index_nodes.first, landing.first),
+                                    min_of(chunk.index_nodes.bound, landing.bound)};
+                if (step.index_nodes.first >= step.index_nodes.bound) continue;
+                step.source_nodes = {step.index_nodes.first - landing.first, step.index_nodes.bound - landing.first};
                 if (status_t const loaded = plans[into].load(step, *part.index, source_range); failed(loaded))
                     return loaded;
-                for (node_id_t row : step.index_rows) shards_[into].keys[row] = part.keys[row - landing.first];
+                for (node_id_t row : step.index_nodes) shards_[into].keys[row] = part.keys[row - landing.first];
             }
             return status_t::success_k;
         };
@@ -3061,7 +3061,7 @@ struct ram_indexes {
     }
 
     /**
-     *  @brief The scan behind @c search_if: every row published when a query's block starts is
+     *  @brief The scan behind @c search_if: every entry published when a query's block starts is
      *      scored, so the rankings are the ones a graph walk approximates.
      *
      *  Each block of queries takes a thread and its traversal, scans every shard below one snapshot
@@ -3136,8 +3136,8 @@ struct ram_indexes {
             return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
 
-        auto search_row = [&](std::size_t query, std::size_t thread, traversal_context_t& traversal,
-                              std::span<node_id_t const> watermarks, u64_t) noexcept {
+        auto search_query = [&](std::size_t query, std::size_t thread, traversal_context_t& traversal,
+                                std::span<node_id_t const> watermarks, u64_t) noexcept {
             std::span<key_t> const keys_row = to_span(keys.row(query).as_vector());
             std::span<score_type_> const distances_row = to_span(distances.row(query).as_vector());
             vector_view_t const query_vector =
@@ -3170,7 +3170,7 @@ struct ram_indexes {
             return refusal;
         };
         return for_each_row_(queries_count, executor, traversals, config,
-                             staged_rows_bytes(vector_dtype_k, 1, queries.columns), search_row, counts, predicate,
+                             staged_rows_bytes(vector_dtype_k, 1, queries.columns), search_query, counts, predicate,
                              index_t::round_capacity(shards_[0].index->connectivity()));
     }
 
@@ -3204,8 +3204,8 @@ struct ram_indexes {
 
         status_t first_refusal = status_t::success_k;
         alignas(default_alignment_k) std::size_t live_rows = 0;
-        std::size_t const filling = filling_rows<std::size_t>(shards_[0].index->non_zero_expansion_factor(config),
-                                                              shards_[0].index->connectivity());
+        std::size_t const filling = filling_nodes<std::size_t>(shards_[0].index->non_zero_expansion_factor(config),
+                                                               shards_[0].index->connectivity());
         auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             traversal_context_t& traversal = traversals[thread];
             std::size_t const live = atomic_ref<std::size_t>(live_rows).fetch_add(1, std::memory_order_relaxed) + 1;
@@ -3326,7 +3326,7 @@ struct ram_indexes {
         constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
                                            nk::matrix_span<node_id_t> scratch) { planned.save(step, scratch); };
         std::size_t const scratch_rows = saving_k
-                                             ? power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_rows_log2_k)
+                                             ? power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_nodes_log2_k)
                                              : 0;
 
         auto [executor_claim, claim_status] = executor.claim();

@@ -293,8 +293,8 @@ struct specialized_index {
         else return new (std::nothrow) index_t(kernel, tables);
     }
     static void destroy(void* index) noexcept { delete static_cast<index_t*>(index); }
-    static void bound_shards(void* index, std::size_t rows) noexcept {
-        if constexpr (!viewed_k) of(index).bound_shards(rows);
+    static void bound_shards(void* index, std::size_t nodes) noexcept {
+        if constexpr (!viewed_k) of(index).bound_shards(nodes);
     }
     static status_t emplace(void* index, int placement) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
@@ -373,7 +373,7 @@ struct specialized_index {
                     else break;
                 }
                 landed += taking;
-                // Every row is claimed before the first report and none can be withdrawn, so a
+                // Every entry is claimed before the first report and none can be withdrawn, so a
                 // cancel goes unheard.
                 ticks(landed, count);
             }
@@ -654,8 +654,8 @@ struct specialized_index {
         }
     }
 
-    /** Opens a cursor over every row; a GPU index reads its rows back by key or search and answers
-     *  @c unsupported_k. */
+    /** Opens a cursor over every entry; a GPU index reads its vectors back by key or search and
+     *  answers @c unsupported_k. */
     static expected<void*> cursor_open(void* index) noexcept {
         if constexpr (is_vram_index<index_type_>) return {nullptr, status_t::unsupported_k};
         else {

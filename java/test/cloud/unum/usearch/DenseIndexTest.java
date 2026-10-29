@@ -433,7 +433,7 @@ public class DenseIndexTest {
             DenseVectors every = index.get(Key.of(5), Scalar.F64, arena);
             assertEquals(3, every.rows());
             assertEquals(2 * Double.BYTES, every.strideBytes());
-            // A sharded index deals one batch's rows across its shards, so only the multiset is promised.
+            // A sharded index deals one batch's entries across its shards, so only the multiset is promised.
             double[] values = every.segment().toArray(ValueLayout.JAVA_DOUBLE);
             double[][] landed = new double[3][];
             for (int row = 0; row != landed.length; ++row) {
@@ -624,7 +624,7 @@ public class DenseIndexTest {
             float[] row = new float[] {0, 1};
             index.insert(new Key[] {Key.of(1)}, RowsView.of(row, 2));
 
-            // Overwriting the source after the batch must leave the stored row untouched.
+            // Overwriting the source after the batch must leave the stored vector untouched.
             row[0] = 9;
             row[1] = 9;
 

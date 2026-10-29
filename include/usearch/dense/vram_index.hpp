@@ -69,7 +69,7 @@ struct vram_build_t {
     byte_t const* staging = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
-    u32_t selection_rows = 0;
+    u32_t selection_nodes = 0;
     node_id_t first_id = 0;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
@@ -77,7 +77,7 @@ struct vram_build_t {
     u32_t epoch_base = 0;
     u32_t* published_rows = nullptr;
     vram_telemetry_block_t* telemetry = nullptr;
-    u32_t* assigned_rows = nullptr;
+    u32_t* assigned_nodes = nullptr;
     u32_t* link_heads = nullptr;
     u32_t* link_next = nullptr;
     u32_t* touched_ids = nullptr;
@@ -99,7 +99,7 @@ struct vram_search_t {
     u32_t* assigned_queries = nullptr;
     u32_t* live_walks = nullptr;
     u32_t concurrent_walks = 0;
-    u32_t filling_rows = 0;
+    u32_t filling_nodes = 0;
 };
 
 /** One refinement launch, mirroring the shared refine view. */
@@ -108,14 +108,14 @@ struct vram_refine_t {
     u32_t* shadow_neighbors = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
-    u32_t selection_rows = 0;
+    u32_t selection_nodes = 0;
     node_id_t first_id = 0;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
     u32_t expansion = 0;
     u32_t epoch_base = 0;
     vram_telemetry_block_t* telemetry = nullptr;
-    u32_t* assigned_rows = nullptr;
+    u32_t* assigned_nodes = nullptr;
     u32_t const* node_ids = nullptr;
     u32_t sampling_bound = 0;
     u32_t const* part_bases = nullptr;
@@ -166,12 +166,12 @@ struct vram_fold_t {
     u32_t row_bits = 0;
     u32_t cross_count = 0;
     u32_t scratch_bytes_per_warp = 0;
-    u32_t selection_rows = 0;
+    u32_t selection_nodes = 0;
     vram_fold_phase_t phase = vram_fold_phase_t::reselect_k;
     byte_t* arena = nullptr;
     gpu_arena_shape_t arena_shape {};
     vram_telemetry_block_t* telemetry = nullptr;
-    u32_t* assigned_rows = nullptr;
+    u32_t* assigned_nodes = nullptr;
 };
 
 /** A search's landing, mirroring the shared search sink. */
@@ -327,7 +327,7 @@ struct vram_search_config_t {
      *  insert-safe by protocol, so the field only documents intent. */
     synchronization_t synchronization = synchronization_t::concurrent_k;
 
-    /** How rows are reached; @c scan_k scores every visible row exactly on the kits' tile steps,
+    /** How entries are reached; @c scan_k scores every visible row exactly on the kits' tile steps,
      *  keeping each query's @c count nearest, and only the NVIDIA @c search implements it. */
     traversal_t traversal = traversal_t::walk_k;
 };
@@ -620,13 +620,13 @@ struct vram_shard_core {
     /** Steps the lanes cooperating on one row take across it. */
     u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments(), kernels_.lanes_per_row(*this)); }
 
-    /** Bytes of one builder warp's slice over @p selection_rows cached candidates: the query span
+    /** Bytes of one builder warp's slice over @p selection_nodes cached candidates: the query span
      *  while walking, then the candidate cache, and per cached candidate its score, three ID spans,
      *  its distance and its norms. */
-    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
+    u32_t build_scratch_bytes_per_warp(u32_t selection_nodes) const noexcept {
         u32_t const candidate_bytes = static_cast<u32_t>(row_bytes() + gpu_scored_node_bytes<node_id_t> +
                                                          3 * sizeof(u32_t) + sizeof(f32_t) + sizeof(norms_t));
-        return max_of(static_cast<u32_t>(row_bytes()), selection_rows * candidate_bytes);
+        return max_of(static_cast<u32_t>(row_bytes()), selection_nodes * candidate_bytes);
     }
 
     /** The serialized extents: published nodes x logical dimensions & connectivity - the fragment
@@ -698,15 +698,15 @@ struct vram_shard_core {
 
     using frontier_kind_t = vram_frontier_kind_t;
 
-    /** One warp's arena slice for @p walks walks sharing one visited set over @p candidate_rows
+    /** One warp's arena slice for @p walks walks sharing one visited set over @p candidate_nodes
      *  candidates each: the exact visited set over every ID they claim, plus the spill tail when
      *  @p frontier_kind outgrows registers, what their expansions stage. */
-    gpu_arena_shape_t arena_shape_for(u32_t candidate_rows, frontier_kind_t frontier_kind,
+    gpu_arena_shape_t arena_shape_for(u32_t candidate_nodes, frontier_kind_t frontier_kind,
                                       u32_t walks = 1) const noexcept {
         u32_t const connectivity = static_cast<u32_t>(this->connectivity()), lanes = kernels_type_::wave_lanes();
-        u32_t const visits = walks * gpu_walk_visits(candidate_rows, connectivity, lanes);
+        u32_t const visits = walks * gpu_walk_visits(candidate_nodes, connectivity, lanes);
         u32_t const tail = frontier_kind == frontier_kind_t::wide_arena_k
-                               ? walks * gpu_walk_tail_entries(candidate_rows, connectivity, lanes)
+                               ? walks * gpu_walk_tail_entries(candidate_nodes, connectivity, lanes)
                                : 0;
         return gpu_arena_shape(visits, tail, 0);
     }
@@ -786,9 +786,9 @@ struct vram_shard_core {
                 (normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_t::success_k) ||
                 neighbors_matrix_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t)) != status_t::success_k)
                 return {0, status_t::bad_alloc_k};
-            ceiling_rows_ = ceiling_rows;
+            ceiling_nodes_ = ceiling_rows;
         }
-        status_t const mapped = map_rows_(config.capacity);
+        status_t const mapped = map_nodes_(config.capacity);
         return {capacity(), mapped};
     }
 
@@ -1670,7 +1670,7 @@ struct vram_shard_core {
         /** A save owns nothing but its bounce, so a dying plan leaves the index as it found it,
          *  once the copies into its pending half landed. */
         ~save_plan_t() noexcept {
-            if (!pending_.index_rows.empty()) [[maybe_unused]]
+            if (!pending_.index_nodes.empty()) [[maybe_unused]]
                 status_t const drained = crossed_[pending_half_].wait();
         }
 
@@ -1681,10 +1681,10 @@ struct vram_shard_core {
             std::size_t position = 0;
 
             /** Where the rows sit in the index, in its own ID space. */
-            iota_view<node_id_t> index_rows;
+            iota_view<node_id_t> index_nodes;
 
             /** Where they sit in the caller's buffer, counted from its first row. */
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> source_nodes;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -1694,8 +1694,8 @@ struct vram_shard_core {
             std::size_t const first = position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(visible));
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = step.index_rows;
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = step.index_nodes;
             return step;
         }
 
@@ -1735,11 +1735,11 @@ struct vram_shard_core {
             // Shards' steps interleave on one thread, so another shard's device may be current.
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
                 return status_t::device_error_k;
-            iota_view<node_id_t> const rows = step.index_rows;
+            iota_view<node_id_t> const rows = step.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             if (flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes).empty() ||
                 flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes).empty() ||
                 flat_rows(columns.norms, first, rows.size(), sizeof(norms_t)).empty() != columns.norms.empty())
@@ -1747,7 +1747,7 @@ struct vram_shard_core {
             for (std::size_t chunk = rows.first; chunk < rows.bound; chunk += half_rows()) {
                 std::size_t const bound = min_of<std::size_t>(chunk + half_rows(), rows.bound);
                 // Every half but the pending one has landed, so the other one is free.
-                std::size_t const half = pending_.index_rows.empty() ? 0 : pending_half_ ^ 1;
+                std::size_t const half = pending_.index_nodes.empty() ? 0 : pending_half_ ^ 1;
                 byte_t* const bounce_vectors =
                     bounce.data() + half * half_rows() * (scalar_row_bytes + neighbors_row_bytes + sizeof(norms_t));
                 byte_t* const bounce_neighbors = bounce_vectors + half_rows() * scalar_row_bytes;
@@ -1767,9 +1767,9 @@ struct vram_shard_core {
                     return status_t::device_error_k;
                 // The previous half lands on the host while this one copies off the device.
                 if (status_t const landed = land_pending_(); failed(landed)) return landed;
-                pending_.index_rows = {static_cast<node_id_t>(chunk), static_cast<node_id_t>(bound)};
-                pending_.source_rows = {static_cast<node_id_t>(first + chunk - rows.first),
-                                        static_cast<node_id_t>(first + bound - rows.first)};
+                pending_.index_nodes = {static_cast<node_id_t>(chunk), static_cast<node_id_t>(bound)};
+                pending_.source_nodes = {static_cast<node_id_t>(first + chunk - rows.first),
+                                         static_cast<node_id_t>(first + bound - rows.first)};
                 pending_half_ = half;
             }
             return status_t::success_k;
@@ -1801,8 +1801,8 @@ struct vram_shard_core {
         /** Awaits the pending half's copies, then moves its rows into the columns, shifting every
          *  neighbor under the watermark and folding every other onto the sentinel. */
         status_t land_pending_() noexcept {
-            iota_view<node_id_t> const rows = pending_.source_rows;
-            if (pending_.index_rows.empty()) return status_t::success_k;
+            iota_view<node_id_t> const rows = pending_.source_nodes;
+            if (pending_.index_nodes.empty()) return status_t::success_k;
             if (status_t const drained = crossed_[pending_half_].wait(); failed(drained)) return drained;
             pending_ = {};
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
@@ -1968,17 +1968,17 @@ struct vram_shard_core {
             index_->unclaim_(base, rows);
         }
 
-        /** One step of the plan: one bounce-sized batch of the appended rows. */
+        /** One step of the plan: one bounce-sized batch of the appended nodes. */
         struct step_t {
 
             /** The step's position in the plan - what a fan-out hands to a stream. */
             std::size_t position = 0;
 
             /** Where the rows land in the index, in its own ID space, from @c base. */
-            iota_view<node_id_t> index_rows;
+            iota_view<node_id_t> index_nodes;
 
             /** Where they come from in the caller's buffer, from its first row. */
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> source_nodes;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -1988,8 +1988,8 @@ struct vram_shard_core {
             std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(base) + rows);
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
             return step;
         }
 
@@ -2028,7 +2028,7 @@ struct vram_shard_core {
          *  sharded plan drives it one part's slice at a time, its step naming the rows in that
          *  part's row and ID spaces.
          *
-         *  @param[in] step The step to fill; its source rows address @p columns.
+         *  @param[in] step The step to fill; its source nodes address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
          *  @param[in] source_range The ID space those rows speak.
          *
@@ -2041,12 +2041,12 @@ struct vram_shard_core {
             if (!index_ || bounce.empty()) return status_t::uninitialized_k;
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
                 return status_t::device_error_k;
-            iota_view<node_id_t> const range = step.index_rows;
+            iota_view<node_id_t> const range = step.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
             bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
@@ -2054,7 +2054,7 @@ struct vram_shard_core {
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
             // the step rather than from the plan's base - the two agree for a one-part plan.
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_nodes.first + source_range.first);
             // The device indexes its chain heads by neighbor ID unchecked, so every rebased ID must
             // land in this plan.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
@@ -2115,7 +2115,7 @@ struct vram_shard_core {
          *  on the plan's stream. Nothing waits, so @p source_shard must stay quiescent until the
          *  caller drains that stream.
          *
-         *  @param[in] step The step to fill; its source rows address @p source_shard.
+         *  @param[in] step The step to fill; its source nodes address @p source_shard.
          *  @param[in] source_shard The shard the rows come from, read through its core.
          *  @param[in] source_range The ID space the source's rows speak.
          *
@@ -2130,19 +2130,19 @@ struct vram_shard_core {
             if (!index_) return status_t::uninitialized_k;
             int const device = index_->device_specs().ordinal;
             if (failed(vendor_t::select(index_->api(), device))) return status_t::device_error_k;
-            iota_view<node_id_t> const range = step.index_rows;
+            iota_view<node_id_t> const range = step.index_nodes;
             bool const normed = index_->stores_norms() && source.stores_norms();
-            if (range.empty() || range.size() != step.source_rows.size() || range.first < base ||
-                range.bound > base + rows || step.source_rows.bound > source.size() ||
+            if (range.empty() || range.size() != step.source_nodes.size() || range.first < base ||
+                range.bound > base + rows || step.source_nodes.bound > source.size() ||
                 source.dimensions() != index_->dimensions() || source.connectivity() != index_->connectivity() ||
                 !source.vectors_matrix_.shared_with(device) || !source.neighbors_matrix_.shared_with(device) ||
                 (normed && !source.norms_column_.shared_with(device)))
                 return status_t::config_mismatch_k;
-            node_id_t const shift = range.first - step.source_rows.first + source_range.first;
+            node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(node_id_t);
-            std::size_t const count = range.size(), into = range.first, from = step.source_rows.first;
+            std::size_t const count = range.size(), into = range.first, from = step.source_nodes.first;
             if (failed(vendor_t::copy(index_->api(), index_->vectors_rows_() + into * row_bytes,
                                       source.vectors_rows_() + from * row_bytes, count * row_bytes, stream)) ||
                 failed(vendor_t::copy(index_->api(), index_->neighbors_matrix_.base() + into * neighbors_row_bytes,
@@ -2159,7 +2159,7 @@ struct vram_shard_core {
             return status_t::success_k;
         }
 
-        /** Publishes the appended rows once every batch's vectors and neighbors landed: the norms
+        /** Publishes the appended nodes once every batch's vectors and neighbors landed: the norms
          *  derive on the device unless the metric is dot or every batch carried them, the row count
          *  lands, the claim lifts, and the watermark turns over the rows once every earlier batch
          *  has. A success spends the plan, so a second call answers @c uninitialized_k instead of
@@ -2243,9 +2243,9 @@ struct vram_shard_core {
             if (failed(claim_status)) return {{}, claim_status};
             base = first_id;
         }
-        else if (rows > ceiling_rows_ - base) return {{}, status_t::overflow_k};
+        else if (rows > ceiling_nodes_ - base) return {{}, status_t::overflow_k};
         load_plan_t plan {*this, stream, base, rows};
-        if (status_t const grown = grow_rows_(base + rows, stream.handle); failed(grown)) return {{}, grown};
+        if (status_t const grown = grow_nodes_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};
     }
 
@@ -2298,13 +2298,13 @@ struct vram_shard_core {
         std::size_t const import_bytes = import_bytes_(rows, new_rows.dtype);
         // Past the rows and their import window: the chain heads over every row, then the batch's
         // pick links, the touched nodes and their count.
-        std::size_t const total_rows = first_id + rows, picks = rows * connectivity();
+        std::size_t const total_nodes = first_id + rows, picks = rows * connectivity();
         std::size_t const links_offset = round_up_to_multiple<std::size_t>(rows * row_bytes() + import_bytes, 16);
-        std::size_t const links_bytes = (total_rows + 2 * picks + 1) * sizeof(u32_t);
+        std::size_t const links_bytes = (total_nodes + 2 * picks + 1) * sizeof(u32_t);
         byte_t* const staging = context.ensure_staging(links_offset + links_bytes);
         if (!staging) return {{}, status_t::bad_alloc_k};
         u32_t* const link_heads = reinterpret_cast<u32_t*>(staging + links_offset);
-        if (failed(vendor_t::fill(api(), link_heads, 0xFF, total_rows * sizeof(u32_t), stream)))
+        if (failed(vendor_t::fill(api(), link_heads, 0xFF, total_nodes * sizeof(u32_t), stream)))
             return {{}, status_t::device_error_k};
         if ((import_bytes || packed_row_bytes() != row_bytes()) &&
             failed(vendor_t::fill(api(), staging, 0, rows * row_bytes() + import_bytes, stream)))
@@ -2316,7 +2316,7 @@ struct vram_shard_core {
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
         u32_t const candidate_slots = candidate_slots_for_(expansion, 0);
-        u32_t const selection_rows = walk_selection_rows_(expansion, candidate_slots);
+        u32_t const selection_nodes = walk_selection_nodes_(expansion, candidate_slots);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
         std::size_t const arena_warps = device_.multiprocessor_count *
                                         kernels_type_::resident_blocks_(vram_kernel_t::insert_k, candidate_slots) *
@@ -2327,15 +2327,15 @@ struct vram_shard_core {
 
         // The claim admits no other grower, and a rejected grid publishes nothing, so the caller
         // un-claims it exactly.
-        if (status_t const grown = grow_rows_(total_rows, stream); failed(grown)) return {{}, grown};
+        if (status_t const grown = grow_nodes_(total_nodes, stream); failed(grown)) return {{}, grown};
         // Monotone, so an un-claim below only forfeits epoch space.
         auto const [epoch_base, epochs_status] = context.take_epochs(rows, arena_bytes_before);
         if (failed(epochs_status)) return {{}, epochs_status};
         vram_build_t const build {storage(),
                                   staging,
-                                  static_cast<u32_t>(total_rows),
-                                  arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(selection_rows),
-                                  selection_rows,
+                                  static_cast<u32_t>(total_nodes),
+                                  arena_shape.scratch_bytes ? 0u : build_scratch_bytes_per_warp(selection_nodes),
+                                  selection_nodes,
                                   first_id,
                                   arena,
                                   arena_shape,
@@ -2343,11 +2343,11 @@ struct vram_shard_core {
                                   epoch_base,
                                   published_rows_(),
                                   context.telemetry_.get(),
-                                  context.assigned_rows_.get(),
+                                  context.assigned_nodes_.get(),
                                   link_heads,
-                                  link_heads + total_rows,
-                                  link_heads + total_rows + picks,
-                                  link_heads + total_rows + 2 * picks};
+                                  link_heads + total_nodes,
+                                  link_heads + total_nodes + picks,
+                                  link_heads + total_nodes + 2 * picks};
         // The launch is the last fallible step; reading its verdict here keeps the claim
         // reversible.
         if (failed(kernels_.launch_insert_(*this, build, candidate_slots, context)))
@@ -2357,7 +2357,7 @@ struct vram_shard_core {
         result.first_id = first_id;
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
-        result.new_size = total_rows;
+        result.new_size = total_nodes;
         return {result, status_t::success_k};
     }
 
@@ -2664,7 +2664,7 @@ struct vram_shard_core {
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
     expected<node_id_t> claim_(std::size_t rows) noexcept {
-        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_rows_);
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_nodes_);
         return {static_cast<node_id_t>(first_id), claim_status};
     }
 
@@ -2716,8 +2716,8 @@ struct vram_shard_core {
     node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.base()); }
 
     /** Maps every matrix and column up to @p rows - host work alone, so it rides no stream, and
-     *  leaves the fresh neighbor rows for @ref grow_rows_ to fill. */
-    status_t map_rows_(std::size_t rows) noexcept {
+     *  leaves the fresh neighbor rows for @ref grow_nodes_ to fill. */
+    status_t map_nodes_(std::size_t rows) noexcept {
         if (rows <= capacity()) return status_t::success_k;
         if (status_t status = vectors_matrix_.commit((rows + 1) * row_bytes()); status != status_t::success_k)
             return status;
@@ -2734,8 +2734,8 @@ struct vram_shard_core {
      *  queued it, so a claim never launches into rows still filling. A refused fill advances
      *  nothing, so the next grow retries it. Callers hold the claim over the rows, or the closed
      *  claim word. */
-    status_t grow_rows_(std::size_t rows, stream_handle_t stream) noexcept {
-        if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
+    status_t grow_nodes_(std::size_t rows, stream_handle_t stream) noexcept {
+        if (status_t const mapped = map_nodes_(rows); failed(mapped)) return mapped;
         if (failed(vendor_t::follow(api(), stream, grown_))) return status_t::device_error_k;
         if (rows <= filled_rows_) return status_t::success_k;
         std::size_t const mapped_rows = capacity(), row_words = connectivity();
@@ -2758,20 +2758,20 @@ struct vram_shard_core {
     /** Candidates a walk's diversity selection caches: all of the walk's candidates, as the CPU's
      *  selection judges, @p candidate_slots ranks per lane on the register ladder, or the arena
      *  frontier's @p expansion past it. */
-    u32_t walk_selection_rows_(u32_t expansion, u32_t candidate_slots) const noexcept {
+    u32_t walk_selection_nodes_(u32_t expansion, u32_t candidate_slots) const noexcept {
         return candidate_slots ? candidate_slots * kernels_type_::wave_lanes() : expansion;
     }
 
     /** Candidates a re-selection caches, a back-link round's or a refinement merge's: a row of the
      *  node's own neighbors or forward picks, a row's worth of incoming newcomers or reverse
      *  proposals, and the node's own row last. */
-    u32_t reselection_rows_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
+    u32_t reselection_nodes_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
 
     /** Bytes of one builder warp's slice, its walk's or its re-selection's, whichever caches more:
      *  an insert and its back-link, or a refine and its merge, share one arena shape. */
     u32_t builder_scratch_bytes_per_warp_(u32_t expansion, u32_t candidate_slots) const noexcept {
         return build_scratch_bytes_per_warp(
-            max_of(walk_selection_rows_(expansion, candidate_slots), reselection_rows_()));
+            max_of(walk_selection_nodes_(expansion, candidate_slots), reselection_nodes_()));
     }
 
     /** One building warp's arena slice for @p walks walks on the rung of @p candidate_slots, the
@@ -2780,7 +2780,7 @@ struct vram_shard_core {
     gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t candidate_slots, u32_t walks) const noexcept {
         u32_t const scratch_bytes = builder_scratch_bytes_per_warp_(expansion, candidate_slots);
         gpu_arena_shape_t shape = arena_shape_for(
-            walk_selection_rows_(expansion, candidate_slots),
+            walk_selection_nodes_(expansion, candidate_slots),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
         if (!kernels_.build_scratch_fits(*this, scratch_bytes)) shape.scratch_bytes = scratch_bytes;
         return shape;
@@ -2920,7 +2920,7 @@ struct vram_shard_core {
     std::size_t filled_rows_ = 0;
 
     /** Rows the reserved ranges span, the most any claim reaches; fixed by the first @c reserve. */
-    std::size_t ceiling_rows_ = max_node_count_k;
+    std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** Marks the last sentinel fill, or the copies of a load that died over filled rows, which
      *  every grow's stream follows; recorded and followed by the claim's holder alone. */

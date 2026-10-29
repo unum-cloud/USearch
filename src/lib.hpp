@@ -24,7 +24,7 @@
 #include <type_traits>      // `std::is_same_v` - the residency discrimination
 #include <variant>          // `std::variant`, `std::visit`
 
-#include <forkunion.h>                // `fu_topology_new` - the executor factories' discovery
+#include <forkunion/forkunion.h>      // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfe_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
@@ -1677,20 +1677,20 @@ class call_outcome_t {
     usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
 };
 
-/** Where a ranked run lands inside a claimed arena: @c wanted keys and scores per row, and a count
- *  per row. */
+/** Where a ranked run lands inside a claimed arena: @c wanted keys and scores per query, and a
+ *  count per query. */
 struct matches_landing_t {
     usearch_key_t* keys = nullptr;
     usearch_distance_t* scores = nullptr;
     std::size_t* counts = nullptr;
     std::size_t wanted = 0;
 
-    /** The view the call publishes once every row landed. */
+    /** The view the call publishes once every query landed. */
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** The landing of @p count rows of @p wanted matches, carved out of a claimed arena's host pages or
- *  device memory, @p memory; a zero @p wanted carves only the counts. */
+/** The landing of @p count queries of @p wanted matches, carved out of a claimed arena's host pages
+ *  or device memory, @p memory; a zero @p wanted carves only the counts. */
 template <typename memory_type_>
 inline expected<matches_landing_t> carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted) noexcept {
     matches_landing_t landing;
@@ -1704,8 +1704,8 @@ inline expected<matches_landing_t> carve_matches(memory_type_& memory, std::size
     return {landing, carved ? status_t::success_k : status_t::bad_alloc_k};
 }
 
-/** The @p count rows @ref carve_matches put in @p landing as the caller reads them, where @p arena
- *  hands outputs out, once its uploads drained. */
+/** The @p count queries @ref carve_matches put in @p landing as the caller reads them, where
+ *  @p arena hands outputs out, once its uploads drained. */
 inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena, matches_landing_t const& landing,
                                                         std::size_t count) noexcept {
     std::size_t const entries = count * landing.wanted;
@@ -1716,7 +1716,7 @@ inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& 
     return {{keys, scores, counts, landing.wanted}, landed};
 }
 
-/** The ragged run of @p count rows @ref carve put on host pages, @p keys and @p scores cut by
+/** The ragged run of @p count queries @ref carve put on host pages, @p keys and @p scores cut by
  *  @p offsets, as the caller reads it where @p arena hands outputs out, once its uploads drained;
  *  an empty run hands out no keys or scores. */
 inline expected<usearch_matches_tape_view_t> publish_matches(usearch_arena_handle_t& arena, usearch_key_t* keys,

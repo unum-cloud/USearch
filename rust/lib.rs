@@ -43,6 +43,6 @@ pub use dense_index::{
 };
 pub use types::{
     capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, CPUClass, Deferred, Deferring,
-    Distance, Element, Error, Executor, GPUClass, Key, Matches, MatchesRow, Mood, On, Predicate, ProgressCallback,
+    Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Predicate, ProgressCallback, QueryMatches,
     Residency, Result, Scalar, Status, Traversal, Wait,
 };

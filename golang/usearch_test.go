@@ -131,7 +131,7 @@ func ExampleDenseIndex() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _, err := matches.Row(0) // valid until the next call given arena
+	found, _, err := matches.Query(0) // valid until the next call given arena
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func ExampleDenseIndex_Deferred() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _, err := matches.Row(0)
+	found, _, err := matches.Query(0)
 	if err != nil {
 		log.Fatal(err)
 	}

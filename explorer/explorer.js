@@ -649,18 +649,18 @@ export async function explore(elements, parameters) {
         /** @type {number[]} */ const sources = [];
         /** @type {number[]} */ const targets = [];
         /** @type {number[]} */ const distances = [];
-        for (let row = 0; row < count; row++) {
-          for (let column = 0; column < found.counts[row]; column++) {
-            const match = row * found.columns + column;
+        for (let query = 0; query < count; query++) {
+          for (let column = 0; column < found.counts[query]; column++) {
+            const match = query * found.columns + column;
             const matchName = keyName(found.keys, match * 16);
             if (matchName === name) continue;
             let target = firstOrdinal(matchName);
             if (target === undefined) {
               if (nodes >= capacity) continue;
-              newcomers.push(entries[row] ?? node);
+              newcomers.push(entries[query] ?? node);
               target = register(matchName, found.keys, match * 16);
             }
-            sources.push(entries[row] ?? node);
+            sources.push(entries[query] ?? node);
             targets.push(target);
             distances.push(found.distances[match]);
           }

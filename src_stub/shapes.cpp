@@ -61,7 +61,7 @@ constexpr std::size_t coordinates_k = 3;
 using shapes_payload_t = std::vector<double>;
 using shapes_entry_t = entry<shapes_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<shapes_entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<shapes_entry_t>, "reallocation must move entries, never copy them");
 
 /** What a handle froze at construction, or adopted from a checkpoint. */
 struct shapes_index_options_t {
@@ -161,20 +161,21 @@ static void read_shape(usearch_tape_view_t tape, std::size_t entry, std::vector<
                  std::span<double>(values).subspan(point * coordinates_k, coordinates_k));
 }
 
-/** The output twin of @c read_shape: lands the entries at @p rows into @p arena as one tape of
+/** The output twin of @c read_shape: lands the entries at @p entries into @p arena as one tape of
  *  @p scalar_kind points, writing @p tape only once every point landed, and answers false once
  *  @p outcome records why not. */
-static bool land_entries(shapes_index_t const& index, std::span<std::size_t const> rows, usearch_scalar_t scalar_kind,
-                         usearch_arena_handle_t& arena, usearch_tape_view_t& tape, usearch_outcome_t* outcome) {
+static bool land_entries(shapes_index_t const& index, std::span<std::size_t const> entries,
+                         usearch_scalar_t scalar_kind, usearch_arena_handle_t& arena, usearch_tape_view_t& tape,
+                         usearch_outcome_t* outcome) {
     std::size_t const point_bytes = row_extent(scalar_kind, coordinates_k);
     std::size_t total_points = 0;
-    for (std::size_t row : rows) total_points += points_of(index.entries[row]);
-    std::size_t* const offsets = carve<std::size_t>(arena, rows.size() + 1, outcome);
+    for (std::size_t entry : entries) total_points += points_of(index.entries[entry]);
+    std::size_t* const offsets = carve<std::size_t>(arena, entries.size() + 1, outcome);
     std::byte* const landing = offsets ? carve<std::byte>(arena, total_points * point_bytes, outcome) : nullptr;
     if (!landing) return false;
     offsets[0] = 0;
-    for (std::size_t found = 0; found != rows.size(); ++found) {
-        shapes_entry_t const& entry = index.entries[rows[found]];
+    for (std::size_t found = 0; found != entries.size(); ++found) {
+        shapes_entry_t const& entry = index.entries[entries[found]];
         std::size_t const points = points_of(entry);
         for (std::size_t point = 0; point != points; ++point)
             write_row(row_at<std::byte>(landing, offsets[found] + point, point_bytes, point_bytes), scalar_kind,
@@ -193,7 +194,7 @@ static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t querie
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_traversal_stats_t* stats, usearch_predicate_t predicate,
                                usearch_progress_t progress) {
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
     std::vector<double> query_shape;
@@ -201,11 +202,11 @@ static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t querie
     for (std::size_t query = 0; query != count; ++query) {
         read_shape(queries, query, query_shape);
         rank<shapes_payload_t>(
-            std::span<shapes_entry_t const>(index.entries).first(rows), predicate,
+            std::span<shapes_entry_t const>(index.entries).first(entries), predicate,
             [&](shapes_payload_t const& payload) { return distance(index, query_shape, payload); }, ranked);
         landing.write(query, ranked);
         if (stats) {
-            stats->visited_members += rows;
+            stats->visited_members += entries;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
@@ -244,30 +245,30 @@ struct shapes_checkpoint_prefix_t {
 /** The per-entry overhead of the blob: the key, then the point count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::utilities::u64_t);
 
-static std::size_t payload_extent(shapes_index_t const& index, std::size_t rows) {
+static std::size_t payload_extent(shapes_index_t const& index, std::size_t entries) {
     std::size_t extent = 0;
-    for (std::size_t row = 0; row != rows; ++row)
-        extent += record_overhead_k + index.entries[row].payload.size() * sizeof(double);
+    for (std::size_t entry = 0; entry != entries; ++entry)
+        extent += record_overhead_k + index.entries[entry].payload.size() * sizeof(double);
     return extent;
 }
 
-static std::optional<std::size_t> serialized_bytes(shapes_index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(shapes_checkpoint_prefix_t), payload_extent(index, rows), 1);
+static std::optional<std::size_t> serialized_bytes(shapes_index_t const& index, std::size_t entries) {
+    return blob_bytes(sizeof(shapes_checkpoint_prefix_t), payload_extent(index, entries), 1);
 }
 
-static void write_into(shapes_index_t const& index, std::size_t rows, bytes_span_t target) {
+static void write_into(shapes_index_t const& index, std::size_t entries, bytes_span_t target) {
     shapes_checkpoint_prefix_t prefix {};
     prefix.points = index.options.points;
     prefix.connectivity = index.options.connectivity;
-    prefix.entries = rows;
-    prefix.payload_bytes = payload_extent(index, rows);
+    prefix.entries = entries;
+    prefix.payload_bytes = payload_extent(index, entries);
     prefix.metric = index.options.metric;
     prefix.quantization = index.options.quantization;
     write_pod(target, prefix);
 
     bytes_span_t cursor = target.subspan(sizeof(prefix));
-    for (std::size_t row = 0; row != rows; ++row) {
-        shapes_entry_t const& entry = index.entries[row];
+    for (std::size_t position = 0; position != entries; ++position) {
+        shapes_entry_t const& entry = index.entries[position];
         std::size_t const point_count = points_of(entry);
         std::size_t const payload_bytes = entry.payload.size() * sizeof(double);
         write_pod(cursor, entry.key);
@@ -415,7 +416,8 @@ void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
-    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
+    // its zero cost.
     usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(served.view(), outcome);
     if (!index) return;
     index->served = std::move(served);
@@ -495,8 +497,8 @@ void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     if (reject_keys(arguments->keys, outcome)) return;
     if (reject_tape(shapes, count, outcome)) return;
     if (index.options.points)
-        for (std::size_t row = 0; row != count; ++row)
-            if (reject_if(shapes.offsets[row + 1] - shapes.offsets[row] != index.options.points,
+        for (std::size_t offset = 0; offset != count; ++offset)
+            if (reject_if(shapes.offsets[offset + 1] - shapes.offsets[offset] != index.options.points,
                           usearch_status_shape_mismatch_k, "The index froze a point count this entry does not match",
                           outcome))
                 return;
@@ -510,9 +512,9 @@ void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     std::size_t const watermark = index.entries.size();
     shapes_payload_t payload;
     std::size_t published = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        read_shape(shapes, row, payload);
-        index.append(key_at(arguments->keys, row), payload);
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        read_shape(shapes, offset, payload);
+        index.append(key_at(arguments->keys, offset), payload);
         ++published;
         if (!keep_going(arguments->progress, published, count)) break;
     }
@@ -537,14 +539,14 @@ void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
     // An exact scan reaches every entry it holds in one level.
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -598,10 +600,10 @@ void usearch_shapes_get(usearch_shapes_get_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
-    if (rows.empty()) return;
-    if (!land_entries(index, rows, arguments->outputs_scalar, *arena, *arguments->shapes, outcome)) return;
-    if (arguments->written) *arguments->written = rows.size();
+    std::vector<std::size_t> const entries = entries_under(index, arguments->key);
+    if (entries.empty()) return;
+    if (!land_entries(index, entries, arguments->outputs_scalar, *arena, *arguments->shapes, outcome)) return;
+    if (arguments->written) *arguments->written = entries.size();
 }
 
 void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
@@ -630,12 +632,12 @@ void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
         return;
     // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
     // it.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -720,14 +722,14 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
         writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    while (refinement.swept < rows && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, rows);
+    while (refinement.swept < entries && !cancelled)
+        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->visited) *arguments->visited = refinement.swept;
     if (arguments->stats) arguments->stats->visited_members = refinement.swept;
-    reject_if(cancelled && refinement.swept != rows, usearch_status_cancelled_k,
+    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
               "The caller's handler stopped the sweep", outcome);
 }
 
@@ -742,9 +744,9 @@ void usearch_shapes_refinement_finish(usearch_shapes_refinement_finish_t* argume
         return;
     usearch_shapes_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    std::size_t const entries = index.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments) {
@@ -841,14 +843,14 @@ void usearch_shapes_save(usearch_shapes_save_t* arguments) {
                   "An NVMe view already is its checkpoint", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, rows);
+    std::size_t const entries = index.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(index, entries);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
-    write_into(index, rows, blob);
+    write_into(index, entries, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
     keep_going(arguments->progress, 1, 1);
 }

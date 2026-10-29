@@ -173,7 +173,7 @@ struct [[nodiscard]] compact_result_t {
     std::size_t source_shards = 0, target_shards = 0;
 
     /** Rows that changed shard, and edges dropped because a cut separated their ends. */
-    std::size_t moved_rows = 0, cut_edges = 0;
+    std::size_t moved_entries = 0, cut_edges = 0;
 
     /** The re-selections and the heal, counted as every refine counts them. */
     refine_result_t graph;

@@ -4,7 +4,7 @@
  *  @date October 17, 2026
  *  @brief The NVIDIA unit of the kernels every basic face shares, over 32-bit node IDs.
  *
- *  The rebase of absorbed rows, the reachability audit with its reconnection, and a split's
+ *  The rebase of absorbed nodes, the reachability audit with its reconnection, and a split's
  *  partition and scatter read the neighbors matrix alone and move values as opaque bytes, so one
  *  unit serves every modality on every NVIDIA class.
  *
@@ -34,51 +34,53 @@ template <vram_kernel_t kernel_, typename node_id_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blocks(kernel_, 0))
     cuda_kernel(vram_graph<node_id_type_> graph) {
     if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
-        dense::vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
+        dense::vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.nodes_count, graph.connectivity,
                                               graph.source_first, graph.source_bound, graph.shift);
     else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
-        dense::vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
+        dense::vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.nodes_count, graph.seed_count);
     else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
-        dense::vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity,
+        dense::vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.nodes_count, graph.connectivity,
                                                     graph.reached, graph.frontier, graph.next_frontier, graph.counter,
                                                     graph.previous_counter, graph.levels);
     else if constexpr (kernel_ == vram_kernel_t::reachability_islands_k)
-        dense::vram_reachability_islands<cuda_warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
+        dense::vram_reachability_islands<cuda_warp_t>(graph.reached, graph.nodes_count, graph.island_ids,
+                                                      graph.counter);
     else if constexpr (kernel_ == vram_kernel_t::reached_in_links_k)
-        dense::vram_reached_in_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
+        dense::vram_reached_in_links<cuda_warp_t>(graph.neighbors, graph.nodes_count, graph.connectivity, graph.reached,
                                                   graph.in_links);
     else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
         dense::vram_reconnect_island<cuda_warp_t>(graph.neighbors, graph.connectivity, graph.island_ids,
-                                                  graph.islands_count, graph.reached, graph.rows_count,
+                                                  graph.islands_count, graph.reached, graph.nodes_count,
                                                   graph.seed_count, graph.in_links, graph.reconnected);
     else if constexpr (kernel_ == vram_kernel_t::partition_roots_k)
         dense::vram_partition_roots<cuda_warp_t>(graph.roots, graph.seed_count, graph.labels, graph.frontier,
                                                  graph.part_sizes);
     else if constexpr (kernel_ == vram_kernel_t::partition_propose_k)
-        dense::vram_partition_propose<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.labels,
+        dense::vram_partition_propose<cuda_warp_t>(graph.neighbors, graph.nodes_count, graph.connectivity, graph.labels,
                                                    graph.proposals, graph.frontier, graph.part_sizes,
                                                    graph.part_capacity, graph.previous_counter);
     else if constexpr (kernel_ == vram_kernel_t::partition_tally_k)
-        dense::vram_partition_tally<cuda_warp_t>(graph.labels, graph.proposals, graph.rows_count, graph.proposed,
+        dense::vram_partition_tally<cuda_warp_t>(graph.labels, graph.proposals, graph.nodes_count, graph.proposed,
                                                  graph.previous_counter);
     else if constexpr (kernel_ == vram_kernel_t::partition_accept_k)
-        dense::vram_partition_accept<cuda_warp_t>(graph.labels, graph.proposals, graph.rows_count, graph.next_frontier,
+        dense::vram_partition_accept<cuda_warp_t>(graph.labels, graph.proposals, graph.nodes_count, graph.next_frontier,
                                                   graph.part_sizes, graph.proposed, graph.part_capacity, graph.counter,
                                                   graph.previous_counter);
     else if constexpr (kernel_ == vram_kernel_t::partition_fill_k)
-        dense::vram_partition_fill<cuda_warp_t>(graph.labels, graph.proposals, graph.rows_count, graph.next_frontier,
+        dense::vram_partition_fill<cuda_warp_t>(graph.labels, graph.proposals, graph.nodes_count, graph.next_frontier,
                                                 graph.part_sizes, graph.proposed, graph.part_capacity, graph.counter,
                                                 graph.previous_counter);
     else if constexpr (kernel_ == vram_kernel_t::partition_islands_k)
-        dense::vram_partition_islands<cuda_warp_t>(graph.labels, graph.rows_count, graph.part_sizes, graph.parts_count);
+        dense::vram_partition_islands<cuda_warp_t>(graph.labels, graph.nodes_count, graph.part_sizes,
+                                                   graph.parts_count);
     else if constexpr (kernel_ == vram_kernel_t::partition_seams_k)
-        dense::vram_partition_seams<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.labels,
+        dense::vram_partition_seams<cuda_warp_t>(graph.neighbors, graph.nodes_count, graph.connectivity, graph.labels,
                                                  graph.seams);
     else if constexpr (kernel_ == vram_kernel_t::split_links_k)
-        dense::vram_split_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.labels,
+        dense::vram_split_links<cuda_warp_t>(graph.neighbors, graph.nodes_count, graph.connectivity, graph.labels,
                                              graph.part_capacity, graph.part_neighbors);
     else
-        dense::vram_split_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.rows_count, graph.labels,
+        dense::vram_split_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.nodes_count, graph.labels,
                                             graph.part_capacity, graph.part_values, graph.part_offsets);
 }
 

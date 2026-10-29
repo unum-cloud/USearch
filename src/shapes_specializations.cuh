@@ -114,7 +114,7 @@ struct shapes_ram_variant {
     }
     status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
 
-    /** Adds the points of a landed @p donor, whose rows this index now holds. */
+    /** Adds the points of a landed @p donor, whose nodes this index now holds. */
     void absorbed(shapes_ram_variant const& donor) noexcept {
         atomic_ref<std::size_t>(total_points).add(donor.total_points, std::memory_order_relaxed);
     }
@@ -135,20 +135,20 @@ struct shapes_ram_variant {
     status_t sample(usearch_shapes_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
-/** Packs entry @p row of @p tape into @p packed under @p allocator, casting the caller's scalar
+/** Packs entry @p entry of @p tape into @p packed under @p allocator, casting the caller's scalar
  *  into @p scalar_type_ with @p kit_type_ through @p scratch where they differ; refuses a count
  *  other than a frozen nonzero @p points. */
 template <nk::shapes_dtype scalar_type_, typename kit_type_, typename packed_type_, typename allocator_type_>
-status_t pack_entry(usearch_tape_view_t tape, std::size_t row, std::size_t points, packed_type_& packed,
+status_t pack_entry(usearch_tape_view_t tape, std::size_t entry, std::size_t points, packed_type_& packed,
                     allocator_type_ const& allocator, thread_allocator_t const& scratch) noexcept {
     constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
-    std::size_t const count = tape.offsets[row + 1] - tape.offsets[row];
+    std::size_t const count = tape.offsets[entry + 1] - tape.offsets[entry];
     if (points && count != points) return status_t::shape_mismatch_k;
     nk_dtype_t const from = nk_dtype_of(tape.scalar);
     std::size_t const from_bytes = nk_dtype_bits(from) / 8;
     std::size_t const elements = count * 3;
     bytes_view_t const coordinates = bytes_of(
-        static_cast<byte_t const*>(tape.data) + tape.offsets[row] * 3 * from_bytes, elements * from_bytes);
+        static_cast<byte_t const*>(tape.data) + tape.offsets[entry] * 3 * from_bytes, elements * from_bytes);
     growing_buffer<scalar_type_, thread_allocator_t> converted {scratch};
     std::span<scalar_type_ const> cloud = elements_of<scalar_type_>(coordinates);
     if (from != dtype_k) {
@@ -171,8 +171,8 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::in
     usearch_shapes_insert_t const& arguments, progress_ticks_t& ticks, executor_t& executor) noexcept {
     usearch_tape_view_t const& shapes = arguments.shapes;
     std::size_t const count = arguments.count, connectivity = geometry.connectivity;
-    auto build = [&](std::size_t row, value_t& value, std::size_t thread) noexcept {
-        return pack_entry<scalar_type_, kit_t>(shapes, row, geometry.points, value, value.get_allocator(),
+    auto build = [&](std::size_t offset, value_t& value, std::size_t thread) noexcept {
+        return pack_entry<scalar_type_, kit_t>(shapes, offset, geometry.points, value, value.get_allocator(),
                                                thread_allocator_t {executor.arena(thread)});
     };
     std::size_t const expansion = arguments.expansion_factor ? arguments.expansion_factor : connectivity * 2;
@@ -190,11 +190,11 @@ expected<traversal_telemetry_t> shapes_ram_variant<scalar_type_, cpu_class_>::se
     executor_t& executor) noexcept {
     using query_t = nk::shapes_packed<scalar_type_,
                                       typename std::allocator_traits<thread_allocator_t>::template rebind_alloc<char>>;
-    auto query_of = [&](std::size_t row, std::size_t thread, auto&& answer) noexcept {
+    auto query_of = [&](std::size_t query_index, std::size_t thread, auto&& answer) noexcept {
         thread_allocator_t const scratch {executor.arena(thread)};
         query_t query {scratch};
-        if (status_t const packed = pack_entry<scalar_type_, kit_t>(arguments.queries, row, geometry.points, query,
-                                                                    scratch, scratch);
+        if (status_t const packed = pack_entry<scalar_type_, kit_t>(arguments.queries, query_index, geometry.points,
+                                                                    query, scratch, scratch);
             failed(packed))
             return packed;
         return answer(query);
@@ -265,7 +265,7 @@ status_t shapes_ram_variant<scalar_type_, cpu_class_>::load(std::string_view pat
 }
 
 /** One shapes alternative on block storage: the basic NVMe index over the clouds of @p scalar_type_
- *  a RAM variant saved, read-only, each row its points as saved, scored with the RAM variant's
+ *  a RAM variant saved, read-only, each shape its points as saved, scored with the RAM variant's
  *  metric and the kits @p cpu_class_ picks. Its verbs are instantiated in the class's unit, as the
  *  RAM variant's are. */
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
@@ -329,10 +329,10 @@ expected<traversal_telemetry_t> shapes_nvme_variant<scalar_type_, cpu_class_>::s
     executor_t& executor) noexcept {
     using query_t = nk::shapes_packed<scalar_type_,
                                       typename std::allocator_traits<thread_allocator_t>::template rebind_alloc<char>>;
-    auto query_of = [&](std::size_t row, thread_allocator_t const& scratch) noexcept {
+    auto query_of = [&](std::size_t query_index, thread_allocator_t const& scratch) noexcept {
         query_t query {scratch};
-        status_t const packed = pack_entry<scalar_type_, kit_t>(arguments.queries, row, geometry.points, query, scratch,
-                                                                scratch);
+        status_t const packed = pack_entry<scalar_type_, kit_t>(arguments.queries, query_index, geometry.points, query,
+                                                                scratch, scratch);
         return expected<query_t> {std::move(query), packed};
     };
     return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
@@ -472,21 +472,21 @@ expected<tape_view<byte_t const>> shapes_vram_nvidia_variant<scalar_type_, gpu_c
     if (!offsets) return {{}, status_t::bad_alloc_k};
     offsets[0] = 0;
     std::size_t largest = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        std::size_t const cloud = tape.offsets[row + 1] - tape.offsets[row];
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        std::size_t const cloud = tape.offsets[offset + 1] - tape.offsets[offset];
         if (geometry.points && cloud != geometry.points) return {{}, status_t::shape_mismatch_k};
         largest = max_of(largest, cloud);
         nk_size_t bytes = 0;
         if (status_t const sized = us::shapes::status_of(pack_kit_t::pack_size(cloud, &bytes)); failed(sized))
             return {{}, sized};
-        offsets[row + 1] = offsets[row] + bytes;
+        offsets[offset + 1] = offsets[offset] + bytes;
     }
     byte_t* const packed = carve<byte_t>(pages, offsets[count]);
     raw_t* const converted = from == dtype_k ? nullptr : carve<raw_t>(pages, largest * 3);
     if (!packed || (from != dtype_k && !converted)) return {{}, status_t::bad_alloc_k};
-    for (std::size_t row = 0; row != count; ++row) {
-        std::size_t const cloud = tape.offsets[row + 1] - tape.offsets[row];
-        void const* const coordinates = static_cast<byte_t const*>(tape.data) + tape.offsets[row] * 3 * from_bytes;
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        std::size_t const cloud = tape.offsets[offset + 1] - tape.offsets[offset];
+        void const* const coordinates = static_cast<byte_t const*>(tape.data) + tape.offsets[offset] * 3 * from_bytes;
         raw_t const* cloud_points = static_cast<raw_t const*>(coordinates);
         if (from != dtype_k) {
             if (status_t const cast = us::shapes::status_of(
@@ -496,7 +496,7 @@ expected<tape_view<byte_t const>> shapes_vram_nvidia_variant<scalar_type_, gpu_c
             cloud_points = converted;
         }
         if (status_t const made = us::shapes::status_of(
-                pack_kit_t::pack(cloud_points, cloud, packed + offsets[row], nullptr));
+                pack_kit_t::pack(cloud_points, cloud, packed + offsets[offset], nullptr));
             failed(made))
             return {{}, made};
     }
@@ -620,7 +620,7 @@ struct variant_bodies<shapes_traits_t> {
     template <typename cloud_type_>
     static status_t keep(nvme_executor_t& executor, std::size_t thread, cloud_type_ const& cloud,
                          kept_t& kept) noexcept {
-        return keep_row(executor, thread, bytes_of(cloud.data(), cloud.extent(0) * 3), kept);
+        return keep_entry(executor, thread, bytes_of(cloud.data(), cloud.extent(0) * 3), kept);
     }
 
     /** Lands @p count clouds, the @c i th as @p value_at hands it, as points in the scalar the call
@@ -652,7 +652,7 @@ struct variant_bodies<shapes_traits_t> {
     }
 
     /** Adds one entry's points to a key's statistics, from any thread: a variant's packs count
-     *  their points, and a view's clouds hold a row per point. */
+     *  their points, and a view's shapes hold a row per point. */
     template <typename cloud_type_>
     static void tally(usearch_shapes_key_stats_t& stats, cloud_type_ const& cloud) noexcept {
         std::size_t points = 0;

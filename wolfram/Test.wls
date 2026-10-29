@@ -66,7 +66,7 @@ Expect["a negative expansion", DenseSearch[$index, $typed, 1, $arena, "Expansion
 Expect["an empty batch", DenseInsert[$index, {}, {}], Null]
 Expect["no queries", DenseSearch[$index, {}, 10, $arena], <|"Keys" -> {}, "Scores" -> {}|>]
 
-(* The defaults make an angular bf16 index, and a scan scores every row exactly, so each row finds itself first. *)
+(* The defaults make an angular bf16 index, and a scan scores every entry exactly, so each vector finds itself first. *)
 $scanned = DenseInitRam[5]
 Expect["the default geometry", KeyTake[DenseDescribe[$scanned], {"Metric", "Quantization"}],
     <|"Metric" -> "angular", "Quantization" -> "bf16"|>]
@@ -81,7 +81,7 @@ Expect["an arena no constructor made", DenseSearch[$index, $rows, 10, Arena[0]],
     Failure["uninitialized", <|"MessageTemplate" -> "the Arena was released"|>]]
 
 (* One arena serves get and multiply in turn, and each result outlives its reuse. *)
-Expect["a stored row", DenseGet[$index, 43, $arena], {Last[$rows]}]
+Expect["a stored vector", DenseGet[$index, 43, $arena], {Last[$rows]}]
 Expect["an absent key", DenseGet[$index, 99, $local], {}]
 Expect["the entries under a key", DenseCount[$index, $uuid], 1]
 $products = DenseMultiply[DenseIndexOn[$index, $executor], $rows, $arena]

@@ -7,7 +7,7 @@
  *
  *  Plain C++, so the host classes build with any compiler: the members reading the kits, which size
  *  a launch's spans, are defined beside the kits in the metric, which only the modality's NVIDIA
- *  unit compiles. Rows are NumKong packs end to end, as @c nk::shapes_pack lays them out, in the
+ *  unit compiles. Shapes are NumKong packs end to end, as @c nk::shapes_pack lays them out, in the
  *  caller's tape and in the index.
  */
 #pragma once
@@ -38,12 +38,12 @@ struct vram_nvidia_kits {
     template <typename, typename>
     friend struct basic::vram_ragged_graph;
 
-    /** The rung serving rows of @p longest bytes, or @c rungs_k when none does. Defined in
+    /** The rung serving shapes of @p longest bytes, or @c rungs_k when none does. Defined in
      *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
     static std::size_t rung_serving_(std::size_t longest) noexcept;
 
-    /** Lanes the kit scores a row with on @p rung. */
-    static u32_t lanes_per_row_(std::size_t rung) noexcept;
+    /** Lanes the kit scores a shape with on @p rung. */
+    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
 
     /** Bytes the @p bytes long pack at @p data takes once prepared, a multiple of 16. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
@@ -139,7 +139,7 @@ struct vram_nvidia_index {
     std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
         return graph_.traversal_memory_usage(tape, config);
     }
-    expected<insert_plan_t> plan_insert(std::size_t rows) noexcept { return graph_.plan_insert(rows); }
+    expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
     expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         return graph_.insert(tape, context, config);
@@ -153,11 +153,12 @@ struct vram_nvidia_index {
         return graph_.search(queries, result_ids, result_distances, context, config);
     }
 
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {
-        return graph_.traversal_memory_usage(config, rows);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries) const noexcept {
+        return graph_.traversal_memory_usage(config, entries);
     }
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows, std::size_t receivers) const noexcept {
-        return graph_.traversal_memory_usage(config, rows, receivers);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries,
+                                       std::size_t receivers) const noexcept {
+        return graph_.traversal_memory_usage(config, entries, receivers);
     }
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                         refine_config_t config = {}) noexcept {

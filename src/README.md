@@ -48,7 +48,7 @@ The variants are aliases over those templates, keyed by the storage dtype and th
 
 A variant's executor type is its home, so `home_of`, `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 Every home fills every entry: an NVMe view answers `read_only_k` for each mutation, and a device variant `unsupported_k` for what only a host walk takes.
-`insert` is one plan with a step per slice that publishes every row at once, and refinements and cursors live behind a `void*` their own entries open, step and free.
+`insert` is one plan with a step per slice that publishes every entry at once, and refinements and cursors live behind a `void*` their own entries open, step and free.
 Rows reach every variant in the caller's scalar as a `dense::rows_view_t`, and each variant imports them into its stored scalar per thread, in scratch its executor already owns, so the C layer never stages a row.
 Scores land in the arena as the ABI's `double` straight from the engines, and row outputs export into the scalar the caller asks for.
 A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unless the caller asks otherwise, each handed to the engine whole and reported once; without a handler the call is one slice, and a GPU engine windows a large one through its own staging.

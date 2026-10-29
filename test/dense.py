@@ -98,7 +98,7 @@ def test_construction_reports_its_geometry(dimensions: int, metric: DenseMetric)
 
 
 def test_construction_takes_a_pinned_class():
-    """A serial pin runs on every CPU, and the index it opens reports the pinned class and its rows."""
+    """A serial pin runs on every CPU, and the index it opens reports the pinned class and its entries."""
     index = DenseIndex.init_ram(dimensions=8, cpu_class=CPUClass.SERIAL)
     index.reserve(2)
     index.insert([1, 2], np.ones((2, 8), dtype=np.float32))
@@ -122,7 +122,7 @@ def test_fresh_index_inserts_without_a_reservation():
         ({"quantization": Scalar.F32}, UnknownKindError),  # Rows cross the boundary as `f32` but are never stored so.
         ({"residency": Scalar.F32}, TypeError),  # The factory chooses the residency; no keyword does.
         ({"devices": [0]}, TypeError),  # A variant belonging to another residency.
-        ({"threads": 2}, TypeError),  # An index owns rows; an `Executor` owns workers.
+        ({"threads": 2}, TypeError),  # An index owns entries; an `Executor` owns workers.
         ({"expansion_add": 64}, TypeError),  # A keyword the surface does not have.
         ({"ndim": 8}, TypeError),  # Renamed to 'dimensions'.
     ],
@@ -263,7 +263,7 @@ def test_executor_is_borrowed_for_the_call(executor):
 
 
 def test_one_executor_serves_several_indexes(executor):
-    """An index owns rows and an executor owns workers, so one pool drives as many as asked."""
+    """An index owns entries and an executor owns workers, so one pool drives as many as asked."""
     first, vectors = build_index(16, 8, executor)
     second, _ = build_index(16, 8, executor, seed=1)
     assert len(first) == len(second) == 16
@@ -460,7 +460,7 @@ def test_deferred_receiver_lacks_what_cannot_defer(executor):
 @pytest.mark.parametrize("count", BATCH_SIZES)
 @pytest.mark.parametrize("dimensions", SETTINGS.dims)
 def test_insert_publishes_every_row(executor, count: int, dimensions: int):
-    """A batch is all-or-nothing, so every row of an accepted batch is visible afterwards."""
+    """A batch is all-or-nothing, so every entry of an accepted batch is visible afterwards."""
     index, _ = build_index(count, dimensions, executor)
     assert len(index) == count
     assert index.capacity >= count
@@ -584,7 +584,7 @@ def test_insert_reports_progress(executor):
 
 
 def test_insert_handler_reports_and_cannot_stop(executor):
-    """Every row is claimed before the first report, so a handler answering False still lands the whole batch."""
+    """Every entry is claimed before the first report, so a handler answering False still lands the whole batch."""
     index = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     index.reserve(64)
     index.on(executor).insert(np.arange(64), random_vectors(64, 16), progress=lambda done, total: done < 8)
@@ -626,13 +626,13 @@ def test_search_shapes(executor, dimensions: int):
     assert stats.computed_distances > 0
 
 
-def test_search_rows_are_matches(executor):
-    """A result row is a tuple of scored entries, nearest first."""
+def test_search_queries_are_matches(executor):
+    """A query's result is a tuple of scored entries, nearest first."""
     index, vectors = build_index(64, 32, executor)
-    row = index.on(executor).search(vectors[:1], 4, Arena(executor))[0]
-    assert all(isinstance(match, Match) for match in row)
-    assert isinstance(row[0].key, Key)
-    assert row[0].distance <= row[-1].distance
+    found = index.on(executor).search(vectors[:1], 4, Arena(executor))[0]
+    assert all(isinstance(match, Match) for match in found)
+    assert isinstance(found[0].key, Key)
+    assert found[0].distance <= found[-1].distance
 
 
 def test_search_reports_fewer_matches_than_asked(executor):
@@ -748,7 +748,7 @@ def test_filtered_search_propagates_a_raising_predicate(executor):
 
 
 def test_scan_finds_every_row_itself(executor):
-    """A scan scores every row exactly, so each self-query finds its own row first."""
+    """A scan scores every entry exactly, so each self-query finds itself first."""
     index, vectors = build_index(64, 16, executor)
     matches = index.on(executor).search(vectors, 4, Arena(executor), traversal=Traversal.SCAN)
     assert keys_to_integers(matches.keys)[:, 0].tolist() == list(range(64))
@@ -826,7 +826,7 @@ def test_results_refuse_reads_once_their_arena_rewinds(executor):
             read()
     rows = index.on(executor).get(1, arena)
     with pytest.raises(UninitializedError):
-        products.row(0)
+        products.query(0)
     assert np.asarray(rows).shape == (1, 8)
 
 
@@ -1075,7 +1075,7 @@ def test_metadata_roundtrips_through_a_factory(executor, tmp_path):
 
 
 def test_refine_reports_a_sweep_and_leaves_the_index_standing(executor):
-    """A sweep re-selects edges without publishing or retiring an entry, so the rows survive it."""
+    """A sweep re-selects edges without publishing or retiring an entry, so the entries survive it."""
     index, vectors = build_index(64, 16, executor)
     changed = index.on(executor).refine(expansion_factor=64)
     assert isinstance(changed, int)
@@ -1206,7 +1206,7 @@ def test_maxsim_refuses_ragged_queries(executor):
 
 
 def test_maxsim_scores_only_admitted_documents(executor):
-    """A predicate is asked before any of a document's rows score, so a rejected one never lands."""
+    """A predicate is asked before any of a document's vectors score, so a rejected one never lands."""
     index, tokens = late_interaction_index(executor)
     documents = scored_documents(index, tokens, 2, 4, executor, predicate=lambda key: int(key) % 2 == 0)
     found = keys_to_integers(documents.keys)
@@ -1261,7 +1261,7 @@ def test_multiply_reports_every_scored_pair(executor):
     assert offsets.shape == (len(rows) + 1,)
     assert offsets[0] == 0 and offsets[-1] == len(scores) == products.required
     assert np.all(np.diff(offsets) > 0)
-    row_keys, row_scores = products.row(1)
+    row_keys, row_scores = products.query(1)
     assert np.array_equal(np.asarray(row_scores), scores[offsets[1] : offsets[2]])
     assert np.array_equal(keys_to_integers(row_keys), named[offsets[1] : offsets[2]])
     assert not hasattr(products.scores, "__cuda_array_interface__")
@@ -1274,7 +1274,7 @@ def test_multiply_reports_every_scored_pair(executor):
 
 
 def test_multiply_reports_what_wanted_cut(executor):
-    """A bound keeps the first pairs per row, and `required` still counts every pair scored."""
+    """A bound keeps the first pairs per left row, and `required` still counts every pair scored."""
     index, vectors = build_index(64, 16, executor, metric=DenseMetric.INNER)
     products = index.on(executor).multiply(vectors[:2], 4, Arena(executor))
     assert np.diff(np.asarray(products.offsets)).tolist() == [4, 4]

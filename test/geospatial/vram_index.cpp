@@ -8,8 +8,8 @@
  *
  *  Collections are uniform over the globe, a dense square kilometre of one city, or that city's
  *  cameras with a heading, a field of view and a range each, which the @c sees and @c seen
- *  relations narrow by view cone on the device. Rows insert in three batches, so the later batches
- *  walk graphs whose reverse links earlier batches merged.
+ *  relations narrow by view cone on the device. Observations insert in three batches, so the later
+ *  batches walk graphs whose reverse links earlier batches merged.
  *
  *  Over rolling hills, half the cameras record no altitude and stand on the ground, and every
  *  relation past @c near also needs a clear sight line. Those collections are no wider than the
@@ -179,24 +179,26 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
     std::vector<usearch_geospatial_observation_t> observations = generate_observations(kind, count, seed);
     std::vector<usearch_geospatial_observation_t> queries = generate_observations(kind, queries_count, ~seed);
     // Over hills, every other camera stands on the ground and the rest hover over every hill.
-    for (std::size_t row = 1; hills && row < count; row += 2) observations[row].altitude_metres = 60 + row % 31;
-    for (std::size_t row = 1; hills && row < queries_count; row += 2) queries[row].altitude_metres = 60 + row % 31;
+    for (std::size_t offset = 1; hills && offset < count; offset += 2)
+        observations[offset].altitude_metres = 60 + offset % 31;
+    for (std::size_t offset = 1; hills && offset < queries_count; offset += 2)
+        queries[offset].altitude_metres = 60 + offset % 31;
     usearch_geospatial_terrain_t const terrain = hills ? hills->borrowed() : usearch_geospatial_terrain_t {};
     std::vector<usearch_key_t> keys(count);
-    for (std::size_t row = 0; row != count; ++row) keys[row] = us::tools::key_of_row(seed, row);
+    for (std::size_t offset = 0; offset != count; ++offset) keys[offset] = us::tools::key_of_offset(seed, offset);
     usearch_geospatial_tolerance_t const tolerance {radius_metres, 0};
     std::size_t failures = 0;
 
     // The exact admitted chords of every query, ascending.
     std::vector<earth_observation_t> stored(count);
-    for (std::size_t row = 0; row != count; ++row) stored[row] = encoded(observations[row], hills);
+    for (std::size_t entry = 0; entry != count; ++entry) stored[entry] = encoded(observations[entry], hills);
     std::vector<std::vector<f64_t>> exact(queries_count);
     for (std::size_t query = 0; query != queries_count; ++query) {
         earth_observation_t const probe = encoded(queries[query], hills);
-        for (std::size_t row = 0; row != count; ++row)
-            if (related(static_cast<relation_t>(relation), radius_metres, probe, stored[row], hills))
+        for (std::size_t entry = 0; entry != count; ++entry)
+            if (related(static_cast<relation_t>(relation), radius_metres, probe, stored[entry], hills))
                 exact[query].push_back(
-                    std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[row].position))) /
+                    std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[entry].position))) /
                     centimetres_per_metre_k);
         std::sort(exact[query].begin(), exact[query].end());
     }
@@ -293,13 +295,14 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
         earth_observation_t const probe = encoded(queries[query], hills);
         failures += expect_eq(vram_matches.counts[query], min_of(wanted_k, exact[query].size()));
         for (std::size_t rank = 0; rank != vram_matches.counts[query]; ++rank) {
-            std::optional<u64_t> const minted = us::tools::row_of_key(seed, vram_matches.keys[query * wanted_k + rank]);
+            std::optional<u64_t> const minted = us::tools::offset_of_key(seed,
+                                                                         vram_matches.keys[query * wanted_k + rank]);
             if (expect(minted && *minted < count)) return failures + 1;
-            u64_t const row = *minted;
+            u64_t const entry = *minted;
             f64_t const metres = vram_matches.metres[query * wanted_k + rank];
-            f64_t const chord = std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[row].position))) /
+            f64_t const chord = std::sqrt(static_cast<f64_t>(chord_squared(probe.position, stored[entry].position))) /
                                 centimetres_per_metre_k;
-            failures += expect(related(static_cast<relation_t>(relation), radius_metres, probe, stored[row], hills));
+            failures += expect(related(static_cast<relation_t>(relation), radius_metres, probe, stored[entry], hills));
             failures += expect(std::abs(metres - chord) <= 1e-6 * max_of(chord, 1.0));
             failures += expect(
                 count > expansion ||

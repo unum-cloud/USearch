@@ -64,6 +64,11 @@ if (APPLE)
     target_link_options(usearch_shared PRIVATE "LINKER:-exported_symbol,_usearch_*")
 elseif (CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI")
     # `wasm-ld` has no `--exclude-libs`.
+elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
+    # The standard library's inline definitions, like `std::bad_variant_access`, keep default visibility under any
+    # preset, so only a version script keeps them in.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map" "{ global: usearch_*; local: *; };\n")
+    target_link_options(usearch_shared PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/usearch_shared.map")
 elseif (NOT MSVC)
     target_link_options(usearch_shared PRIVATE "LINKER:--exclude-libs,ALL")
 endif ()
@@ -74,18 +79,29 @@ if (USEARCH_WITH_JEMALLOC)
     target_link_libraries(usearch_shared PRIVATE ${USEARCH_JEMALLOC_LIBRARY})
 endif ()
 
-# Outside the export set: `USEARCH_INSTALL` governs the CMake config, not whether a built library lands in the prefix.
-# One component per flavor, so a packager can take either.
+# `SOVERSION` carries the major alone, the only break the C ABI admits.
+set_target_properties(usearch_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+
+# Each flavor joins an export set, so `find_package(usearch)` names them `usearch::shared` and `usearch::static`. The
+# preview SDK takes the shared one; the archive installs as a component of its own, which the Rust crate links from.
 if (USEARCH_BUILD_SHARED)
+    set_target_properties(usearch_shared PROPERTIES EXPORT_NAME shared)
+    set_target_properties(usearch_static PROPERTIES EXPORT_NAME static)
     install(
         TARGETS usearch_shared
-        COMPONENT usearch_shared
+        EXPORT ${PROJECT_NAME}Targets
+        COMPONENT sdk
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
     install(
         TARGETS usearch_static
-        COMPONENT usearch_static
+        EXPORT ${PROJECT_NAME}StaticTargets
+        COMPONENT static
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        INCLUDES
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 endif ()

@@ -25,8 +25,8 @@ namespace unum::usearch::utilities {
 
 /**
  *  @brief One batched read over every shard of a device tower: the executor's claim, a context per
- *      shard sized for the widest window, and one snapshot of the shards' visible rows, so every
- *      window reads the same rows.
+ *      shard sized for the widest window, and one snapshot of the shards' visible entries, so every
+ *      window reads the same entries.
  *
  *  @tparam shards_type_ The tower's @c shard_set.
  *  @tparam vendor_type_ The runtime the shards' devices answer to.
@@ -119,22 +119,22 @@ struct vram_shard_fanout {
     }
 
     /**
-     *  Why a batch of @p rows cannot rank into @p keys, @p scores and @p counts on @p executor: the
-     *  checks every window repeats, run once over the whole batch before any window slices it.
+     *  Why a batch of @p queries cannot rank into @p keys, @p scores and @p counts on @p executor:
+     *  the checks every window repeats, run once over the whole batch before any window slices it.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The tower has no shards.
      *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, @p counts is
-     *    not @p rows long, or the row counts or widths of @p keys and @p scores disagree.
+     *    not @p queries long, or the row counts or widths of @p keys and @p scores disagree.
      *  - @c unsupported_layout_k A row of @p keys or @p scores is not contiguous.
      */
     template <typename score_type_>
-    static status_t refusal(shards_t const& shards, executor_t const& executor, std::size_t rows,
+    static status_t refusal(shards_t const& shards, executor_t const& executor, std::size_t queries,
                             nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
                             std::span<std::size_t const> counts) noexcept {
         if (status_t const paired = pairs_with(shards, executor); failed(paired)) return paired;
-        if (counts.size() != rows) return status_t::config_mismatch_k;
-        return rankings_refusal(rows, keys, scores);
+        if (counts.size() != queries) return status_t::config_mismatch_k;
+        return rankings_refusal(queries, keys, scores);
     }
 
 #pragma endregion Pairing
@@ -181,8 +181,8 @@ struct vram_shard_fanout {
      *      each shard and its context to @p merge as its stream lands.
      *
      *  Whichever shard lands first merges first, so one merge overlaps the other walks. The
-     *  telemetry and the rows' @p counts sum, and the first refusal is the one kept. @p submit is
-     *  called as <tt>submit(shard, traversal, visible) → status_t</tt>, and @p merge as
+     *  telemetry and the queries' @p counts sum, and the first refusal is the one kept. @p submit
+     *  is called as <tt>submit(shard, traversal, visible) → status_t</tt>, and @p merge as
      *  <tt>merge(shard, traversal)</tt>.
      */
     template <typename submit_type_, typename merge_type_>
@@ -191,9 +191,9 @@ struct vram_shard_fanout {
         std::size_t const shards = this->shards();
 
         // Queue every shard before awaiting any, so the batch costs the slowest device rather than
-        // the sum. From here to the last landing there must be no return: the caller's rows and
+        // the sum. From here to the last landing there must be no return: the caller's queries and
         // the landing are DMA targets on every queued stream - the refuser's included, since its
-        // upload may already be reading the caller's rows.
+        // upload may already be reading the caller's queries.
         status_t first_refusal = status_t::success_k;
         std::size_t queued = 0;
         for (; queued != shards; ++queued) {
@@ -239,7 +239,7 @@ struct vram_shard_fanout {
         return {merged, first_refusal};
     }
 
-    /** One landed match of a shard's row, scored in the type its search lands. */
+    /** One landed match of a shard's query, scored in the type its search lands. */
     struct landed_match_t {
         node_id_t node_id;
         landed_score_t distance;
@@ -252,10 +252,10 @@ struct vram_shard_fanout {
      *      each shard's host keys.
      *
      *  @p search_shard is called as <tt>search_shard(shard, node_ids, scores, counts, traversal,
-     *  visible) → status_t</tt> with that shard's own block of the landing: a row ends at its
-     *  count, which starts at @p wanted for a search that reports none, or at its first sentinel
-     *  ID. A shard with no visible node walks nothing and merges nothing. The landing is never
-     *  zeroed and grows to the widest window, which every later one reuses.
+     *  visible) → status_t</tt> with that shard's own block of the landing: a query's matches end
+     *  at its count, which starts at @p wanted for a search that reports none, or at its first
+     *  sentinel ID. A shard with no visible node walks nothing and merges nothing. The landing is
+     *  never zeroed and grows to the widest window, which every later one reuses.
      */
     template <typename search_shard_type_, typename score_type_>
     expected<search_result_t> search_every_shard(std::size_t queries_count, std::size_t wanted,
@@ -313,14 +313,14 @@ struct vram_shard_fanout {
     /** One context per shard, sized for the widest window. */
     traversals_t traversals_;
 
-    /** Every shard's visible rows in the one snapshot every window reads below. */
+    /** Every shard's visible entries in the one snapshot every window reads below. */
     growing_buffer<node_id_t, forkunion_allocator_t> visible_;
 
     /** The shards queued and not landed yet. */
     growing_buffer<std::size_t, forkunion_allocator_t> pending_;
 
     /** The host landing every window's matches land in, one block per shard: the IDs, the scores
-     *  and each row's count; then the frame one row of them repacks into. Grown to the widest
+     *  and each query's count; then the frame one query's matches repack into. Grown to the widest
      *  window and reused by the rest. */
     growing_buffer<node_id_t, forkunion_allocator_t> landed_ids_;
     growing_buffer<landed_score_t, forkunion_allocator_t> landed_scores_;

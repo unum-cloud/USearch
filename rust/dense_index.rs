@@ -38,8 +38,8 @@ use crate::types::{
     usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
     usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
     values_of, vram_options, Accepts, Arena, Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Element,
-    Error, Executor, Exported, GPUClass, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency,
-    Result, RowsView, Scalar, Status, Traversal,
+    Error, Executor, Exported, GPUClass, Handles, Key, Matches, On, Predicate, ProgressCallback, QueryMatches,
+    Residency, Result, RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -511,16 +511,16 @@ pub enum DenseMetric {
     /// accept, since a product and a softmax both need logits rather than distances.
     Inner = 1,
     /// Cosine distance in [0, 2], zero for identical directions and blind to magnitude, which is precomputed once
-    /// per row at insertion rather than per comparison.
+    /// per vector at insertion rather than per comparison.
     #[default]
     Angular = 2,
-    /// L2 distance, non-negative and zero only for identical rows - the scale-sensitive counterpart to angular,
+    /// L2 distance, non-negative and zero only for identical vectors - the scale-sensitive counterpart to angular,
     /// where a doubled vector is far from its original rather than identical to it.
     Euclidean = 3,
     /// Count of differing bits, so its range is the dimensionality and every bit weighs the same.
     Hamming = 4,
-    /// Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the kind for sparse sets,
-    /// where Hamming would call two nearly-empty rows identical.
+    /// Differing bits over union bits in [0, 1], ignoring the zeros both vectors share - the kind for sparse sets,
+    /// where Hamming would call two nearly-empty vectors identical.
     Jaccard = 5,
 }
 
@@ -559,7 +559,7 @@ impl FromStr for DenseMetric {
     }
 }
 
-/// Construction options of a dense index, whose stored rows round up to the SIMD step quantum so
+/// Construction options of a dense index, whose stored vectors round up to the SIMD step quantum so
 /// every kernel runs tail-free.
 ///
 /// Rust-only; the fields `usearch_dense_init_ram_t` and `usearch_dense_init_vram_t` share.
@@ -609,7 +609,7 @@ pub struct DenseMetadata {
     pub dimensions: usize,
     /// The metric kind the checkpoint scores with.
     pub metric: DenseMetric,
-    /// The scalar type its rows are stored and quantized into.
+    /// The scalar type its vectors are stored and quantized into.
     pub quantization: Scalar,
     /// Connections per node the graph was built with.
     pub connectivity: usize,
@@ -894,7 +894,7 @@ pub struct DenseInsertConfig<'config, Rows> {
     pub vectors: Rows,
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
-    /// Reports the rows inserted; every row is claimed before the first report, so a `Break` is
+    /// Reports the entries inserted; every entry is claimed before the first report, so a `Break` is
     /// ignored.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
@@ -938,7 +938,7 @@ pub struct DenseSearchConfig<'config> {
     pub wanted: usize,
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
     pub expansion_factor: usize,
-    /// Walks the graph by default; [`Traversal::Scan`] scores every row exactly, on RAM and NVMe
+    /// Walks the graph by default; [`Traversal::Scan`] scores every entry exactly, on RAM and NVMe
     /// handles, and a VRAM handle refuses it with [`Status::Unsupported`].
     pub traversal: Traversal,
     /// Admits only the keys it approves; the rest still route the walk, so recall does not
@@ -972,7 +972,7 @@ impl From<usize> for DenseSearchConfig<'_> {
 ///
 /// Mirrors `usearch_dense_maxsim_t`.
 pub struct DenseMaxsimConfig<'config> {
-    /// Documents kept per query, counted over keys rather than rows; zero keeps every key the
+    /// Documents kept per query, counted over keys rather than entries; zero keeps every key the
     /// query scored.
     pub wanted: usize,
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
@@ -1210,29 +1210,29 @@ impl<'arena> DenseProducts<'arena> {
     /// Left rows the call multiplied, or queries it scored.
     pub fn queries(&self) -> usize { self.count }
 
-    /// Pairs the walks scored across every row, or keys scored across every query, before the
-    /// wanted bound cut any.
+    /// Pairs the walks scored across every left row, or keys scored across every query, before
+    /// the wanted bound cut any.
     pub fn required(&self) -> usize { self.required }
 
-    /// The pairs of one left row, a key naming each indexed row beside its product, or the keys
+    /// The pairs of one left row, a key naming each indexed entry beside its product, or the keys
     /// of one query beside their summed maxima, refused with [`Status::InvalidArgument`] when
-    /// `row` is not below [`DenseProducts::queries`] and with [`Status::Device`] over device
+    /// `query` is not below [`DenseProducts::queries`] and with [`Status::Device`] over device
     /// memory.
-    pub fn row(&self, row: usize) -> Result<MatchesRow<'arena>> {
+    pub fn query(&self, query: usize) -> Result<QueryMatches<'arena>> {
         self.arena.host()?;
-        match row < self.count {
+        match query < self.count {
             // Safety: the arena holds a finished call's output in host memory.
-            true => Ok(unsafe { self.products.0.row(row) }),
-            false => Err(fail(Status::InvalidArgument, "the row is not below the call's count")),
+            true => Ok(unsafe { self.products.0.query(query) }),
+            false => Err(fail(Status::InvalidArgument, "the query is not below the call's count")),
         }
     }
 
-    /// Every left row's pairs, in row order, refused with [`Status::Device`] over device memory.
-    pub fn rows(&self) -> Result<impl Iterator<Item = MatchesRow<'arena>>> {
+    /// Every query's pairs or keys, in query order, refused with [`Status::Device`] over device memory.
+    pub fn iter(&self) -> Result<impl Iterator<Item = QueryMatches<'arena>>> {
         self.arena.host()?;
         let products = self.products.0;
         // Safety: the arena holds a finished call's output in host memory.
-        Ok((0..self.count).map(move |row| unsafe { products.row(row) }))
+        Ok((0..self.count).map(move |query| unsafe { products.query(query) }))
     }
 }
 
@@ -1254,7 +1254,7 @@ impl<'arena> Monolith<'arena> {
 }
 
 /// One cursor pull exported into the arena it borrows: the keys, and beside them the keys each
-/// entry links to when the pull asked; the rows themselves come from [`DenseVerbs::get`].
+/// entry links to when the pull asked; the vectors themselves come from [`DenseVerbs::get`].
 ///
 /// Rust-only.
 pub struct DenseBatch<'arena> {
@@ -1282,7 +1282,7 @@ impl<'arena> DenseBatch<'arena> {
         self.arena.host()?;
         match (&self.links, entry < self.written) {
             // Safety: the arena holds a finished call's output in host memory.
-            (Some(links), true) => Ok(unsafe { links.0.row(entry) }),
+            (Some(links), true) => Ok(unsafe { links.0.entry(entry) }),
             _ => Err(fail(
                 Status::InvalidArgument,
                 "the pull exported no links, or the entry is not below its count",
@@ -1318,8 +1318,8 @@ impl<'arena> DenseBatch<'arena> {
 /// let executor = Executor::for_ram(&[], None, 0, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
-/// for row in matches.rows()? {
-///     println!("{} matches", row.keys.len());
+/// for query in matches.iter()? {
+///     println!("{} matches", query.keys.len());
 /// }
 /// # Ok::<(), usearch::Error>(())
 /// ```
@@ -1384,7 +1384,7 @@ impl DenseIndex {
     /// let executor = Executor::for_ram(&[], None, 0, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let call = index.deferred(&executor).get::<f32>(Key::from(1u64), &mut arena)?;
-    /// let rows = call.wait()?;
+    /// let vectors = call.wait()?;
     /// # Ok::<(), usearch::Error>(())
     /// ```
     ///
@@ -1729,7 +1729,7 @@ pub trait DenseVerbs<'index>: Copy {
 
     /// Adds a matrix of vectors under their keys - the native batch operation.
     ///
-    /// A batch is all-or-nothing and becomes visible at once. Every row is claimed before the first
+    /// A batch is all-or-nothing and becomes visible at once. Every entry is claimed before the first
     /// progress report, so a `Break` is ignored. Overlaps safely with concurrent searches on the
     /// same handle, and the input scalar type is independent of the stored quantization - the
     /// library converts on ingest.
@@ -1842,7 +1842,7 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Approximate sparse product of a matrix against the indexed rows, landing its keys, products
+    /// Approximate sparse product of a matrix against the indexed vectors, landing its keys, products
     /// and offsets in `arena` as one ragged run.
     ///
     /// The linear-algebra sibling of [`DenseVerbs::search`], reporting every pair the traversal
@@ -1915,7 +1915,7 @@ pub trait DenseVerbs<'index>: Copy {
     /// overlapping search. The donors are consumed whether or not the absorb succeeds: a stopped
     /// absorb keeps the donors already absorbed, the count the handler last saw names the
     /// boundary, and the donors past it are freed with the call, while a failed one may leave the
-    /// failing donor's rows behind.
+    /// failing donor's entries behind.
     ///
     /// Calls `usearch_dense_absorb`.
     fn absorb<'config, Donors: IntoIterator<Item = DenseIndex>>(
@@ -1972,11 +1972,11 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// Opens a walk over the current contents, pulled blocking on this receiver's executor; each
-    /// shard's publication watermark is read as the walk enters it, so a row once passed is never
+    /// shard's publication watermark is read as the walk enters it, so an entry once passed is never
     /// revisited.
     ///
-    /// Without `starts` the walk yields every row as stored. With them it yields the start keys'
-    /// own rows first, in order, then the rows those link to breadth-first, each row once.
+    /// Without `starts` the walk yields every entry as stored. With them it yields the start keys'
+    /// own entries first, in order, then the entries those link to breadth-first, each entry once.
     ///
     /// Calls `usearch_dense_cursor_init`.
     fn cursor(self, starts: &[Key]) -> Result<DenseCursor<'index>>
@@ -2179,7 +2179,7 @@ impl Calling for DenseCount {
     fn finish(self) -> Result<usize> { Ok(self.entries) }
 }
 
-/// A retrieval of the rows under one key; see [`DenseVerbs::get`].
+/// A retrieval of the vectors under one key; see [`DenseVerbs::get`].
 ///
 /// Calls `usearch_dense_get`.
 pub struct DenseGet<'arena, Value> {
@@ -2843,8 +2843,8 @@ impl Drop for DenseCursor<'_> {
 /// A resumable nearest-neighbor stream; see [`DenseVerbs::search_stream`].
 ///
 /// Ordering beyond the expansion horizon is best-effort nearest, not globally exact. Each pull
-/// lands its matches in the arena it is given as one row of a search, so nothing allocates per
-/// match. An empty row means the walk is drained.
+/// lands its matches in the arena it is given as one query of a search, so nothing allocates per
+/// match. An empty pull means the walk is drained.
 ///
 /// Mirrors `usearch_dense_search_stream_t`; dropping it calls `usearch_dense_search_stream_free`.
 #[derive(Debug)]
@@ -2855,7 +2855,7 @@ pub struct DenseSearchStream<'index> {
 }
 
 impl DenseSearchStream<'_> {
-    /// Pulls up to `wanted` more matches into `arena`, as the one row of [`Matches`].
+    /// Pulls up to `wanted` more matches into `arena`, as the one query of [`Matches`].
     ///
     /// Calls `usearch_dense_search_stream_next`.
     pub fn next<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<Matches<'arena>> {
@@ -2964,7 +2964,7 @@ mod tests {
     fn matches_of(index: &DenseIndex, query: &[f32], dimensions: usize) -> Result<usize> {
         let mut arena = Arena::new()?;
         let matches = index.search(&rows(query, dimensions)?, 1, &mut arena)?;
-        Ok(matches.row(0)?.keys.len())
+        Ok(matches.query(0)?.keys.len())
     }
 
     /// The rows a `get` exported, laid end to end.
@@ -3015,7 +3015,7 @@ mod tests {
     /// What a progress handler saw: the last report, and whether the counts ever went backwards.
     ///
     /// The number of reports is deliberately not recorded - the engine ticks once per chunk where
-    /// the stand-in ticks once per row - and the assertions run after the call, since a panic
+    /// the stand-in ticks once per entry - and the assertions run after the call, since a panic
     /// inside a handler stops the call first and resurfaces only once it is final.
     struct Watch {
         /// The finished and total counts of the last report.
@@ -3429,8 +3429,8 @@ mod tests {
         Ok(())
     }
 
-    /// An arena is reused once its rows are no longer read, and keeping one call's rows past the next
-    /// takes a second one.
+    /// An arena is reused once its outputs are no longer read, and keeping one call's outputs past
+    /// the next takes a second one.
     #[test]
     fn a_second_arena_keeps_the_first_output_alive() -> Result<()> {
         const DIMENSIONS: usize = 4;
@@ -3481,9 +3481,9 @@ mod tests {
         let query = bit_rows(&[0b0111_1000]);
         let mut arena = Arena::new()?;
         let matches = index.search(&rows(&query, DIMENSIONS)?, 2, &mut arena)?;
-        let row = matches.row(0)?;
+        let found = matches.query(0)?;
         assert_eq!(
-            row.keys.iter().copied().collect::<HashSet<Key>>(),
+            found.keys.iter().copied().collect::<HashSet<Key>>(),
             keys.iter().copied().collect::<HashSet<Key>>()
         );
         Ok(())
@@ -3524,14 +3524,17 @@ mod tests {
         let mut arena = Arena::new()?;
         let matches = index.search(&rows(&slab[..4 * DIMENSIONS], DIMENSIONS)?, 0, &mut arena)?;
         assert_eq!(matches.queries(), 4);
-        assert!(matches.rows()?.all(|row| row.keys.is_empty()), "no row holds a match");
+        assert!(
+            matches.iter()?.all(|query| query.keys.is_empty()),
+            "no query holds a match"
+        );
         Ok(())
     }
 
-    /// Every query's matches land in their own packed row of the arena, and its count in its own
-    /// slot; a row past the call's count is refused rather than read.
+    /// Every query's matches land packed in the arena, and its count in its own slot; a query past
+    /// the call's count is refused rather than read.
     #[test]
-    fn fills_every_output_row_of_a_batch() -> Result<()> {
+    fn fills_every_query_of_a_batch() -> Result<()> {
         const DIMENSIONS: usize = 64;
         const QUERIES: usize = 8;
         const WANTED: usize = 5;
@@ -3548,11 +3551,11 @@ mod tests {
             &mut arena,
         )?;
         assert_eq!(matches.queries(), QUERIES);
-        assert!(matches.rows()?.all(|row| row.keys.len() == WANTED));
-        for (query, row) in matches.rows()?.enumerate() {
-            assert_eq!(row.keys[0], keys[query], "each row answers its own query first");
+        assert!(matches.iter()?.all(|found| found.keys.len() == WANTED));
+        for (query, found) in matches.iter()?.enumerate() {
+            assert_eq!(found.keys[0], keys[query], "each query finds itself first");
         }
-        assert_eq!(matches.row(QUERIES).unwrap_err().status, Status::InvalidArgument);
+        assert_eq!(matches.query(QUERIES).unwrap_err().status, Status::InvalidArgument);
         Ok(())
     }
 
@@ -3620,7 +3623,7 @@ mod tests {
             &mut arena,
         )?;
 
-        let admitted = matches.row(0)?;
+        let admitted = matches.query(0)?;
         assert!(!admitted.keys.is_empty());
         for key in admitted.keys {
             assert!(is_even(*key), "{key} was not admitted by the predicate");
@@ -3649,7 +3652,7 @@ mod tests {
             &mut arena,
         )?;
 
-        for key in matches.row(0)?.keys {
+        for key in matches.query(0)?.keys {
             assert!(allowed.contains(key), "{key} is outside the captured set");
         }
         Ok(())
@@ -3672,7 +3675,7 @@ mod tests {
                 },
                 &mut arena,
             )?;
-            Ok(matches.row(0)?.keys.len())
+            Ok(matches.query(0)?.keys.len())
         };
 
         assert_eq!(admitted(&|_| false)?, 0, "a fully-rejecting predicate is not an error");
@@ -3683,7 +3686,7 @@ mod tests {
         Ok(())
     }
 
-    /// A scan scores every row rather than the ones a walk reaches, so every query finds itself first.
+    /// A scan scores every entry rather than the ones a walk reaches, so every query finds itself first.
     #[test]
     fn scans_find_every_query_itself() -> Result<()> {
         const DIMENSIONS: usize = 16;
@@ -3700,8 +3703,8 @@ mod tests {
             &mut arena,
         )?;
         assert_eq!(matches.queries(), COUNT);
-        for (query, row) in matches.rows()?.enumerate() {
-            assert_eq!(row.keys[0], keys[query]);
+        for (query, found) in matches.iter()?.enumerate() {
+            assert_eq!(found.keys[0], keys[query]);
         }
         Ok(())
     }
@@ -3758,7 +3761,7 @@ mod tests {
         let mut arena = Arena::new()?;
         let every = index.multiply(&left, 0, &mut arena)?;
         assert!(
-            every.rows()?.all(|row| row.keys.len() == ROWS),
+            every.iter()?.all(|row| row.keys.len() == ROWS),
             "every row scores every column"
         );
 
@@ -3769,13 +3772,13 @@ mod tests {
         };
         let cut = index.multiply(&left, config, &mut arena)?;
         assert_eq!(cut.queries(), ROWS);
-        assert!(cut.rows()?.all(|row| row.keys.len() == WANTED));
+        assert!(cut.iter()?.all(|row| row.keys.len() == WANTED));
         assert_eq!(cut.required(), ROWS * ROWS, "the count outruns the pairs kept");
-        assert_eq!(cut.row(ROWS).unwrap_err().status, Status::InvalidArgument);
+        assert_eq!(cut.query(ROWS).unwrap_err().status, Status::InvalidArgument);
 
         let mut placed = Arena::new_in(&executor)?;
         let same = index.on(&executor).multiply(&left, WANTED, &mut placed)?;
-        assert!(same.rows()?.all(|row| row.keys.len() == WANTED));
+        assert!(same.iter()?.all(|row| row.keys.len() == WANTED));
         Ok(())
     }
 
@@ -3810,16 +3813,19 @@ mod tests {
         let matches = index.on(&executor).maxsim(&tokens, TOKENS, DOCUMENTS, &mut arena)?;
         assert_eq!(matches.queries(), QUERIES);
         assert!(
-            matches.rows()?.all(|row| row.keys.len() == DOCUMENTS),
+            matches.iter()?.all(|query| query.keys.len() == DOCUMENTS),
             "every document is scored, once per query"
         );
-        let bounded: Vec<usize> = matches.rows()?.map(|row| row.keys.len()).collect();
+        let bounded: Vec<usize> = matches.iter()?.map(|query| query.keys.len()).collect();
         let every = index.maxsim(&tokens, TOKENS, 0, &mut arena)?;
         assert!(
-            every.rows()?.zip(bounded).all(|(row, kept)| row.keys.len() >= kept),
+            every.iter()?.zip(bounded).all(|(query, kept)| query.keys.len() >= kept),
             "no bound lands every key a query scored"
         );
-        assert_eq!(every.required(), every.rows()?.map(|row| row.keys.len()).sum::<usize>());
+        assert_eq!(
+            every.required(),
+            every.iter()?.map(|query| query.keys.len()).sum::<usize>()
+        );
         assert!(matches!(
             index.maxsim(&tokens, TOKENS + 1, DOCUMENTS, &mut arena),
             Err(Error {
@@ -4118,16 +4124,16 @@ mod tests {
             opened => opened?,
         };
         let first = stream.next(5, &mut arena)?;
-        assert_eq!(first.queries(), 1, "a pull is one row of a search");
+        assert_eq!(first.queries(), 1, "a pull is one query of a search");
         assert_eq!(
-            first.row(0)?.keys.len(),
+            first.query(0)?.keys.len(),
             5,
             "a pull hands the caller as many as it asked for"
         );
 
         let mut drained = 0;
         loop {
-            let pulled = stream.next(PULL, &mut arena)?.row(0)?.keys.len();
+            let pulled = stream.next(PULL, &mut arena)?.query(0)?.keys.len();
             if pulled == 0 {
                 break;
             }
@@ -4135,7 +4141,7 @@ mod tests {
         }
         assert!(drained > PULL, "the walk spans several pulls");
         assert!(
-            stream.next(PULL, &mut arena)?.row(0)?.keys.is_empty(),
+            stream.next(PULL, &mut arena)?.query(0)?.keys.is_empty(),
             "a drained stream stays drained"
         );
 
@@ -4143,7 +4149,7 @@ mod tests {
             expansion_factor: 64,
             ..DenseSearchStreamInitConfig::from(query)
         })?;
-        assert!(!widened.next(PULL, &mut arena)?.row(0)?.keys.is_empty());
+        assert!(!widened.next(PULL, &mut arena)?.query(0)?.keys.is_empty());
 
         assert!(
             matches!(
@@ -4186,7 +4192,7 @@ mod tests {
         Ok(())
     }
 
-    /// Every row is claimed before the first report, so a stop is ignored and the batch publishes
+    /// Every entry is claimed before the first report, so a stop is ignored and the batch publishes
     /// whole.
     #[test]
     fn a_stopped_batch_publishes_everything() -> Result<()> {
@@ -4361,8 +4367,8 @@ mod tests {
         let mut arena = Arena::new_in(&executor)?;
         let matches = receiver.search(&vectors, config, &mut arena)?;
         assert!(
-            matches.rows()?.all(|row| row.keys.len() == WANTED),
-            "every query fills its own output row"
+            matches.iter()?.all(|query| query.keys.len() == WANTED),
+            "every query fills its own output"
         );
         Ok(())
     }
@@ -4376,8 +4382,8 @@ mod tests {
         let (mut first, mut second) = (Arena::new()?, Arena::new()?);
         let on_this_thread = index.search(&query, 4, &mut first)?;
         let on_the_null_executor = index.on(&Executor::default()).search(&query, 4, &mut second)?;
-        assert_eq!(on_this_thread.row(0)?.keys.len(), 4);
-        assert_eq!(on_this_thread.row(0), on_the_null_executor.row(0));
+        assert_eq!(on_this_thread.query(0)?.keys.len(), 4);
+        assert_eq!(on_this_thread.query(0), on_the_null_executor.query(0));
         Ok(())
     }
 
@@ -4425,8 +4431,8 @@ mod tests {
                     .expect("the racing search must resolve");
                 // Whether a racing insert is visible is what the watermark leaves unspecified;
                 // that no key outside the dataset appears is what it guarantees.
-                for row in matches.rows().expect("the arena is host memory") {
-                    if row.keys.iter().any(|key| !known.contains(key)) {
+                for query in matches.iter().expect("the arena is host memory") {
+                    if query.keys.iter().any(|key| !known.contains(key)) {
                         strangers.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -4436,7 +4442,7 @@ mod tests {
         assert_eq!(
             strangers.load(Ordering::Relaxed),
             0,
-            "searches never see unpublished rows"
+            "searches never see unpublished entries"
         );
         assert_eq!(index.describe()?.size, 2 * HALF);
         Ok(())
@@ -4472,12 +4478,12 @@ mod tests {
         )?;
         assert_eq!(deferred.queries(), QUERIES);
         for query in 0..QUERIES {
-            assert_eq!(deferred.row(query), blocking.row(query));
+            assert_eq!(deferred.query(query), blocking.query(query));
         }
 
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         let again = index.deferred(&executor).search(queries, WANTED, &mut arena)?;
-        assert_eq!(again.wait()?.row(0), blocking.row(0));
+        assert_eq!(again.wait()?.query(0), blocking.query(0));
         Ok(())
     }
 
@@ -4538,10 +4544,10 @@ mod tests {
             panic!("a drained call must be final");
         };
         assert_eq!(
-            matches?.row(0),
+            matches?.query(0),
             index
                 .search(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, 3, &mut Arena::new()?)?
-                .row(0)
+                .query(0)
         );
         assert!(matches!(awaited.as_mut().poll(&mut context), Poll::Ready(Err(_))));
         Ok(())

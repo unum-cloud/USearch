@@ -152,7 +152,7 @@ The CMakeLists.txt file has a number of options you can pass:
 
 The sibling libraries carry no switches.
 NumKong, ForkUnion, StringZilla and SmashTable are what the headers are written against, so every build acquires all four - from the submodule when a recursive clone provides one, and from the pinned commit otherwise.
-The language bindings take their headers from `numkong/include`, `forkunion/include`, and `stringzilla/include` in the checkout, so `pyproject.toml`, `package.json`, `build.rs`, and `Package.swift` each reach the same roots, and none of them builds from a non-recursive clone.
+The language bindings take their headers from the `numkong`, `forkunion`, and `stringzilla` trees in the checkout, so `pyproject.toml`, `package.json`, `build.rs`, and `Package.swift` each reach the same roots, and none of them builds from a non-recursive clone.
 
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 

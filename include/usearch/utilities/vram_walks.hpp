@@ -49,12 +49,12 @@ struct gpu_arena_shape_t {
  *  candidates than it reports. */
 constexpr u32_t gpu_walk_breadth(u32_t expansion, u32_t count) noexcept { return max_of(expansion, count); }
 
-/** IDs a converged walk keeping @p candidate_rows candidates claims: a row of @p connectivity
+/** IDs a converged walk keeping @p candidate_nodes candidates claims: a row of @p connectivity
  *  neighbors or a draw of @p lanes landmarks per expansion, one expansion per rank, then a
  *  re-selecting walk's own node and row. A walk past it re-scores, see
  *  @ref unum::usearch::utilities::vram_visited_set. */
-constexpr u32_t gpu_walk_visits(u32_t candidate_rows, u32_t connectivity, u32_t lanes) noexcept {
-    return (candidate_rows + 1) * max_of(connectivity, lanes) + connectivity + 1;
+constexpr u32_t gpu_walk_visits(u32_t candidate_nodes, u32_t connectivity, u32_t lanes) noexcept {
+    return (candidate_nodes + 1) * max_of(connectivity, lanes) + connectivity + 1;
 }
 
 /** Entries an arena frontier's spill tail holds: what @p expansion expansions stage, a row or a
@@ -91,7 +91,7 @@ constexpr std::size_t gpu_rung_index(u32_t slots) noexcept {
     return slots ? static_cast<std::size_t>(std::countr_zero(slots)) : 0;
 }
 
-/** One bit per row over device-resident words, marked concurrently by a whole grid. */
+/** One bit per node over device-resident words, marked concurrently by a whole grid. */
 struct vram_bitset_t {
     u32_t* words = nullptr;
 };

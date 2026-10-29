@@ -38,23 +38,23 @@ using namespace unum::usearch::utilities;
  *  shared memory runs out. */
 inline constexpr u32_t vram_levenshtein_words_k[] = {2, 4, 8, 16, 32, 64};
 
-/** Bytes of the longest row @p words Myers words score, a bit of a 64-bit word per byte; a row
- *  of @c b bytes holds at most @c b runes, so it bounds rune rows too. */
+/** Bytes of the longest sequence @p words Myers words score, a bit of a 64-bit word per byte; a
+ *  sequence of @c b bytes holds at most @c b runes, so it bounds rune sequences too. */
 constexpr std::size_t vram_levenshtein_bytes(u32_t words) noexcept {
     return std::size_t {words} * std::numeric_limits<u64_t>::digits;
 }
 
-/** Bytes of the longest row the widest Levenshtein rung scores; longer ones are refused. */
+/** Bytes of the longest sequence the widest Levenshtein rung scores; longer ones are refused. */
 inline constexpr std::size_t vram_levenshtein_widest_bytes_k = vram_levenshtein_bytes(
     vram_levenshtein_words_k[std::size(vram_levenshtein_words_k) - 1]);
 
-/** Lanes each overlap rung splits a row's windows among, narrowest first: one lane alone, then
+/** Lanes each overlap rung splits a sequence's windows among, narrowest first: one lane alone, then
  *  every power of two from a block's warps up to the kit's warp. */
 inline constexpr u32_t vram_overlap_rungs_k[] = {1, 4, 8, 16, 32};
 
 /** Query codes each lane of a Needleman-Wunsch rung holds, narrowest first: a warp's stripe of
  *  rows is as tall as the lanes times these, and the widest rung repeats its stripe down a query
- *  as long as the widest Levenshtein row. */
+ *  as long as the widest Levenshtein sequence. */
 inline constexpr u32_t vram_needleman_wunsch_rows_k[] = {1, 2, 3, 4, 5, 6, 7, 8};
 
 /** The rungs the kit of @p metric scores on, narrowest first. */
@@ -98,36 +98,37 @@ struct vram_nvidia_kits {
     template <typename, typename>
     friend struct basic::vram_ragged_graph;
 
-    /** The first rung whose kit serves rows of @p longest bytes, or @c rungs_k past every one;
-     *  for overlap, the widest whose lanes each still roll a widest window of such a row. */
+    /** The first rung whose kit serves sequences of @p longest bytes, or @c rungs_k past every one;
+     *  for overlap, the widest whose lanes each still roll a widest window of such a sequence. */
     std::size_t rung_serving_(std::size_t longest) const noexcept;
 
-    /** Lanes the kit scores a row with on @p rung. */
-    static u32_t lanes_per_row_(std::size_t rung) noexcept;
+    /** Lanes the kit scores a sequence with on @p rung. */
+    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
 
-    /** Bytes the @p bytes long row at @p data takes once prepared, a multiple of 16. */
+    /** Bytes the @p bytes long sequence at @p data takes once prepared, a multiple of 16. */
     std::size_t span_bytes_(byte_t const* data, std::size_t bytes) const noexcept;
 
-    /** Bytes the @p stored row saves into: its own, since a row is its bytes, as a RAM string. */
+    /** Bytes the @p stored sequence saves into: its own, since a sequence is its bytes, as a RAM
+     *  string. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
         return {stored.size(), status_t::success_k};
     }
 
     /**
-     *  Saves the @p stored row into @p saved as it is.
+     *  Saves the @p stored sequence into @p saved as it is.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The two differ in size.
      */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
-    /** Bytes the @p saved row stores into: its own. */
+    /** Bytes the @p saved sequence stores into: its own. */
     static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept {
         return {saved.size(), status_t::success_k};
     }
 
     /**
-     *  Stores the @p saved row into @p stored as it is.
+     *  Stores the @p saved sequence into @p stored as it is.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The two differ in size.
@@ -136,7 +137,7 @@ struct vram_nvidia_kits {
 
     /**
      *  Loads the fatbin onto @p device, finds every kernel of every rung by its symbol, and uploads
-     *  the parameters the kits read beside the rows.
+     *  the parameters the kits read beside the sequences.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The kind takes parameters, and none were set.
@@ -242,7 +243,7 @@ struct vram_nvidia_index {
     std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
         return graph_.traversal_memory_usage(tape, config);
     }
-    expected<insert_plan_t> plan_insert(std::size_t rows) noexcept { return graph_.plan_insert(rows); }
+    expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
     expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         return graph_.insert(tape, context, config);
@@ -256,11 +257,12 @@ struct vram_nvidia_index {
         return graph_.search(queries, result_ids, result_distances, context, config);
     }
 
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {
-        return graph_.traversal_memory_usage(config, rows);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries) const noexcept {
+        return graph_.traversal_memory_usage(config, entries);
     }
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows, std::size_t receivers) const noexcept {
-        return graph_.traversal_memory_usage(config, rows, receivers);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries,
+                                       std::size_t receivers) const noexcept {
+        return graph_.traversal_memory_usage(config, entries, receivers);
     }
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                         refine_config_t config = {}) noexcept {

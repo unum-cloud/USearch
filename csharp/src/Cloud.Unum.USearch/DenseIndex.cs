@@ -68,7 +68,7 @@ public static partial class Names
 /// them - the fields <c>usearch_dense_init_ram_t</c> and <c>usearch_dense_init_vram_t</c> share.
 /// </summary>
 /// <remarks>
-/// Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and every
+/// Stored vectors always round up to the SIMD step quantum, so they stay cache-line aligned and every
 /// kernel runs tail-free; the index is slightly larger for it, and that is not a knob.
 /// <para>
 /// Every field is init-only, so a variant comes from <c>DenseOptions.Default with { ... }</c>
@@ -119,7 +119,7 @@ public readonly struct DenseMetadata
     /// <summary>The distance kind the checkpoint scores with.</summary>
     public DenseMetric Metric { get; init; }
 
-    /// <summary>The scalar type its rows are stored and quantized into.</summary>
+    /// <summary>The scalar type its vectors are stored and quantized into.</summary>
     public Scalar Quantization { get; init; }
 
     /// <summary>The connections-per-node bound the graph was built with.</summary>
@@ -701,7 +701,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// This is a build step rather than a repair: a cheap insertion pass followed by one refinement
     /// reaches a better graph, in less total time, than a single expensive insertion pass - so a
     /// wide expansion factor belongs here rather than in <see cref="Insert"/>. Searches may run
-    /// throughout, since edge re-selection publishes one row at a time and never removes a node.
+    /// throughout, since edge re-selection publishes one neighbor list at a time and never removes a node.
     /// </remarks>
     /// <param name="expansionFactor">The breadth of the candidates the re-selection walk explores; zero
     /// derives it from the geometry.</param>
@@ -741,9 +741,9 @@ public sealed unsafe class DenseIndex : IDisposable
     /// predicate cannot narrow a device walk, so a VRAM handle refuses one as
     /// <see cref="Status.Device"/>.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
-    /// <param name="traversal">A walk, the default, or an exact scan of every row on RAM and NVMe
+    /// <param name="traversal">A walk, the default, or an exact scan of every entry on RAM and NVMe
     /// handles; a VRAM handle refuses a scan as <see cref="Status.Unsupported"/>.</param>
-    /// <returns>The run, one row per query, readable until the arena's next call.</returns>
+    /// <returns>The run, one list per query, readable until the arena's next call.</returns>
     public Matches Search(
         RowsView queries, int wanted, Arena arena, ulong expansionFactor = 0, Func<Key, bool>? predicate = null,
         DenseTraversalStats? stats = null, Traversal traversal = Traversal.Walk) =>
@@ -778,7 +778,7 @@ public sealed unsafe class DenseIndex : IDisposable
             new(this._handle, null), queries, rowsPerQuery, wanted, arena, expansionFactor, stats)).Result;
 
     /// <summary>
-    /// Multiplies a run of rows against the indexed rows, reporting every pair the traversal scored
+    /// Multiplies a run of rows against the indexed vectors, reporting every pair the traversal scored
     /// rather than only the nearest - the approximate sparse product a graph walk reads off for free.
     /// Calls <c>usearch_dense_multiply</c>.
     /// </summary>
@@ -847,7 +847,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// An absorbed donor is consumed and refuses every later verb with <see cref="Status.Uninitialized"/>;
     /// one the call did not absorb, such as a donor of another residency, scalar, metric or geometry,
     /// which refuses with <see cref="Status.ConfigMismatch"/>, stays a live index the caller still
-    /// owns, though its rows may already have landed here.
+    /// owns, though its entries may already have landed here.
     /// </remarks>
     /// <param name="donors">The indexes to absorb.</param>
     public void Absorb(params DenseIndex[] donors) => Calls.Block(new DenseAbsorbCall(new(this._handle, null), donors));
@@ -868,9 +868,9 @@ public sealed unsafe class DenseIndex : IDisposable
         Calls.Block(new DenseSaveBufferCall(new(this._handle, null), arena)).Result;
 
     /// <summary>Opens a walk over the current contents, pulled on the caller's thread; each
-    /// shard's publication watermark is read as the walk enters it, so a row once passed is never
-    /// revisited. Without starts it yields every row as stored; with them, the start keys' own rows
-    /// first in order, then the rows those link to breadth-first, each once. Calls
+    /// shard's publication watermark is read as the walk enters it, so an entry once passed is never
+    /// revisited. Without starts it yields every entry as stored; with them, the start keys' own entries
+    /// first in order, then the entries those link to breadth-first, each once. Calls
     /// <c>usearch_dense_cursor_init</c>.</summary>
     /// <param name="starts">The keys to walk from; empty walks every row.</param>
     /// <returns>The cursor, which keeps the index alive until disposed.</returns>
@@ -1920,33 +1920,33 @@ public readonly unsafe struct DenseProducts
     /// <summary>How many left rows were multiplied, or queries scored.</summary>
     public int Queries { get; }
 
-    /// <summary>The pairs the walks scored across every row, or the keys scored across every query,
+    /// <summary>The pairs the walks scored across every left row, or the keys scored across every query,
     /// before the wanted bound cut any.</summary>
     public ulong Required { get; }
 
-    /// <summary>The keys naming each indexed row one left row reached, in traversal order, or the
+    /// <summary>The keys naming each indexed entry one left row reached, in traversal order, or the
     /// keys one query kept, largest score first.</summary>
-    /// <param name="row">The left row.</param>
+    /// <param name="query">The left row or query.</param>
     /// <returns>The keys, valid until the arena's next call or disposal.</returns>
-    public ReadOnlySpan<Key> Keys(int row) => new(this._view.Keys + this.Begin(row), this.Length(row));
+    public ReadOnlySpan<Key> Keys(int query) => new(this._view.Keys + this.Begin(query), this.Length(query));
 
     /// <summary>The products positionally paired with <see cref="Keys"/>.</summary>
-    /// <param name="row">The left row.</param>
+    /// <param name="query">The left row or query.</param>
     /// <returns>The products, valid until the arena's next call or disposal.</returns>
-    public ReadOnlySpan<double> Scores(int row) => new(this._view.Scores + this.Begin(row), this.Length(row));
+    public ReadOnlySpan<double> Scores(int query) => new(this._view.Scores + this.Begin(query), this.Length(query));
 
-    private nuint Begin(int row)
+    private nuint Begin(int query)
     {
-        if ((uint)row >= (uint)this.Queries)
+        if ((uint)query >= (uint)this.Queries)
         {
-            throw new ArgumentOutOfRangeException(nameof(row));
+            throw new ArgumentOutOfRangeException(nameof(query));
         }
 
         Arena.Readable(this._arena, this._generation);
-        return this._view.Offsets[row];
+        return this._view.Offsets[query];
     }
 
-    private int Length(int row) => (int)(this._view.Offsets[row + 1] - this._view.Offsets[row]);
+    private int Length(int query) => (int)(this._view.Offsets[query + 1] - this._view.Offsets[query]);
 }
 
 /// <summary>One serialized monolith <see cref="DenseIndex.SaveBuffer"/> wrote into its
@@ -1985,7 +1985,7 @@ public readonly unsafe struct Monolith
 }
 
 /// <summary>One batch a <see cref="DenseCursor"/> pull wrote into its <see cref="Arena"/>: the keys,
-/// and the keys each links to when the pull exported them; the rows come from
+/// and the keys each links to when the pull exported them; the vectors come from
 /// <see cref="DenseIndex.Get"/>.</summary>
 /// <remarks>A view by value, readable until the arena's next call or disposal, as
 /// <see cref="Matches"/> is.</remarks>
@@ -2049,8 +2049,8 @@ public readonly unsafe struct DenseBatch
 
 /// <summary>
 /// A sequential walk over the index contents - export, migration, and visualization feed off
-/// it. Each shard's publication watermark is read as the walk enters that shard, so a row once
-/// passed is never revisited, while a later shard may still carry rows published after the walk
+/// it. Each shard's publication watermark is read as the walk enters that shard, so an entry once
+/// passed is never revisited, while a later shard may still carry entries published after the walk
 /// began. It keeps the index and the executor it pulls on alive until disposed.
 /// </summary>
 public sealed unsafe class DenseCursor : IDisposable
@@ -2200,7 +2200,7 @@ public sealed unsafe class DenseSearchStream : IDisposable
     /// <param name="wanted">The upper bound on matches the pull writes.</param>
     /// <param name="arena">Where the pull lands, rewound by it.</param>
     /// <returns>The matches, none once the walk is drained.</returns>
-    public MatchesRow Next(int wanted, Arena arena)
+    public QueryMatches Next(int wanted, Arena arena)
     {
         nuint bound = Calls.Bound(wanted);
         using Lease stream = Lease.Of(this._handle, "search stream");
@@ -2220,7 +2220,7 @@ public sealed unsafe class DenseSearchStream : IDisposable
         usearch_dense_search_stream_next(&arguments);
         int generation = Arena.Rewound(arena, &outcome);
         outcome.ThrowIfFailed();
-        return new MatchesRow(arena, generation, matches.Keys, matches.Scores, matches.Counts);
+        return new QueryMatches(arena, generation, matches.Keys, matches.Scores, matches.Counts);
     }
 
     /// <summary>Releases the stream and the walk state it keeps, then the index and executor it kept
@@ -2238,7 +2238,7 @@ internal struct NativeDenseMetadata
 {
     /// <summary>The metric kind the checkpoint scores with.</summary>
     public DenseMetric Metric;
-    /// <summary>The scalar type its rows are stored and quantized into.</summary>
+    /// <summary>The scalar type its vectors are stored and quantized into.</summary>
     public Scalar Quantization;
     /// <summary>The scalars per stored vector.</summary>
     public nuint Dimensions;

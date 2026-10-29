@@ -598,12 +598,12 @@ public final class Types {
         }
     }
 
-    /** How a search reaches the indexed rows it scores. */
+    /** How a search reaches the indexed entries it scores. */
     public enum Traversal {
 
-        /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
+        /** Walks the graph, scoring the entries the expansion reaches - approximate, the default. */
         WALK(1),
-        /** Scores every row published when the query's scan starts - exact, on RAM and NVMe handles. */
+        /** Scores every entry published when the query's scan starts - exact, on RAM and NVMe handles. */
         SCAN(2);
 
         private final int code;
@@ -626,7 +626,7 @@ public final class Types {
 
     /**
      * The workers every fanned-out verb runs on, shared across indexes: an executor owns host threads
-     * or device streams and their scratch, an index owns rows.
+     * or device streams and their scratch, an index owns entries.
      *
      * <p>
      * One factory per C constructor, each taking every argument its own kind takes: memory domains
@@ -872,7 +872,7 @@ public final class Types {
      * <pre>{@code
      * try (Arena arena = new Arena(pool)) {
      *     for (Key key : keys) {
-     *         DenseVectors rows = index.on(pool).get(key, Scalar.F32, arena); // valid until the next call given `arena`
+     *         DenseVectors vectors = index.on(pool).get(key, Scalar.F32, arena); // valid until the next call given `arena`
      *     }
      * }
      * }</pre>
@@ -1205,7 +1205,7 @@ public final class Types {
             this.columns = columns;
         }
 
-        /** Lifts the {@code usearch_matches_view_t} a call over {@code queries} rows wrote into its arena. */
+        /** Lifts the {@code usearch_matches_view_t} a call over {@code queries} wrote into its arena. */
         static Matches lift(Call call, MemorySegment view, long queries) {
             long columns = view.get(Library.SIZE, Library.offset(Library.MATCHES_VIEW, "columns"));
             long slots = Extents.product(queries, columns, "the match matrix");
@@ -1223,7 +1223,7 @@ public final class Types {
                     Extents.toIndex(columns, "the column count"));
         }
 
-        /** Columns per row the call wrote, at most its wanted count, and the row width of both matrices. */
+        /** Columns per query the call wrote, at most its wanted count, and the row width of both matrices. */
         public int columns() {
             return columns;
         }

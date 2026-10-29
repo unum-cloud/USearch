@@ -123,7 +123,7 @@ final class Library {
                     padding())
             .withName("usearch_rows_view_t");
 
-    /** @c usearch_matches_view_t - a ranked run a call wrote into its arena, @c columns packed columns per row. */
+    /** @c usearch_matches_view_t - a ranked run a call wrote into its arena, @c columns packed columns per query. */
     static final StructLayout MATCHES_VIEW = MemoryLayout.structLayout(
                     POINTER.withName("keys"),
                     POINTER.withName("scores"),

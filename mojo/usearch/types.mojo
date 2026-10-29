@@ -445,14 +445,14 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct Traversal(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """How a search reaches the indexed rows it scores - `usearch_traversal_t`."""
+    """How a search reaches the indexed entries it scores - `usearch_traversal_t`."""
 
     var code: c_int
     """The raw `usearch_traversal_t` value the ABI exchanges."""
     comptime WALK = Self(1)
-    """Walk the graph, scoring the rows the expansion reaches - approximate, the default."""
+    """Walk the graph, scoring the entries the expansion reaches - approximate, the default."""
     comptime SCAN = Self(2)
-    """Score every row published when the query's scan starts - exact, on RAM and NVMe handles."""
+    """Score every entry published when the query's scan starts - exact, on RAM and NVMe handles."""
 
 
 @fieldwise_init
@@ -797,7 +797,7 @@ struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
 @fieldwise_init
 struct MatchesViewArguments(Defaultable, ImplicitlyCopyable):
     """`usearch_matches_view_t`, laid out as the ABI declares it: `count x columns` keys and scores
-    inside the arena, and one count per row."""
+    inside the arena, and one count per query."""
 
     var keys: Address
     var scores: Address
@@ -815,7 +815,7 @@ struct MatchesViewArguments(Defaultable, ImplicitlyCopyable):
 @fieldwise_init
 struct MatchesTapeViewArguments(Defaultable, ImplicitlyCopyable):
     """`usearch_matches_tape_view_t`, laid out as the ABI declares it: keys and scores end to end
-    inside the arena, and one more offset than rows."""
+    inside the arena, and one more offset than queries."""
 
     var keys: Address
     var scores: Address
@@ -830,8 +830,8 @@ struct MatchesTapeViewArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct KeysTapeViewArguments(Defaultable, ImplicitlyCopyable):
-    """`usearch_keys_tape_view_t`, laid out as the ABI declares it: every row's keys end to end
-    inside the arena, and one more offset than rows."""
+    """`usearch_keys_tape_view_t`, laid out as the ABI declares it: every entry's keys end to end
+    inside the arena, and one more offset than entries."""
 
     var keys: Address
     var offsets: Address
@@ -847,7 +847,7 @@ struct Matches[origin: MutOrigin](Movable, Sized):
     """A ranked run a call wrote into its arena - `usearch_matches_view_t`, read in place.
 
     Every ranking verb - the search, late interaction, and a stream pull - answers exactly this. Each
-    count is the number of matches written to its row, never more than `wanted`.
+    count is the number of matches written for its query, never more than `wanted`.
 
     Parameters:
         origin: The arena the run lives in, which this result borrows.
@@ -860,21 +860,21 @@ struct Matches[origin: MutOrigin](Movable, Sized):
     var view: MatchesViewArguments
     """Where the engine wrote the keys, scores and counts, inside the arena."""
     var queries: Int
-    """Query rows the call answered."""
+    """Queries the call answered."""
 
     def __len__(self) -> Int:
-        """The query rows the call answered.
+        """The queries the call answered.
 
         Returns:
-            One per query row of that call.
+            One per query of that call.
         """
         return self.queries
 
-    def row_keys(ref self, row: Int) raises Error -> Span[Key, origin_of(self)]:
-        """One row's keys, nearest first, trimmed to the matches that row found.
+    def query_keys(ref self, query: Int) raises Error -> Span[Key, origin_of(self)]:
+        """One query's keys, nearest first, trimmed to the matches that query found.
 
         Args:
-            row: The query row, below `len(self)`.
+            query: The query's offset in the batch, below `len(self)`.
 
         Returns:
             The keys, borrowed from the arena this result reads.
@@ -882,15 +882,15 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         Raises:
             `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "Matches.row_keys")
-        var start = self.view.keys + row * Int(self.view.columns) * size_of[Key]()
-        return _in_arena[Key, origin_of(self)](start, self._found(row))
+        _readable(self.arena, self.generation, "Matches.query_keys")
+        var start = self.view.keys + query * Int(self.view.columns) * size_of[Key]()
+        return _in_arena[Key, origin_of(self)](start, self._found(query))
 
-    def row_distances(ref self, row: Int) raises Error -> Span[Distance, origin_of(self)]:
-        """One row's scores, paired positionally with `row_keys`.
+    def query_distances(ref self, query: Int) raises Error -> Span[Distance, origin_of(self)]:
+        """One query's scores, paired positionally with `query_keys`.
 
         Args:
-            row: The query row, below `len(self)`.
+            query: The query's offset in the batch, below `len(self)`.
 
         Returns:
             The scores, borrowed from the arena this result reads.
@@ -898,15 +898,15 @@ struct Matches[origin: MutOrigin](Movable, Sized):
         Raises:
             `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
-        _readable(self.arena, self.generation, "Matches.row_distances")
-        var start = self.view.scores + row * Int(self.view.columns) * size_of[Distance]()
-        return _in_arena[Distance, origin_of(self)](start, self._found(row))
+        _readable(self.arena, self.generation, "Matches.query_distances")
+        var start = self.view.scores + query * Int(self.view.columns) * size_of[Distance]()
+        return _in_arena[Distance, origin_of(self)](start, self._found(query))
 
-    def _found(self, row: Int) -> Int:
-        """The matches written to one row; a pull with nothing to report left the counts null."""
+    def _found(self, query: Int) -> Int:
+        """The matches written for one query; a pull with nothing to report left the counts null."""
         if self.view.counts == NULL_ADDRESS:
             return 0
-        return Int(Pointer[c_size_t, ImmUntrackedOrigin](unsafe_from_address=self.view.counts)[unsafe_offset=row])
+        return Int(Pointer[c_size_t, ImmUntrackedOrigin](unsafe_from_address=self.view.counts)[unsafe_offset=query])
 
 
 @fieldwise_init

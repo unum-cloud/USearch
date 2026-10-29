@@ -93,7 +93,7 @@ struct save_config_t {
 /** How much room a load leaves; each part lands on a shard of its own. */
 struct load_config_t {
 
-    /** Rows to reserve across the shards; zero fits the checkpoint exactly and leaves
+    /** Entries to reserve across the shards; zero fits the checkpoint exactly and leaves
      *  the index full. */
     std::size_t capacity = 0;
 };
@@ -1675,12 +1675,13 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string
  *  - @c malformed_k The header does not parse, or a column's bytes, sums or extents disagree
  *    with its rows or the monolith.
  *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
- *    @p codec take, the segment is misaligned, @p index already holds rows, or a step's rows
+ *    @p codec take, the segment is misaligned, @p index already holds entries, or a step's nodes
  *    fall outside the plan.
- *  - @c overflow_k The rows pass the node IDs, the key multimap or the locator map of @p index.
+ *  - @c overflow_k The node count passes the node IDs, the key multimap or the locator map of
+ *    @p index.
  *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
  *    @p executor has no workers.
- *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+ *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
  *  - @c contended_k A mutator, a batch, a load or a plan holds @p index, or the pool of
  *    @p executor runs another dispatch.
  */
@@ -1856,12 +1857,13 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
  *  - @c malformed_k The file is empty, the header does not parse, or a column's bytes, sums or
  *    extents disagree with its rows or the monolith.
  *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
- *    @p codec take, the segment is misaligned, @p index already holds rows, or a step's rows
+ *    @p codec take, the segment is misaligned, @p index already holds entries, or a step's nodes
  *    fall outside the plan.
- *  - @c overflow_k The rows pass the node IDs, the key multimap or the locator map of @p index.
+ *  - @c overflow_k The node count passes the node IDs, the key multimap or the locator map of
+ *    @p index.
  *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
  *    @p executor has no workers.
- *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+ *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
  *  - @c contended_k A mutator, a batch, a load or a plan holds @p index, or the pool of
  *    @p executor runs another dispatch.
  */

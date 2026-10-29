@@ -25,7 +25,7 @@
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
 #include <limits>      // `std::numeric_limits` - the arena's chunk bound
-#include <memory>      // `std::allocator`, `std::destroy_n` - built rows
+#include <memory>      // `std::allocator`, `std::destroy_n` - built values
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
 #include <type_traits> // `std::is_trivially_destructible`, `std::is_trivially_copyable`, `std::is_nothrow_*`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
@@ -1021,90 +1021,93 @@ class growing_buffer {
 };
 
 /**
- *  @brief The one growth schedule every chunked collection follows: chunks double from 2^first_rows_log2_ rows up
- *      to 2^slab_rows_log2_, then stay slab-sized, so a row's chunk and its offset in it are closed-form and never
- * move.
+ *  @brief The one growth schedule every chunked collection follows: chunks double from
+ *      2^first_nodes_log2_ nodes up to 2^slab_nodes_log2_, then stay slab-sized, so a node's chunk
+ *      and its offset in it are closed-form and never move.
  *
  *  Doubling chunks give closed-form prefix sums, so @ref locate is one @c bit_width plus a few adds - cheap enough
  *  for every traversal hop.
  */
-template <std::size_t first_rows_log2_, std::size_t slab_rows_log2_>
+template <std::size_t first_nodes_log2_, std::size_t slab_nodes_log2_>
 struct chunk_schedule {
-    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < address_bits_k);
+    static_assert(first_nodes_log2_ <= slab_nodes_log2_ && slab_nodes_log2_ < address_bits_k);
 
-    /** Rows in every mature slab-sized chunk, as a power-of-two exponent. */
-    inline static constexpr std::size_t slab_rows_log2_k = slab_rows_log2_;
+    /** Nodes in every mature slab-sized chunk, as a power-of-two exponent. */
+    inline static constexpr std::size_t slab_nodes_log2_k = slab_nodes_log2_;
 
     /** Chunks in the doubling phase: the first chunk plus one per doubling. */
-    inline static constexpr std::size_t doubling_chunks_k = slab_rows_log2_ - first_rows_log2_ + 1;
+    inline static constexpr std::size_t doubling_chunks_k = slab_nodes_log2_ - first_nodes_log2_ + 1;
 
-    /** Rows the doubling phase covers: 2^(slab_rows_log2_ + 1) - 2^first_rows_log2_, in 64 bits,
-     *  since a schedule may span more rows than a 32-bit @c std::size_t addresses. */
-    inline static constexpr u64_t doubling_rows_k = (u64_t {1} << (slab_rows_log2_ + 1)) -
-                                                    (u64_t {1} << first_rows_log2_);
+    /** Nodes the doubling phase covers: 2^(slab_nodes_log2_ + 1) - 2^first_nodes_log2_, in 64 bits,
+     *  since a schedule may span more nodes than a 32-bit @c std::size_t addresses. */
+    inline static constexpr u64_t doubling_nodes_k = (u64_t {1} << (slab_nodes_log2_ + 1)) -
+                                                     (u64_t {1} << first_nodes_log2_);
 
-    /** Where a row lives: its chunk, and its offset within that chunk. */
+    /** Where a node lives: its chunk, and its offset within that chunk. */
     struct location_t {
         std::size_t chunk = 0;
         std::size_t offset = 0;
     };
 
-    /** The chunk and offset of @p row. */
-    static constexpr location_t locate(std::size_t row) noexcept {
-        if (row < doubling_rows_k) {
-            // Biasing by the first chunk's size makes the leading bit of the row encode the chunk.
-            u64_t const biased = row + (u64_t {1} << first_rows_log2_);
-            return {static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_rows_log2_,
+    /** The chunk and offset of @p node. */
+    static constexpr location_t locate(std::size_t node) noexcept {
+        if (node < doubling_nodes_k) {
+            // Biasing by the first chunk's size makes the leading bit of the node encode the chunk.
+            u64_t const biased = node + (u64_t {1} << first_nodes_log2_);
+            return {static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_nodes_log2_,
                     static_cast<std::size_t>(biased - std::bit_floor(biased))};
         }
-        u64_t const flat = row - doubling_rows_k;
-        return {doubling_chunks_k + static_cast<std::size_t>(flat >> slab_rows_log2_),
-                static_cast<std::size_t>(flat & ((u64_t {1} << slab_rows_log2_) - 1))};
+        u64_t const flat = node - doubling_nodes_k;
+        return {doubling_chunks_k + static_cast<std::size_t>(flat >> slab_nodes_log2_),
+                static_cast<std::size_t>(flat & ((u64_t {1} << slab_nodes_log2_) - 1))};
     }
 
-    /** Rows across the first @p chunks chunks - the prefix sums @ref locate inverts. */
-    static constexpr std::size_t rows_before(std::size_t chunks) noexcept {
+    /** Nodes across the first @p chunks chunks - the prefix sums @ref locate inverts. */
+    static constexpr std::size_t nodes_before(std::size_t chunks) noexcept {
         if (chunks <= doubling_chunks_k)
-            return static_cast<std::size_t>((u64_t {1} << (first_rows_log2_ + chunks)) -
-                                            (u64_t {1} << first_rows_log2_));
-        return static_cast<std::size_t>(doubling_rows_k + (u64_t {chunks - doubling_chunks_k} << slab_rows_log2_));
+            return static_cast<std::size_t>((u64_t {1} << (first_nodes_log2_ + chunks)) -
+                                            (u64_t {1} << first_nodes_log2_));
+        return static_cast<std::size_t>(doubling_nodes_k + (u64_t {chunks - doubling_chunks_k} << slab_nodes_log2_));
     }
 
-    /** Rows in chunk @p chunk, capped at what @c std::size_t addresses,
+    /** Nodes in chunk @p chunk, capped at what @c std::size_t addresses,
      *  which no allocation reaches. */
-    static constexpr std::size_t rows_in(std::size_t chunk) noexcept {
-        u64_t const rows = u64_t {1} << (chunk < doubling_chunks_k ? first_rows_log2_ + chunk : slab_rows_log2_);
-        return static_cast<std::size_t>(min_of<u64_t>(rows, std::numeric_limits<std::size_t>::max()));
+    static constexpr std::size_t nodes_in(std::size_t chunk) noexcept {
+        u64_t const nodes = u64_t {1} << (chunk < doubling_chunks_k ? first_nodes_log2_ + chunk : slab_nodes_log2_);
+        return static_cast<std::size_t>(min_of<u64_t>(nodes, std::numeric_limits<std::size_t>::max()));
     }
 
-    /** Chunks that hold the first @p rows rows. */
-    static constexpr std::size_t chunks_for(std::size_t rows) noexcept { return rows ? locate(rows - 1).chunk + 1 : 0; }
+    /** Chunks that hold the first @p nodes nodes. */
+    static constexpr std::size_t chunks_for(std::size_t nodes) noexcept {
+        return nodes ? locate(nodes - 1).chunk + 1 : 0;
+    }
 };
 
-/** The schedule spanning @p max_rows_ rows in about 2^12 chunks: 2^10-row chunks doubling up to
- *  slabs as wide as that takes - at 2^32 rows, the dense index's @c chunk_schedule<10, 20>. */
-template <std::size_t max_rows_>
-using chunk_schedule_spanning = chunk_schedule<10, max_of<std::size_t>(std::bit_width(max_rows_), 10 + 12) - 12>;
+/** The schedule spanning @p max_nodes_ nodes in about 2^12 chunks: 2^10-node chunks doubling up to
+ *  slabs as wide as that takes - at 2^32 nodes, the dense index's @c chunk_schedule<10, 20>. */
+template <std::size_t max_nodes_>
+using chunk_schedule_spanning = chunk_schedule<10, max_of<std::size_t>(std::bit_width(max_nodes_), 10 + 12) - 12>;
 
 /**
- *  @brief Rows addressed by ID that never move: chunks on @p schedule_type_, a missing one allocated, zeroed and
- *      published by whichever thread asks for it first, so readers index while writers grow the column.
+ *  @brief Values addressed by node ID that never move: chunks on @p schedule_type_, a missing one
+ *      allocated, zeroed and published by whichever thread asks for it first, so readers index
+ *      while writers grow the column.
  *
- *  @ref cover is the only fallible call, and it may run on any thread. Covers publish chunks in order, so the
- *  published ones are always a prefix. A reader indexes only rows some cover already reached, and learns of them
- *  through the owner's own publication, which orders the chunk before the read. The directory entries are plain
- *  pointers owned through @p atomic_ref_template_.
+ *  @ref cover is the only fallible call, and it may run on any thread. Covers publish chunks in
+ *  order, so the published ones are always a prefix. A reader indexes only values some cover
+ *  already reached, and learns of them through the owner's own publication, which orders the chunk
+ *  before the read. The directory entries are plain pointers owned through @p atomic_ref_template_.
  *
- *  A row type that is not trivially copyable is built instead of zeroed: every row of a fresh
+ *  A value type that is not trivially copyable is built instead of zeroed: every value of a fresh
  *  chunk is constructed from @p allocator_type_ before the chunk publishes, and destroyed before
  *  the chunk is returned.
  */
-template <typename value_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+template <typename value_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
           template <typename> class atomic_ref_template_ = standard_atomic_ref>
 class chunked_column {
     static_assert(std::is_trivially_copyable_v<value_type_> ||
                       std::is_nothrow_constructible_v<value_type_, allocator_type_ const&>,
-                  "Rows are zeroed, or built from the column's allocator");
+                  "Values are zeroed, or built from the column's allocator");
 
   public:
     using value_t = value_type_;
@@ -1114,8 +1117,8 @@ class chunked_column {
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    /** Chunks the directory holds - enough for @p max_rows_ rows. */
-    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_rows_);
+    /** Chunks the directory holds - enough for @p max_nodes_ nodes. */
+    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_nodes_);
 
     explicit chunked_column(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     chunked_column(chunked_column&& other) noexcept : chunks_(other.chunks_), allocator_(std::move(other.allocator_)) {
@@ -1131,85 +1134,86 @@ class chunked_column {
     ~chunked_column() noexcept { reset(); }
 
     /**
-     *  Allocates, zeroes or builds, and publishes every chunk the first @p rows rows need and is
+     *  Allocates, zeroes or builds, and publishes every chunk the first @p nodes nodes need and is
      *  missing - safe on any thread.
      *
      *  @par Statuses:
-     *  - @c overflow_k @p rows passes the directory's @c max_rows_.
+     *  - @c overflow_k @p nodes passes the directory's @c max_nodes_.
      */
-    status_t cover(std::size_t rows) noexcept {
-        if (rows > max_rows_) return status_t::overflow_k;
-        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
+    status_t cover(std::size_t nodes) noexcept {
+        if (nodes > max_nodes_) return status_t::overflow_k;
+        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
             atomic_ref<value_t*> slot {chunks_[chunk]};
             if (slot.load(std::memory_order_acquire)) continue;
-            value_t* const fresh = allocator_.allocate(schedule_t::rows_in(chunk));
+            value_t* const fresh = allocator_.allocate(schedule_t::nodes_in(chunk));
             if (!fresh) return status_t::bad_alloc_k;
             if constexpr (std::is_trivially_copyable_v<value_t>)
-                std::memset(static_cast<void*>(fresh), 0, schedule_t::rows_in(chunk) * sizeof(value_t));
+                std::memset(static_cast<void*>(fresh), 0, schedule_t::nodes_in(chunk) * sizeof(value_t));
             else {
-                allocator_type_ const rows_allocator(allocator_);
-                for (std::size_t row = 0; row != schedule_t::rows_in(chunk); ++row)
-                    new (fresh + row) value_t(rows_allocator);
+                allocator_type_ const values_allocator(allocator_);
+                for (std::size_t offset = 0; offset != schedule_t::nodes_in(chunk); ++offset)
+                    new (fresh + offset) value_t(values_allocator);
             }
             value_t* expected_empty = nullptr;
             // A peer covering the same chunk first keeps its own; this one goes back.
             if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
                                               std::memory_order_acquire))
-                release_(fresh, schedule_t::rows_in(chunk));
+                release_(fresh, schedule_t::nodes_in(chunk));
         }
         return status_t::success_k;
     }
 
-    /** The row at @p location, which a @ref cover already reached - for callers that located it
+    /** The value at @p location, which a @ref cover already reached - for callers that located it
      *  once for several columns. */
     value_t& operator[](location_t location) noexcept {
-        value_t* const rows = atomic_ref<value_t*>(chunks_[location.chunk]).load(std::memory_order_relaxed);
-        return rows[location.offset];
+        value_t* const values = atomic_ref<value_t*>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return values[location.offset];
     }
     value_t const& operator[](location_t location) const noexcept {
-        value_t* const rows = atomic_ref<value_t* const>(chunks_[location.chunk]).load(std::memory_order_relaxed);
-        return rows[location.offset];
+        value_t* const values = atomic_ref<value_t* const>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return values[location.offset];
     }
 
-    /** Row @p row, which a @ref cover already reached. */
-    value_t& operator[](std::size_t row) noexcept { return (*this)[schedule_t::locate(row)]; }
-    value_t const& operator[](std::size_t row) const noexcept { return (*this)[schedule_t::locate(row)]; }
+    /** The value of node @p node, which a @ref cover already reached. */
+    value_t& operator[](std::size_t node) noexcept { return (*this)[schedule_t::locate(node)]; }
+    value_t const& operator[](std::size_t node) const noexcept { return (*this)[schedule_t::locate(node)]; }
 
-    /** The rows of chunk @p index, acquired with its contents; empty until a cover publishes it. */
+    /** The values of chunk @p index, acquired with its contents; empty until a cover publishes
+     *  it. */
     std::span<value_t> chunk(std::size_t index) noexcept {
-        value_t* const rows = atomic_ref<value_t*>(chunks_[index]).load(std::memory_order_acquire);
-        return {rows, rows ? schedule_t::rows_in(index) : 0};
+        value_t* const values = atomic_ref<value_t*>(chunks_[index]).load(std::memory_order_acquire);
+        return {values, values ? schedule_t::nodes_in(index) : 0};
     }
     std::span<value_t const> chunk(std::size_t index) const noexcept {
-        value_t* const rows = atomic_ref<value_t* const>(chunks_[index]).load(std::memory_order_acquire);
-        return {rows, rows ? schedule_t::rows_in(index) : 0};
+        value_t* const values = atomic_ref<value_t* const>(chunks_[index]).load(std::memory_order_acquire);
+        return {values, values ? schedule_t::nodes_in(index) : 0};
     }
 
-    /** Rows the published chunks hold. */
+    /** Values the published chunks hold. */
     std::size_t capacity() const noexcept {
         std::size_t chunks = 0;
         while (chunks != max_chunks_k && !chunk(chunks).empty()) ++chunks;
-        return schedule_t::rows_before(chunks);
+        return schedule_t::nodes_before(chunks);
     }
 
-    /** Hands @p callback the @p rows as contiguous spans, one per chunk they cross - the shape a bulk copy in or out
-     *  takes. */
+    /** Hands @p callback the @p nodes as contiguous spans, one per chunk they cross - the shape a
+     *  bulk copy in or out takes. */
     template <typename callback_type_>
-    void for_each_span(iota_view<std::size_t> rows, callback_type_&& callback) {
-        for (std::size_t row = rows.first; row != rows.bound;) {
-            auto const at = schedule_t::locate(row);
-            std::size_t const run = min_of(rows.bound - row, schedule_t::rows_in(at.chunk) - at.offset);
+    void for_each_span(iota_view<std::size_t> nodes, callback_type_&& callback) {
+        for (std::size_t node = nodes.first; node != nodes.bound;) {
+            auto const at = schedule_t::locate(node);
+            std::size_t const run = min_of(nodes.bound - node, schedule_t::nodes_in(at.chunk) - at.offset);
             callback(chunk(at.chunk).subspan(at.offset, run));
-            row += run;
+            node += run;
         }
     }
     template <typename callback_type_>
-    void for_each_span(iota_view<std::size_t> rows, callback_type_&& callback) const {
-        for (std::size_t row = rows.first; row != rows.bound;) {
-            auto const at = schedule_t::locate(row);
-            std::size_t const run = min_of(rows.bound - row, schedule_t::rows_in(at.chunk) - at.offset);
+    void for_each_span(iota_view<std::size_t> nodes, callback_type_&& callback) const {
+        for (std::size_t node = nodes.first; node != nodes.bound;) {
+            auto const at = schedule_t::locate(node);
+            std::size_t const run = min_of(nodes.bound - node, schedule_t::nodes_in(at.chunk) - at.offset);
             callback(chunk(at.chunk).subspan(at.offset, run));
-            row += run;
+            node += run;
         }
     }
 
@@ -1219,16 +1223,16 @@ class chunked_column {
     /** Frees every chunk - single-threaded: the caller certifies no concurrent readers or writers. */
     void reset() noexcept {
         for (std::size_t index = 0; index != max_chunks_k; ++index)
-            if (value_t* const rows = std::exchange(chunks_[index], nullptr))
-                release_(rows, schedule_t::rows_in(index));
+            if (value_t* const values = std::exchange(chunks_[index], nullptr))
+                release_(values, schedule_t::nodes_in(index));
     }
 
   private:
 
-    /** Destroys the @p count rows a cover built, if it built any, and returns their chunk. */
-    void release_(value_t* rows, std::size_t count) noexcept {
-        if constexpr (!std::is_trivially_copyable_v<value_t>) std::destroy_n(rows, count);
-        allocator_.deallocate(rows, count);
+    /** Destroys the @p count values a cover built, if it built any, and returns their chunk. */
+    void release_(value_t* values, std::size_t count) noexcept {
+        if constexpr (!std::is_trivially_copyable_v<value_t>) std::destroy_n(values, count);
+        allocator_.deallocate(values, count);
     }
 
     /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover reached yet. */
@@ -1245,7 +1249,7 @@ class chunked_column {
  *  The first @ref cover fixes the width, before any reader can learn of a row, and every later one
  *  repeats it.
  */
-template <typename value_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+template <typename value_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
           template <typename> class atomic_ref_template_ = standard_atomic_ref>
 class chunked_matrix {
     static_assert(std::is_trivially_copyable_v<value_type_>, "Rows are written in place, never constructed");
@@ -1258,8 +1262,8 @@ class chunked_matrix {
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    /** Chunks the directory holds - enough for @p max_rows_ rows. */
-    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_rows_);
+    /** Chunks the directory holds - enough for @p max_nodes_ rows. */
+    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_nodes_);
 
     explicit chunked_matrix(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
     chunked_matrix(chunked_matrix const&) = delete;
@@ -1271,15 +1275,15 @@ class chunked_matrix {
      *  each of its bytes to @p fill, and publishes it - safe on any thread.
      *
      *  @par Statuses:
-     *  - @c overflow_k @p rows passes the directory's @c max_rows_.
+     *  - @c overflow_k @p rows passes the directory's @c max_nodes_.
      */
     status_t cover(std::size_t rows, std::size_t columns, std::uint8_t fill = 0) noexcept {
-        if (rows > max_rows_) return status_t::overflow_k;
+        if (rows > max_nodes_) return status_t::overflow_k;
         if (columns_ != columns) columns_ = columns;
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
             atomic_ref<value_t*> slot {chunks_[chunk]};
             if (slot.load(std::memory_order_acquire)) continue;
-            std::size_t const values = schedule_t::rows_in(chunk) * columns;
+            std::size_t const values = schedule_t::nodes_in(chunk) * columns;
             value_t* const fresh = allocator_.allocate(values);
             if (!fresh) return status_t::bad_alloc_k;
             std::memset(static_cast<void*>(fresh), fill, values * sizeof(value_t));
@@ -1311,7 +1315,7 @@ class chunked_matrix {
     void reset() noexcept {
         for (std::size_t index = 0; index != max_chunks_k; ++index)
             if (value_t* const rows = std::exchange(chunks_[index], nullptr))
-                allocator_.deallocate(rows, schedule_t::rows_in(index) * columns_);
+                allocator_.deallocate(rows, schedule_t::nodes_in(index) * columns_);
     }
 
   private:

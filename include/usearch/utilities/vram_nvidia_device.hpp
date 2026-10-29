@@ -1506,7 +1506,7 @@ struct cuda_traversal_context {
         : results {growing_buffer<scored_node_t, cuda_pinned_allocator_t> {cuda_pinned_allocator_t {allocator.api()}}},
           allocator_ {(cuda_set_device(allocator.api(), allocator.device()), allocator)}, //
           telemetry_ {cuda_make_unique(telemetry_allocator_t {allocator_}, 1)},
-          assigned_rows_ {cuda_make_unique(counter_allocator_t {allocator_}, cuda_claim_counters_k)},
+          assigned_nodes_ {cuda_make_unique(counter_allocator_t {allocator_}, cuda_claim_counters_k)},
           missed_ {cuda_make_unique(counter_allocator_t {allocator_}, 1)},
           host_counters_ {take_counters_(allocator_.landings())},
           arena_ {nullptr, cuda_deleter<allocator_t> {allocator_, 0}},
@@ -1534,7 +1534,7 @@ struct cuda_traversal_context {
     /** Whether this context can walk at all: every device-side word and its host twin claimed, and
      *  its event born. */
     explicit operator bool() const noexcept {
-        return telemetry_ && assigned_rows_ && missed_ && host_counters_ && event_;
+        return telemetry_ && assigned_nodes_ && missed_ && host_counters_ && event_;
     }
 
     /** Waits for every transfer and launch queued on this context's stream - one stream's
@@ -1624,9 +1624,9 @@ struct cuda_traversal_context {
     /** The device-side counters of the last submission, zeroed when it was queued. */
     cuda_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
 
-    /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
+    /** Entries the current launch's batch warps have assigned themselves so far: a builder's nodes,
      *  or a walk's queries; @ref cuda_claim_counters_k words, the first serving one launch. */
-    cuda_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
+    cuda_unique_ptr<u32_t, counter_allocator_t> assigned_nodes_;
 
     /** Raised by the last attend's walks at a node their value lookup had no row for, zeroed when
      *  it was queued. */

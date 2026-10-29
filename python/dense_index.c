@@ -27,7 +27,7 @@ typedef struct DenseIndex {
     usearch_dense_index_t handle;
 } DenseIndex;
 
-/** A sequential row scan over the entries an index holds, in batches. */
+/** A sequential scan over the entries an index holds, in batches. */
 typedef struct DenseCursor {
     PyObject ob_base;
 
@@ -38,14 +38,14 @@ typedef struct DenseCursor {
     PyObject* receiver;
 } DenseCursor;
 
-/** The rows one cursor step wrote into an arena: keys always, their links when the step asked. */
+/** The entries one cursor step wrote into an arena: keys always, their links when asked. */
 typedef struct DenseBatch {
     PyObject ob_base;
 
     /** The (count, 16) @c ArenaBuffer of identities. */
     PyObject* keys;
 
-    /** The (offsets, keys) pair of each row's linked identities, or None for a keys-only step. */
+    /** The (offsets, keys) pair of each entry's linked identities, or None for a keys-only step. */
     PyObject* links;
 } DenseBatch;
 
@@ -171,25 +171,25 @@ static int walk_reports_traverse(walk_reports_t const* reports, visitproc visit,
 
 #pragma region Construction
 
-static char const doc_DenseIndex[] =                                                            //
-    "DenseIndex\n"                                                                              //
-    "\n"                                                                                        //
-    "Vector search over equidimensional dense embeddings.\n"                                    //
-    "\n"                                                                                        //
-    "Every verb is a batch, and one vector is a one-row matrix. The stored scalar type is\n"    //
-    "the `quantization`; query rows may arrive in any other type and convert on the way in.\n"  //
-    "\n"                                                                                        //
-    "Start an empty one in the residency its rows live in - `init_ram` or `init_vram` - copy\n" //
-    "a checkpoint in with `load_ram` or `load_vram`, or serve one in place with `view_ram`\n"   //
-    "or `view_nvme`, which are read-only.\n"                                                    //
-    "\n"                                                                                        //
-    "The receiver chooses where a verb runs, and the verb stays the same: the index runs it\n"  //
-    "on the calling thread, `on(executor)` blocks on that executor, and `deferred(executor)`\n" //
-    "submits it there and answers a `Deferred`. See `usearch.Executor`.\n"                      //
-    "\n"                                                                                        //
-    "Example:\n"                                                                                //
-    "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"             //
-    "  >>> index.cpu_class is not None\n"                                                       //
+static char const doc_DenseIndex[] =                                                               //
+    "DenseIndex\n"                                                                                 //
+    "\n"                                                                                           //
+    "Vector search over equidimensional dense embeddings.\n"                                       //
+    "\n"                                                                                           //
+    "Every verb is a batch, and one vector is a one-row matrix. The stored scalar type is\n"       //
+    "the `quantization`; query rows may arrive in any other type and convert on the way in.\n"     //
+    "\n"                                                                                           //
+    "Start an empty one in the residency its entries live in - `init_ram` or `init_vram` - copy\n" //
+    "a checkpoint in with `load_ram` or `load_vram`, or serve one in place with `view_ram`\n"      //
+    "or `view_nvme`, which are read-only.\n"                                                       //
+    "\n"                                                                                           //
+    "The receiver chooses where a verb runs, and the verb stays the same: the index runs it\n"     //
+    "on the calling thread, `on(executor)` blocks on that executor, and `deferred(executor)`\n"    //
+    "submits it there and answers a `Deferred`. See `usearch.Executor`.\n"                         //
+    "\n"                                                                                           //
+    "Example:\n"                                                                                   //
+    "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"                //
+    "  >>> index.cpu_class is not None\n"                                                          //
     "  True";
 
 /** The geometry both creation verbs freeze, read before the factory's residency arm. */
@@ -298,26 +298,26 @@ static PyObject* DenseIndex_tp_new(PyTypeObject* type, PyObject* args, PyObject*
     return NULL;
 }
 
-static char const doc_DenseIndex_init_ram[] =                                                         //
-    "init_ram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n" //
-    "    values_per_key=0, memory_domains=None, cpu_class=None) -> DenseIndex\n"                      //
-    "\n"                                                                                              //
-    "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                 //
-    "Calls `usearch_dense_init_ram`.\n"                                                               //
-    "\n"                                                                                              //
-    "Args:\n"                                                                                         //
-    "  dimensions (int): Scalars per vector.\n"                                                       //
-    "  metric (DenseMetric, optional): How two rows are scored. Defaults to `DenseMetric.ANGULAR`.\n" //
-    "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"         //
-    "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"         //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                  //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across, so a\n"               //
-    "    dual-socket box naming two gets two graphs; None derives every node.\n"                      //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"       //
-    "\n"                                                                                              //
-    "Example:\n"                                                                                      //
-    "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"                   //
-    "  >>> index.dimensions\n"                                                                        //
+static char const doc_DenseIndex_init_ram[] =                                                            //
+    "init_ram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n"    //
+    "    values_per_key=0, memory_domains=None, cpu_class=None) -> DenseIndex\n"                         //
+    "\n"                                                                                                 //
+    "Starts an empty, mutable graph in host memory, one shard per named NUMA node.\n"                    //
+    "Calls `usearch_dense_init_ram`.\n"                                                                  //
+    "\n"                                                                                                 //
+    "Args:\n"                                                                                            //
+    "  dimensions (int): Scalars per vector.\n"                                                          //
+    "  metric (DenseMetric, optional): How two vectors are scored. Defaults to `DenseMetric.ANGULAR`.\n" //
+    "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"            //
+    "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"            //
+    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                     //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across, so a\n"                  //
+    "    dual-socket box naming two gets two graphs; None derives every node.\n"                         //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"          //
+    "\n"                                                                                                 //
+    "Example:\n"                                                                                         //
+    "  >>> index = usearch.DenseIndex.init_ram(256, usearch.DenseMetric.ANGULAR)\n"                      //
+    "  >>> index.dimensions\n"                                                                           //
     "  256";
 
 static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -352,28 +352,28 @@ static PyObject* DenseIndex_init_ram(PyTypeObject* type, PyObject* const* args, 
     return index_adopt(type, handle, &outcome);
 }
 
-static char const doc_DenseIndex_init_vram[] =                                                         //
-    "init_vram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n" //
-    "    values_per_key=0, devices=None, gpu_class=None) -> DenseIndex\n"                              //
-    "\n"                                                                                               //
-    "Starts an empty, mutable graph on CUDA devices, one shard per named ordinal.\n"                   //
-    "Calls `usearch_dense_init_vram`.\n"                                                               //
-    "\n"                                                                                               //
-    "Rows are sharded and never replicated, so eight devices host eight slices of one\n"               //
-    "graph rather than eight copies. An index outgrowing them fails rather than paging to\n"           //
-    "the host, and the answer is to name more devices.\n"                                              //
-    "\n"                                                                                               //
-    "Args:\n"                                                                                          //
-    "  dimensions (int): Scalars per vector.\n"                                                        //
-    "  metric (DenseMetric, optional): How two rows are scored. Defaults to `DenseMetric.ANGULAR`.\n"  //
-    "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"          //
-    "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"          //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                   //
-    "  devices (Sequence[int], optional): CUDA ordinals to shard across; None derives one\n"           //
-    "    free device.\n"                                                                               //
-    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n"     //
-    "\n"                                                                                               //
-    "Example:\n"                                                                                       //
+static char const doc_DenseIndex_init_vram[] =                                                           //
+    "init_vram(dimensions, metric=DenseMetric.ANGULAR, quantization=Scalar.BF16, *, connectivity=0,\n"   //
+    "    values_per_key=0, devices=None, gpu_class=None) -> DenseIndex\n"                                //
+    "\n"                                                                                                 //
+    "Starts an empty, mutable graph on CUDA devices, one shard per named ordinal.\n"                     //
+    "Calls `usearch_dense_init_vram`.\n"                                                                 //
+    "\n"                                                                                                 //
+    "Entries are sharded and never replicated, so eight devices host eight slices of one\n"              //
+    "graph rather than eight copies. An index outgrowing them fails rather than paging to\n"             //
+    "the host, and the answer is to name more devices.\n"                                                //
+    "\n"                                                                                                 //
+    "Args:\n"                                                                                            //
+    "  dimensions (int): Scalars per vector.\n"                                                          //
+    "  metric (DenseMetric, optional): How two vectors are scored. Defaults to `DenseMetric.ANGULAR`.\n" //
+    "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"            //
+    "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"            //
+    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                     //
+    "  devices (Sequence[int], optional): CUDA ordinals to shard across; None derives one\n"             //
+    "    free device.\n"                                                                                 //
+    "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n"       //
+    "\n"                                                                                                 //
+    "Example:\n"                                                                                         //
     "  >>> index = usearch.DenseIndex.init_vram(256, devices=[0, 1])   # doctest: +SKIP";
 
 static PyObject* DenseIndex_init_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -535,7 +535,7 @@ PyTypeObject DenseTraversalStatsType = {
 static PyStructSequence_Field DenseMetadata_fields[] = {
     {"dimensions", "Scalars per stored vector."},
     {"metric", "The `DenseMetric` the checkpoint scores with."},
-    {"quantization", "The `Scalar` its rows are stored and quantized into."},
+    {"quantization", "The `Scalar` its vectors are stored and quantized into."},
     {"connectivity", "Connections per node the graph was built with."},
     {NULL, NULL},
 };
@@ -844,34 +844,34 @@ static PyObject* DenseIndex_clear(PyObject* self, PyObject* unused) {
     return usearch_py_call_run(&receiver, &clear_verb, call);
 }
 
-static char const doc_DenseIndex_insert[] =                                                  //
-    "insert(keys, vectors, /, *, expansion_factor=0, dtype=None, progress=None,\n"           //
-    "    progress_steps=0, stats=None) -> None\n"                                            //
-    "\n"                                                                                     //
-    "Inserts a batch of vectors under a batch of keys; one vector is a one-row matrix.\n"    //
-    "Keys need not be unique: inserting one twice stores two entries, and `count`\n"         //
-    "reports both. A batch is all-or-nothing and becomes visible at once, so a rejected\n"   //
-    "batch leaves the index untouched and a concurrent search sees all of it or none.\n"     //
-    "Calls `usearch_dense_insert`.\n"                                                        //
-    "\n"                                                                                     //
-    "Args:\n"                                                                                //
-    "  keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.\n"        //
-    "  vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.\n"         //
-    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"         //
-    "  dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it\n"   //
-    "    must be as wide as the buffer's items.\n"                                           //
-    "  progress (callable, optional): Called with (completed, total) rows. It reports and\n" //
-    "    cannot stop the batch, every row being claimed before the first report; what it\n"  //
-    "    raises surfaces once the batch has landed. Reports are serialized.\n"               //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"  //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"     //
-    "\n"                                                                                     //
-    "Example:\n"                                                                             //
-    "  >>> from array import array\n"                                                        //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                              //
-    "  >>> index.reserve(1)\n"                                                               //
-    "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                            //
-    "  >>> len(index)\n"                                                                     //
+static char const doc_DenseIndex_insert[] =                                                     //
+    "insert(keys, vectors, /, *, expansion_factor=0, dtype=None, progress=None,\n"              //
+    "    progress_steps=0, stats=None) -> None\n"                                               //
+    "\n"                                                                                        //
+    "Inserts a batch of vectors under a batch of keys; one vector is a one-row matrix.\n"       //
+    "Keys need not be unique: inserting one twice stores two entries, and `count`\n"            //
+    "reports both. A batch is all-or-nothing and becomes visible at once, so a rejected\n"      //
+    "batch leaves the index untouched and a concurrent search sees all of it or none.\n"        //
+    "Calls `usearch_dense_insert`.\n"                                                           //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.\n"           //
+    "  vectors (buffer): An (N, dimensions) matrix; only the row stride may vary.\n"            //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"            //
+    "  dtype (Scalar, optional): Names the input scalar type when the buffer cannot; it\n"      //
+    "    must be as wide as the buffer's items.\n"                                              //
+    "  progress (callable, optional): Called with (completed, total) entries. It reports and\n" //
+    "    cannot stop the batch, every entry being claimed before the first report; what it\n"   //
+    "    raises surfaces once the batch has landed. Reports are serialized.\n"                  //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
+    "  >>> from array import array\n"                                                           //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                                 //
+    "  >>> index.reserve(1)\n"                                                                  //
+    "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                               //
+    "  >>> len(index)\n"                                                                        //
     "  1";
 
 /** A @c usearch_dense_insert call and the inputs it borrows until it is final. */
@@ -1071,7 +1071,7 @@ static char const doc_DenseIndex_search[] =                                     
     "  arena (Arena): Where the matches land, rewound by the call.\n"                          //
     "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it.\n"           //
     "  traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;\n"     //
-    "    `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.\n"                //
+    "    `Traversal.SCAN` scores every entry exactly, on RAM and NVMe handles.\n"              //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"        //
     "  predicate (callable, optional): Admits a Key when it returns truthy. Non-matching\n"    //
     "    entries still route the traversal, so recall survives low selectivity. The\n"         //
@@ -1330,33 +1330,33 @@ static PyObject* DenseIndex_get(PyObject* self, PyObject* const* args, Py_ssize_
 
 #pragma region Linear Algebra
 
-static char const doc_DenseIndex_multiply[] =                                                 //
-    "multiply(rows, wanted, arena, /, *, expansion_factor=0, dtype=None, progress=None,\n"    //
-    "    progress_steps=0, stats=None) -> DenseProducts\n"                                    //
-    "\n"                                                                                      //
-    "Approximate sparse product of a matrix against the indexed rows - the linear algebra\n"  //
-    "sibling of `search`, reporting every pair the traversal scored rather than only the\n"   //
-    "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n" //
-    "How many a walk scores is known only once it ends, so the pairs come back ragged.\n"     //
-    "Calls `usearch_dense_multiply`.\n"                                                       //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  rows (buffer): An (R, dimensions) matrix of left-hand rows.\n"                         //
-    "  wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;\n"    //
-    "    0 keeps every pair.\n"                                                               //
-    "  arena (Arena): Where the pairs and their offsets land, rewound by the call.\n"         //
-    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider\n"  //
-    "    factor widens the emitted pattern, being what the walk's breadth decides.\n"         //
-    "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"   //
-    "  progress (callable, optional): Called with (completed, total) rows; returning False\n" //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                     //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"      //
-    "\n"                                                                                      //
-    "Returns:\n"                                                                              //
-    "  DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, row `i` spanning pairs\n"     //
-    "    `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's\n" //
-    "    indexed row; `scores`, the (pairs,) float64 products; and `required`, the pairs\n"   //
+static char const doc_DenseIndex_multiply[] =                                                   //
+    "multiply(rows, wanted, arena, /, *, expansion_factor=0, dtype=None, progress=None,\n"      //
+    "    progress_steps=0, stats=None) -> DenseProducts\n"                                      //
+    "\n"                                                                                        //
+    "Approximate sparse product of a matrix against the indexed vectors - the linear algebra\n" //
+    "sibling of `search`, reporting every pair the traversal scored rather than only the\n"     //
+    "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n"   //
+    "How many a walk scores is known only once it ends, so the pairs come back ragged.\n"       //
+    "Calls `usearch_dense_multiply`.\n"                                                         //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  rows (buffer): An (R, dimensions) matrix of left-hand rows.\n"                           //
+    "  wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;\n"      //
+    "    0 keeps every pair.\n"                                                                 //
+    "  arena (Arena): Where the pairs and their offsets land, rewound by the call.\n"           //
+    "  expansion_factor (int, optional): Breadth of the candidates; 0 derives it. A wider\n"    //
+    "    factor widens the emitted pattern, being what the walk's breadth decides.\n"           //
+    "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"     //
+    "  progress (callable, optional): Called with (completed, total) rows; returning False\n"   //
+    "    stops the batch and raises `CancelledError`, None carries on.\n"                       //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
+    "\n"                                                                                        //
+    "Returns:\n"                                                                                //
+    "  DenseProducts: `offsets`, (R + 1,) Apache Arrow offsets, left row `i` spanning pairs\n"  //
+    "    `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each pair's\n"   //
+    "    indexed entry; `scores`, the (pairs,) float64 products; and `required`, the pairs\n"   //
     "    scored before `wanted` cut any. All of them live in the arena.";
 
 /** A @c usearch_dense_multiply call and the ragged pairs it lands in the claimed arena. */
@@ -1669,13 +1669,13 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "    traversal=Traversal.WALK, dtype=None, predicate=None, progress=None,\n"                 //
     "    progress_steps=0, stats=None) -> DenseProducts\n"                                       //
     "\n"                                                                                         //
-    "Late-interaction scoring of multi-row queries against multi-row entries: every query\n"     //
-    "row takes its best match within a key, and those maxima sum to that key's score.\n"         //
+    "Late-interaction scoring of multi-row queries against multi-vector documents: every\n"      //
+    "query row takes its best match within a key, and those maxima sum to that key's score.\n"   //
     "\n"                                                                                         //
     "A document is one key holding its token rows, which is what `values_per_key` above one\n"   //
     "exists for, and the walk stays over individual tokens under a plain inner product - so\n"   //
-    "an entry's rows need no ordering and two documents need not share a row count. The\n"       //
-    "result is sized over documents rather than over rows.\n"                                    //
+    "a document's vectors need no ordering and two documents need not share a vector count.\n"   //
+    "The result is sized over documents rather than over rows.\n"                                //
     "Calls `usearch_dense_maxsim`.\n"                                                            //
     "\n"                                                                                         //
     "Args:\n"                                                                                    //
@@ -1692,7 +1692,7 @@ static char const doc_DenseIndex_maxsim[] =                                     
     "    walking the graph; `Traversal.SCAN` nominates every document, on RAM and NVMe.\n"       //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"          //
     "  predicate (callable, optional): Admits a Key when it returns truthy, asked before any\n"  //
-    "    of its rows are scored, so a rejected document never scores.\n"                         //
+    "    of its vectors are scored, so a rejected document never scores.\n"                      //
     "  progress (callable, optional): Called with (completed, total) queries; returning\n"       //
     "    False stops the batch and raises `CancelledError`, None carries on.\n"                  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"      //
@@ -1831,7 +1831,7 @@ static char const doc_DenseIndex_absorb[] =                                     
     "\n"                                                                                      //
     "Cancellation stops between donors, so a donor already absorbed stays absorbed and one\n" //
     "not yet reached stays a live handle its caller still owns. A donor whose absorption\n"   //
-    "fails stays usable too, though its rows may already have landed in this index.\n"        //
+    "fails stays usable too, though its entries may already have landed in this index.\n"     //
     "Calls `usearch_dense_absorb`.\n"                                                         //
     "\n"                                                                                      //
     "Args:\n"                                                                                 //
@@ -1956,13 +1956,13 @@ static PyObject* DenseIndex_absorb(PyObject* self, PyObject* const* args, Py_ssi
 
 #pragma region Iteration
 
-static char const doc_DenseCursor[] =                                                       //
-    "A sequential row scan over the entries an index holds, pulled in batches by `next`.\n" //
-    "\n"                                                                                    //
-    "Each shard's publication watermark is read as the scan enters that shard, so a row\n"  //
-    "once passed is never revisited, while a later shard may still carry rows inserted\n"   //
-    "after the cursor opened. One step runs at a time; an overlapping step or `close()`\n"  //
-    "raises `ContendedError`. `close()`, or the end of a `with` block, releases the scan\n" //
+static char const doc_DenseCursor[] =                                                         //
+    "A sequential scan over the entries an index holds, pulled in batches by `next`.\n"       //
+    "\n"                                                                                      //
+    "Each shard's publication watermark is read as the scan enters that shard, so an entry\n" //
+    "once passed is never revisited, while a later shard may still carry entries inserted\n"  //
+    "after the cursor opened. One step runs at a time; an overlapping step or `close()`\n"    //
+    "raises `ContendedError`. `close()`, or the end of a `with` block, releases the scan\n"   //
     "before the cursor is collected.";
 
 /** Stands in the handle slot of a cursor or a stream while one step holds its handle, refusing a
@@ -1998,15 +1998,15 @@ static void DenseCursor_dealloc(DenseCursor* self) {
 static char const doc_DenseBatch[] =                                                         //
     "DenseBatch\n"                                                                           //
     "\n"                                                                                     //
-    "The rows one cursor step wrote into an `Arena`, viewing it until it rewinds. Its\n"     //
+    "The entries one cursor step wrote into an `Arena`, viewing it until it rewinds. Its\n"  //
     "length counts them, so the empty batch a drained cursor answers is falsy.\n"            //
     "\n"                                                                                     //
     "Attributes:\n"                                                                          //
     "  keys (buffer): (count, 16) identities, most significant byte first.\n"                //
-    "  links (tuple | None): (offsets, keys) of the identities each row links to, row `i`\n" //
-    "    spanning `offsets[i]` up to `offsets[i + 1]`, or None when the step asked for none.";
+    "  links (tuple | None): (offsets, keys) of the identities each entry links to, entry\n" //
+    "    `i` spanning `offsets[i]` up to `offsets[i + 1]`, or None when the step asked for none.";
 
-/** The (offsets, keys) pair of the @p written rows' links in @p arena; a new reference, or NULL
+/** The (offsets, keys) pair of the @p written entries' links in @p arena; a new reference, or NULL
  *  with an exception set. */
 static PyObject* links_answer(PyObject* arena, usearch_keys_tape_view_t const* links, size_t written) {
     Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)written + 1};
@@ -2021,7 +2021,7 @@ static PyObject* links_answer(PyObject* arena, usearch_keys_tape_view_t const* l
     return pair;
 }
 
-/** A new @c DenseBatch over the @p written rows a step wrote into @p arena; NULL @p links means
+/** A new @c DenseBatch over the @p written entries a step wrote into @p arena; NULL @p links means
  *  keys alone. */
 static PyObject* batch_answer(PyObject* arena, usearch_keys_view_t const* keys, usearch_keys_tape_view_t const* links,
                               size_t written) {
@@ -2047,7 +2047,7 @@ static PyMemberDef DenseBatch_members[] = {
     {"keys", Py_T_OBJECT_EX, offsetof(DenseBatch, keys), Py_READONLY,
      "(count, 16) identities, most significant byte first."},
     {"links", Py_T_OBJECT_EX, offsetof(DenseBatch, links), Py_READONLY,
-     "(offsets, keys) of each row's linked identities, or None when the step asked for none."},
+     "(offsets, keys) of each entry's linked identities, or None when the step asked for none."},
     {NULL, 0, 0, 0, NULL},
 };
 
@@ -2099,21 +2099,21 @@ static PyObject* cursor_step(DenseCursor* self, usearch_dense_cursor_t handle, s
     return batch;
 }
 
-static char const doc_DenseCursor_next[] =                                                    //
-    "next(wanted, arena, /, *, links=False) -> DenseBatch\n"                                  //
-    "\n"                                                                                      //
-    "The next batch of at most `wanted` rows, in `arena`, and an empty one, so falsy, once\n" //
-    "the scan is drained. Blocks on the executor the cursor was opened through, or on the\n"  //
-    "calling thread.\n"                                                                       //
-    "Calls `usearch_dense_cursor_next`.\n"                                                    //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  wanted (int): The most rows the batch holds.\n"                                        //
-    "  arena (Arena): Where the batch lands, rewound by the step.\n"                          //
-    "  links (bool): Also export the identities each row links to; the rows themselves\n"     //
-    "    come from `get`.\n"                                                                  //
-    "\n"                                                                                      //
-    "Raises:\n"                                                                               //
+static char const doc_DenseCursor_next[] =                                                       //
+    "next(wanted, arena, /, *, links=False) -> DenseBatch\n"                                     //
+    "\n"                                                                                         //
+    "The next batch of at most `wanted` entries, in `arena`, and an empty one, so falsy, once\n" //
+    "the scan is drained. Blocks on the executor the cursor was opened through, or on the\n"     //
+    "calling thread.\n"                                                                          //
+    "Calls `usearch_dense_cursor_next`.\n"                                                       //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  wanted (int): The most entries the batch holds.\n"                                        //
+    "  arena (Arena): Where the batch lands, rewound by the step.\n"                             //
+    "  links (bool): Also export the identities each entry links to; the vectors themselves\n"   //
+    "    come from `get`.\n"                                                                     //
+    "\n"                                                                                         //
+    "Raises:\n"                                                                                  //
     "  UninitializedError: When the cursor was closed.";
 
 static PyObject* DenseCursor_next(DenseCursor* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -2184,27 +2184,27 @@ PyTypeObject DenseCursorType = {
     .tp_methods = DenseCursor_methods,
 };
 
-static char const doc_DenseIndex_cursor[] =                                                   //
-    "cursor(starts=None) -> DenseCursor\n"                                                    //
-    "\n"                                                                                      //
-    "Opens a walk over the index, which `DenseCursor.next` pulls in batches, each into the\n" //
-    "arena that pull names. Without `starts` it yields every row as stored; with them, the\n" //
-    "start keys' own rows first in order, then the rows those link to breadth-first, each\n"  //
-    "once. Each shard's watermark is read as the scan enters that shard, so a row once\n"     //
-    "passed is never revisited, while a later shard may still carry rows inserted after\n"    //
-    "this call. Every pull blocks, on the receiver's executor or the calling thread.\n"       //
-    "Calls `usearch_dense_cursor_init`.\n"                                                    //
-    "\n"                                                                                      //
-    "Example:\n"                                                                              //
-    "  >>> from array import array\n"                                                         //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                               //
-    "  >>> index.reserve(3)\n"                                                                //
-    "  >>> for key in (1, 2, 3):\n"                                                           //
-    "  ...     index.insert([key], array('d', [0.1, 0.2]))\n"                                 //
-    "  >>> arena, cursor = usearch.Arena(), index.cursor()\n"                                 //
-    "  >>> while batch := cursor.next(2, arena):\n"                                           //
-    "  ...     print(len(batch))\n"                                                           //
-    "  2\n"                                                                                   //
+static char const doc_DenseIndex_cursor[] =                                                     //
+    "cursor(starts=None) -> DenseCursor\n"                                                      //
+    "\n"                                                                                        //
+    "Opens a walk over the index, which `DenseCursor.next` pulls in batches, each into the\n"   //
+    "arena that pull names. Without `starts` it yields every entry as stored; with them, the\n" //
+    "start keys' own entries first in order, then the entries those link to breadth-first,\n"   //
+    "each once. Each shard's watermark is read as the scan enters that shard, so an entry\n"    //
+    "once passed is never revisited, while a later shard may still carry entries inserted\n"    //
+    "after this call. Every pull blocks, on the receiver's executor or the calling thread.\n"   //
+    "Calls `usearch_dense_cursor_init`.\n"                                                      //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
+    "  >>> from array import array\n"                                                           //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                 //
+    "  >>> index.reserve(3)\n"                                                                  //
+    "  >>> for key in (1, 2, 3):\n"                                                             //
+    "  ...     index.insert([key], array('d', [0.1, 0.2]))\n"                                   //
+    "  >>> arena, cursor = usearch.Arena(), index.cursor()\n"                                   //
+    "  >>> while batch := cursor.next(2, arena):\n"                                             //
+    "  ...     print(len(batch))\n"                                                             //
+    "  2\n"                                                                                     //
     "  1";
 
 static PyObject* DenseIndex_cursor(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -2310,19 +2310,19 @@ static PyObject* stream_pull(DenseSearchStream* self, usearch_dense_search_strea
     return pulled;
 }
 
-static char const doc_DenseSearchStream_next[] =                                              //
-    "next(wanted, arena, /) -> Matches\n"                                                     //
-    "\n"                                                                                      //
-    "The next at most `wanted` matches, as one row of `Matches` in `arena`, whose count is\n" //
-    "zero once the walk is drained. Blocks on the executor the stream was opened through,\n"  //
-    "or on the calling thread.\n"                                                             //
-    "Calls `usearch_dense_search_stream_next`.\n"                                             //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  wanted (int): The most matches the pull writes.\n"                                     //
-    "  arena (Arena): Where the matches land, rewound by the pull.\n"                         //
-    "\n"                                                                                      //
-    "Raises:\n"                                                                               //
+static char const doc_DenseSearchStream_next[] =                                                //
+    "next(wanted, arena, /) -> Matches\n"                                                       //
+    "\n"                                                                                        //
+    "The next at most `wanted` matches, as one query of `Matches` in `arena`, whose count is\n" //
+    "zero once the walk is drained. Blocks on the executor the stream was opened through,\n"    //
+    "or on the calling thread.\n"                                                               //
+    "Calls `usearch_dense_search_stream_next`.\n"                                               //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  wanted (int): The most matches the pull writes.\n"                                       //
+    "  arena (Arena): Where the matches land, rewound by the pull.\n"                           //
+    "\n"                                                                                        //
+    "Raises:\n"                                                                                 //
     "  UninitializedError: When the stream was closed.";
 
 static PyObject* DenseSearchStream_next(DenseSearchStream* self, PyObject* const* args,

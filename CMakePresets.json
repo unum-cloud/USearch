@@ -143,6 +143,8 @@
       "description": "The full CPU matrix: C++ suite, benchmarks, the C 99 library and its test.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
         "USEARCH_BUILD_SHARED": "ON"
@@ -215,6 +217,9 @@
       "description": "Same targets as `cuda`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
         "USEARCH_CUDA_ARCH": "all"
       }
     },
@@ -425,6 +430,8 @@
       "description": "Same targets as `rocm`, at Release and embedding code objects for every AMD class - what shipping artifacts need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "USEARCH_ROCM_ARCH": "all"
       }
     },

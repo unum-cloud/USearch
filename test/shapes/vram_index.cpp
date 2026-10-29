@@ -9,9 +9,9 @@
  *  Collections hold 10 to 60 points a cloud: random points; coincident points, which pack to one
  *  point and tie every pair at zero; collinear points, whose packs degenerate on two axes; and
  *  molecule-like clouds, eight jittered prototypes, one in four mirrored, so neighbors cluster by
- *  prototype. Rows insert as packs in three batches whose tapes start an alignment line past their
- *  own first byte, as an Arrow slice's do, so the later batches walk graphs whose reverse links
- *  earlier batches merged.
+ *  prototype. Shapes insert as packs in three batches whose tapes start an alignment line past
+ *  their own first byte, as an Arrow slice's do, so the later batches walk graphs whose reverse
+ *  links earlier batches merged.
  */
 #include <algorithm> // `std::nth_element`
 #include <array>     // `std::array` - the prototypes, one cloud a pack takes
@@ -134,26 +134,26 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     std::vector<std::vector<f64_t>> const clouds = generate_clouds(kind, count + queries_count, seed);
     std::vector<std::vector<scalar_type_>> stored(clouds.size());
     std::vector<std::size_t> offsets {nk_default_alignment_k};
-    for (std::size_t row = 0; row != clouds.size(); ++row) {
-        for (f64_t const coordinate : clouds[row]) stored[row].push_back(scalar_type_(coordinate));
-        offsets.push_back(offsets.back() + nk::shapes_pack_size<scalar_type_>(clouds[row].size() / 3, 0).value);
+    for (std::size_t entry = 0; entry != clouds.size(); ++entry) {
+        for (f64_t const coordinate : clouds[entry]) stored[entry].push_back(scalar_type_(coordinate));
+        offsets.push_back(offsets.back() + nk::shapes_pack_size<scalar_type_>(clouds[entry].size() / 3, 0).value);
     }
     std::vector<byte_t, nk::aligned_allocator<byte_t>> tape(offsets.back());
-    for (std::size_t row = 0; row != clouds.size(); ++row)
+    for (std::size_t entry = 0; entry != clouds.size(); ++entry)
         failures += expect(!nk::failed(
-            nk::shapes_pack<scalar_type_>(reinterpret_cast<typename scalar_type_::raw_t const*>(stored[row].data()),
-                                          stored[row].size() / 3, tape.data() + offsets[row], 0)));
+            nk::shapes_pack<scalar_type_>(reinterpret_cast<typename scalar_type_::raw_t const*>(stored[entry].data()),
+                                          stored[entry].size() / 3, tape.data() + offsets[entry], 0)));
 
     // The serial distances of every query to every stored cloud, over the packs the GPU stores.
     std::vector<std::vector<distance_t>> exact(queries_count, std::vector<distance_t>(count));
     for (std::size_t query = 0; query != queries_count; ++query)
-        for (std::size_t row = 0; row != count; ++row) {
+        for (std::size_t entry = 0; entry != count; ++entry) {
             void const* const query_pack = tape.data() + offsets[count + query];
-            void const* const row_pack = tape.data() + offsets[row];
+            void const* const entry_pack = tape.data() + offsets[entry];
             auto const pairwise = kernel == nk_kernel_hausdorffs_packed_k ? serial_kit_t::hausdorffs
                                                                           : serial_kit_t::chamfers;
-            failures += expect(pairwise(&query_pack, 1, &row_pack, 1, &exact[query][row], sizeof(distance_t), nullptr,
-                                        nullptr) == nk_success_k);
+            failures += expect(pairwise(&query_pack, 1, &entry_pack, 1, &exact[query][entry], sizeof(distance_t),
+                                        nullptr, nullptr) == nk_success_k);
         }
 
     ram_index_t ram_index;
@@ -162,10 +162,10 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     typename ram_index_t::traversal_context_t ram_context {seed};
     typename value_t::allocator_type const value_allocator {ram_index.get_allocator()};
     failures += expect(bool(ram_index.reserve(count)));
-    for (std::size_t row = 0; row != count; ++row) {
-        std::array const cloud {std::span<scalar_type_ const> {stored[row]}};
+    for (std::size_t entry = 0; entry != count; ++entry) {
+        std::array const cloud {std::span<scalar_type_ const> {stored[entry]}};
         value_t value = value_t::make(cloud, value_allocator, 0).value;
-        us::utilities::uuid_t const key = uuid_of(row);
+        us::utilities::uuid_t const key = uuid_of(entry);
         failures += expect_eq(ram_index
                                   .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                           us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})

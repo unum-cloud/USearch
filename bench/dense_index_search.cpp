@@ -221,7 +221,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         // Every stored row is its own nearest neighbor.
         oracle.counts.assign(rows, 1);
         for (std::size_t row = 0; row != rows; ++row)
-            oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_row(settings.seed, first_row + row)));
+            oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_offset(settings.seed, first_row + row)));
     }
     else if (!search.query_neighbors.empty() && !first_row && !search.max_base_vectors.value) {
         auto [truth, truth_status] = mapped_rows_t::open(search.query_neighbors);

@@ -225,13 +225,13 @@ struct multiply_fold {
 using scan_payload_t = u32_t;
 
 /** Asks @p admits about the @p filled leading @p nodes of a quad at their own static extent,
- *  handing @p keep_row the payload of each one it admits. */
+ *  handing @p keep_entry the payload of each one it admits. */
 template <typename admits_type_, typename keep_row_type_>
 void ask_contenders(admits_type_& admits, quad<node_id_t> const& nodes, quad<scan_payload_t> const& payloads,
-                    std::size_t filled, keep_row_type_& keep_row) noexcept {
+                    std::size_t filled, keep_row_type_& keep_entry) noexcept {
     with_static_extent<quad_lanes_k>(filled, [&]<std::size_t extent_>() noexcept {
         ask_quad(admits, std::span<node_id_t const, extent_>(nodes.data(), extent_),
-                 std::span<scan_payload_t const, extent_>(payloads.data(), extent_), keep_row);
+                 std::span<scan_payload_t const, extent_>(payloads.data(), extent_), keep_entry);
     });
 }
 
@@ -284,7 +284,7 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
             }
             return row_distances;
         };
-        auto keep_row = [&](scan_payload_t row) noexcept {
+        auto keep_entry = [&](scan_payload_t row) noexcept {
             row_distances_t const row_distances = distances_of(row);
             node_id_t const node = static_cast<node_id_t>(first + row);
             for (std::size_t column = 0; column != columns; ++column)
@@ -302,11 +302,11 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
             if (!closer) continue;
             nodes[filled] = static_cast<node_id_t>(first + row), payloads[filled] = static_cast<scan_payload_t>(row);
             if (++filled != quad_lanes_k) continue;
-            ask_contenders(admits, nodes, payloads, filled, keep_row);
+            ask_contenders(admits, nodes, payloads, filled, keep_entry);
             filled = 0;
         }
-        ask_contenders(admits, nodes, payloads, filled, keep_row);
-        settle_predicate(admits, keep_row);
+        ask_contenders(admits, nodes, payloads, filled, keep_entry);
+        settle_predicate(admits, keep_entry);
     }
 }
 
@@ -1021,9 +1021,9 @@ struct ram_index {
     std::size_t capacity() const noexcept {
         std::ptrdiff_t const unclaimed_rows =
             atomic_ref<std::ptrdiff_t const>(remaining_capacity_).load(std::memory_order_acquire);
-        std::size_t const claimed_rows =
+        std::size_t const claimed_entries =
             atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
-        return claimed_rows + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
+        return claimed_entries + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
     }
 
     /** Bytes the materialized chunks span - vectors, norms & neighbors - derived from the hosted
@@ -1034,8 +1034,8 @@ struct ram_index {
         if (!frozen) return sizeof(ram_index);
         std::size_t const hosted_rows = capacity();
         small_size_t chunks = 0;
-        while (chunks != max_chunks_k && chunk_schedule_t::rows_before(chunks) < hosted_rows) ++chunks;
-        std::size_t const rows = chunk_schedule_t::rows_before(chunks);
+        while (chunks != max_chunks_k && chunk_schedule_t::nodes_before(chunks) < hosted_rows) ++chunks;
+        std::size_t const rows = chunk_schedule_t::nodes_before(chunks);
         std::size_t bytes = sizeof(ram_index);
         bytes += rows * padded_row_values(frozen) * sizeof(scalar_t);
         if (stores_norms()) bytes += rows * sizeof(vector_norms_t);
@@ -1170,7 +1170,7 @@ struct ram_index {
 
         // Stored ahead of the freeze, the ceiling reaches every claim that sees the geometry.
         if (!geometry())
-            atomic_ref<std::size_t>(ceiling_rows_)
+            atomic_ref<std::size_t>(ceiling_nodes_)
                 .store(min_of(config.ceiling, max_node_count_k), std::memory_order_relaxed);
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
         geometry_t const desired_geometry {config.dimensions, config.connectivity};
@@ -1181,14 +1181,15 @@ struct ram_index {
         if (frozen_geometry != desired_geometry) return {0, status_t::config_mismatch_k};
 
         while (true) {
-            std::size_t const total_rows = capacity();
-            if (total_rows >= config.capacity) return {total_rows, status_t::success_k};
+            std::size_t const total_nodes = capacity();
+            if (total_nodes >= config.capacity) return {total_nodes, status_t::success_k};
 
             // Claim from the claimed rows up to the request, not the deficit alone: a deficit that
             // fits in the free rows is granted without a growth and released, forever. Only a claim
             // crossing the free rows elects a grower, and one growth covers it.
-            std::size_t const claimed_rows = atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
-            std::size_t const claim_rows = config.capacity - claimed_rows;
+            std::size_t const claimed_entries =
+                atomic_ref<node_id_t>(last_allocated_id_).load(std::memory_order_acquire);
+            std::size_t const claim_rows = config.capacity - claimed_entries;
             auto const [first_row, status] = claim_capacity(claim_rows);
             if (failed(status)) return {capacity(), status};
             release_capacity(claim_rows);
@@ -1221,7 +1222,7 @@ struct ram_index {
     static constexpr queue_sizes_t queue_sizes_(std::size_t expansion_factor, std::size_t connectivity) noexcept {
         return {expansion_factor + connectivity, max_of<std::size_t>(connectivity + 1, expansion_factor),
                 expansion_factor + connectivity, expansion_factor * connectivity,
-                filling_rows(expansion_factor, connectivity)};
+                filling_nodes(expansion_factor, connectivity)};
     }
 
     static status_t reserve_queues_(traversal_context_t& context, queue_sizes_t sizes) noexcept {
@@ -1631,8 +1632,8 @@ struct ram_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = position * chunk_schedule_t::rows_in(0);
-            std::size_t const bound = min_of(first + chunk_schedule_t::rows_in(0), static_cast<std::size_t>(visible));
+            std::size_t const first = position * chunk_schedule_t::nodes_in(0);
+            std::size_t const bound = min_of(first + chunk_schedule_t::nodes_in(0), static_cast<std::size_t>(visible));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
@@ -1640,7 +1641,8 @@ struct ram_index {
 
         /** The plan's steps, positionally; every level sweeps all of them. */
         indexed_range<health_plan_t> steps() const noexcept {
-            std::size_t const count = index_ ? divide_round_up<std::size_t>(visible, chunk_schedule_t::rows_in(0)) : 0u;
+            std::size_t const count = index_ ? divide_round_up<std::size_t>(visible, chunk_schedule_t::nodes_in(0))
+                                             : 0u;
             return {this, count};
         }
 
@@ -1916,9 +1918,9 @@ struct ram_index {
             if (audited_()) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
-            iota_view<node_id_t> const range = phase_rows_();
+            iota_view<node_id_t> const range = phase_nodes_();
             std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1)
-                                                                     : chunk_schedule_t::rows_in(0);
+                                                                     : chunk_schedule_t::nodes_in(0);
             std::size_t const first = range.first + (position * width);
             std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
             step.position = position;
@@ -1931,7 +1933,7 @@ struct ram_index {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ == phase_t::partition_k) return {this, 1u};
             if (audited_()) return {this, audit.steps().size()};
-            return {this, divide_round_up<std::size_t>(phase_rows_().size(), chunk_schedule_t::rows_in(0))};
+            return {this, divide_round_up<std::size_t>(phase_nodes_().size(), chunk_schedule_t::nodes_in(0))};
         }
 
         /**
@@ -1939,8 +1941,8 @@ struct ram_index {
          *      of one phase, and never failing on a bound plan, since planning claimed and reserved
          *      everything a step writes.
          *
-         *  The one partition step grows a split's parts, and a scatter step copies source rows into
-         *  their receivers, firing @p on_landed per row with the source row, the receiver's
+         *  The one partition step grows a split's parts, and a scatter step copies source nodes
+         *  into their receivers, firing @p on_landed per row with the source row, the receiver's
          *  position and the row there - what a sharded caller moves its keys by.
          *
          *  @par Statuses:
@@ -2035,13 +2037,13 @@ struct ram_index {
         }
 
         /** The rows the current phase steps over: a split source's, or the round's. */
-        iota_view<node_id_t> phase_rows_() const noexcept {
-            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, source_rows_()};
+        iota_view<node_id_t> phase_nodes_() const noexcept {
+            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, source_nodes_()};
             return round_nodes_();
         }
 
         /** Rows the split's source published at planning: one slot each. */
-        node_id_t source_rows_() const noexcept { return static_cast<node_id_t>(part_slots_.size()); }
+        node_id_t source_nodes_() const noexcept { return static_cast<node_id_t>(part_slots_.size()); }
 
         /** The most rows one part takes: the source's rows over the receivers, rounded up. */
         std::size_t part_capacity_() const noexcept {
@@ -2057,18 +2059,19 @@ struct ram_index {
         /** Calls @p callback with every live link of source row @p row, skipping the self-loop of
          *  a published-empty row; reads plain, since nothing writes the source meanwhile. */
         template <typename callback_type_>
-        void for_each_link_(node_id_t row, callback_type_&& callback) const noexcept {
+        void for_each_link_(node_id_t node, callback_type_&& callback) const noexcept {
             node_ids_view_t const links = static_cast<ram_index const&>(*source_).neighbors_for(
-                chunk_schedule_t::locate(row));
+                chunk_schedule_t::locate(node));
             for (std::size_t slot = 0; slot != links.size() && links[slot] != node_id_unknown_k; ++slot)
-                if (links[slot] != row) callback(links[slot]);
+                if (links[slot] != node) callback(links[slot]);
         }
 
-        /** Places source row @p row last in @p part, its slot naming the part and the position. */
-        void enlist_(node_id_t row, std::size_t part) noexcept {
-            std::size_t const position = part_extents_[part].rows++, capacity = part_capacity_();
-            part_members_[part * capacity + position] = row;
-            part_slots_[row] = static_cast<node_id_t>(part * capacity + position);
+        /** Places source node @p node last in @p part, its slot naming the part and the
+         *  position. */
+        void enlist_(node_id_t node, std::size_t part) noexcept {
+            std::size_t const position = part_extents_[part].nodes++, capacity = part_capacity_();
+            part_members_[part * capacity + position] = node;
+            part_slots_[node] = static_cast<node_id_t>(part * capacity + position);
         }
 
         /** Expands the oldest unexpanded member of @p part, enlisting its unplaced neighbors while
@@ -2077,24 +2080,24 @@ struct ram_index {
             // Until the seams replace them, these count each part's expanded members.
             node_id_t& expanded = part_extents_[part].seam;
             std::size_t const capacity = part_capacity_();
-            if (expanded == part_extents_[part].rows || part_extents_[part].rows == capacity) return false;
+            if (expanded == part_extents_[part].nodes || part_extents_[part].nodes == capacity) return false;
             node_id_t const node_id = part_members_[part * capacity + expanded++];
-            node_id_t const source_rows = source_rows_();
+            node_id_t const source_nodes = source_nodes_();
             for_each_link_(node_id, [&](node_id_t target) noexcept {
-                if (target < source_rows && part_slots_[target] == node_id_unknown_k &&
-                    part_extents_[part].rows != capacity)
+                if (target < source_nodes && part_slots_[target] == node_id_unknown_k &&
+                    part_extents_[part].nodes != capacity)
                     enlist_(target, part);
             });
             return true;
         }
 
-        /** Whether source row @p row links into a part other than its @p part. */
-        bool links_across_(node_id_t row, std::size_t part) const noexcept {
+        /** Whether source node @p node links into a part other than its @p part. */
+        bool links_across_(node_id_t node, std::size_t part) const noexcept {
             bool across = false;
             std::size_t const capacity = part_capacity_();
-            node_id_t const source_rows = source_rows_();
-            for_each_link_(row, [&](node_id_t target) noexcept {
-                across = across || (target < source_rows && part_slots_[target] / capacity != part);
+            node_id_t const source_nodes = source_nodes_();
+            for_each_link_(node, [&](node_id_t target) noexcept {
+                across = across || (target < source_nodes && part_slots_[target] / capacity != part);
             });
             return across;
         }
@@ -2102,43 +2105,43 @@ struct ram_index {
         /**
          *  @brief Grows one part per receiver from a root the seed picks, breadth first over the
          *      source's links and one expansion per part in turn, each capped at the part capacity;
-         *      every row left unplaced then seeds a growth of the smallest part.
+         *      every node left unplaced then seeds a growth of the smallest part.
          *
-         *  Each part's seams, the rows linking into another part, then move ahead of the rest, and
-         *  every row's slot names its part and its row in the receiver.
+         *  Each part's seams, the nodes linking into another part, then move ahead of the rest, and
+         *  every node's slot names its part and its ID in the receiver.
          */
         void partition_() noexcept {
             std::size_t const parts = receivers_.size(), capacity = part_capacity_();
-            node_id_t const source_rows = source_rows_();
+            node_id_t const source_nodes = source_nodes_();
             for (node_id_t& slot : part_slots_) slot = node_id_unknown_k;
             for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
-            for (std::size_t part = 0; part != parts && part != source_rows; ++part)
-                enlist_(static_cast<node_id_t>(seeded_bijection(part, source_rows, seed_)), part);
+            for (std::size_t part = 0; part != parts && part != source_nodes; ++part)
+                enlist_(static_cast<node_id_t>(seeded_bijection(part, source_nodes, seed_)), part);
             for (std::size_t expanded = parts; expanded;) {
                 expanded = 0;
                 for (std::size_t part = 0; part != parts; ++part) expanded += expand_(part);
             }
-            for (node_id_t row = 0; row != source_rows; ++row) {
-                if (part_slots_[row] != node_id_unknown_k) continue;
+            for (node_id_t node = 0; node != source_nodes; ++node) {
+                if (part_slots_[node] != node_id_unknown_k) continue;
                 std::size_t smallest = 0;
                 for (std::size_t part = 1; part != parts; ++part)
-                    if (part_extents_[part].rows < part_extents_[smallest].rows) smallest = part;
-                enlist_(row, smallest);
+                    if (part_extents_[part].nodes < part_extents_[smallest].nodes) smallest = part;
+                enlist_(node, smallest);
                 while (expand_(smallest)) {}
             }
             for (std::size_t part = 0; part != parts; ++part) {
                 node_id_t* const members = part_members_.data() + part * capacity;
-                std::size_t seams = 0, interior = part_extents_[part].rows;
+                std::size_t seams = 0, interior = part_extents_[part].nodes;
                 while (seams != interior)
                     if (links_across_(members[seams], part)) ++seams;
                     else std::swap(members[seams], members[--interior]);
                 part_extents_[part].seam = static_cast<node_id_t>(seams);
-                for (std::size_t position = 0; position != part_extents_[part].rows; ++position)
+                for (std::size_t position = 0; position != part_extents_[part].nodes; ++position)
                     part_slots_[members[position]] = static_cast<node_id_t>(part * capacity + position);
             }
         }
 
-        /** Copies the source rows of @p step into their receivers' claimed rows - vectors, norms,
+        /** Copies the source nodes of @p step into their receivers' claimed rows - vectors, norms,
          *  and the links inside each part rebased through its slots, the links across dropped, a
          *  row left with none becoming the published-empty self-loop - and fires @p on_landed. */
         template <typename callback_type_>
@@ -2148,42 +2151,42 @@ struct ram_index {
             std::size_t const connectivity = frozen.connectivity();
             std::size_t const row_bytes = padded_row_values(frozen) * sizeof(scalar_t);
             std::size_t const capacity = part_capacity_();
-            node_id_t const source_rows = source_rows_();
-            for (node_id_t row = step.nodes.first; row < step.nodes.bound; ++row) {
-                std::size_t const slot = part_slots_[row], part = slot / capacity;
+            node_id_t const source_nodes = source_nodes_();
+            for (node_id_t node = step.nodes.first; node < step.nodes.bound; ++node) {
+                std::size_t const slot = part_slots_[node], part = slot / capacity;
                 node_id_t const landed = static_cast<node_id_t>(slot % capacity);
                 ram_index& into = *receivers_[part];
-                location_t const from = chunk_schedule_t::locate(row), to = chunk_schedule_t::locate(landed);
+                location_t const from = chunk_schedule_t::locate(node), to = chunk_schedule_t::locate(landed);
                 std::memcpy(into.vectors_[to], source.vectors_[from], row_bytes);
                 if (source.stores_norms()) into.norm_ref_for(to) = source.norms_[from];
                 node_id_t* const links = into.neighbors_[to];
                 std::size_t kept = 0;
-                for_each_link_(row, [&](node_id_t target) noexcept {
-                    if (target < source_rows && part_slots_[target] / capacity == part)
+                for_each_link_(node, [&](node_id_t target) noexcept {
+                    if (target < source_nodes && part_slots_[target] / capacity == part)
                         links[kept++] = static_cast<node_id_t>(part_slots_[target] % capacity);
                 });
                 if (!kept) links[kept++] = landed;
                 for (std::size_t tail = kept; tail != connectivity; ++tail) links[tail] = node_id_unknown_k;
-                on_landed(row, part, landed);
+                on_landed(node, part, landed);
             }
         }
 
-        /** Publishes every receiver's rows, consuming the claim of a full part and returning what
+        /** Publishes every receiver's nodes, consuming the claim of a full part and returning what
          *  the part left unused, then empties the source. */
         void publish_parts_() noexcept {
             std::size_t const capacity = part_capacity_();
             for (std::size_t part = 0; part != receivers_.size(); ++part) {
                 ram_index& into = *receivers_[part];
-                node_id_t const rows = part_extents_[part].rows;
+                node_id_t const nodes = part_extents_[part].nodes;
                 receiver_claims_[part].consume();
-                if (capacity != rows) into.release_capacity(capacity - rows);
-                if (!rows) continue;
+                if (capacity != nodes) into.release_capacity(capacity - nodes);
+                if (!nodes) continue;
                 node_id_t dispensed = 0;
                 atomic_ref<node_id_t>(into.next_dispensed_id_)
-                    .compare_exchange_strong(dispensed, rows, std::memory_order_release, std::memory_order_relaxed);
-                atomic_ref<node_id_t>(into.last_visible_id_).store(rows, std::memory_order_release);
+                    .compare_exchange_strong(dispensed, nodes, std::memory_order_release, std::memory_order_relaxed);
+                atomic_ref<node_id_t>(into.last_visible_id_).store(nodes, std::memory_order_release);
             }
-            source_->forget_(source_rows_());
+            source_->forget_(source_nodes_());
             source_ = nullptr;
         }
 
@@ -2192,7 +2195,7 @@ struct ram_index {
         void bind_receiver_() noexcept {
             std::size_t const receiver = refined_receivers_;
             index_ = receivers_[receiver];
-            audit.rebind(*index_, part_extents_[receiver].rows);
+            audit.rebind(*index_, part_extents_[receiver].nodes);
             nodes_ = {0, part_extents_[receiver].seam};
             round_ = 0;
             swept_after_ = phase_t::reselect_k;
@@ -2255,8 +2258,8 @@ struct ram_index {
 
         /** Reconnects every island in @p step, a node the audit left unreached or not reaching
          *  back, to its nearest neighbor the audit proved both ways, else the landmark covering it:
-         *  that node's row links an unreached island, and the island's own row links that node when
-         *  it has no way back. */
+         *  that node's neighbor row links an unreached island, and the island's own row links that
+         *  node when it has no way back. */
         void reconnect_(step_t const& step, traversal_context_t& context) noexcept {
             std::size_t reconnected = 0;
             for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
@@ -2342,12 +2345,12 @@ struct ram_index {
         /** Per source row: its part times the part capacity, plus its row in that receiver. */
         part_bases_t part_slots_;
 
-        /** Per part, a run of the part capacity: its source rows in receiver order. */
+        /** Per part, a run of the part capacity: its source nodes in receiver order. */
         part_bases_t part_members_;
 
         /** One part's rows, and the seam within them: the rows before it lost a link across. */
         struct part_extent_t {
-            node_id_t rows = 0;
+            node_id_t nodes = 0;
             node_id_t seam = 0;
         };
 
@@ -2425,8 +2428,9 @@ struct ram_index {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every published node in @p nodes and heals whatever that strands - one
-     *      @ref refine_plan_t drained on the calling thread. An empty range heals alone.
+     *  @brief Re-selects the neighbors of every published node in @p nodes and heals the islands
+     *      that leaves - one @ref refine_plan_t drained on the calling thread. An empty range heals
+     *      alone.
      *
      *  @param[in] nodes The ID range to re-select; IDs at or past the watermark are skipped.
      *  @param[in,out] context The calling thread's scratch & telemetry, reused across passes.
@@ -2557,7 +2561,7 @@ struct ram_index {
          *  when the caller certifies no concurrent mutators. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
 
-        /** How rows are reached; @c scan_k scores every published row exactly, keeping the
+        /** How entries are reached; @c scan_k scores every published row exactly, keeping the
          *  breadth's nearest, and only @c search and @c search_if implement it. */
         traversal_t traversal = traversal_t::walk_k;
 
@@ -2865,22 +2869,22 @@ struct ram_index {
             std::size_t position = 0;
 
             /** Where the rows sit in the index, in its own ID space. */
-            iota_view<node_id_t> index_rows;
+            iota_view<node_id_t> index_nodes;
 
             /** Where they sit in the caller's buffer, counted from its first row. */
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> source_nodes;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = chunk_schedule_t::rows_before(static_cast<small_size_t>(position));
-            std::size_t const bound = min_of(chunk_schedule_t::rows_before(static_cast<small_size_t>(position + 1)),
+            std::size_t const first = chunk_schedule_t::nodes_before(static_cast<small_size_t>(position));
+            std::size_t const bound = min_of(chunk_schedule_t::nodes_before(static_cast<small_size_t>(position + 1)),
                                              static_cast<std::size_t>(visible));
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = step.index_rows;
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = step.index_nodes;
             return step;
         }
 
@@ -2909,14 +2913,14 @@ struct ram_index {
          */
         status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const rows = step.index_rows;
+            iota_view<node_id_t> const rows = step.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
             geometry_t const frozen = index_->geometry();
             std::size_t const connectivity = frozen.connectivity();
             std::size_t const step_slots = rows.size() * connectivity;
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
             std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(),
                                                           connectivity * sizeof(node_id_t));
@@ -3084,17 +3088,17 @@ struct ram_index {
         /** The claim's own death releases the rows, unless @c finish consumed them. */
         ~load_plan_t() noexcept = default;
 
-        /** One step of the plan: one storage chunk's share of the appended rows. */
+        /** One step of the plan: one storage chunk's share of the appended nodes. */
         struct step_t {
 
             /** The step's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
 
             /** Where the rows land in the index, in its own ID space, from @c base. */
-            iota_view<node_id_t> index_rows;
+            iota_view<node_id_t> index_nodes;
 
             /** Where they come from in the caller's columns or source index, from its first row. */
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> source_nodes;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -3103,14 +3107,14 @@ struct ram_index {
             if (position >= steps().size()) return step;
             small_size_t const first_chunk = chunk_schedule_t::locate(base).chunk;
             std::size_t const first = max_of(
-                chunk_schedule_t::rows_before(static_cast<small_size_t>(first_chunk + position)),
+                chunk_schedule_t::nodes_before(static_cast<small_size_t>(first_chunk + position)),
                 static_cast<std::size_t>(base));
             std::size_t const bound = min_of(
-                chunk_schedule_t::rows_before(static_cast<small_size_t>(first_chunk + position + 1)),
+                chunk_schedule_t::nodes_before(static_cast<small_size_t>(first_chunk + position + 1)),
                 static_cast<std::size_t>(base) + rows);
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
             return step;
         }
 
@@ -3131,7 +3135,7 @@ struct ram_index {
          *  the sentinel. A sharded plan drives it one part's slice at a time, its step naming the
          *  rows in that part's row and ID spaces.
          *
-         *  @param[in] step The step to fill; its source rows address @p columns.
+         *  @param[in] step The step to fill; its source nodes address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
          *  @param[in] source_range The ID space those rows speak.
          *
@@ -3142,14 +3146,14 @@ struct ram_index {
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_rows;
+            iota_view<node_id_t> const range = step.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
             geometry_t const frozen = index_->geometry();
             std::size_t const connectivity = frozen.connectivity();
             std::size_t const step_slots = range.size() * connectivity;
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
             std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(),
                                                           connectivity * sizeof(node_id_t));
@@ -3158,7 +3162,7 @@ struct ram_index {
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
             // the step rather than from the plan's base - the two agree for a one-part plan.
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_nodes.first + source_range.first);
             // A rebased ID past this plan would name whichever row a later insert fills.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
@@ -3195,7 +3199,7 @@ struct ram_index {
          *  @p source without locks, so nothing may insert into, refine or clear it while the step
          *  runs.
          *
-         *  @param[in] step The step to fill; its source rows address @p source.
+         *  @param[in] step The step to fill; its source nodes address @p source.
          *  @param[in] source The index the rows come from, of this one's geometry and norms.
          *  @param[in] source_range The ID space the source's rows speak.
          *
@@ -3207,21 +3211,21 @@ struct ram_index {
          */
         status_t load(step_t const& step, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_rows;
+            iota_view<node_id_t> const range = step.index_nodes;
             geometry_t const frozen = index_->geometry();
-            if (range.empty() || range.size() != step.source_rows.size() || source.geometry() != frozen ||
-                source.stores_norms() != index_->stores_norms() || step.source_rows.bound > source.size())
+            if (range.empty() || range.size() != step.source_nodes.size() || source.geometry() != frozen ||
+                source.stores_norms() != index_->stores_norms() || step.source_nodes.bound > source.size())
                 return status_t::config_mismatch_k;
-            node_id_t const shift = range.first - step.source_rows.first + source_range.first;
+            node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const connectivity = frozen.connectivity();
             std::size_t const row_bytes = padded_row_values(frozen) * sizeof(scalar_t);
 
             // The step sits in one chunk here, while the source's chunks start elsewhere.
-            for (node_id_t landing = range.first, reading = step.source_rows.first; landing != range.bound;) {
+            for (node_id_t landing = range.first, reading = step.source_nodes.first; landing != range.bound;) {
                 location_t const into = chunk_schedule_t::locate(landing), from = chunk_schedule_t::locate(reading);
                 node_id_t const run = static_cast<node_id_t>(
-                    min_of<std::size_t>(range.bound - landing, chunk_schedule_t::rows_in(from.chunk) - from.offset));
+                    min_of<std::size_t>(range.bound - landing, chunk_schedule_t::nodes_in(from.chunk) - from.offset));
                 std::memcpy(index_->vectors_[into], source.vectors_[from], run * row_bytes);
                 if (index_->stores_norms())
                     std::memcpy(&index_->norms_[into], &source.norms_[from], run * sizeof(vector_norms_t));
@@ -3238,7 +3242,7 @@ struct ram_index {
             return status_t::success_k;
         }
 
-        /** Publishes the appended rows once every chunk's vectors and neighbors landed: the claim
+        /** Publishes the appended nodes once every chunk's vectors and neighbors landed: the claim
          *  consumed first, then identity, then the watermark last with a release. The identity
          *  releases too, and moves only an open dispenser: a closed one stays closed for its closer
          *  to reopen past the rows. A success spends the plan; a refusal leaves it whole, so the
@@ -3544,14 +3548,14 @@ struct ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return {0, status_t::uninitialized_k};
 
-        std::size_t const ceiling_rows = atomic_ref<std::size_t const>(ceiling_rows_).load(std::memory_order_relaxed);
+        std::size_t const ceiling_rows = atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed);
         std::size_t added_capacity = 0;
         while (added_capacity < minimal_capacity) {
-            std::size_t const hosted_rows = chunk_schedule_t::rows_before(chunks_count_);
+            std::size_t const hosted_rows = chunk_schedule_t::nodes_before(chunks_count_);
             if (chunks_count_ == max_chunks_k || hosted_rows >= ceiling_rows)
                 return {added_capacity, status_t::overflow_k};
 
-            std::size_t const covered_rows = chunk_schedule_t::rows_before(chunks_count_ + 1u);
+            std::size_t const covered_rows = chunk_schedule_t::nodes_before(chunks_count_ + 1u);
             // Norms exist only when the finalize reads them, which a dot does on compensated kits
             // alone. The all-ones neighbors fill is load-bearing: a sentinel leading slot reads as
             // unpublished, and sentinel tails terminate short rows, so no counts are stored.
@@ -3562,7 +3566,7 @@ struct ram_index {
             if (failed(covered)) return {added_capacity, covered};
 
             // A chunk crossing the ceiling hosts only the rows below it.
-            added_capacity += min_of(chunk_schedule_t::rows_in(chunks_count_), ceiling_rows - hosted_rows);
+            added_capacity += min_of(chunk_schedule_t::nodes_in(chunks_count_), ceiling_rows - hosted_rows);
             ++chunks_count_;
             // The all-ones ID is the sentinel: account one row less in the final chunk, so no
             // claim can dispense it and the dispenser never wraps.
@@ -3586,7 +3590,7 @@ struct ram_index {
     expected<node_id_t> claim_capacity(std::size_t count) noexcept {
         // Rejected before the counter dance, so it neither grows the index in vain nor overflows
         // the signed capacity arithmetic below.
-        if (count > atomic_ref<std::size_t const>(ceiling_rows_).load(std::memory_order_relaxed))
+        if (count > atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed))
             return {node_id_unknown_k, status_t::overflow_k};
         while (true) {
             // One unconditional subtract, and its sign says what happened; the deficit it can
@@ -4038,7 +4042,7 @@ struct ram_index {
         for (node_id_t row = 0; row != visible;) {
             location_t const location = chunk_schedule_t::locate(row);
             node_id_t const run = static_cast<node_id_t>(
-                min_of<std::size_t>(visible - row, chunk_schedule_t::rows_in(location.chunk) - location.offset));
+                min_of<std::size_t>(visible - row, chunk_schedule_t::nodes_in(location.chunk) - location.offset));
             std::memset(neighbors_[location], 0xFF, run * row_bytes);
             row += run;
         }
@@ -4080,8 +4084,9 @@ struct ram_index {
     /** Adds the published @p row members the walk's candidates lack, scored against the node, past
      *  the walk's breadth: its nearer finds evict the far members, the long links among them, which
      *  must still compete. @return The distances computed. */
-    std::size_t add_row_candidates_(vector_view_t own_vector, vector_norms_t own_norms, std::span<node_id_t const> row,
-                                    node_id_t first_invisible_id, traversal_context_t& context) const noexcept {
+    std::size_t add_neighbor_candidates_(vector_view_t own_vector, vector_norms_t own_norms,
+                                         std::span<node_id_t const> row, node_id_t first_invisible_id,
+                                         traversal_context_t& context) const noexcept {
         results_array_t& results = context.results;
         quad<node_id_t> lane_ids;
         quad<vector_view_t> lane_vectors;
@@ -4148,7 +4153,8 @@ struct ram_index {
         if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
                                  context, context.results, dummy_fold_t {}, seeds, single_zero_rescoring_t {})))
             ++context.saturated_walks;
-        context.computed_distances += add_row_candidates_(own_vector, own_norms, seeds, first_invisible_id, context);
+        context.computed_distances += add_neighbor_candidates_(own_vector, own_norms, seeds, first_invisible_id,
+                                                               context);
 
         selection_t& selected = context.selected_neighbors;
         std::size_t const refine_distances = select_diverse(context.results, node_id, node_connectivity, selected,
@@ -4347,8 +4353,8 @@ struct ram_index {
         vector_norms_t const query_norms = norms(query);
         distance_t threshold = std::numeric_limits<distance_t>::max();
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
-             first += chunk_schedule_t::rows_in(chunk++)) {
-            std::size_t const rows_count = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
+             first += chunk_schedule_t::nodes_in(chunk++)) {
+            std::size_t const rows_count = min_of(chunk_schedule_t::nodes_in(chunk), first_invisible_id - first);
             for (std::size_t row = 0; row < rows_count; row += quad_lanes_k) {
                 std::size_t const lanes = min_of<std::size_t>(quad_lanes_k, rows_count - row);
                 quad<vector_view_t> lane_rows, next_rows;
@@ -4362,7 +4368,7 @@ struct ram_index {
                 }
                 quad<distance_t> const lane_distances =
                     scores(query, query_norms, lane_rows, lane_norms, next_rows).distances;
-                auto keep_row = [&](scan_payload_t contender) noexcept {
+                auto keep_entry = [&](scan_payload_t contender) noexcept {
                     distance_t const distance = lane_distances[contender - row];
                     if (distance < threshold)
                         threshold = land(0, {static_cast<node_id_t>(first + contender), distance});
@@ -4375,8 +4381,8 @@ struct ram_index {
                     nodes[filled] = static_cast<node_id_t>(first + row + lane);
                     payloads[filled++] = static_cast<scan_payload_t>(row + lane);
                 }
-                ask_contenders(admits, nodes, payloads, filled, keep_row);
-                settle_predicate(admits, keep_row);
+                ask_contenders(admits, nodes, payloads, filled, keep_entry);
+                settle_predicate(admits, keep_entry);
             }
         }
         context.computed_distances += first_invisible_id;
@@ -4429,8 +4435,8 @@ struct ram_index {
         std::size_t const block_rows = max_of((cache_bytes - min_of(cache_bytes, pack_stride)) / row_bytes,
                                               tiles_kit_t::stream_rows_k);
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
-             first += chunk_schedule_t::rows_in(chunk++)) {
-            std::size_t const chunk_rows = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
+             first += chunk_schedule_t::nodes_in(chunk++)) {
+            std::size_t const chunk_rows = min_of(chunk_schedule_t::nodes_in(chunk), first_invisible_id - first);
             std::size_t const step_rows = cache_bytes ? block_rows : chunk_rows;
             for (std::size_t block_first = 0; block_first < chunk_rows; block_first += step_rows) {
                 std::size_t const rows = min_of(step_rows, chunk_rows - block_first);
@@ -4874,7 +4880,7 @@ struct ram_index {
     alignas(default_alignment_k) geometry_t geometry_ {};
 
     /** Rows the index may ever host, stored by the reservation that froze the geometry. */
-    std::size_t ceiling_rows_ = max_node_count_k;
+    std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** The distance kind every walk ranks by; only the distance epilogue and the norms chunks
      *  read it. */

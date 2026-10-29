@@ -1,52 +1,108 @@
-# The package files, the install rules and export set, and the Swift artifact.
+# The package files, the install rules and export sets, the Swift artifact, and the preview SDK archive.
 
-# The package files: a pkg-config file, so other tools can find this, and the CMake config with its version file. A
-# header-only package fits any architecture, and `ARCH_INDEPENDENT` declares exactly that - no hand-written version
-# template needed.
+# The package files: a pkg-config file, so other tools can find this, and the CMake config with its version file. The
+# package holds the compiled libraries, so its config lands under `LIBDIR`, one per architecture.
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-set(usearch_config_install_dir_ "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}")
-set(usearch_targets_export_name_ "${PROJECT_NAME}Targets")
+set(usearch_config_install_dir_ "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 set(usearch_cmake_version_config_file_ "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake")
 set(usearch_cmake_project_config_file_ "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Config.cmake")
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
 write_basic_package_version_file(
     ${usearch_cmake_version_config_file_}
     VERSION ${PROJECT_VERSION}
-    COMPATIBILITY AnyNewerVersion ARCH_INDEPENDENT
+    COMPATIBILITY AnyNewerVersion
 )
-configure_file(cmake/config.cmake.in ${usearch_cmake_project_config_file_} @ONLY)
+configure_file(cmake/usearchConfig.cmake.in ${usearch_cmake_project_config_file_} @ONLY)
 
-# The headers, the package files and the export set, which records the siblings without headers - each owns its own - so
-# `usearch::header` names nothing a consumer cannot resolve. Both exports read the set as it stands when called, so they
-# trail every target that belongs to it.
+# The `.pc` spells its prefix against `${pcfiledir}`, so it stays correct after `cmake --install --prefix` moves the
+# tree; `file(RELATIVE_PATH)` ends a path to an ancestor with a slash, which the `.` closes. `GNUInstallDirs` returns a
+# relative path unless a distro forced an absolute one, and only the former may follow a prefix.
+file(RELATIVE_PATH usearch_pc_relative_prefix_ "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+set(usearch_pc_prefix_ "\${pcfiledir}/${usearch_pc_relative_prefix_}.")
+if (IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+    set(usearch_pc_libdir_ "${CMAKE_INSTALL_LIBDIR}")
+else ()
+    set(usearch_pc_libdir_ "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+endif ()
+if (IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(usearch_pc_includedir_ "${CMAKE_INSTALL_INCLUDEDIR}")
+else ()
+    set(usearch_pc_includedir_ "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+endif ()
+configure_file(cmake/usearch.pc.in "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" @ONLY)
+
+# The headers, the package files and three export sets, one per component. The preview SDK takes the stable C interface,
+# its C++ wrappers and `usearchTargets`, the shared library; `usearchStaticTargets` holds the archive. The header-only
+# core is a component of its own, with `usearchHeaderTargets`, which records the siblings without headers - each owns
+# its own - so `usearch::header` names nothing a consumer cannot resolve. Every export reads its set as it stands when
+# called, so they trail every target that belongs to it.
 if (USEARCH_INSTALL)
-    install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    install(FILES ${usearch_cmake_project_config_file_} ${usearch_cmake_version_config_file_}
-            DESTINATION ${usearch_config_install_dir_}
+    install(
+        DIRECTORY c/usearch cpp/usearch
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT sdk
+    )
+    install(
+        DIRECTORY include/usearch
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT core
+    )
+    install(
+        FILES LICENSE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/usearch
+        COMPONENT sdk
+    )
+    install(
+        FILES ${usearch_cmake_project_config_file_} ${usearch_cmake_version_config_file_}
+        DESTINATION ${usearch_config_install_dir_}
+        COMPONENT sdk
+    )
+    install(
+        FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig"
+        COMPONENT sdk
     )
     install(
         TARGETS usearch_core usearch_header
-        EXPORT ${usearch_targets_export_name_}
+        EXPORT ${PROJECT_NAME}HeaderTargets
         FILE_SET HEADERS
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT core
         INCLUDES
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" DESTINATION "${CMAKE_INSTALL_DATADIR}/pkgconfig")
     if (usearch_sibling_targets_)
-        install(TARGETS ${usearch_sibling_targets_} EXPORT ${usearch_targets_export_name_})
+        install(
+            TARGETS ${usearch_sibling_targets_}
+            EXPORT ${PROJECT_NAME}HeaderTargets
+            COMPONENT core
+        )
     endif ()
     export(
         TARGETS usearch_core usearch_header ${usearch_sibling_targets_}
         NAMESPACE ${PROJECT_NAME}::
-        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}Targets.cmake"
+        FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}HeaderTargets.cmake"
     )
     install(
-        EXPORT ${usearch_targets_export_name_}
+        EXPORT ${PROJECT_NAME}HeaderTargets
         NAMESPACE ${PROJECT_NAME}::
         DESTINATION ${usearch_config_install_dir_}
+        COMPONENT core
     )
+    if (USEARCH_BUILD_SHARED)
+        install(
+            EXPORT ${PROJECT_NAME}Targets
+            NAMESPACE ${PROJECT_NAME}::
+            DESTINATION ${usearch_config_install_dir_}
+            COMPONENT sdk
+        )
+        install(
+            EXPORT ${PROJECT_NAME}StaticTargets
+            NAMESPACE ${PROJECT_NAME}::
+            DESTINATION ${usearch_config_install_dir_}
+            COMPONENT static
+        )
+    endif ()
 endif ()
 
 # The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
@@ -87,4 +143,21 @@ if (USEARCH_BUILD_SWIFT)
         DEPENDS usearch_static
         VERBATIM
     )
+endif ()
+
+# The preview SDK: `cpack --config build_release/CPackConfig.cmake` archives the `sdk` component alone, the stripped
+# shared library with the C headers, the C++ wrappers, the CMake package, the `.pc` and the license, as
+# `usearch-<version>-<platform>-sdk.tar.gz`. A parent project packages itself.
+if (USEARCH_INSTALL AND PROJECT_IS_TOP_LEVEL)
+    set(CPACK_PACKAGE_NAME ${PROJECT_NAME})
+    if (WIN32)
+        set(CPACK_GENERATOR ZIP)
+    else ()
+        set(CPACK_GENERATOR TGZ)
+    endif ()
+    set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+    set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY ON)
+    set(CPACK_COMPONENTS_ALL sdk)
+    set(CPACK_STRIP_FILES ON)
+    include(CPack)
 endif ()

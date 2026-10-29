@@ -43,7 +43,7 @@
  *
  *  A VRAM handle builds and searches on the devices its placement names, its shards spread over
  *  them, several to a device when asked, and never replicated, so capacity is what those devices
- *  host together: the geometry freezes at init, and rows grow on demand up to what they hold.
+ *  host together: the geometry freezes at init, and capacity grows on demand up to what they hold.
  *  Planes stay device-resident and never migrate, so an index outgrowing its devices fails rather
  *  than paging to the host - the answer to a dataset past one accelerator is to name more of them.
  *
@@ -70,12 +70,12 @@
  *
  *  @section dense_index_concurrency Concurrency & Thread Safety
  *
- *  An insertion is all-or-nothing per call, and the rows of one call become visible at once on RAM
- *  and VRAM handles alike, so a concurrent search sees all of them or none. On a RAM handle every
- *  fallible step precedes the claim of the first entry identity, so a failed call publishes nothing
- *  and leaves the reported size untouched. A VRAM call that fails after its first launch publishes
- *  none of its rows either, and leaves the handle refusing every later mutation, while searches
- *  continue.
+ *  An insertion is all-or-nothing per call, and the entries of one call become visible at once on
+ *  RAM and VRAM handles alike, so a concurrent search sees all of them or none. On a RAM handle
+ *  every fallible step precedes the claim of the first entry identity, so a failed call publishes
+ *  nothing and leaves the reported size untouched. A VRAM call that fails after its first launch
+ *  publishes none of its entries either, and leaves the handle refusing every later mutation, while
+ *  searches continue.
  *
  *  A handle may be shared across threads. On a RAM handle, insertions and searches overlap freely:
  *  searches read only entries published behind the visibility watermark and never write to the
@@ -95,15 +95,15 @@
  *
  *  Every verb is safe beside every other on the same handle, with no rule to keep any of them from
  *  starting. Each RAM or VRAM handle carries one gate: insertions hold its shared side for their
- *  own call, and the verbs that empty or move rows in place - a clear, an absorb consuming a donor,
- *  a compaction, a split emptying its source, and the closing step of every refinement, absorb,
- *  compaction, split, load and VRAM save - take it alone or report @c usearch_status_contended_k,
- *  never waiting. Readers take no lock at all: a search, a product, an attention call, a lookup of
- *  rows or a cursor pull reads one epoch word before and after its work, repeats once when a
- *  destructive step ran in between, and reports @c usearch_status_contended_k when another one did.
- *  Nothing a reader can reach is freed while the handle lives: an emptied shard keeps its memory
- *  until the handle is freed, and a count of a key stays exact throughout, as a compaction moves
- *  each key's entry with one atomic store.
+ *  own call, and the verbs that empty or move entries in place - a clear, an absorb consuming a
+ *  donor, a compaction, a split emptying its source, and the closing step of every refinement,
+ *  absorb, compaction, split, load and VRAM save - take it alone or report
+ *  @c usearch_status_contended_k, never waiting. Readers take no lock at all: a search, a product,
+ *  an attention call, a lookup of vectors or a cursor pull reads one epoch word before and after
+ *  its work, repeats once when a destructive step ran in between, and reports
+ *  @c usearch_status_contended_k when another one did. Nothing a reader can reach is freed while
+ *  the handle lives: an emptied shard keeps its memory until the handle is freed, and a count of a
+ *  key stays exact throughout, as a compaction moves each key's entry with one atomic store.
  *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
@@ -128,15 +128,15 @@
  *
  *  A VRAM handle refuses a search with a @c predicate, since a host predicate cannot narrow a
  *  device walk, and an AMD or Apple one refuses a @c usearch_traversal_scan_k scan, both with
- *  @c usearch_status_unsupported_k; RAM and NVMe answer both.
- *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search.
+ *  @c usearch_status_unsupported_k; RAM and NVMe answer both. @c usearch_dense_cursor_init answers
+ *  on RAM, while VRAM vectors are read back by key or by search.
  *  @c usearch_dense_search_stream_init, @c usearch_dense_sample and @c usearch_dense_split are
  *  unsupported on both, and so are a cursor opened at @c starts and a pull asking for @c links.
  *
  *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
- *  @c usearch_dense_health included, its rows read through the executor's engines. Every mutating
- *  verb answers @c usearch_status_read_only_k, and saving answers @c usearch_status_unsupported_k,
- *  since a view already is its checkpoint.
+ *  @c usearch_dense_health included, its entries read through the executor's engines. Every
+ *  mutating verb answers @c usearch_status_read_only_k, and saving answers
+ *  @c usearch_status_unsupported_k, since a view already is its checkpoint.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
@@ -147,10 +147,10 @@
  *  best score, summed per key.
  *
  *  @c usearch_dense_multiply is an approximate A × Bᵀ in the shape of BLAS' @c ?GEMM, with the
- *  indexed rows as B, and a sparse output: every pair the traversal scored, not only the nearest.
- *  Unlike a sparse @c ?GEMM, the output pattern is not implied by the operands' own pattern - it
- *  is whatever the walk touched - so the product is dense-in, sparse-out, and its sparsity
- *  follows the dots: the walk ranks by 1 − dot, so it skips the low and negative ones.
+ *  indexed vectors as B, and a sparse output: every pair the traversal scored, not only the
+ *  nearest. Unlike a sparse @c ?GEMM, the output pattern is not implied by the operands' own
+ *  pattern - it is whatever the walk touched - so the product is dense-in, sparse-out, and its
+ *  sparsity follows the dots: the walk ranks by 1 − dot, so it skips the low and negative ones.
  *
  *  @c usearch_dense_attend folds a softmax over that same walk. A running maximum, partition,
  *  and weighted value sum update per scored batch and rescale whenever the maximum moves - the
@@ -187,12 +187,13 @@ extern "C" {
 typedef struct usearch_dense_index_handle_t* usearch_dense_index_t;
 
 /**
- *  @brief A walk over the graph yielding each row's key with the keys it links to, every row as
+ *  @brief A walk over the graph yielding each entry's key with the keys it links to, every entry as
  *      stored or breadth-first from start keys, which export, migration, and visualization read.
  *
- *  Each shard's publication watermark is read as the walk enters that shard, so a row once passed
- *  is never revisited, while a later shard may still carry rows published after the walk began.
- *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k.
+ *  Each shard's publication watermark is read as the walk enters that shard, so an entry once
+ *  passed is never revisited, while a later shard may still carry entries published after the walk
+ *  began. Each pull names the index again; an overlapping pull reports
+ *  @c usearch_status_contended_k.
  */
 typedef struct usearch_dense_cursor_handle_t* usearch_dense_cursor_t;
 
@@ -218,7 +219,7 @@ typedef struct usearch_dense_search_stream_handle_t* usearch_dense_search_stream
 typedef struct usearch_dense_refinement_handle_t* usearch_dense_refinement_t;
 
 /** The dense metric kinds supported out of the box, with SIMD kernels dispatched by the
- *  machine's capabilities. The last two read their rows as @c usearch_scalar_u1x8_k bit sets
+ *  machine's capabilities. The last two read their vectors as @c usearch_scalar_u1x8_k bit sets
  *  and refuse any other quantization; the first four refuse that one. */
 typedef enum usearch_dense_metric_t {
 
@@ -232,10 +233,10 @@ typedef enum usearch_dense_metric_t {
     usearch_dense_metric_inner_k = 1,
 
     /** Cosine distance in [0, 2], zero for identical directions and blind to magnitude,
-     *  which is precomputed once per row at insertion rather than per comparison. */
+     *  which is precomputed once per vector at insertion rather than per comparison. */
     usearch_dense_metric_angular_k = 2,
 
-    /** L2 distance, non-negative and zero only for identical rows - the scale-sensitive
+    /** L2 distance, non-negative and zero only for identical vectors - the scale-sensitive
      *  counterpart to angular, where a doubled vector is far from its original rather than
      *  identical to it. */
     usearch_dense_metric_euclidean_k = 3,
@@ -244,8 +245,8 @@ typedef enum usearch_dense_metric_t {
      *  the same. */
     usearch_dense_metric_hamming_k = 4,
 
-    /** Differing bits over union bits in [0, 1], ignoring the zeros both rows share - the
-     *  kind for sparse sets, where Hamming would call two nearly-empty rows identical. */
+    /** Differing bits over union bits in [0, 1], ignoring the zeros both vectors share - the
+     *  kind for sparse sets, where Hamming would call two nearly-empty vectors identical. */
     usearch_dense_metric_jaccard_k = 5,
 } usearch_dense_metric_t;
 
@@ -260,9 +261,9 @@ USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_byt
  *  @brief The arguments of @c usearch_dense_init_ram - the geometry and metric the empty index
  *      freezes at init, and where its shards live.
  *
- *  Stored rows round up to whole steps of the distance kit the build picked, zero-tailed, so no
- *  step load straddles a row's alignment; the memory is slightly larger for it, and that is not a
- *  knob. Saved payloads keep logical rows, so they move between builds with different kits.
+ *  Stored vectors round up to whole steps of the distance kit the build picked, zero-tailed, so no
+ *  step load straddles a vector's alignment; the memory is slightly larger for it, and that is not
+ *  a knob. Saved payloads keep logical vectors, so they move between builds with different kits.
  */
 typedef struct usearch_dense_init_ram_t {
 
@@ -295,7 +296,7 @@ typedef struct usearch_dense_init_ram_t {
 } usearch_dense_init_ram_t;
 
 /**
- *  @brief Creates an empty, mutable index in host memory, its geometry frozen, so it takes rows
+ *  @brief Creates an empty, mutable index in host memory, its geometry frozen, so it takes vectors
  *      without a reservation.
  *
  *  @par Statuses:
@@ -335,8 +336,8 @@ typedef struct usearch_dense_init_vram_t {
 } usearch_dense_init_vram_t;
 
 /**
- *  @brief Creates an empty, mutable index in device memory, its geometry frozen, so it takes rows
- *      without a reservation. @ref dense_index_gpu_acceleration
+ *  @brief Creates an empty, mutable index in device memory, its geometry frozen, so it takes
+ *      vectors without a reservation. @ref dense_index_gpu_acceleration
  *
  *  @par Statuses:
  *  - @c usearch_status_config_mismatch_k Zero @c dimensions, a @c connectivity that is not a
@@ -724,19 +725,19 @@ typedef struct usearch_dense_insert_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Rows to admit - the batch axis of @c keys and @c vectors. */
+    /** Entries to admit - the batch axis of @c keys and @c vectors. */
     size_t count;
 
-    /** The identities to admit the rows under, one per row. */
+    /** The identities to admit the entries under, one per entry. */
     usearch_keys_view_t keys;
 
-    /** The rows to admit, converted on ingest to the stored type. */
+    /** The vectors to admit, converted on ingest to the stored type. */
     usearch_rows_view_t vectors;
 
     /** The @b optional breadth of the candidates the build walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows admitted, which reports and cannot cancel. */
+    /** The @b optional handler, called with entries admitted, which reports and cannot cancel. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -748,16 +749,16 @@ typedef struct usearch_dense_insert_t {
  *      a count of one. Overlaps safely with concurrent searches on the same handle.
  *  @ref dense_index_concurrency
  *
- *  An insertion is all-or-nothing per call, with or without a handler, and its rows become visible
- *  at once on RAM and VRAM handles alike, so a concurrent search sees every row of the call or none
- *  of them. Every row is claimed before the handler's first report, and a claimed row cannot be
- *  withdrawn, so the handler reports progress but cannot cancel: a returned @c usearch_cancel_k is
- *  ignored.
+ *  An insertion is all-or-nothing per call, with or without a handler, and its entries become
+ *  visible at once on RAM and VRAM handles alike, so a concurrent search sees every entry of the
+ *  call or none of them. Every entry is claimed before the handler's first report, and a claimed
+ *  entry cannot be withdrawn, so the handler reports progress but cannot cancel: a returned
+ *  @c usearch_cancel_k is ignored.
  *
  *  On a RAM handle every fallible step runs before the first entry identity is claimed, so a failed
  *  call leaves the index untouched. A VRAM call that fails after its first launch publishes none of
- *  its rows and leaves the handle refusing every later mutation with that failure, while searches
- *  continue.
+ *  its entries and leaves the handle refusing every later mutation with that failure, while
+ *  searches continue.
  *
  *  @code{.c}
  *  usearch_outcome_t outcome = {0};
@@ -824,10 +825,10 @@ typedef struct usearch_dense_refine_t {
  *  instead. A caller loops until @c changed falls below whatever change rate they consider
  *  settled.
  *
- *  Re-selection alone can strand an entry no search reaches, so every call closes by re-linking
- *  them: unreachable entries re-select from scratch, and whatever the diversity judgment still
- *  drops is reconnected to a reachable one. A cancelled call skips the rest of the re-selection but
- *  still re-links, so it never leaves entries unreachable.
+ *  Re-selection alone can leave an island, an entry no search reaches, so every call closes by
+ *  re-linking them: unreachable entries re-select from scratch, and whatever the diversity judgment
+ *  still drops is reconnected to a reachable one. A cancelled call skips the rest of the
+ *  re-selection but still re-links, so it never leaves entries unreachable.
  *
  *  On a RAM handle searches may run throughout: re-selection publishes one node at a time and never
  *  removes a node, so a concurrent walk sees either the old neighbors or the new ones. On a VRAM
@@ -909,7 +910,7 @@ typedef struct usearch_dense_search_t {
     /** Queries to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
-    /** The rows to resolve, one query apiece. */
+    /** The query vectors to resolve, one per query. */
     usearch_rows_view_t queries;
 
     /** Output for the run, inside @c arena. */
@@ -925,8 +926,8 @@ typedef struct usearch_dense_search_t {
      *  it. */
     size_t expansion_factor;
 
-    /** How rows are reached: a walk, the default, or an exact scan of every row, on all but AMD and
-     *  Apple VRAM. */
+    /** How entries are reached: a walk, the default, or an exact scan of every entry, on all but
+     *  AMD and Apple VRAM. */
     usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a scored quad of candidates at a time. */
@@ -941,21 +942,22 @@ typedef struct usearch_dense_search_t {
 
 /**
  *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
- *      graph or exact by scanning every row - the native batch operation, parallelized internally.
+ *      graph or exact by scanning every entry - the native batch operation, parallelized
+ *      internally.
  *
  *  One query is a count of one. Never writes to the index, so any number may overlap with
  *  insertions. @ref dense_index_concurrency
  *
  *  A scan walks no graph. On RAM the queries split into blocks, each taken by one of the executor's
  *  threads: a block of many queries packs once into the operand layout of the CPU's matrix kernels
- *  and streams every stored row against the pack where it lies, while a lone query takes the walk's
- *  own 4-way kernels. On NVMe the queries pack once and the threads split the value column instead,
- *  each run landing beside its keys, so the column is read once and in order. Either way each
- *  query's matches merge into its output row as the pass advances. On NVIDIA VRAM the batch scans
- *  every shard's rows on the device, where the shards' matches merge too. Every residency ranks by
- *  the distances its walk reports. A @c predicate is asked only about rows closer than the worst
- *  match the query already holds, which makes the scan the fallback for filters too selective for a
- *  walk to cross.
+ *  and streams every stored vector against the pack where it lies, while a lone query takes the
+ *  walk's own 4-way kernels. On NVMe the queries pack once and the threads split the value column
+ *  instead, each run landing beside its keys, so the column is read once and in order. Either way
+ *  each query's matches merge into its output row as the pass advances. On NVIDIA VRAM the batch
+ *  scans every shard's vectors on the device, where the shards' matches merge too. Every residency
+ *  ranks by the distances its walk reports. A @c predicate is asked only about entries closer than
+ *  the worst match the query already holds, which makes the scan the fallback for filters too
+ *  selective for a walk to cross.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
@@ -982,7 +984,7 @@ typedef struct usearch_dense_search_t {
  *      .count = 32, .queries = {rows_base, 256 * sizeof(float), 256, usearch_scalar_f32_k},
  *      .matches = &matches, .arena = arena, .wanted = 10,
  *      .predicate = {admits_tenant, &tenant}});
- *  // Row 3's nearest key, valid until the next call given `arena`.
+ *  // Query 3's nearest key, valid until the next call given arena.
  *  usearch_key_t nearest = matches.keys[3 * matches.columns];
  *  @endcode
  *
@@ -1037,7 +1039,8 @@ typedef struct usearch_dense_get_t {
     /** The handle to be queried. */
     usearch_dense_index_t index;
 
-    /** The executor whose stream or thread copies the rows; its kind must match the residency. */
+    /** The executor whose stream or thread copies the vectors; its kind must match the
+     *  residency. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1049,10 +1052,10 @@ typedef struct usearch_dense_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** Output for every row, packed at their natural width, inside @c arena. */
+    /** Output for every vector, packed at their natural width, inside @c arena. */
     usearch_rows_view_t* vectors;
 
-    /** The @b optional output for the rows written; zero when the key is absent. */
+    /** The @b optional output for the vectors written; zero when the key is absent. */
     size_t* written;
 
     /** Memory for @c vectors, rewound by the call. */
@@ -1066,11 +1069,11 @@ typedef struct usearch_dense_get_t {
  *  @brief Retrieves every vector stored under one key into @c arena, one row per entry sharing the
  *      key, shard by shard and in insertion order within each - one call, however many there are.
  *
- *  The rows span @c written entries; an absent key leaves @c vectors->data @c NULL.
+ *  The vectors span @c written entries; an absent key leaves @c vectors->data @c NULL.
  *
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k An unknown @c outputs_scalar.
- *  - @c usearch_status_shape_mismatch_k Sub-byte rows ending inside a byte.
+ *  - @c usearch_status_shape_mismatch_k Sub-byte vectors ending inside a byte.
  *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
  *  - @c usearch_status_device_k An arena or an executor on another residency or device.
  *  - @c usearch_status_contended_k The arena serves another call, another call holds the
@@ -1100,7 +1103,7 @@ typedef struct usearch_dense_absorb_t {
     /** Donor handles to absorb. */
     size_t count;
 
-    /** Array of @c count handles, each consumed and nulled once its rows are published here. */
+    /** Array of @c count handles, each consumed and nulled once its entries are published here. */
     usearch_dense_index_t* donors;
 
     /** The @b optional output for the nodes the closing refine changed. */
@@ -1125,11 +1128,11 @@ typedef struct usearch_dense_absorb_t {
  *      rather than re-inserting their vectors and linking each in by walks across. Donor handles
  *      are consumed and must not be used afterwards, not even for @c usearch_dense_free.
  *
- *  The donors land one after another, each all-or-nothing: its rows append to @c index shard by
+ *  The donors land one after another, each all-or-nothing: its entries append to @c index shard by
  *  shard with their edges rebased, publish at once, and the donor is consumed, so at most one
- *  donor's rows are ever held twice. One refinement then walks every shard across the parts the
+ *  donor's entries are ever held twice. One refinement then walks every shard across the parts the
  *  donors appended, round by round, so a group of donors costs one refinement rather than one per
- *  donor. Readers of a RAM @c index may keep searching throughout, since unpublished rows hide
+ *  donor. Readers of a RAM @c index may keep searching throughout, since unpublished entries hide
  *  behind the watermark, while a VRAM one rewrites neighbors in place and admits no overlapping
  *  search, as refinement does. Insertions into @c index or into a donor arriving meanwhile are
  *  refused with @c usearch_status_contended_k, while searches of a donor run throughout.
@@ -1183,8 +1186,8 @@ typedef struct usearch_dense_compact_t {
      *  source landed. */
     usearch_dense_index_t* sources;
 
-    /** The @b optional most rows one target shard holds; zero, or more than the target's own bound,
-     *  means that bound. */
+    /** The @b optional most entries one target shard holds; zero, or more than the target's own
+     *  bound, means that bound. */
     size_t shard_capacity;
 
     /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
@@ -1206,17 +1209,17 @@ typedef struct usearch_dense_compact_t {
 
 /**
  *  @brief Compacts every shard of the handles in @c sources into @c target under @c shard_capacity
- *      rows per shard, largest first, each into the first shard with room, so it ends with as few
- *      shards as fit; in place when @c target is among @c sources.
+ *      entries per shard, largest first, each into the first shard with room, so it ends with as
+ *      few shards as fit; in place when @c target is among @c sources.
  *
  *  The shard a bin keeps stays resident with its IDs, every other source shard lands after it with
- *  its edges rebased and its keys beside it, and only the appended rows walk the target across the
- *  parts and link in, then each target shard re-links what that strands, as @c usearch_dense_refine
- *  does. In place, a moved row's key moves with one atomic store, so lookups and searches of
- *  @c target run throughout and emptied shards stay as idle slots for its next generation. Once the
- *  call landed every source, each one but @c target is freed and nulled, as @c usearch_dense_absorb
- *  frees its donors; a failure frees none, those it consumed left empty and refusing insertions, so
- *  every handle in @c sources stays the caller's to free.
+ *  its edges rebased and its keys beside it, and only the appended entries walk the target across
+ *  the parts and link in, then each target shard re-links the islands that leaves, as
+ *  @c usearch_dense_refine does. In place, a moved entry's key moves with one atomic store, so
+ *  lookups and searches of @c target run throughout and emptied shards stay as idle slots for its
+ *  next generation. Once the call landed every source, each one but @c target is freed and nulled,
+ *  as @c usearch_dense_absorb frees its donors; a failure frees none, those it consumed left empty
+ *  and refusing insertions, so every handle in @c sources stays the caller's to free.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k @c target is an NVMe view.
@@ -1278,16 +1281,16 @@ typedef struct usearch_dense_split_t {
  *      graph-local parts keeping their edges rather than re-inserting their vectors, one part per
  *      receiver, and @c index left empty but live.
  *
- *  Every receiver is checked and held before the first part lands, so a refusal moves nothing.
- *  The part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
- *  links from its root, capped at an equal share of the rows, while rows no root reaches join the
- *  smallest part. A sharded handle splits shard by shard, part @c p of shard @c s landing in shard
- *  @c s of receiver @c p. Each part then lands in its receiver all-or-nothing, its edges rebased,
- *  its edges into other parts dropped, and the rows that lost one placed first; @c index clears
- *  once every part landed. Each receiver closes by refining the rows that lost an edge and
- *  re-linking what that strands, as @c usearch_dense_refine does. Insertions into @c index or a
- *  receiver arriving meanwhile are refused with @c usearch_status_contended_k, while searches of
- *  either run throughout.
+ *  Every receiver is checked and held before the first part lands, so a refusal moves nothing. The
+ *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
+ *  links from its root, capped at an equal share of the entries, while entries no root reaches join
+ *  the smallest part. A sharded handle splits shard by shard, part @c p of shard @c s landing in
+ *  shard @c s of receiver @c p. Each part then lands in its receiver all-or-nothing, its edges
+ *  rebased, its edges into other parts dropped, and the entries that lost one placed first;
+ *  @c index clears once every part landed. Each receiver closes by refining the entries that lost
+ *  an edge and re-linking the islands that leaves, as @c usearch_dense_refine does. Insertions into
+ *  @c index or a receiver arriving meanwhile are refused with @c usearch_status_contended_k, while
+ *  searches of either run throughout.
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_dense_refine: a cancel skips the rest of the re-selection, still re-links, and
@@ -1299,7 +1302,7 @@ typedef struct usearch_dense_split_t {
  *  - @c usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
  *    @c NULL slot in them.
  *  - @c usearch_status_config_mismatch_k A receiver of another residency, scalar, class, metric,
- *    geometry or shard count, one holding rows, one on a device the executor does not drive, one
+ *    geometry or shard count, one holding entries, one on a device the executor does not drive, one
  *    named twice, or @c index itself.
  *  - @c usearch_status_contended_k An insertion in flight on @c index or on a receiver, or on
  *    VRAM a save of either; nothing moves.
@@ -1325,7 +1328,7 @@ typedef struct usearch_dense_refinement_init_t {
      *  @c usearch_dense_refinement_finish frees it. */
     usearch_dense_refinement_t* refinement;
 
-    /** The @b optional donors to absorb first, each consumed and nulled once its rows land; the
+    /** The @b optional donors to absorb first, each consumed and nulled once its entries land; the
      *  array must outlive the refinement. */
     usearch_dense_index_t* donors;
 
@@ -1357,7 +1360,7 @@ typedef struct usearch_dense_refinement_init_t {
  *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors or @c receivers, @c NULL
  *    @c donors for a nonzero @c count, one receiver alone, or donors and receivers both named.
  *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, scalar,
- *    class, metric or geometry, a receiver holding rows, or @c index itself.
+ *    class, metric or geometry, a receiver holding entries, or @c index itself.
  *  - @c usearch_status_contended_k An insertion, save or another refinement in flight on
  *    @c index.
  */
@@ -1441,7 +1444,7 @@ typedef struct usearch_dense_refinement_finish_t {
 } usearch_dense_refinement_finish_t;
 
 /**
- *  @brief Skips whatever re-selection a stopped refinement left, re-links what it strands as
+ *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
  *      @c usearch_dense_refine does, reports, reopens the index, and frees the handle. A
  *      refinement whose donors have not all landed re-links nothing and reports zeros.
  *
@@ -1463,7 +1466,7 @@ typedef struct usearch_dense_cursor_init_t {
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** The @b optional count of @c starts; zero walks every row as stored. */
+    /** The @b optional count of @c starts; zero walks every entry as stored. */
     size_t starts_count;
 
     /** The keys to walk from, in the order the walk begins with them. */
@@ -1473,9 +1476,9 @@ typedef struct usearch_dense_cursor_init_t {
 /**
  *  @brief Opens a walk over the current contents; see @c usearch_dense_cursor_t.
  *
- *  Without @c starts the cursor yields every row as stored. With them it yields the start keys'
- *  own rows first, in the order given, then the rows those link to, breadth-first, each row once,
- *  so a caller wanting only the starts' immediate links reads the rows of the first pulled
+ *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
+ *  own entries first, in the order given, then the entries those link to, breadth-first, each entry
+ *  once, so a caller wanting only the starts' immediate links reads the links of the first pulled
  *  entries. A key the index lacks starts nothing.
  *
  *  @par Statuses:
@@ -1504,17 +1507,17 @@ typedef struct usearch_dense_cursor_next_t {
     /** Output for the identities, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** The @b optional output for each row's links, the keys of the rows it links to, row @c i
-     *  spanning @c offsets[i] up to @c offsets[i+1], inside @c arena; @c NULL skips them. */
+    /** The @b optional output for each entry's links, the keys of the entries it links to, entry
+     *  @c i spanning @c offsets[i] up to @c offsets[i+1], inside @c arena; @c NULL skips them. */
     usearch_keys_tape_view_t* links;
 
-    /** Output for the rows written; zero when the walk is exhausted. */
+    /** Output for the entries written; zero when the walk is exhausted. */
     size_t* written;
 
     /** Memory for @c keys and @c links, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The upper bound on rows this pull writes. */
+    /** The upper bound on entries this pull writes. */
     size_t wanted;
 } usearch_dense_cursor_next_t;
 
@@ -1523,7 +1526,7 @@ typedef struct usearch_dense_cursor_next_t {
  *      links to, in the order @c usearch_dense_cursor_init describes; the vectors themselves come
  *      from @c usearch_dense_get.
  *
- *  Links name only rows published when the pull ran, as the graph stored them then. The keys are
+ *  Links name only entries published when the pull ran, as the graph stored them then. The keys are
  *  copied rather than borrowed from the index, so the batch stays valid until the next call given
  *  the same arena, however the cursor moves meanwhile.
  *
@@ -1560,7 +1563,7 @@ typedef struct usearch_dense_sample_t {
     /** Output for the identities drawn, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** Output for each draw's nearest earlier draws - their keys and distances, row @c i spanning
+    /** Output for each draw's nearest earlier draws - their keys and distances, draw @c i spanning
      *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
     usearch_matches_tape_view_t* links;
 
@@ -1925,36 +1928,38 @@ typedef struct usearch_dense_multiply_t {
     /** Left-hand rows - the batch axis. */
     size_t count;
 
-    /** The left-hand rows, multiplied against every indexed row the walk reaches. */
+    /** The left-hand rows, multiplied against every indexed vector the walk reaches. */
     usearch_rows_view_t left;
 
-    /** Output for the pairs inside @c arena: each one's indexed key and product, row @c i spanning
-     *  @c products->offsets[i] up to @c products->offsets[i+1]. */
+    /** Output for the pairs inside @c arena: each one's indexed key and product, query @c i
+     *  spanning @c products->offsets[i] up to @c products->offsets[i+1]. */
     usearch_matches_tape_view_t* products;
 
-    /** The @b optional output for the pairs written across every row. */
+    /** The @b optional output for the pairs written across every query. */
     size_t* written;
 
-    /** The @b optional output for the pairs scored across every row, before @c wanted cut any. */
+    /** The @b optional output for the pairs scored across every query, before @c wanted cut any. */
     size_t* required;
 
     /** Memory for @c products, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The @b optional bound on pairs kept per row, the first ones its walk scored; zero keeps every pair. */
+    /** The @b optional bound on pairs kept per query, the first ones its walk scored; zero keeps
+     *  every pair. */
     size_t wanted;
 
     /** The @b optional breadth of the candidates, which widens the emitted pattern; zero
      *  derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows resolved. */
+    /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
 
-    /** How rows are reached: a walk, the default; no residency multiplies by an exact scan yet. */
+    /** How entries are reached: a walk, the default; no residency multiplies by an exact scan
+     *  yet. */
     usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a scored quad of keys at a time; a pair it
@@ -1963,24 +1968,24 @@ typedef struct usearch_dense_multiply_t {
 } usearch_dense_multiply_t;
 
 /**
- *  @brief Approximate sparse product of a run of rows against the indexed rows - the linear
+ *  @brief Approximate sparse product of a run of rows against the indexed vectors - the linear
  *      algebra sibling of @c usearch_dense_search, reporting @b every pair the traversal scored
  *      instead of only the nearest. @ref dense_index_linear_algebra
  *
  *  A walk scores many times the pairs a search reports, and each of them is an exact product the
  *  caller would otherwise recompute - this verb hands them all back. Pairs arrive in traversal
  *  order rather than sorted, and carry no duplicates: the traversal's visited set admits each
- *  indexed row at most once per left-hand row. A wider @c expansion_factor widens the emitted
+ *  indexed vector at most once per left-hand row. A wider @c expansion_factor widens the emitted
  *  pattern, that breadth being what decides how much the walk touches.
  *
  *  How many pairs a walk scores is known only once it finishes, so the call lands the keys, the
  *  scores and their Apache Arrow offsets in @c arena as one ragged output, in one call. A non-zero
- *  @c wanted keeps the first pairs each row's walks scored, shard by shard in placement order,
- *  and @c required says how many there were.
+ *  @c wanted keeps the first pairs each left-hand row's walks scored, shard by shard in placement
+ *  order, and @c required says how many there were.
  *
- *  Cost is not O(m · n · k) but roughly O(count × expansion × connectivity × dimensions),
- *  sublinear in the indexed rows, which is the whole point of reading a product off a graph. The
- *  result is approximate, and the pairs the walk never reaches are the low and negative dots.
+ *  Cost is not O(m · n · k) but roughly O(count × expansion × connectivity × dimensions), sublinear
+ *  in the indexed vectors, which is the whole point of reading a product off a graph. The result is
+ *  approximate, and the pairs the walk never reaches are the low and negative dots.
  *
  *  Runs on the inner-product kinds, whose traversal scores are the products themselves. A graph
  *  frozen under a distance kind scored a different quantity, so the products it would report are
@@ -2100,7 +2105,7 @@ typedef struct usearch_dense_attend_t {
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
 
-    /** How rows are reached: a walk, the default; no residency attends by an exact scan yet. */
+    /** How entries are reached: a walk, the default; no residency attends by an exact scan yet. */
     usearch_traversal_t traversal;
 
     /** The @b optional admission filter, asked about a scored quad of keys at a time; a key it
@@ -2218,7 +2223,7 @@ typedef struct usearch_dense_maxsim_t {
     /** Memory for @c matches, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The @b optional bound on keys per query - the "k" over documents, not rows; zero keeps
+    /** The @b optional bound on keys per query - the "k" over documents, not token rows; zero keeps
      *  every key the query scored. */
     size_t wanted;
 

@@ -121,10 +121,10 @@ for (const batch of batches) {
   total += matches.scores.reduce((sum, score) => sum + score, 0);
 }
 
-using found = new Arena(), rows = new Arena(); // two live results, two arenas
+using found = new Arena(), fetched = new Arena(); // two live results, two arenas
 const nearest = index.search(query, 10, found).get(0);
 for (let position = 0; position < nearest.count; position++)
-  rerank(keyAt(nearest.keys, position), index.get(keyAt(nearest.keys, position), rows));
+  rerank(keyAt(nearest.keys, position), index.get(keyAt(nearest.keys, position), fetched));
 
 const calls = shards.map((shard, position) => shard.deferred(executor).search(queries, 10, arenas[position]));
 const results = [];
@@ -150,7 +150,7 @@ usearch.integerFromKey(usearch.keyAt(matches.keys, 0)); // its integer, when it 
 An integer key parks in the trailing eight bytes with the leading eight zeroed, so `42n` prints as `00000000-0000-0000-0000-00000000002a`.
 `integerFromKey` throws on a key whose leading bytes carry anything, since no integer spells it.
 
-Keys are accepted in every one of those spellings, plus a `BigUint64Array` of integer keys, which stays the convenient path for services that number their rows:
+Keys are accepted in every one of those spellings, plus a `BigUint64Array` of integer keys, which stays the convenient path for services that number their entries:
 
 ```js
 index.insert(42n, vector);                                     // a BigInt
@@ -270,19 +270,19 @@ A row run claiming more bytes than its array holds is refused before it crosses.
 ```js
 const matches = index.search(queries, 10, arena);
 
-matches.queries;   // Rows in the run, one per query
-matches.columns;   // Columns per row the call wrote, at most its 'k'
+matches.queries;   // Queries in the run
+matches.columns;   // Columns per query the call wrote, at most its 'k'
 matches.counts;    // BigUint64Array, the matches every query found
-matches.keys;      // Uint8Array, sixteen bytes per cell, rows laid end to end
+matches.keys;      // Uint8Array, sixteen bytes per cell, queries laid end to end
 matches.scores;    // Float64Array, one distance per cell
 
-const found = matches.get(0); // A MatchesRow, borrowed out of the run rather than copied
+const found = matches.get(0); // A QueryMatches, borrowed out of the run rather than copied
 found.count;                  // Matches this query found, never above `wanted`
 found.keys;                   // Sixteen bytes per match found
 found.scores;                 // One distance per match found
 ```
 
-Every view reads the arena's own memory rather than a copy, so reading a row costs nothing.
+Every view reads the arena's own memory rather than a copy, so reading a query costs nothing.
 Scores come back as a `Float64Array`, which is the width the ABI writes.
 
 The breadth of the candidates rides every call rather than the construction, so a recall sweep runs against one immutable index with no mutation between points:
@@ -334,7 +334,7 @@ The engine-side predicate and the progress handlers are not exposed, for the rea
 
 ### Retrieval and Streaming
 
-`get` exports the rows stored under one key into the arena, as `f32` unless `scalar` names another kind:
+`get` exports the vectors stored under one key into the arena, as `f32` unless `scalar` names another kind:
 
 ```js
 const stored = index.get(42n, arena); // The vectors under a key, as f32 DenseVectors
@@ -344,14 +344,14 @@ const packed = index.get(42n, bitsArena, { scalar: usearch.Scalar.U1x8 }); // Or
 
 `get` shapes its rows from the width and stride the call reports: `stored.data` holds `stored.rows` rows of `stored.columns` values, `stored.stride` bytes apart, and no rows when the key is absent.
 
-A cursor walks the index instead; each shard's watermark is read as the walk enters it, so a row once passed is never revisited.
-Without start keys it yields every row in storage order; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
-It lands each batch of up to `wanted` keys in the arena, and beside them the keys each links to when `links` asks; the rows themselves come from `get`:
+A cursor walks the index instead; each shard's watermark is read as the walk enters it, so an entry once passed is never revisited.
+Without start keys it yields every entry in storage order; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
+It lands each batch of up to `wanted` keys in the arena, and beside them the keys each links to when `links` asks; the vectors themselves come from `get`:
 
 ```js
 using cursor = index.on(executor).cursor();
-for (let batch = cursor.next(1024, arena, { links: true }); batch.rows; batch = cursor.next(1024, arena, { links: true })) {
-  writeOut(batch.keys, batch.links.get(0), batch.rows);
+for (let batch = cursor.next(1024, arena, { links: true }); batch.entries; batch = cursor.next(1024, arena, { links: true })) {
+  writeOut(batch.keys, batch.links.get(0), batch.entries);
 }
 ```
 
@@ -374,7 +374,7 @@ It adds and removes nothing, and searches may run throughout.
 ### Absorbing & Splitting
 
 Bigger indexes come from absorbing, never mutating: `absorb` appends every donor in turn, keeping its graph and linking it in across the appended part, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
-A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its rows may already have landed.
+A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have landed.
 A deferred absorb holds its donors until it is final, so meanwhile they refuse every verb and no other absorb can name them.
 
 ```js
@@ -389,15 +389,15 @@ How many pairs a walk scores is known only once it ends, so the call answers wit
 ```js
 const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Inner, dimensions: 128 });
 const products = index.on(executor).multiply(left, arena, { wanted: 64 }); // Up to 64 pairs per left row
-for (let row = 0; row < products.rows; row++) {
-  const pairs = products.get(row); // A MatchesRow over `offsets[row]` up to `offsets[row + 1]`
+for (let row = 0; row < products.queries; row++) {
+  const pairs = products.get(row); // A QueryMatches over `offsets[row]` up to `offsets[row + 1]`
   for (let pair = 0; pair < pairs.count; pair++) accumulate(row, usearch.keyAt(pairs.keys, pair), pairs.scores[pair]);
 }
-products.required; // Pairs scored across every row, before `wanted` cut any
+products.required; // Pairs scored across every left row, before `wanted` cut any
 ```
 
 Pairs arrive in traversal order rather than sorted, and a `wanted` bound keeps the first ones each walk scored; leaving it out keeps every pair.
-The Arrow `offsets`, one entry longer than the left rows, land in the arena beside the pairs.
+The Arrow `offsets`, one longer than the left rows, land in the arena beside the pairs.
 
 ### Late Interaction
 
@@ -410,7 +410,7 @@ index.on(executor).insert(documentKeys, tokenRows);
 
 // 32 padded token rows per query, up to 10 documents each, query `i` spanning `offsets[i]` up to `offsets[i + 1]`
 const documents = index.on(executor).maxsim(queryTokens, 32, 10, arena);
-const best = documents.get(0); // A MatchesRow over the first query's documents
+const best = documents.get(0); // A QueryMatches over the first query's documents
 ```
 
 ### Attention

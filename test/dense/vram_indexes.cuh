@@ -36,7 +36,7 @@ concept vram_collection = requires { indexes_type_::vendor_k; };
 
 /** The VRAM reading of the search race: the index admits no search during a mutation,
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
- *  reader walks the published rows only once the writer has returned. */
+ *  reader walks the published entries only once the writer has returned. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_type_::executor_t& placement) {
     using index_t = typename indexes_type_::index_t;
@@ -77,7 +77,8 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_typ
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(indexes.size(), nodes_count);
 
-    // Every published row resolves to a key inside the assigned range - never the key column's zero-fill.
+    // Every published entry resolves to a key inside the assigned range - never the key column's
+    // zero-fill.
     std::size_t mislabeled = 0;
     for (std::size_t searches = 0; searches != dense_reader_minimal_searches_k; ++searches) {
         auto const [search_result, search_status] = indexes.search(
@@ -91,9 +92,10 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_typ
     return failures;
 }
 
-/** The planned insertion: launched rows stay out of the size, the locators and a search until @c finish publishes
- *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
- *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
+/** The planned insertion: launched entries stay out of the size, the locators and a search until
+ *  @c finish publishes every one, a plan short of entries refuses to finish and stays whole, its
+ *  gate turns a second batch away, and a plan dying unfinished publishes nothing and leaves its
+ *  shard refusing every later batch. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_planned_insert(u64_t seed, typename indexes_type_::executor_t& placement) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -319,11 +321,11 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     return failures;
 }
 
-/** Device shards compact into one host shard: every row crosses with its key exactly once, the
- *  source ends empty, rows of every source shard link into the others', and the merged graph walks
- *  within noise of the recall at ten one built from every row at once reaches. Past
+/** Device shards compact into one host shard: every entry crosses with its key exactly once, the
+ *  source ends empty, nodes of every source shard link into the others', and the merged graph walks
+ *  within noise of the recall at ten one built from every entry at once reaches. Past
  *  @c connectivity+1 tiny shards the fold splits them into bins, each member keeping a slot of a
- *  row from every other, and the run stops once the re-selection landed and resumes. */
+ *  node from every other, and the run stops once the re-selection landed and resumes. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::executor_t& placement,
                                             std::size_t shards_count) {
@@ -351,7 +353,7 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
     failures += expect(
         succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
-    // The source shards land in their order, so each one's rows follow the counts before it.
+    // The source shards land in their order, so each one's nodes follow the counts before it.
     std::vector<std::size_t> shard_ends(shards_count);
     for (std::size_t shard = 0, end = 0; shard != shards_count; ++shard)
         shard_ends[shard] = end += source.shard(shard).size();
@@ -376,7 +378,8 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
                                       ? compact(compacted, target, driver.executor, host.executor)
                                       : resumed();
     failures += expect_eq(status, status_t::success_k);
-    failures += expect(result.source_shards == shards_count && result.target_shards == 1 && result.moved_rows == rows);
+    failures += expect(result.source_shards == shards_count && result.target_shards == 1 &&
+                       result.moved_entries == rows);
     failures += expect(result.graph.reselected_nodes > 0);
     failures += expect_eq(source.size(), 0u);
     failures += expect_eq(target.size(), rows);
@@ -385,8 +388,8 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     for (key_t const key : keys) miscounted += target.count(key) != 1;
     failures += expect_eq(miscounted, 0u);
 
-    // A row holding a row of another source shard is a link the fold made, and none points past the
-    // rows.
+    // A neighbor list holding a node of another source shard is a link the fold made, and none
+    // points past the nodes.
     ram_cursor<typename ram_t::index_t, synchronization_t::immutable_k, forkunion_allocator_t> cursor {target.shard(0)};
     failures += expect_eq(cursor.reserve(forkunion_allocator_t {no_memory_domain_k}), status_t::success_k);
     auto shard_of = [&](node_id_t row) noexcept {
@@ -467,8 +470,8 @@ std::size_t test_dense_vram_indexes_generations(u64_t seed, typename indexes_typ
     failures += expect((shard_sizes(filled) == std::vector<std::size_t> {1000, 1000, 1000, 1000, 500, 500}));
     failures += expect_eq(miscounted(filled, rows), 0u);
 
-    // 750 rows a shard, then a batch of 1000 tops both up to the bound and opens a generation for
-    // the other 500, whole, and a search reaches the new generation's rows.
+    // 750 entries a shard, then a batch of 1000 tops both up to the bound and opens a generation
+    // for the other 500, whole, and a search reaches the new generation's entries.
     indexes_type_ crossed {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(bounded(crossed));
     failures += expect_eq(insert(crossed, 0, 1500), status_t::success_k);

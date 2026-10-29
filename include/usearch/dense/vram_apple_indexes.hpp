@@ -540,12 +540,13 @@ struct vram_apple_indexes {
         // Every claim taken, a refusal from here on dies with the plan, which gives them back.
         plan.owner_ = this;
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            std::size_t const claimed_rows = plan.shares_[shard].first_id + plan.shares_[shard].rows;
+            std::size_t const claimed_entries = plan.shares_[shard].first_id + plan.shares_[shard].rows;
             if (!plan.shares_[shard].rows) continue;
-            reserve_capacity_t const grown {claimed_rows, static_cast<connectivity_t>(connectivity()), dimensions()};
+            reserve_capacity_t const grown {claimed_entries, static_cast<connectivity_t>(connectivity()), dimensions()};
             if (status_t const reserved = shards_[shard].index->reserve(grown).status; failed(reserved))
                 return {{}, reserved};
-            if (status_t const covered = shards_[shard].keys.cover(claimed_rows); failed(covered)) return {{}, covered};
+            if (status_t const covered = shards_[shard].keys.cover(claimed_entries); failed(covered))
+                return {{}, covered};
         }
         return {std::move(plan), status_t::success_k};
     }
@@ -668,7 +669,7 @@ struct vram_apple_indexes {
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished.
          *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, a
-         *    donor's rows never land, or @ref status keeps it.
+         *    donor's nodes never land, or @ref status keeps it.
          *  - @c contended_k Another call holds the @p executor or a donor's gate, or a shard has a
          *    batch or load in flight.
          *  - @c overflow_k The landed rows pass a shard's ceiling or key column, or the locator
@@ -855,7 +856,7 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every stored node and heals whatever that strands:
+     *  @brief Re-selects the neighbors of every stored node and heals the islands that leaves:
      *      @ref plan_refine, then @c run and @c finish.
      *
      *  A stopped pass leaves the graph correct and merely less improved. Every shard's claim word
@@ -898,7 +899,7 @@ struct vram_apple_indexes {
      *  lands before any shard publishes, and only then do the keys resolve. The donor then forgets
      *  its rows in place inside its window, keeping its shards and their storage, its slot nulls,
      *  it stays closed and sealed, consumed, and its shards land among the receiving shards' parts
-     *  in the plan, so at most one donor's rows are ever held twice.
+     *  in the plan, so at most one donor's nodes are ever held twice.
      *
      *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
      *  landings appended, round by round; a cancel pauses only that walk. This index and every
@@ -2227,10 +2228,10 @@ struct vram_apple_indexes {
                 node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
                 if (!part_rows) continue;
                 typename index_t::load_plan_t::step_t step;
-                step.index_rows = {base, base + part_rows};
-                step.source_rows = {0, part_rows};
-                for (node_id_t row : step.source_rows) one.keys[base + row] = part.keys[row];
-                queued = plan.load(step, *part.index, step.source_rows);
+                step.index_nodes = {base, base + part_rows};
+                step.source_nodes = {0, part_rows};
+                for (node_id_t row : step.source_nodes) one.keys[base + row] = part.keys[row];
+                queued = plan.load(step, *part.index, step.source_nodes);
                 base += part_rows;
             }
         }

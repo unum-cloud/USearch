@@ -861,21 +861,21 @@ struct needleman_wunsch_costs_t {
     }
 };
 
-/** Codes the packed @p bytes long @p row holds: as many as its bytes past the first fit at
+/** Codes the packed @p bytes long @p sequence holds: as many as its bytes past the first fit at
  *  @p code_bits apiece, less the unused tail slots that first byte counts. */
-constexpr std::size_t packed_codes_count(byte_t const* row, std::size_t bytes, u32_t code_bits) noexcept {
+constexpr std::size_t packed_codes_count(byte_t const* sequence, std::size_t bytes, u32_t code_bits) noexcept {
     if (!bytes) return 0;
-    std::size_t const slots = (bytes - 1) * 8 / code_bits, unused = std::to_integer<std::size_t>(row[0]);
+    std::size_t const slots = (bytes - 1) * 8 / code_bits, unused = std::to_integer<std::size_t>(sequence[0]);
     return slots > unused ? slots - unused : 0;
 }
 
-/** The code at @p index of the packed @p row, little-endian from the byte past its first; a code
- *  reads its second byte only when it crosses into one. */
-constexpr u32_t packed_code_at(byte_t const* row, std::size_t index, u32_t code_bits) noexcept {
+/** The code at @p index of the packed @p sequence, little-endian from the byte past its first; a
+ *  code reads its second byte only when it crosses into one. */
+constexpr u32_t packed_code_at(byte_t const* sequence, std::size_t index, u32_t code_bits) noexcept {
     std::size_t const bit = index * code_bits, byte = 1 + (bit >> 3);
     u32_t const shift = bit & 7u;
-    u32_t word = std::to_integer<u32_t>(row[byte]);
-    if (shift + code_bits > 8) word |= std::to_integer<u32_t>(row[byte + 1]) << 8;
+    u32_t word = std::to_integer<u32_t>(sequence[byte]);
+    if (shift + code_bits > 8) word |= std::to_integer<u32_t>(sequence[byte + 1]) << 8;
     return (word >> shift) & ((1u << code_bits) - 1u);
 }
 
@@ -885,16 +885,16 @@ constexpr std::size_t packed_codes_bytes(std::size_t codes, u32_t code_bits) noe
     return 1 + divide_round_up<std::size_t>(codes * code_bits, 8);
 }
 
-/** Packs @p codes at @p code_bits apiece into @p row, @ref packed_codes_bytes long, behind the
+/** Packs @p codes at @p code_bits apiece into @p sequence, @ref packed_codes_bytes long, behind the
  *  count of slots its last bytes leave unused. */
-inline void pack_codes(std::span<u8_t const> codes, u32_t code_bits, bytes_span_t row) noexcept {
-    std::memset(row.data(), 0, row.size());
-    row[0] = static_cast<byte_t>((row.size() - 1) * 8 / code_bits - codes.size());
+inline void pack_codes(std::span<u8_t const> codes, u32_t code_bits, bytes_span_t sequence) noexcept {
+    std::memset(sequence.data(), 0, sequence.size());
+    sequence[0] = static_cast<byte_t>((sequence.size() - 1) * 8 / code_bits - codes.size());
     for (std::size_t index = 0; index != codes.size(); ++index) {
         std::size_t const bit = index * code_bits, byte = 1 + (bit >> 3);
         u32_t const shifted = u32_t {codes[index]} << (bit & 7u);
-        row[byte] |= static_cast<byte_t>(shifted & 0xFFu);
-        if (shifted > 0xFFu) row[byte + 1] |= static_cast<byte_t>(shifted >> 8);
+        sequence[byte] |= static_cast<byte_t>(shifted & 0xFFu);
+        if (shifted > 0xFFu) sequence[byte + 1] |= static_cast<byte_t>(shifted >> 8);
     }
 }
 
@@ -1183,13 +1183,13 @@ class needleman_wunsch_metric {
     void reset(sz::string_view_t query) noexcept {
         staged_.clear();
         if (!costs_) return;
-        bytes_view_t const row = bytes_of(query.data(), query.size());
-        std::size_t const codes = packed_codes_count(row.data(), row.size(), costs_->code_bits);
+        bytes_view_t const packed = bytes_of(query.data(), query.size());
+        std::size_t const codes = packed_codes_count(packed.data(), packed.size(), costs_->code_bits);
         query_.clear();
         last_status_ = query_.reserve(codes);
         if (failed(last_status_)) return;
         for (std::size_t index = 0; index != codes; ++index)
-            query_.push_back_reserved(static_cast<u8_t>(packed_code_at(row.data(), index, costs_->code_bits)));
+            query_.push_back_reserved(static_cast<u8_t>(packed_code_at(packed.data(), index, costs_->code_bits)));
     }
 
     /** Stages one candidate, or refuses once the round is full. */

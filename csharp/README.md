@@ -84,7 +84,7 @@ Calls depending on each other are ordered by waiting on the first before submitt
 
 ## Executors
 
-An executor owns host threads or device streams; an index owns rows.
+An executor owns host threads or device streams; an index owns entries.
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns.
 
 One factory per C constructor, each taking only what its hardware has: `ForVram` has no thread count because a single host thread drives one stream per device.
@@ -128,10 +128,10 @@ foreach (RowsView batch in batches)
     foreach (double distance in matches[0].Distances) total += distance;
 }
 
-using Arena found = new(), rows = new();                           // Two live results, two arenas
+using Arena found = new(), fetched = new();                        // Two live results, two arenas
 foreach (Key key in index.Search(query, 10, found)[0].Keys)
 {
-    Rerank(key, index.Get(key, rows));
+    Rerank(key, index.Get(key, fetched));
 }
 
 Arena[] arenas = [.. shards.Select(_ => new Arena(pool))];       // One arena per submitted call
@@ -235,7 +235,7 @@ for (int query = 0; query < found.Queries; query++)
 ```
 
 The breadth of the candidates rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-`traversal: Traversal.Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses a scan with `Status.Unsupported`.
+`traversal: Traversal.Scan` scores every entry instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses a scan with `Status.Unsupported`.
 `DenseTraversalStats` is a pure output, overwritten by every call it is passed to, and `Accumulate` folds one call's counters into another's to total a run of batches.
 
 A sweep reuses one arena across every point, which keeps its high-water mark, so nothing is allocated between them:
@@ -264,17 +264,17 @@ A host predicate cannot narrow a device walk, so a VRAM handle refuses one with 
 ### Retrieval and Streaming
 
 ```csharp
-DenseVectors rows = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
-ReadOnlySpan<float> first = rows.Row<float>(0);                  // As wide as rows.Columns
+DenseVectors vectors = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
+ReadOnlySpan<float> first = vectors.Row<float>(0);                  // As wide as vectors.Columns
 
-using DenseCursor cursor = index.On(pool).Cursor();    // Each row once, in storage order; `Cursor([key])` walks out from a key
+using DenseCursor cursor = index.On(pool).Cursor();    // Each entry once, in storage order; `Cursor([key])` walks out from a key
 for (DenseBatch batch = cursor.Next(128, arena); batch.Count != 0; batch = cursor.Next(128, arena))
 {
-    ReadOnlySpan<Key> page = batch.Keys;               // Pass `links: true` for `batch.Links(entry)`; rows come from `Get`
+    ReadOnlySpan<Key> page = batch.Keys;               // Pass `links: true` for `batch.Links(entry)`; vectors come from `Get`
 }
 
 using DenseSearchStream stream = index.On(pool).SearchStream(RowsView.RowsOf<float>(vector, dimensions: 3));
-MatchesRow nearer = stream.Next(8, arena);             // Resumable nearest-neighbor stream
+QueryMatches nearer = stream.Next(8, arena);             // Resumable nearest-neighbor stream
 ```
 
 A cursor or stream keeps walk state rather than a thread, pulls on the executor of the receiver that opened it, and keeps its index alive until disposed.
@@ -298,13 +298,13 @@ index.On(pool).Absorb(donor);
 ```
 
 Bigger indexes come from absorbing, never mutating: `Absorb` appends each donor in turn, keeping its graph and linking it in across the appended part.
-Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its rows may already have landed.
+Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have landed.
 
 ### Sparse Multiplication
 
 ```csharp
 DenseProducts products = index.On(pool).Multiply(RowsView.RowsOf<float>(left, dimensions: 3), arena, wanted: 64);
-ReadOnlySpan<Key> reached = products.Keys(0);         // Every indexed row the first walk scored
+ReadOnlySpan<Key> reached = products.Keys(0);         // Every indexed entry the first walk scored
 ReadOnlySpan<double> dots = products.Scores(0);       // Paired with those keys, in traversal order
 ```
 

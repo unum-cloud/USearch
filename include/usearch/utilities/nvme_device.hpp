@@ -104,7 +104,7 @@
 #include <utility>     // `std::exchange`, `std::swap`, `std::move`
 #include <variant>     // `std::variant`, `std::visit`, `std::get_if`, `std::in_place_index`
 
-#include <forkunion.h>           // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
+#include <forkunion/forkunion.h> // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the holder counts
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
 

@@ -416,8 +416,8 @@ std::size_t check_shapes_nvme(u64_t seed) {
         status_t const ready = metric.init(staging);
         return expected<metric_t> {std::move(metric), ready};
     };
-    auto query_of = [&](std::size_t row, scratch_t const& allocator) noexcept {
-        std::array<std::span<scalar_t const>, 1> const query_clouds {clouds[row]};
+    auto query_of = [&](std::size_t query, scratch_t const& allocator) noexcept {
+        std::array<std::span<scalar_t const>, 1> const query_clouds {clouds[query]};
         auto [packed, packed_status] = query_t::make(query_clouds, allocator, 0);
         return expected<query_t> {std::move(packed), status_of(packed_status)};
     };

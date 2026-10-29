@@ -29,17 +29,17 @@
 
 #pragma region Crossings
 
-/** Key @p row of the caller's keys, through their stride; zero means packed. */
-inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t row) noexcept {
+/** Key @p offset of the caller's keys, through their stride; zero means packed. */
+inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) noexcept {
     std::size_t const stride = keys.stride ? keys.stride : sizeof(usearch_key_t);
     usearch_key_t key;
-    std::memcpy(&key, reinterpret_cast<byte_t const*>(keys.data) + row * stride, sizeof(key));
+    std::memcpy(&key, reinterpret_cast<byte_t const*>(keys.data) + offset * stride, sizeof(key));
     return key;
 }
 
-/** Entry @p row of a byte tape, as the view every string type converts from. */
-inline std::string_view chars_at(usearch_tape_view_t tape, std::size_t row) noexcept {
-    return {static_cast<char const*>(tape.data) + tape.offsets[row], tape.offsets[row + 1] - tape.offsets[row]};
+/** Entry @p entry of a byte tape, as the view every string type converts from. */
+inline std::string_view chars_at(usearch_tape_view_t tape, std::size_t entry) noexcept {
+    return {static_cast<char const*>(tape.data) + tape.offsets[entry], tape.offsets[entry + 1] - tape.offsets[entry]};
 }
 
 /** The @p count entries of the caller's byte tape @p tape, as the engines read tapes. */
@@ -51,8 +51,8 @@ inline tape_view<byte_t const> bytes_tape_of(usearch_tape_view_t tape, std::size
  *  do. */
 inline bool monotone_offsets(usearch_tape_view_t tape, std::size_t count) noexcept {
     if (!tape.offsets) return false;
-    for (std::size_t row = 0; row != count; ++row)
-        if (tape.offsets[row + 1] < tape.offsets[row]) return false;
+    for (std::size_t entry = 0; entry != count; ++entry)
+        if (tape.offsets[entry + 1] < tape.offsets[entry]) return false;
     return true;
 }
 
@@ -128,7 +128,7 @@ struct basic_verbs {
     void (*destroy)(void* variant) noexcept;
     bool (*freeze)(void* variant, geometry_t& geometry, typename traits_type_::freeze_t const& input,
                    usearch_outcome_t* outcome) noexcept;
-    void (*bound_shards)(void* variant, std::size_t rows) noexcept;
+    void (*bound_shards)(void* variant, std::size_t nodes) noexcept;
 
     /** Appends one shard on a host memory domain or a device's vendor ordinal. */
     status_t (*emplace)(void* variant, int placement) noexcept;
@@ -604,8 +604,8 @@ inline bool accepts_observations(usearch_geospatial_observation_t const* observa
                                  usearch_outcome_t* outcome) noexcept {
     if (!observations)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The observations must not be null");
-    for (std::size_t row = 0; row != count; ++row) {
-        usearch_geospatial_observation_t const& observation = observations[row];
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        usearch_geospatial_observation_t const& observation = observations[offset];
         if (std::isnan(observation.latitude_degrees) || std::isnan(observation.longitude_degrees))
             return propagate_error(usearch_status_invalid_argument_k, outcome,
                                    "An observation needs a latitude and a longitude");

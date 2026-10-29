@@ -221,61 +221,61 @@ struct gpu_arena_t {
  *  @c count_k. */
 enum class vram_kernel_t : u32_t {
 
-    /** Walks the graph for each row of an insertion wave and selects its forward neighbors. */
+    /** Walks the graph for each entry of an insertion wave and selects its forward neighbors. */
     insert_k,
 
-    /** Links the nodes an insertion wave picked back to the wave's rows. */
+    /** Links the nodes an insertion wave picked back to the wave's nodes. */
     back_link_k,
 
-    /** Walks the graph again for existing rows and re-selects their neighbors. */
+    /** Walks the graph again for existing nodes and re-selects their neighbors. */
     refine_k,
 
     /** Walks the graph for each query and ranks its matches. */
     search_k,
 
-    /** Moves rows' neighbor IDs between ID spaces, packing the survivors. */
+    /** Moves nodes' neighbor IDs between ID spaces, packing the survivors. */
     rebase_links_k,
 
-    /** Marks the reachability audit's landmark rows reached and in the first frontier. */
+    /** Marks the reachability audit's landmark nodes reached and in the first frontier. */
     mark_landmarks_k,
 
     /** Expands the reachability frontier by one level. */
     reachability_sweep_k,
 
-    /** Counts the rows no sweep reached, collecting their IDs. */
+    /** Counts the nodes no sweep reached, collecting their IDs. */
     reachability_islands_k,
 
-    /** Counts, for every row, the reached rows that point at it. */
+    /** Counts, for every node, the reached nodes that point at it. */
     reached_in_links_k,
 
     /** Links each unreached island back into the reached graph. */
     reconnect_island_k,
 
-    /** Places a split's part roots, one row per part, in the first frontier. */
+    /** Places a split's part roots, one node per part, in the first frontier. */
     partition_roots_k,
 
-    /** Proposes every frontier row to the unplaced rows it links to, a growth round's first. */
+    /** Proposes every frontier node to the unplaced nodes it links to, a growth round's first. */
     partition_propose_k,
 
-    /** Counts the rows a growth round proposed to each part. */
+    /** Counts the nodes a growth round proposed to each part. */
     partition_tally_k,
 
-    /** Places the proposed rows of every part with room for the whole round. */
+    /** Places the proposed nodes of every part with room for the whole round. */
     partition_accept_k,
 
-    /** Places the lowest-ID proposed rows of every part a round overflows, up to its room. */
+    /** Places the lowest-ID proposed nodes of every part a round overflows, up to its room. */
     partition_fill_k,
 
-    /** Places every row no growth round reached in the smallest parts. */
+    /** Places every node no growth round reached in the smallest parts. */
     partition_islands_k,
 
-    /** Marks the rows linking into another part. */
+    /** Marks the nodes linking into another part. */
     partition_seams_k,
 
-    /** Moves every row's neighbors into its part's receiver, rebased through the slots. */
+    /** Moves every node's neighbors into its part's receiver, rebased through the slots. */
     split_links_k,
 
-    /** Moves every row's ragged value into its part's receiver. */
+    /** Moves every node's ragged value into its part's receiver. */
     split_tape_k,
 
     /** The number of kernels, sizing the tables of loaded kernels. */

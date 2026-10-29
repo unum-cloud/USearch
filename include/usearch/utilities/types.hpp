@@ -229,9 +229,9 @@ struct tape_view {
     /** Entries the tape holds. */
     std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
 
-    /** Entry @p row. */
-    std::span<element_type_> operator[](std::size_t row) const noexcept {
-        return {elements + offsets[row], offsets[row + 1] - offsets[row]};
+    /** Entry @p entry. */
+    std::span<element_type_> operator[](std::size_t entry) const noexcept {
+        return {elements + offsets[entry], offsets[entry + 1] - offsets[entry]};
     }
 
     /** The @p count entries from @p first, their offsets still counting from @c elements. */
@@ -587,13 +587,13 @@ enum class synchronization_t : u32_t {
     exclusive_k,
 };
 
-/** How a search reaches the rows it scores, mirroring @c usearch_traversal_t. */
+/** How a search reaches the entries it scores, mirroring @c usearch_traversal_t. */
 enum class traversal_t : u32_t {
 
-    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    /** Walk the graph, scoring the entries the expansion reaches - approximate, the default. */
     walk_k = usearch_traversal_walk_k,
 
-    /** Score every published row - exact, ignoring the expansion factor. */
+    /** Score every published entry - exact, ignoring the expansion factor. */
     scan_k = usearch_traversal_scan_k,
 };
 
@@ -614,7 +614,7 @@ enum connectivity_t : u32_t {
     connectivity_128_k = 128,
 };
 
-/** The walk breadth a walk takes when its config asks for none: twice the neighbors one row
+/** The walk breadth a walk takes when its config asks for none: twice the neighbors one node
  *  holds, in every design and residency. */
 constexpr std::size_t default_expansion_factor(std::size_t connectivity) noexcept { return connectivity * 2; }
 
@@ -801,16 +801,16 @@ struct persisted_column_t {
 /** The three columns of an index persisted on a medium, whatever format laid them out. */
 struct persisted_columns_t {
 
-    /** Rows every column holds; neighbor IDs at or past it are sentinels. */
+    /** Nodes every column holds; neighbor IDs at or past it are sentinels. */
     std::size_t nodes = 0;
 
-    /** One key per row, a @c uuid key a single 16-byte element. */
+    /** One key per node, a @c uuid key a single 16-byte element. */
     persisted_column_t keys;
 
     /** The values, fixed-width or ragged in the codec's elements. */
     persisted_column_t values;
 
-    /** The neighbor IDs, a fixed degree or ragged rows. */
+    /** The neighbor IDs, a fixed degree or ragged lists. */
     persisted_column_t neighbors;
 };
 
@@ -877,21 +877,21 @@ constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
     return first < second ? second : first;
 }
 
-/** Rows whose neighbors fill a walk's @p expansion candidates at @p connectivity neighbors per row,
- *  none while an index holds no geometry yet. */
+/** Nodes whose neighbors fill a walk's @p expansion candidates at @p connectivity neighbors per
+ *  node, none while an index holds no geometry yet. */
 template <typename count_type_>
-constexpr count_type_ filling_rows(count_type_ expansion, count_type_ connectivity) noexcept {
+constexpr count_type_ filling_nodes(count_type_ expansion, count_type_ connectivity) noexcept {
     return connectivity ? divide_round_up(expansion, connectivity) : count_type_ {0};
 }
 
-/** Rows a walk expands per hop: @p concurrent_walks, the walks the hardware runs at once, divided
- *  among the walks that need them, at least one and at most @p filling_rows. While a batch has more
- *  walks waiting than the hardware runs, every walk expands one row per hop. */
+/** Nodes a walk expands per hop: @p concurrent_walks, the walks the hardware runs at once, divided
+ *  among the walks that need them, at least one and at most @p filling_nodes. While a batch has
+ *  more walks waiting than the hardware runs, every walk expands one node per hop. */
 template <typename count_type_>
 constexpr count_type_ walk_width(count_type_ concurrent_walks, count_type_ live_walks, count_type_ unstarted_walks,
-                                 count_type_ filling_rows) noexcept {
+                                 count_type_ filling_nodes) noexcept {
     count_type_ const walks = max_of(live_walks, min_of(unstarted_walks, concurrent_walks));
-    return min_of(filling_rows, max_of<count_type_>(concurrent_walks / walks, 1));
+    return min_of(filling_nodes, max_of<count_type_>(concurrent_walks / walks, 1));
 }
 
 /** Outcome of one reachability audit, the same on every tier, layer and residency. */
@@ -1005,25 +1005,25 @@ struct [[nodiscard]] refine_result_t {
     }
 };
 
-/** The tail slots of a full row a heal may give up to islands, which spread over them by ID so
- *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
- *  and slot 0, and nothing in a single-neighbor row. */
+/** The tail slots of a full neighbor list a heal may give up to islands, which spread over them by
+ *  ID so islands sharing a list land apart: the farther half, keeping the nearer half that carries
+ *  search and slot 0, and nothing in a single-neighbor list. */
 template <typename size_type_>
 constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
     return connectivity / 2;
 }
 
-/** The rows that @p node_id walks across first in round @p round of merging @p parts parts, whose
- *  ascending @p part_bases start below @p rows: the neighboring group of <tt>2^round</tt> parts,
+/** The nodes that @p node_id walks across first in round @p round of merging @p parts parts, whose
+ *  ascending @p part_bases start below @p nodes: the neighboring group of <tt>2^round</tt> parts,
  *  or none when no group neighbors its own. */
 template <typename node_id_type_>
 constexpr iota_view<node_id_type_> part_across(node_id_type_ const* part_bases, std::size_t parts, std::size_t round,
-                                               node_id_type_ rows, node_id_type_ node_id) noexcept {
+                                               node_id_type_ nodes, node_id_type_ node_id) noexcept {
     std::size_t part = 0;
     while (part + 1 < parts && part_bases[part + 1] <= node_id) ++part;
     std::size_t const first = ((part >> round) ^ 1u) << round, bound = first + (std::size_t {1} << round);
     if (first >= parts) return {};
-    return {part_bases[first], bound < parts ? part_bases[bound] : rows};
+    return {part_bases[first], bound < parts ? part_bases[bound] : nodes};
 }
 
 /** The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
@@ -1192,7 +1192,7 @@ struct wait_capped_t {};
  *      monitors, like @c fu::x86_tpause_t, @c fu::arm64_wfet_t, and @c fu::riscv64_wrs_t.
  *
  *  Ignores the watched word and returns at once, so the loop re-checks it - correctness never
- *  depends on the waiter, only latency and power do. It watches an in-place word, like the row
+ *  depends on the waiter, only latency and power do. It watches an in-place word, like the node
  *  locks living inside node records, by its address and the bit pattern last observed: the
  *  currency the address-armed hardware waits - @c UMWAIT, @c WFET, @c WRS - take. The waiting
  *  bound (capped or uncapped) arrives as an arbitrary tag type.
@@ -1830,7 +1830,7 @@ constexpr u32_t ring_offset(u32_t candidate, u32_t query) noexcept { return gold
 
 /** The image of @p position under a bijection over <tt>[0, count)</tt> keyed by @p seed: two odd
  *  multiplies around an xor-shift over the next power of two, its cycle walked until the image
- *  lands below @p count, so the first few positions name distinct rows in constant expected time,
+ *  lands below @p count, so the first few positions name distinct nodes in constant expected time,
  *  never a scan. Positions at or past @p count have no image. */
 constexpr u64_t seeded_bijection(u64_t position, u64_t count, u64_t seed) noexcept {
     if (count < 2) return 0;
@@ -1942,15 +1942,15 @@ inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
  *  ramps its waves up from it. */
 inline constexpr u32_t vram_admission_ramp_floor_k = 32;
 
-/** Shares of the rows already below it an insert wave admits, as negative powers of two, both
- *  measured: a dense wave as wide as those rows, which its back-links splice in before the next
+/** Shares of the nodes already below it an insert wave admits, as negative powers of two, both
+ *  measured: a dense wave as wide as those nodes, which its back-links splice in before the next
  *  wave walks, and a basic wave a quarter of them, the widest at which re-selected waves still
- *  reach the recall of rows inserted one at a time, since a basic wave's rows link one another
+ *  reach the recall of entries inserted one at a time, since a basic wave's nodes link one another
  *  only through the walk after the merge. */
 inline constexpr u32_t vram_dense_admission_share_log2_k = 0;
 inline constexpr u32_t vram_basic_admission_share_log2_k = 2;
 
-/** The end of the insert wave admitting from @p wave_first, its share @p share_log2 of the rows
+/** The end of the insert wave admitting from @p wave_first, its share @p share_log2 of the nodes
  *  below it and never under @c vram_admission_ramp_floor_k, short of @p end_id. */
 constexpr u64_t vram_admission_wave_end(u64_t wave_first, u64_t end_id, u32_t share_log2) noexcept {
     return min_of(end_id, wave_first + max_of(wave_first >> share_log2, u64_t {vram_admission_ramp_floor_k}));
@@ -1980,54 +1980,54 @@ struct vram_telemetry_block_t {
 };
 
 /**
- *  @brief An index's claim word: past the watermark by the rows of the one batch or load in
+ *  @brief An index's claim word: past the watermark by the entries of the one batch or load in
  *      flight, claimed from the watermark by one compare-exchange, or the sentinel while a caller
  *      holds it closed, so a second claimant refuses rather than waits.
  *
- *  The watermark, the rows visible, is the index's own, and every call takes it as @p visible.
+ *  The watermark, the entries visible, is the index's own, and every call takes it as @p visible.
  */
 struct claim_word_t {
 
-    /** The word's value while a caller holds it closed, past any row count. */
+    /** The word's value while a caller holds it closed, past any entry count. */
     static constexpr std::size_t closed_k = std::numeric_limits<std::size_t>::max();
 
-    std::size_t claimed_rows = 0;
+    std::size_t claimed_entries = 0;
 
     /** Whether a caller holds the word closed. */
     bool closed() const noexcept {
-        return standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire) == closed_k;
+        return standard_atomic_ref<std::size_t const>(claimed_entries).load(std::memory_order_acquire) == closed_k;
     }
 
-    /** Rows claimed by batches and loads, visible or not; a closed word holds none past
+    /** Entries claimed by batches and loads, visible or not; a closed word holds none past
      *  @p visible. */
     std::size_t claimed(std::size_t visible) const noexcept {
         std::size_t const claimed =
-            standard_atomic_ref<std::size_t const>(claimed_rows).load(std::memory_order_acquire);
+            standard_atomic_ref<std::size_t const>(claimed_entries).load(std::memory_order_acquire);
         return claimed == closed_k ? visible : claimed;
     }
 
     /**
-     *  Claims @p rows from @p visible: one compare-exchange that succeeds only on an open word
+     *  Claims @p entries from @p visible: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone grows, launches and publishes them.
      *
      *  @par Statuses:
-     *  - @c overflow_k The rows pass @p max_rows.
+     *  - @c overflow_k The entries pass @p max_entries.
      *  - @c contended_k The word is closed, or a batch or load is in flight.
      */
-    expected<std::size_t> claim(std::size_t visible, std::size_t rows, std::size_t max_rows) noexcept {
+    expected<std::size_t> claim(std::size_t visible, std::size_t entries, std::size_t max_entries) noexcept {
         std::size_t first = visible;
-        if (rows > max_rows - first) return {{}, status_t::overflow_k};
-        if (!standard_atomic_ref<std::size_t>(claimed_rows)
-                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
+        if (entries > max_entries - first) return {{}, status_t::overflow_k};
+        if (!standard_atomic_ref<std::size_t>(claimed_entries)
+                 .compare_exchange_strong(first, first + entries, std::memory_order_acq_rel, std::memory_order_relaxed))
             return {{}, status_t::contended_k};
         return {first, status_t::success_k};
     }
 
-    /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
-     *  on, closed by a caller around a load, stays as it is. */
-    void unclaim(std::size_t first, std::size_t rows) noexcept {
-        std::size_t claimed = first + rows;
-        standard_atomic_ref<std::size_t>(claimed_rows)
+    /** Gives back the claim over @p entries from @p first, which launched nothing; a word that
+     *  moved on, closed by a caller around a load, stays as it is. */
+    void unclaim(std::size_t first, std::size_t entries) noexcept {
+        std::size_t claimed = first + entries;
+        standard_atomic_ref<std::size_t>(claimed_entries)
             .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
     }
 
@@ -2038,17 +2038,17 @@ struct claim_word_t {
      *  - @c contended_k A batch or load is in flight.
      */
     status_t close(std::size_t visible) noexcept {
-        return standard_atomic_ref<std::size_t>(claimed_rows)
+        return standard_atomic_ref<std::size_t>(claimed_entries)
                        .compare_exchange_strong(visible, closed_k, std::memory_order_acq_rel, std::memory_order_relaxed)
                    ? status_t::success_k
                    : status_t::contended_k;
     }
 
-    /** Reopens a closed word at @p visible, past every row a load published meanwhile; an open
+    /** Reopens a closed word at @p visible, past every entry a load published meanwhile; an open
      *  one stays as it is. */
     void reopen(std::size_t visible) noexcept {
         std::size_t closed = closed_k;
-        standard_atomic_ref<std::size_t>(claimed_rows)
+        standard_atomic_ref<std::size_t>(claimed_entries)
             .compare_exchange_strong(closed, visible, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 };
@@ -2104,10 +2104,11 @@ struct shared_mutex {
             u64_t const backed_off = atomic_ref<u64_t>(word).fetch_sub(1, std::memory_order_release) - 1;
             wait_type_ {}(&word, backed_off, 0u);
         }
-        // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
-        // returned a store made under this hold proves the acquisition to that snapshot, which can
-        // then no longer read the word from before it. Arm and POWER need the fence as much as the
-        // C++ model does: an acquire orders the add's read before the row stores, not its write.
+        // Pairs with the acquire fence before a certified probe's exit snapshot: a neighbor list
+        // read that returned a store made under this hold proves the acquisition to that snapshot,
+        // which can then no longer read the word from before it. Arm and POWER need the fence as
+        // much as the C++ model does: an acquire orders the add's read before the neighbor list
+        // stores, not its write.
         std::atomic_thread_fence(std::memory_order_release);
         annotate_lock_shared_acquired(&word);
     }

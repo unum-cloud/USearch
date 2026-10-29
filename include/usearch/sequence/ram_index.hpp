@@ -34,7 +34,7 @@
 
 #include <memory>      // `std::allocator`, `std::allocator_traits`
 #include <span>        // `std::span`, `std::as_bytes`
-#include <string_view> // `std::string_view` - a row's borrowed string
+#include <string_view> // `std::string_view` - a stored sequence, borrowed
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
@@ -94,11 +94,11 @@ struct codec_t {
         return status_of(value.assign(chars_of(input)));
     }
 
-    /** What @ref view hands out for a stored row. */
+    /** What @ref view hands out for a stored sequence. */
     using view_t = std::string_view;
 
-    /** The string a stored @p row holds, borrowed. */
-    view_t view(bytes_view_t row) const noexcept { return chars_of(row); }
+    /** The string a stored @p sequence holds, borrowed. */
+    view_t view(bytes_view_t sequence) const noexcept { return chars_of(sequence); }
 };
 
 /** Similarity Search over byte sequences: owned strings, integer distances, and a metric chosen per

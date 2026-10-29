@@ -288,11 +288,12 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     }
     auto const judge_task = [&](std::size_t expansion, landed_matches_t const& found) {
         if (query_targets.empty()) return;
-        std::vector<std::size_t> const offsets = row_offsets(found);
+        std::vector<std::size_t> const offsets = match_offsets(found);
         std::size_t task_first = 0, task_kept = 0;
         for (std::size_t query = 0; query != query_targets.size(); ++query)
             for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match)
-                if (row_of_key(settings.seed, std::bit_cast<usearch_key_t>(found.keys[match])) == query_targets[query])
+                if (offset_of_key(settings.seed, std::bit_cast<usearch_key_t>(found.keys[match])) ==
+                    query_targets[query])
                     task_first += match == offsets[query], task_kept += 1;
         fmt::println("- Task at expansion {}: intended entry at rank 1 {:.4f} · in the top {} {:.4f} over {} queries",
                      expansion, static_cast<double>(task_first) / query_targets.size(), search.top_k.value,

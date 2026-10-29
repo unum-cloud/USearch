@@ -31,6 +31,8 @@ function (usearch_sibling name_ override_ link_target_ repository_ tag_)
     if (NOT sibling_target_)
         set(sibling_target_ ${link_target_})
     endif ()
+    # Each sibling exports its header target as `header`, which would collide with ours under `usearch::`.
+    set_target_properties(${sibling_target_} PROPERTIES EXPORT_NAME ${name_}_header)
     set(usearch_sibling_targets_
         ${usearch_sibling_targets_} ${sibling_target_}
         PARENT_SCOPE
@@ -55,17 +57,17 @@ endforeach ()
 set(usearch_sibling_targets_)
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
-    5d67bd8aafa28867b2d73694f24496c274721397
+    8b3df749915fdcc01e563df8ff119c3e09c04789
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
-    5fac4b88fcd2f611db41055da2b20e1e765449a2
+    53b2c33f7fd2f06c5c6e36de8104ec7a19a66696
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla
-    a43a398cecd159f6c383843756540b898a45bee7
+    cff25ca8f55aa223dd6ab437b8665009e928e493
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE smashtable::header https://github.com/ashvardanian/SmashTable
-    fe3d32edb4685b925e62a427ef6ebdf74b311af9
+    7bc9e00713929c4273099dce3d1e4e6d61bea4af
 )

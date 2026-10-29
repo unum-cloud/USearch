@@ -55,16 +55,16 @@ __device__ __forceinline__ vram_grid_warp_t vram_grid_warp() noexcept {
             gridDim.x * blockDim.x / warp_type_::width_k};
 }
 
-/** Hands @p callback every neighbor of @p row the calling lane owns - its lane-strided slots, past
- *  sentinels, self-loops and IDs at or past @p rows_count. */
+/** Hands @p callback every neighbor of @p node the calling lane owns - its lane-strided slots, past
+ *  sentinels, self-loops and IDs at or past @p nodes_count. */
 template <typename warp_type_, typename node_id_type_, typename callback_type_>
 __device__ __forceinline__ void vram_for_each_link(node_id_type_ const* neighbors, u32_t connectivity,
-                                                   node_id_type_ rows_count, node_id_type_ row, u32_t lane,
+                                                   node_id_type_ nodes_count, node_id_type_ node, u32_t lane,
                                                    callback_type_&& callback) noexcept {
-    node_id_type_ const* const slots = vram_row(neighbors, row, connectivity);
+    node_id_type_ const* const slots = vram_row(neighbors, node, connectivity);
     for (u32_t slot = lane; slot < connectivity; slot += warp_type_::width_k)
         if (node_id_type_ const target = slots[slot];
-            target != std::numeric_limits<node_id_type_>::max() && target != row && target < rows_count)
+            target != std::numeric_limits<node_id_type_>::max() && target != node && target < nodes_count)
             callback(target);
 }
 
@@ -922,7 +922,7 @@ struct vram_warp_context {
     vram_telemetry_t telemetry;
     byte_t* scratch = nullptr;
 
-    /** Rows each round expands, from @ref walk_width; one, the plain greedy walk, for inserts and
+    /** Nodes each round expands, from @ref walk_width; one, the plain greedy walk, for inserts and
      *  refines. */
     u32_t walk_width = 1;
 };
@@ -1088,7 +1088,7 @@ struct vram_selection_scratch {
     scored_node_t* scored_entries;
     u32_t* kept_positions;
 
-    /** Each cached candidate's distance to the walk's row, by cache row, staged once so the
+    /** Each cached candidate's distance to the walk's node, by cache row, staged once so the
      *  selection loop reads memory, not register candidates it would unroll to index. */
     f32_t* candidate_distances;
 

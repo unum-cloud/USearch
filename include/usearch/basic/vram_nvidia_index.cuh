@@ -12,14 +12,14 @@
  *  @c vram_nvidia_index.hpp into the shared views of @c vram_index.cuh; the host finds each kernel
  *  by the symbol @c vram_kernel_symbol spells.
  *
- *  A kit whose lane scores a row alone walks a query or a node per warp. A kit splitting a row over
- *  several lanes walks one per block: warp zero owns the frontier and the visited set and posts
- *  each hop's rows, and the block's four warps score them together, so long rows cost a hop a
- *  quarter of a warp's latency.
+ *  A kit whose lane scores an entry alone walks a query or a node per warp. A kit splitting an
+ *  entry over several lanes walks one per block: warp zero owns the frontier and the visited set
+ *  and posts each hop's entries, and the block's four warps score them together, so long entries
+ *  cost a hop a quarter of a warp's latency.
  */
 #pragma once
 
-#include <limits>      // `std::numeric_limits` - an absent row's distance
+#include <limits>      // `std::numeric_limits` - an absent entry's distance
 #include <type_traits> // `std::conditional_t` - a walk's frontier and schedule
 
 #include "usearch/utilities/types.hpp"
@@ -33,32 +33,33 @@ namespace unum::usearch::basic {
 static_assert(sizeof(std::size_t) == sizeof(u64_t), "The caller's offsets cross as the device's words");
 
 /**
- *  @brief Scores each round of a walk's rows with the whole block: warp zero posts the query and a
- *      row per lane, and every warp scores its share on @p rung_ of @p kit_, @c lanes_per_row_k
- *      lanes to a row, in turns when a row takes more lanes than the block's warps split evenly.
+ *  @brief Scores each round of a walk's entries with the whole block: warp zero posts the query
+ *      and an entry per lane, and every warp scores its share on @p rung_ of @p kit_.
  *
- *  Only warp zero walks, so the frontier, the visited set and the query's span stay its own; the
- *  other warps @ref serve rounds until it @ref finish es. Two named barriers bracket every round,
- *  so the posted rows and the span are read between them alone and rewritten outside them.
+ *  Warps score @c lanes_per_entry_k lanes to an entry, in turns when an entry takes more lanes than
+ *  the block's warps split evenly. Only warp zero walks, so the frontier, the visited set and the
+ *  query's span stay its own; the other warps @ref serve rounds until it @ref finish es. Two named
+ *  barriers bracket every round, so the posted entries and the span are read between them alone and
+ *  rewritten outside them.
  */
 template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 struct cuda_block_schedule {
     using query_t = typename kit_::query_t;
-    inline static constexpr u32_t lanes_per_row_k = vram_lanes_per_row<kit_, rung_>();
+    inline static constexpr u32_t lanes_per_entry_k = vram_lanes_per_entry<kit_, rung_>();
 
-    /** Rows one warp scores per round. */
-    inline static constexpr u32_t rows_per_warp_k = cuda_warp_t::width_k / lanes_per_row_k;
-    inline static constexpr u32_t rows_per_block_k = rows_per_warp_k * vram_warps_per_block_k;
-    static_assert(cuda_warp_t::width_k % rows_per_block_k == 0, "A block's warps split one warp's rows evenly");
+    /** Entries one warp scores per round. */
+    inline static constexpr u32_t entries_per_warp_k = cuda_warp_t::width_k / lanes_per_entry_k;
+    inline static constexpr u32_t entries_per_block_k = entries_per_warp_k * vram_warps_per_block_k;
+    static_assert(cuda_warp_t::width_k % entries_per_block_k == 0, "A block's warps split one warp's entries evenly");
 
-    /** The round warp zero posts, a warp's width of rows or two, and the distances the block lands
-     *  for it. */
+    /** The round warp zero posts, a warp's width of entries or two, and the distances the block
+     *  lands for it. */
     struct shared_t {
         query_t query;
         node_id_type_ ids[2 * cuda_warp_t::width_k];
         distance_t distances[2 * cuda_warp_t::width_k];
         distance_t radius;
-        u32_t rows;
+        u32_t entries;
         u32_t finished;
     };
 
@@ -68,27 +69,27 @@ struct cuda_block_schedule {
         if (threadIdx.x == 0) round.finished = 0;
     }
 
-    /** The distance from @p query to the row this lane of warp zero names, exact within @p radius;
-     *  infinite for the sentinel. Every lane of warp zero calls it. */
+    /** The distance from @p query to the entry this lane of warp zero names, exact within
+     *  @p radius; infinite for the sentinel. Every lane of warp zero calls it. */
     __device__ __forceinline__ distance_t score(vram_ragged_view<node_id_type_> const& storage, query_t const& query,
                                                 node_id_type_ node_id, distance_t radius, u32_t lane) noexcept {
         round.ids[lane] = node_id;
-        if (lane == 0) round.query = query, round.radius = radius, round.rows = cuda_warp_t::width_k;
+        if (lane == 0) round.query = query, round.radius = radius, round.entries = cuda_warp_t::width_k;
         barrier_();
         score_share_(storage, 0, lane);
         barrier_();
         return round.distances[lane];
     }
 
-    /** Scores a round of @p count rows of @p ids, past a warp's width and up to two, into
-     *  @p scored with the whole block: the longest rows first, so every warp's turns pair one of
-     *  the longest groups of rows with one of the shortest. */
+    /** Scores a round of @p count entries of @p ids, past a warp's width and up to two, into
+     *  @p scored with the whole block: the longest entries first, so every warp's turns pair one of
+     *  the longest groups of entries with one of the shortest. */
     __device__ __forceinline__ void score_round(vram_ragged_view<node_id_type_> const& storage, query_t const& query,
                                                 node_id_type_ const* ids, u32_t count, distance_t radius, u32_t lane,
                                                 vram_scored_node<node_id_type_> (&scored)[2]) noexcept {
         vram_split_by_bytes<cuda_warp_t>(storage, ids, count, lane, scored);
         round.ids[lane] = scored[0].id(), round.ids[cuda_warp_t::width_k + lane] = scored[1].id();
-        if (lane == 0) round.query = query, round.radius = radius, round.rows = 2 * cuda_warp_t::width_k;
+        if (lane == 0) round.query = query, round.radius = radius, round.entries = 2 * cuda_warp_t::width_k;
         barrier_();
         score_share_(storage, 0, lane);
         barrier_();
@@ -109,7 +110,7 @@ struct cuda_block_schedule {
         }
     }
 
-    /** Releases the serving warps once warp zero has walked its last row. */
+    /** Releases the serving warps once warp zero has walked its last entry. */
     __device__ __forceinline__ void finish(u32_t lane) noexcept {
         if (lane == 0) round.finished = 1;
         barrier_();
@@ -118,18 +119,18 @@ struct cuda_block_schedule {
   private:
     __device__ __forceinline__ void score_share_(vram_ragged_view<node_id_type_> const& storage, u32_t warp,
                                                  u32_t lane) noexcept {
-        for (u32_t first = warp * rows_per_warp_k; first < round.rows; first += rows_per_block_k) {
-            u32_t const position = first + lane / lanes_per_row_k;
+        for (u32_t first = warp * entries_per_warp_k; first < round.entries; first += entries_per_block_k) {
+            u32_t const position = first + lane / lanes_per_entry_k;
             node_id_type_ const node_id = round.ids[position];
             distance_t distance = std::numeric_limits<distance_t>::infinity();
-            // A row's lanes share its ID, so every group takes one side of each branch whole.
+            // An entry's lanes share its ID, so every group takes one side of each branch whole.
             if (node_id != std::numeric_limits<node_id_type_>::max()) {
-                vram_row_t const row = storage.row(node_id);
-                distance = kit_::lower_bound(storage.kernel, round.query, row);
+                vram_entry_t const entry = storage.entry(node_id);
+                distance = kit_::lower_bound(storage.kernel, round.query, entry);
                 if (!(distance > round.radius))
-                    distance = vram_score<kit_, rung_>(storage.kernel, round.query, row, round.radius, lane);
+                    distance = vram_score<kit_, rung_>(storage.kernel, round.query, entry, round.radius, lane);
             }
-            if (lane % lanes_per_row_k == 0) round.distances[position] = distance;
+            if (lane % lanes_per_entry_k == 0) round.distances[position] = distance;
         }
     }
 
@@ -139,11 +140,11 @@ struct cuda_block_schedule {
     }
 };
 
-/** The schedule a kit scores through on @p rung_: in place when a lane scores a row alone, with the
- *  whole block when a row takes several lanes. */
+/** The schedule a kit scores through on @p rung_: in place when a lane scores an entry alone, with
+ *  the whole block when an entry takes several lanes. */
 template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
 using cuda_schedule =
-    std::conditional_t<vram_lanes_per_row<kit_, rung_>() == 1, vram_lane_schedule<kit_, rung_, node_id_type_>,
+    std::conditional_t<vram_lanes_per_entry<kit_, rung_>() == 1, vram_lane_schedule<kit_, rung_, node_id_type_>,
                        cuda_block_schedule<kit_, rung_, node_id_type_>>;
 
 /** Hands @p walk every ID in @b [first,end) the calling warp assigns itself from @p assigned, a
@@ -154,7 +155,7 @@ __device__ __forceinline__ void cuda_for_each_assigned(schedule_& schedule,
                                                        vram_ragged_view<node_id_type_> const& storage, u32_t* assigned,
                                                        assigned_type_ first, assigned_type_ end,
                                                        vram_warp_slice_t const& slice, walk_type_&& walk) noexcept {
-    if constexpr (schedule_::lanes_per_row_k != 1)
+    if constexpr (schedule_::lanes_per_entry_k != 1)
         if (slice.warp != 0) return schedule.serve(storage, slice.warp, slice.lane);
     while (true) {
         u32_t offset = slice.lane == 0 ? cuda_warp_t::fetch_add_relaxed(*assigned, 1u) : 0;
@@ -162,7 +163,7 @@ __device__ __forceinline__ void cuda_for_each_assigned(schedule_& schedule,
         if (assigned_id >= end) break;
         walk(assigned_id);
     }
-    if constexpr (schedule_::lanes_per_row_k != 1) schedule.finish(slice.lane);
+    if constexpr (schedule_::lanes_per_entry_k != 1) schedule.finish(slice.lane);
 }
 
 /**
@@ -170,10 +171,10 @@ __device__ __forceinline__ void cuda_for_each_assigned(schedule_& schedule,
  *      reading slot-0 words: no device watermark, no publication order, no lock across a distance.
  *
  *  Within a wave, IDs are batch-local: each walker assigns itself the next offset of the wave,
- *  walks the published rows, and publishes its forward row with one release. The host launches each
- *  wave behind the last one's back-link passes, so a wave walks a graph whose reverse links are
- *  already merged, and re-selects behind its own, so its rows reach one another. Rows keep the
- *  neighbors the kit's @c selector_t picks.
+ *  walks the published nodes, and publishes its forward neighbor row with one release. The host
+ *  launches each wave behind the last one's back-link passes, so a wave walks a graph whose reverse
+ *  links are already merged, and re-selects behind its own, so its nodes reach one another. Nodes
+ *  keep the neighbors the kit's @c selector_t picks.
  */
 template <vram_basic_kit kit_, u32_t rung_, u32_t candidate_slots_, vram_kernel_t kernel_, typename node_id_type_>
 __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const& view) {
@@ -188,12 +189,12 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
     u32_t const warp = slice.warp, lane = slice.lane;
     vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
-        slice.scratch + 2 * view.span_bytes, view.selection_rows);
+        slice.scratch + 2 * view.span_bytes, view.selection_nodes);
     using frontier_t = std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
                                           vram_register_frontier<candidate_slots_, cuda_warp_t, node_id_type_>>;
     schedule_t schedule {schedule_state};
     cuda_for_each_assigned( //
-        schedule, view.storage, view.assigned_rows, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
+        schedule, view.storage, view.assigned_nodes, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
             vram_warp_context<frontier_t> context;
             if constexpr (candidate_slots_ == 0) {
                 context.frontier.tail_.entries_ = view.arena_shape.template tail_span<node_id_type_>(view.arena,
@@ -231,10 +232,10 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
     u32_t const lane = slice.lane;
     vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
-        slice.scratch + 2 * view.span_bytes, view.selection_rows);
+        slice.scratch + 2 * view.span_bytes, view.selection_nodes);
     schedule_t schedule {schedule_state};
     cuda_for_each_assigned( //
-        schedule, view.storage, view.assigned_rows, 0u, *view.touched_count, slice, [&](u32_t offset) {
+        schedule, view.storage, view.assigned_nodes, 0u, *view.touched_count, slice, [&](u32_t offset) {
             node_id_type_ const node_id = view.touched_ids[offset];
             vram_telemetry_t telemetry;
             vram_back_link_one<kit_, typename kit_::selector_t>( //
@@ -245,7 +246,7 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
 }
 
 /** One walker per query on the rung of @p slots_, the arena frontier at zero; walkers take queries
- *  from the batch counter, as builders take rows. */
+ *  from the batch counter, as builders take entries. */
 template <vram_basic_kit kit_, u32_t rung_, u32_t slots_, typename node_id_type_>
 __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const& view) {
     using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
@@ -294,10 +295,10 @@ __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<n
             build.arena,
             vram_view(build.arena_shape),
             build.expansion,
-            build.selection_rows,
+            build.selection_nodes,
             build.epoch_base,
             build.telemetry,
-            build.assigned_rows,
+            build.assigned_nodes,
             build.link_heads,
             build.link_next,
             build.touched_ids,
@@ -320,7 +321,7 @@ __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
             search.assigned_queries,
             search.live_walks,
             search.concurrent_walks,
-            search.filling_rows,
+            search.filling_nodes,
             search.result_ids,
             search.result_distances,
             search.count};

@@ -17,10 +17,10 @@
  *    column;
  *  - @c walk_t, one walk's candidates and admitted set, and @c walk_shape_t, the call's sizes;
  *  - @c walk_payload_t, what an aggregating predicate carries beside each key it gathers;
- *  - @c prime_scoring_, which prepares a row's query once the row primes;
+ *  - @c prime_scoring_, which prepares a query once it primes;
  *  - @c score_staged_, which scores a walk's staged flights, folds and releases them, and ranks the
  *    rest through the walker's @c rank_;
- *  - @c ask_relation_, which asks a row's relation about the landed rows of contending flights.
+ *  - @c ask_relation_, which asks a query's relation about the landed rows of contending flights.
  *
  *  Nothing here reads a value row, so the file needs no kernel library, and every tier compiles the
  *  same walk.
@@ -32,7 +32,7 @@
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_cast`
-#include <chrono>      // `std::chrono::steady_clock`, for per-row latencies
+#include <chrono>      // `std::chrono::steady_clock`, for per-query latencies
 #include <concepts>    // `std::same_as`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
@@ -208,10 +208,12 @@ inline status_t nvme_join_path_(growing_buffer<char, forkunion_allocator_t>& buf
 /** Which keys a walk reads besides the value and neighbors rows. */
 enum class nvme_key_reads_t : u8_t {
 
-    /** Only the outputs a row writes resolve into keys, one read each, once its walks finished. */
+    /** Only the outputs a query writes resolve into keys, one read each, once its walks
+     *  finished. */
     outputs_k,
 
-    /** Every scored row's key lands beside its value, for a fold or a rescoring that reads keys. */
+    /** Every scored entry's key lands beside its value, for a fold or a rescoring that reads
+     *  keys. */
     scored_k,
 };
 
@@ -230,7 +232,7 @@ struct nvme_queue_sizes_t {
      *  their radius keeps the walk within; ties at that radius grow it. */
     std::size_t frontier = 0;
 
-    /** One row per candidate - the first size a re-table doubles from. */
+    /** One entry per candidate - the first size a re-table doubles from. */
     std::size_t visited = 0;
 };
 
@@ -251,10 +253,10 @@ std::size_t nvme_widest_row(std::span<part_type_ const> parts) noexcept {
 /** Where a walk stands between its reads. */
 enum class nvme_walk_stage_t : u8_t {
 
-    /** Finished, its candidates merged into its row, or never primed. */
+    /** Finished, its candidates merged into its query, or never primed. */
     finished_k,
 
-    /** Its landmarks are in flight in hop slot zero, and every row that lands enters the
+    /** Its landmarks are in flight in hop slot zero, and every entry that lands enters the
      *  frontier; spare hop slots may already expand the landmarks that landed. */
     seeding_k,
 
@@ -280,19 +282,19 @@ enum class nvme_purpose_t : u8_t {
     key_k,
 };
 
-/** One scored, expanded or resolved row in flight. Its first read lands in the buffer of the
+/** One scored, expanded or resolved entry in flight. Its first read lands in the buffer of the
  *  flight's own index, and a keyed score's key in the buffer one flight count past it. The
  *  shard it reads follows from its issuer, which keeps a flight of 32-bit IDs at 16 bytes. */
 template <typename node_id_type_>
 struct nvme_flight {
 
-    /** The walk that issued a score or an expansion, or the row slot behind a resolution. */
+    /** The walk that issued a score or an expansion, or the query slot behind a resolution. */
     u32_t issuer = 0;
 
-    /** The row's node ID inside its shard. */
+    /** The entry's node ID inside its shard. */
     node_id_type_ node = 0;
 
-    /** Where in its issuer the landing counts: a walk's hop slot, or a row slot's output. */
+    /** Where in its issuer the landing counts: a walk's hop slot, or a query slot's output. */
     u32_t position = 0;
 
     /** Reads still to land: two for a keyed score, one otherwise. */
@@ -319,10 +321,10 @@ struct nvme_walk_payload {
     distance_type_ distance {};
 };
 
-/** Where a row slot stands. */
-enum class nvme_row_stage_t : u8_t {
+/** Where a query slot stands. */
+enum class nvme_query_stage_t : u8_t {
 
-    /** Free for the next row. */
+    /** Free for the next query. */
     idle_k,
 
     /** Some of its walks are still going. */
@@ -332,28 +334,28 @@ enum class nvme_row_stage_t : u8_t {
     resolving_k,
 };
 
-/** One row in flight on a thread: its walks still going, and its resolution's progress. */
-struct nvme_row_slot_t {
+/** One query in flight on a thread: its walks still going, and its resolution's progress. */
+struct nvme_query_slot_t {
 
-    /** Walks of the row not finished yet. */
+    /** Walks of the query not finished yet. */
     u32_t walks_left = 0;
 
-    /** Locators the row asks to resolve. */
+    /** Locators the query asks to resolve. */
     u32_t outputs = 0;
 
     /** The next locator to issue a key read for. */
     u32_t next_output = 0;
 
-    /** Key reads of the row in flight. */
+    /** Key reads of the query in flight. */
     u32_t resolving = 0;
 
     /** Where the slot stands. */
-    nvme_row_stage_t stage = nvme_row_stage_t::idle_k;
+    nvme_query_stage_t stage = nvme_query_stage_t::idle_k;
 
-    /** The batch row the slot holds. */
-    std::size_t row = 0;
+    /** The batch query the slot holds. */
+    std::size_t query_index = 0;
 
-    /** When the row's walks primed, which its latency counts from; unset when the call collects
+    /** When the query's walks primed, which its latency counts from; unset when the call collects
      *  none. */
     std::chrono::steady_clock::time_point primed;
 };
@@ -398,17 +400,18 @@ expected<nvme_call<executor_type_>> nvme_begin_call(executor_type_& executor,
 }
 
 /**
- *  @brief One thread's share of a call: its walks, its rows, its flights and the reads not yet
- *      enqueued, driven until the thread's rows run out.
+ *  @brief One thread's share of a call: its walks, its queries, its flights and the reads not yet
+ *      enqueued, driven until the thread's queries run out.
  *
  *  @tparam tier_type_ The index whose vocabulary the walk speaks and whose @c score_staged_ scores
  *      its landed value rows; it befriends the walker, as the walker befriends it.
- *  @tparam row_type_ One row of the batch: its query, its fold, its bound and its outputs.
+ *  @tparam query_type_ One query of the batch: its prepared query, its fold, its bound and its
+ *      outputs.
  *  @tparam cache_hints_type_ The line hints streaming a landed row toward the core while its quad
  *      fills.
  */
-template <typename tier_type_, typename row_type_, typename cache_hints_type_ = dummy_cache_hints_t>
-class row_walker {
+template <typename tier_type_, typename query_type_, typename cache_hints_type_ = dummy_cache_hints_t>
+class query_walker {
     friend tier_type_;
 
     using tier_t = tier_type_;
@@ -429,40 +432,40 @@ class row_walker {
     using walk_payload_t = typename tier_t::walk_payload_t;
 
   public:
-    using row_t = row_type_;
-    using key_t = typename row_t::key_t;
-    using inputs_t = typename row_t::inputs_t;
+    using query_t = query_type_;
+    using key_t = typename query_t::key_t;
+    using inputs_t = typename query_t::inputs_t;
 
-    /** The walker of executor thread @p thread, whose rows are built from @p inputs, and which asks
-     *  that thread's predicate among them. */
-    row_walker(engine_t& engine, arena_t& arena, std::span<medium_t const> media, std::span<part_t const> parts,
-               walk_shape_t const& shape, inputs_t const& inputs, std::size_t thread, std::size_t line_bytes) noexcept
+    /** The walker of executor thread @p thread, whose queries are built from @p inputs, and which
+     *  asks that thread's predicate among them. */
+    query_walker(engine_t& engine, arena_t& arena, std::span<medium_t const> media, std::span<part_t const> parts,
+                 walk_shape_t const& shape, inputs_t const& inputs, std::size_t thread, std::size_t line_bytes) noexcept
         : engine_(engine), arena_(arena), media_(media), parts_(parts), shape_(shape), inputs_(inputs), thread_(thread),
           prefetcher_ {line_bytes} {}
 
-    row_walker(row_walker const&) = delete;
-    row_walker& operator=(row_walker const&) = delete;
+    query_walker(query_walker const&) = delete;
+    query_walker& operator=(query_walker const&) = delete;
 
-    ~row_walker() noexcept {
+    ~query_walker() noexcept {
         for (walk_t& walk : walks_) walk.~walk_t();
-        for (row_t& row : rows_) row.~row_t();
+        for (query_t& query : queries_) query.~query_t();
     }
 
-    /** Carves every walk, row and flight of the thread, and reserves an aggregating predicate for
+    /** Carves every walk, query and flight of the thread, and reserves an aggregating predicate for
      *  the widest batch it can gather: every flight of the thread landing at once. */
     status_t reserve() noexcept {
-        std::size_t const parts = parts_.size(), rows = shape_.rows_per_thread;
-        std::size_t const walks = rows * parts, flights = walks * shape_.walk_flights;
+        std::size_t const parts = parts_.size(), queries = shape_.queries_per_thread;
+        std::size_t const walks = queries * parts, flights = walks * shape_.walk_flights;
         walk_t* const walk_slots = carve_<walk_t>(walks);
-        row_t* const row_slots = carve_<row_t>(rows);
-        nvme_row_slot_t* const slot_states = carve_<nvme_row_slot_t>(rows);
+        query_t* const query_slots = carve_<query_t>(queries);
+        nvme_query_slot_t* const slot_states = carve_<nvme_query_slot_t>(queries);
         flight_t* const flight_states = carve_<flight_t>(flights);
         u32_t* const free_flights = carve_<u32_t>(flights);
         u32_t* const hop_flights = carve_<u32_t>(walks * shape_.hop_slots);
         io_request_t* const backlog = carve_<io_request_t>(shape_.buffers);
         io_completion_t* const completions = carve_<io_completion_t>(shape_.buffers);
-        if (!walk_slots || !row_slots || !slot_states || !flight_states || !free_flights || !hop_flights || !backlog ||
-            !completions)
+        if (!walk_slots || !query_slots || !slot_states || !flight_states || !free_flights || !hop_flights ||
+            !backlog || !completions)
             return status_t::bad_alloc_k;
 
         scratch_allocator_t const allocator {arena_};
@@ -473,47 +476,46 @@ class row_walker {
             if (failed(constructed.results.reserve(queue_sizes.results)) ||
                 failed(constructed.frontier.reserve(queue_sizes.frontier)) ||
                 failed(constructed.visited.reserve(queue_sizes.visited)) ||
-                (row_t::admitting_k && failed(constructed.admitted.reserve(queue_sizes.results))))
+                (query_t::admitting_k && failed(constructed.admitted.reserve(queue_sizes.results))))
                 return status_t::bad_alloc_k;
         }
-        for (std::size_t row = 0; row != rows; ++row) {
-            row_t& constructed = *new (row_slots + row) row_t {inputs_, allocator};
-            rows_ = {row_slots, row + 1};
+        for (std::size_t query = 0; query != queries; ++query) {
+            query_t& constructed = *new (query_slots + query) query_t {inputs_, allocator};
+            queries_ = {query_slots, query + 1};
             if (status_t const reserved = constructed.reserve(parts, nvme_widest_row(parts_)); failed(reserved))
                 return reserved;
         }
-        for (std::size_t row = 0; row != rows; ++row) new (slot_states + row) nvme_row_slot_t {};
+        for (std::size_t query = 0; query != queries; ++query) new (slot_states + query) nvme_query_slot_t {};
         for (std::size_t flight = 0; flight != flights; ++flight)
             free_flights[flight] = static_cast<u32_t>(flights - 1 - flight);
-        slots_ = {slot_states, rows};
+        slots_ = {slot_states, queries};
         flights_ = {flight_states, flights};
         free_flights_ = {free_flights, flights};
         hop_flights_ = {hop_flights, walks * shape_.hop_slots};
         free_count_ = flights;
         backlog_ = {backlog, shape_.buffers};
         completions_ = {completions, shape_.buffers};
-        if constexpr (row_t::admitting_k)
+        if constexpr (query_t::admitting_k)
             return reserve_predicate(thread_predicate(*inputs_.predicate, thread_), flights);
         return status_t::success_k;
     }
 
-    /** Primes rows until the batch runs out, keeping every slot's walks in flight, and drains the
-     *  engine before it returns, whatever happened; a failure on any thread stops this one too.
-     *  Answers the first row that refused, since a failure is published to every thread
-     *  instead. */
+    /** Primes queries until the batch runs out, keeping every slot's walks in flight, and drains
+     *  the engine before it returns, whatever happened; a failure on any thread stops this one too.
+     *  Answers the first query that refused, as a failure is published to every thread instead. */
     status_t drive_walks() noexcept {
         while (true) {
             if (succeeded(failure_)) {
                 if (status_t const shared = shared_failure_(); failed(shared)) failure_ = shared;
-                else prime_rows_();
+                else prime_queries_();
             }
             if (failed(failure_) && !outstanding_) break;
             if (succeeded(failure_)) {
-                if (!rows_in_flight_ && exhausted_()) break;
+                if (!queries_in_flight_ && exhausted_()) break;
                 enqueue_backlog_();
             }
             if (!outstanding_) {
-                assert((failed(failure_) || !rows_in_flight_) && "A row in flight always waits on a read");
+                assert((failed(failure_) || !queries_in_flight_) && "A query in flight always waits on a read");
                 continue;
             }
             if (status_t const submitted = engine_.submit(io_wait_t::blocking_k); failed(submitted)) {
@@ -522,16 +524,16 @@ class row_walker {
                 outstanding_ = 0;
                 break;
             }
-            telemetry_.round_trips += rows_in_flight_;
+            telemetry_.round_trips += queries_in_flight_;
             for (std::size_t polled = engine_.poll_completions(completions_); polled;
                  polled = engine_.poll_completions(completions_)) {
                 // Completions of walk reads move to the front, as their flights may serve
-                // other rows by the end of the batch.
+                // other queries by the end of the batch.
                 std::size_t advancing = 0;
                 for (io_completion_t const& completion : completions_.first(polled))
                     if (route_completion_(completion)) completions_[advancing++] = completion;
                 // Walks advance once the whole batch landed and its admissions settled, so their
-                // next hops weigh every row that did.
+                // next hops weigh every query that did.
                 settle_admissions_();
                 if (succeeded(failure_))
                     for (io_completion_t const& completion : completions_.first(advancing))
@@ -545,7 +547,7 @@ class row_walker {
     search_result_t const& telemetry() const noexcept { return telemetry_; }
 
     /** Records the thread's first failure and publishes it, so every thread stops priming
-     *  rows. */
+     *  queries. */
     void fail(status_t failure) noexcept {
         if (succeeded(failure_)) failure_ = failure;
         status_t unset = status_t::success_k;
@@ -554,22 +556,23 @@ class row_walker {
     }
 
     /**
-     *  @brief Walks every row of a batch over every part in @p parts, the rows' walks interleaved
-     *      on every thread of @p executor, each row built from @p inputs as @p row_type_ says.
+     *  @brief Walks every query of a batch over every part in @p parts, the queries' walks
+     *      interleaved on every thread of @p executor, each query built from @p inputs as
+     *      @p query_type_ says.
      *
      *  Runs inside a call @ref nvme_begin_call began at @p shape 's sizes, and sums the threads'
-     *  telemetry; @p counts are the rows' own, summed into the result's @c count. @p latencies
-     *  takes one duration per row, or is empty. Every thread streams its landed rows through
+     *  telemetry; @p counts are the queries' own, summed into the result's @c count. @p latencies
+     *  takes one duration per query, or is empty. Every thread streams its landed entries through
      *  @p prefetcher.
      */
     template <typename executor_type_>
     static expected<search_result_t> run_walks(std::span<medium_t const> media, std::span<part_t const> parts,
                                                executor_type_& executor, walk_shape_t shape,
-                                               typename row_t::inputs_t const& inputs,
+                                               typename query_t::inputs_t const& inputs,
                                                std::span<std::size_t const> counts, std::span<u64_t> latencies,
                                                std::size_t line_bytes = default_alignment_k) noexcept {
         search_result_t merged;
-        if (!latencies.empty() && latencies.size() != shape.rows_count) return {merged, status_t::config_mismatch_k};
+        if (!latencies.empty() && latencies.size() != shape.queries_count) return {merged, status_t::config_mismatch_k};
         alignas(default_alignment_k) std::size_t cursor = 0;
         status_t failure = status_t::success_k;
         shape.cursor = &cursor;
@@ -583,7 +586,7 @@ class row_walker {
             add(into.count, reads.count), add(into.bytes, reads.bytes);
         };
         auto walk_thread = [&](std::size_t thread, std::size_t) noexcept {
-            row_walker walker {
+            query_walker walker {
                 executor.engine(thread), executor.arena(thread), media, parts, shape, inputs, thread, line_bytes};
             status_t const reserved = walker.reserve();
             if (failed(reserved)) walker.fail(reserved);
@@ -619,17 +622,17 @@ class row_walker {
     }
 
     bool exhausted_() const noexcept {
-        return atomic_ref<std::size_t>(*shape_.cursor).load(std::memory_order_relaxed) >= shape_.rows_count;
+        return atomic_ref<std::size_t>(*shape_.cursor).load(std::memory_order_relaxed) >= shape_.queries_count;
     }
 
-    /** Hop slots a walk may hold now: its own share, and once the batch ran out, the shares of
-     *  the row slots that went idle; the shares only grow after that, so the free list never runs
+    /** Hop slots a walk may hold now: its own share, and once the batch ran out, the shares of the
+     *  query slots that went idle; the shares only grow after that, so the free list never runs
      *  dry. */
     std::size_t live_hops_() const noexcept {
-        std::size_t const rows = shape_.rows_per_thread;
-        if (rows_in_flight_ == rows || !exhausted_()) return shape_.hops_per_walk;
-        std::size_t const inherited = (rows - rows_in_flight_) * shape_.walk_flights /
-                                      (rows_in_flight_ * (nvme_widest_row(parts_) + 1));
+        std::size_t const queries = shape_.queries_per_thread;
+        if (queries_in_flight_ == queries || !exhausted_()) return shape_.hops_per_walk;
+        std::size_t const inherited = (queries - queries_in_flight_) * shape_.walk_flights /
+                                      (queries_in_flight_ * (nvme_widest_row(parts_) + 1));
         return min_of(shape_.hop_slots, shape_.hops_per_walk + inherited);
     }
 
@@ -662,7 +665,7 @@ class row_walker {
 
     /** The shard @p flight reads: its walk's, or the shard of the output a resolution fills. */
     u32_t shard_of_(flight_t const& flight) const noexcept {
-        return flight.purpose == nvme_purpose_t::key_k ? rows_[flight.issuer].output_locator(flight.position).shard
+        return flight.purpose == nvme_purpose_t::key_k ? queries_[flight.issuer].output_locator(flight.position).shard
                                                        : walks_[flight.issuer].shard;
     }
 
@@ -711,19 +714,19 @@ class row_walker {
         }
     }
 
-    /** Takes the next rows of the batch into every idle slot and seeds all of their walks. */
-    void prime_rows_() noexcept {
+    /** Takes the next queries of the batch into every idle slot and seeds all of their walks. */
+    void prime_queries_() noexcept {
         std::size_t const parts = parts_.size();
         for (u32_t slot_index = 0; slot_index != slots_.size(); ++slot_index) {
-            nvme_row_slot_t& slot = slots_[slot_index];
-            if (slot.stage != nvme_row_stage_t::idle_k) continue;
-            std::size_t const row = atomic_ref<std::size_t>(*shape_.cursor).fetch_add(1, std::memory_order_relaxed);
-            if (row >= shape_.rows_count) return;
-            slot = nvme_row_slot_t {static_cast<u32_t>(parts), 0, 0, 0, nvme_row_stage_t::walking_k, row, {}};
+            nvme_query_slot_t& slot = slots_[slot_index];
+            if (slot.stage != nvme_query_stage_t::idle_k) continue;
+            std::size_t const query = atomic_ref<std::size_t>(*shape_.cursor).fetch_add(1, std::memory_order_relaxed);
+            if (query >= shape_.queries_count) return;
+            slot = nvme_query_slot_t {static_cast<u32_t>(parts), 0, 0, 0, nvme_query_stage_t::walking_k, query, {}};
             if (!shape_.latencies.empty()) slot.primed = std::chrono::steady_clock::now();
-            ++rows_in_flight_;
-            row_t& primed = rows_[slot_index];
-            primed.prime_row(row);
+            ++queries_in_flight_;
+            query_t& primed = queries_[slot_index];
+            primed.prime_query(query);
             tier_t::prime_scoring_(shape_, primed);
             for (u32_t shard = 0; shard != parts; ++shard) {
                 u32_t const walk_index = slot_index * static_cast<u32_t>(parts) + shard;
@@ -733,9 +736,9 @@ class row_walker {
                 walk.frontier.clear();
                 walk.visited.clear();
                 walk.staged.clear();
-                walk.random_generator = seeded_stream(u64_t(row) * parts + shard + 1);
+                walk.random_generator = seeded_stream(u64_t(query) * parts + shard + 1);
                 walk.shard = shard;
-                walk.row_slot = slot_index;
+                walk.query_slot = slot_index;
                 walk.stage = nvme_walk_stage_t::seeding_k;
                 std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
                 std::memset(hop_flights.data(), 0, hop_flights.size_bytes());
@@ -768,7 +771,7 @@ class row_walker {
         flights_[flight] = flight_t {walk_index, node, hop, static_cast<u8_t>(shape_.buffers_per_flight),
                                      nvme_purpose_t::score_k};
         issue_row_read_(flight, nvme_purpose_t::score_k, flight);
-        if constexpr (row_t::key_reads_k == nvme_key_reads_t::scored_k)
+        if constexpr (query_t::key_reads_k == nvme_key_reads_t::scored_k)
             issue_row_read_(flight, nvme_purpose_t::key_k, key_buffer_(flight));
     }
 
@@ -805,10 +808,11 @@ class row_walker {
             u32_t const slot_index = flight.issuer;
             byte_t const* const stored = landed_row_(flight_index, nvme_purpose_t::key_k, flight_index);
             dtype_t const stored_dtype = parts_[shard_of_(flight)].key_dtype;
-            rows_[slot_index].resolve_output_key(flight.position, safegraphs_widened_key<key_t>(stored, stored_dtype));
+            queries_[slot_index].resolve_output_key(flight.position,
+                                                    safegraphs_widened_key<key_t>(stored, stored_dtype));
             release_flight_(flight_index);
             --slots_[slot_index].resolving;
-            resolve_row_(slot_index);
+            resolve_query_(slot_index);
             return false;
         }
         }
@@ -816,8 +820,8 @@ class row_walker {
     }
 
     /** Releases the staged flights of a draining @p walk unscored, or hands them to the tier, which
-     *  scores them as one quad, folds them through the walk's row, releases them and ranks the rest
-     *  through @c rank_. */
+     *  scores them as one quad, folds them through the walk's query, releases them and ranks the
+     *  rest through @c rank_. */
     void score_staged_flights_(walk_t& walk) noexcept {
         if (!walk.staged.size()) return;
         if (walk.stage == nvme_walk_stage_t::draining_k) {
@@ -827,7 +831,7 @@ class row_walker {
         tier_t::score_staged_(*this, walk);
     }
 
-    /** Merges the ascending @p scored rows of @p walk into its candidates, and queues them for
+    /** Merges the ascending @p scored entries of @p walk into its candidates, and queues them for
      *  expansion: every landmark, as the in-memory walk seeds the frontier, and a neighbor only
      *  when the candidates took it. */
     [[gnu::always_inline]] void rank_(walk_t& walk, std::span<scored_node_t const> scored) noexcept {
@@ -838,7 +842,7 @@ class row_walker {
     }
 
     /** Admits the nodes of @p scored, scored from the staged flights of @p walk in lane order, that
-     *  could still enter its admitted set and that the row's relation and the thread's predicate
+     *  could still enter its admitted set and that the query's relation and the thread's predicate
      *  both admit: at once under an immediate predicate, at the batch's settle under an aggregating
      *  one. */
     void admit_scored_(walk_t& walk, std::span<scored_node_t const> scored) noexcept {
@@ -869,7 +873,7 @@ class row_walker {
         });
     }
 
-    /** Asks the row's relation about the landed rows of the contending @p flights, then the
+    /** Asks the query's relation about the landed entries of the contending @p flights, then the
      *  thread's predicate about the keys of those it kept. */
     template <std::size_t extent_>
     void relate_contenders_(walk_t& walk, std::span<u32_t const, extent_> flights,
@@ -914,7 +918,7 @@ class row_walker {
     /** Answers what the thread's predicate gathered over a completion batch, so every walk advances
      *  on its whole admitted set. */
     void settle_admissions_() noexcept {
-        if constexpr (row_t::admitting_k)
+        if constexpr (query_t::admitting_k)
             settle_predicate(thread_predicate(*inputs_.predicate, thread_),
                              [this](walk_payload_t const& payload) noexcept { admit_payload_(payload); });
     }
@@ -942,9 +946,9 @@ class row_walker {
             if (!in_flight_(walk_index)) finish_walk_(walk_index);
             return;
         }
-        row_t const& row = rows_[walk.row_slot];
+        query_t const& query = queries_[walk.query_slot];
         std::size_t const expansion_factor = shape_.expansion_factor;
-        results_array_t const& stopping = row.stopping_candidates(walk);
+        results_array_t const& stopping = query.stopping_candidates(walk);
         bool const stopping_full = stopping.size() == expansion_factor;
         std::span<u32_t> const hop_flights = hop_flights_of_(walk_index).first(live_hops_());
         for (u32_t slot = 0; slot != hop_flights.size() && !walk.frontier.empty(); ++slot) {
@@ -997,30 +1001,30 @@ class row_walker {
         release_flight_(flight_index);
     }
 
-    /** Merges @p walk_index into its row, and once every walk of the row finished, starts the
-     *  row's resolution. */
+    /** Merges @p walk_index into its query, and once every walk of the query finished, starts the
+     *  query's resolution. */
     void finish_walk_(u32_t walk_index) noexcept {
         walk_t& walk = walks_[walk_index];
         walk.stage = nvme_walk_stage_t::finished_k;
-        u32_t const slot_index = walk.row_slot;
-        nvme_row_slot_t& slot = slots_[slot_index];
-        assert(slot.stage == nvme_row_stage_t::walking_k && "Only a walking row's walks finish");
-        rows_[slot_index].finish_walk(walk);
+        u32_t const slot_index = walk.query_slot;
+        nvme_query_slot_t& slot = slots_[slot_index];
+        assert(slot.stage == nvme_query_stage_t::walking_k && "Only a walking query's walks finish");
+        queries_[slot_index].finish_walk(walk);
         if (--slot.walks_left) return;
-        slot.stage = nvme_row_stage_t::resolving_k;
-        slot.outputs = static_cast<u32_t>(rows_[slot_index].output_count());
-        resolve_row_(slot_index);
+        slot.stage = nvme_query_stage_t::resolving_k;
+        slot.outputs = static_cast<u32_t>(queries_[slot_index].output_count());
+        resolve_query_(slot_index);
     }
 
-    /** Issues key reads for the row's written locators within the row's flight budget, and
-     *  finishes the row once every one landed. */
-    void resolve_row_(u32_t slot_index) noexcept {
-        nvme_row_slot_t& slot = slots_[slot_index];
-        assert(slot.stage == nvme_row_stage_t::resolving_k && "Only a resolving row reads keys");
-        row_t& row = rows_[slot_index];
+    /** Issues key reads for the query's written locators within its flight budget, and
+     *  finishes the query once every one landed. */
+    void resolve_query_(u32_t slot_index) noexcept {
+        nvme_query_slot_t& slot = slots_[slot_index];
+        assert(slot.stage == nvme_query_stage_t::resolving_k && "Only a resolving query reads keys");
+        query_t& query = queries_[slot_index];
         std::size_t const budget = parts_.size() * shape_.walk_flights;
         while (slot.next_output != slot.outputs && slot.resolving != budget) {
-            auto const locator = row.output_locator(slot.next_output);
+            auto const locator = query.output_locator(slot.next_output);
             u32_t const flight = take_flight_();
             flights_[flight] = flight_t {slot_index, locator.node, slot.next_output, 1, nvme_purpose_t::key_k};
             issue_row_read_(flight, nvme_purpose_t::key_k, flight);
@@ -1028,13 +1032,14 @@ class row_walker {
             ++slot.resolving;
         }
         if (slot.resolving) return;
-        if (status_t const finished = row.finish_row(); failed(finished) && succeeded(refusal_)) refusal_ = finished;
+        if (status_t const finished = query.finish_query(); failed(finished) && succeeded(refusal_))
+            refusal_ = finished;
         if (!shape_.latencies.empty())
-            shape_.latencies[slot.row] = static_cast<u64_t>(
+            shape_.latencies[slot.query_index] = static_cast<u64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - slot.primed)
                     .count());
-        slot.stage = nvme_row_stage_t::idle_k;
-        --rows_in_flight_;
+        slot.stage = nvme_query_stage_t::idle_k;
+        --queries_in_flight_;
     }
 
     engine_t& engine_;
@@ -1051,8 +1056,8 @@ class row_walker {
     object_prefetcher<cache_hints_type_> prefetcher_;
 
     std::span<walk_t> walks_;
-    std::span<row_t> rows_;
-    std::span<nvme_row_slot_t> slots_;
+    std::span<query_t> queries_;
+    std::span<nvme_query_slot_t> slots_;
     std::span<flight_t> flights_;
     std::span<u32_t> free_flights_;
     std::span<u32_t> hop_flights_;
@@ -1061,13 +1066,13 @@ class row_walker {
     std::size_t free_count_ = 0;
     std::size_t backlog_size_ = 0;
     std::size_t outstanding_ = 0;
-    std::size_t rows_in_flight_ = 0;
+    std::size_t queries_in_flight_ = 0;
     search_result_t telemetry_;
 
     /** The read failure that stops this thread. */
     status_t failure_ = status_t::success_k;
 
-    /** The first row that refused, which leaves the other rows standing. */
+    /** The first query that refused, which leaves the other queries standing. */
     status_t refusal_ = status_t::success_k;
 };
 

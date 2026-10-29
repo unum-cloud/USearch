@@ -486,7 +486,7 @@ static usearch_arena_t call_arena(call_t* call, mint id) {
     return arena->handle;
 }
 
-/** Reads the matches a call keeps per row, refusing a negative number rather than wrapping it. */
+/** Reads the matches a call keeps per query, refusing a negative number rather than wrapping it. */
 static usearch_status_t call_size(call_t* call, MArgument argument, size_t* wanted, char const* message) {
     mint const requested = MArgument_getInteger(argument);
     if (requested < 0) return call_refuse(call, usearch_status_invalid_argument_k, message);
@@ -1173,7 +1173,7 @@ static int answer_matches(WolframLibraryData library_data, call_t* call, DataSto
         keys ? (usearch_key_t*)library_data->numericarrayLibraryFunctions->MNumericArray_getData(keys) : NULL;
     double* const scores_cells = library_data->MTensor_getRealData(scores);
     mint* const counts_cells = library_data->MTensor_getIntegerData(counts);
-    // Columns past a row's count are unwritten, so only the matches it found are copied.
+    // Columns past a query's count are unwritten, so only the matches it found are copied.
     for (size_t row = 0, landed = 0; row != call->count; landed += matches.counts[row++]) {
         counts_cells[row] = (mint)matches.counts[row];
         if (!matches.counts[row]) continue;
@@ -1212,7 +1212,7 @@ static int answer_multiply(WolframLibraryData library_data, call_t* call, DataSt
     if (library_data->MTensor_new(MType_Integer, 1, offsets_extents, &offsets) != LIBRARY_NO_ERROR)
         return LIBRARY_MEMORY_ERROR;
     mint* const offsets_cells = library_data->MTensor_getIntegerData(offsets);
-    // A call with nothing to report leaves its offsets NULL, which reads as every row empty.
+    // A call with nothing to report leaves its offsets NULL, which reads as every query empty.
     if (products.offsets) memcpy(offsets_cells, products.offsets, (call->count + 1) * sizeof(size_t));
     else memset(offsets_cells, 0, (call->count + 1) * sizeof(mint));
     library_data->ioLibraryFunctions->DataStore_addNamedMTensor(store, "Offsets", offsets);

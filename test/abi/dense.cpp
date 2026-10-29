@@ -7,12 +7,12 @@
  *      residency at one shard and at three.
  *
  *  Each cell builds one index the way a binding does, through a session of its residency, and
- *  checks what a caller observes. The rows land under their keys across the shards; every key
- *  counts once and reads back; nine in ten rows find themselves first, and a walk keeps nine in ten
- *  of the exact scan's top ten; a predicate admits only what it admits; refinements settle and an
- *  audit reaches every row; the index saves and reloads into every residency and as a view, and an
- *  NVMe view serves the same searches and refuses every write; a donor absorbs whole; a RAM index
- *  compacts into one shard; a cleared index holds nothing.
+ *  checks what a caller observes. The vectors land under their keys across the shards; every key
+ *  counts once and reads back; nine in ten vectors find themselves first, and a walk keeps nine in
+ *  ten of the exact scan's top ten; a predicate admits only what it admits; refinements settle and
+ *  an audit reaches every entry; the index saves and reloads into every residency and as a view,
+ *  and an NVMe view serves the same searches and refuses every write; a donor absorbs whole; a RAM
+ *  index compacts into one shard; a cleared index holds nothing.
  */
 #include <cstring> // `std::memcmp` - the keys' order
 
@@ -45,38 +45,38 @@ static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t cou
 }
 
 /** Every row searches for itself: nine in ten must land first, every landed key was minted, and
- *  every row ascends. */
+ *  every query's matches ascend. */
 static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     landed_matches_t found;
     usearch_traversal_stats_t stats {};
     std::size_t failures = check(search_queries(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
                                                 usearch_traversal_walk_k, stats, found));
     if (failures) return failures;
-    std::vector<std::size_t> const offsets = row_offsets(found);
+    std::vector<std::size_t> const offsets = match_offsets(found);
     std::size_t found_first = 0, unminted = 0, descending = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        std::size_t const first = offsets[row], last = offsets[row + 1];
+    for (std::size_t query = 0; query != count; ++query) {
+        std::size_t const first = offsets[query], last = offsets[query + 1];
         for (std::size_t match = first; match != last; ++match) {
-            std::optional<u64_t> const landed = row_of_key(index.session->seed,
-                                                           std::bit_cast<usearch_key_t>(found.keys[match]));
+            std::optional<u64_t> const landed = offset_of_key(index.session->seed,
+                                                              std::bit_cast<usearch_key_t>(found.keys[match]));
             unminted += !landed;
-            found_first += match == first && landed == row;
+            found_first += match == first && landed == query;
             if (match != first) descending += found.scores[match] < found.scores[match - 1];
         }
     }
     return check(found_first * 10 >= count * 9) + check(unminted == 0) + check(descending == 0);
 }
 
-/** Every key of the first @p count rows reads one row back. */
+/** Every key of the first @p count entries reads one vector back. */
 static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) {
     std::size_t misread = 0;
-    for (std::size_t row = 0; row != count; ++row) {
+    for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
         usearch_rows_view_t vectors {};
         std::size_t written = 0;
         usearch_dense_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
-        get.key = key_of_row(index.session->seed, row);
+        get.key = key_of_offset(index.session->seed, offset);
         get.vectors = &vectors, get.written = &written, get.arena = index.session->arena;
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_dense_get(&get);
@@ -100,11 +100,12 @@ static void admit_listed(usearch_key_t const* keys, usearch_admission_t* admissi
                                    : usearch_reject_k;
 }
 
-/** A host walk lands only the keys of the even rows among the first @p count , chosen up front for
- *  the predicate to look up; a device walk refuses a host predicate as unsupported. */
+/** A host walk lands only the keys of the even entries among the first @p count , chosen up front
+ *  for the predicate to look up; a device walk refuses a host predicate as unsupported. */
 static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     std::vector<usearch_key_t> admitted;
-    for (std::size_t row = 0; row < count; row += 2) admitted.push_back(key_of_row(index.session->seed, row));
+    for (std::size_t offset = 0; offset < count; offset += 2)
+        admitted.push_back(key_of_offset(index.session->seed, offset));
     std::sort(admitted.begin(), admitted.end(), key_precedes);
     usearch_outcome_t outcome {};
     usearch_matches_view_t matches {};
@@ -125,7 +126,7 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     return check(outside == 0 && !found.keys.empty());
 }
 
-/** An audit reaches every row. */
+/** An audit reaches every entry. */
 static std::size_t expect_health(handle<dense_verbs_t>& index, std::size_t count) {
     usearch_outcome_t outcome {};
     usearch_reachability_t reachability {};
@@ -136,8 +137,8 @@ static std::size_t expect_health(handle<dense_verbs_t>& index, std::size_t count
     return check(outcome) + check(reachability.audited == count && reachability.reachable == count);
 }
 
-/** A RAM index compacts in place under a capacity of every row and keeps every row; the shards it
- *  emptied stay as idle slots, which the description counts among the live ones. */
+/** A RAM index compacts in place under a capacity of every entry and keeps every entry; the shards
+ *  it emptied stay as idle slots, which the description counts among the live ones. */
 static std::size_t expect_compact(handle<dense_verbs_t>& index, std::size_t count) {
     usearch_outcome_t outcome {};
     usearch_dense_index_t sources[1] = {index.get()};

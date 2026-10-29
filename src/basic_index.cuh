@@ -15,7 +15,7 @@
 
 #include <memory>      // `std::unique_ptr` - a finished refinement's handle and state
 #include <new>         // `std::nothrow`
-#include <span>        // `std::span` - the listed devices, a view's paths and rows
+#include <span>        // `std::span` - the listed devices, a view's paths and entries
 #include <string_view> // `std::string_view` - checkpoint paths
 #include <type_traits> // `std::remove_pointer_t`
 #include <utility>     // `std::exchange` - a landed donor's slot
@@ -56,8 +56,8 @@ struct basic_handle {
     }
 };
 
-/** The cursor over a modality's handle: a RAM variant's snapshot, or the next row of an NVMe view,
- *  with the table whose entries pull and free it, which outlives every handle. */
+/** The cursor over a modality's handle: a RAM variant's snapshot, or the next entry of an NVMe
+ *  view, with the table whose entries pull and free it, which outlives every handle. */
 template <typename handle_type_>
 struct basic_cursor {
     basic_home_tables<typename handle_type_::traits_t> tables;
@@ -516,7 +516,7 @@ void basic_report_refined(basic_refined_t const& refined, arguments_type_ const&
         if (arguments.visited) *arguments.visited = refined.visited;
 }
 
-/** Skips the re-selection @p refining left, heals what it strands, and reports. */
+/** Skips the re-selection @p refining left, heals the islands it leaves, and reports. */
 template <typename traits_type_, dense_home_t home_, typename arguments_type_>
 status_t basic_finish_refinement(punned_basic_index<traits_type_, home_> const& punned, void* refining,
                                  arguments_type_ const& arguments,

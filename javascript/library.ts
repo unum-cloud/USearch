@@ -107,7 +107,7 @@ export interface CompiledLinks {
 /** One cursor pull viewed inside its arena, the links present when they were asked for. */
 export interface CompiledBatch {
   keys: Uint8Array | null;
-  rows: number;
+  entries: number;
   links?: CompiledLinks;
 }
 

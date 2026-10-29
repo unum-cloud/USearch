@@ -33,7 +33,7 @@
 //! var arena = try usearch.Arena.init(executor);
 //! defer arena.deinit();
 //! const matches = try index.on(executor).search(try .of(f32, &slab, 256), 10, &arena, .{});
-//! const nearest = (try matches.row(0)).keys[0];
+//! const nearest = (try matches.query(0)).keys[0];
 //! ```
 //!
 //! This root re-exports every public symbol from the modules that mirror the C headers - `types`
@@ -59,7 +59,7 @@ pub const Traversal = types.Traversal;
 pub const BytesView = types.BytesView;
 pub const RowsView = types.RowsView;
 pub const Matches = types.Matches;
-pub const MatchesRow = types.MatchesRow;
+pub const QueryMatches = types.QueryMatches;
 pub const Admission = types.Admission;
 pub const Continuation = types.Continuation;
 pub const ProgressCallback = types.ProgressCallback;

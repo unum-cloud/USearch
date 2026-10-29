@@ -6,11 +6,11 @@
  *      and run its suite in seconds instead of building the engine.
  *
  *  Every SDK in this repository talks to the same C ABI, and most of what breaks in one is the
- *  binding rather than the engine: a leaked handle, a stride counted in scalars instead of
- *  bytes, an unread outcome, an output read past the rows the call wrote. Finding those should not
- *  cost a build of the instantiation grid, so this file answers the dense verbs with the C++
- *  standard library alone - no submodules, no SIMD, no CUDA - over the store and locks of
- *  @c lib.hpp. A binding suite runs unchanged against this library or the engine's.
+ *  binding rather than the engine: a leaked handle, a stride counted in scalars instead of bytes,
+ *  an unread outcome, an output read past the count the call wrote. Finding those should not cost a
+ *  build of the instantiation grid, so this file answers the dense verbs with the C++ standard
+ *  library alone - no submodules, no SIMD, no CUDA - over the store and locks of @c lib.hpp. A
+ *  binding suite runs unchanged against this library or the engine's.
  *
  *  Search here is an exact scan, so recall is trivially perfect and ties fall in insertion
  *  order. What this proves is the binding: handle lifetime, strided input, arena output, the
@@ -31,9 +31,9 @@
  *  never checked against each other, so the bit-set kinds read whatever rows they are handed where
  *  the engine admits @c u1x8 alone. @c values_per_key bounds nothing - a key holds as many entries
  *  as it is handed, the header naming no failure for exceeding it. A walk and a scan rank alike,
- *  both being exact here, and both ask the predicate about every row in one call per query, where
- *  the engine asks about a quad at a time and its scan only about rows closer than the worst match
- *  a query already holds.
+ *  both being exact here, and both ask the predicate about every entry in one call per query, where
+ *  the engine asks about a quad at a time and its scan only about entries closer than the worst
+ *  match a query already holds.
  *  Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than a
  *  settling signal, and a caller must not read it as one. Residency and huge pages are inert, a
  *  view copies its checkpoint rather than mapping it, and only the RAM verbs answer - every VRAM
@@ -42,7 +42,7 @@
  *  is a binary blob of this file's own memory image - not SafeGraphs, not portable across builds,
  *  and readable by nothing but the stand-in that wrote it.
  *
- *  Keeping no edges, the stand-in links every one of its rows to its exact nearest at the frozen
+ *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
  *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
  *  each receiver keeping the source's storage order, and a sample links each draw to its exact
@@ -82,7 +82,7 @@ namespace stub {
 using dense_payload_t = std::vector<double>;
 using dense_entry_t = entry<dense_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<dense_entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<dense_entry_t>, "reallocation must move entries, never copy them");
 
 /** What a handle froze at construction, or adopted from a checkpoint. */
 struct dense_index_options_t {
@@ -90,7 +90,7 @@ struct dense_index_options_t {
     /** What entries are compared by. */
     usearch_dense_metric_t metric;
 
-    /** The scalar kind rows were frozen at, which metadata reports back. */
+    /** The scalar kind vectors were frozen at, which metadata reports back. */
     usearch_scalar_t quantization;
 
     /** The frozen row width. */
@@ -218,27 +218,27 @@ static double dot_product(std::span<double const> first, std::span<double const>
  *  @brief The body of a search, filtered when @p predicate is set.
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
-static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& queries, std::size_t count,
-                               ranked_landing_t const& landing, std::size_t expansion_factor,
-                               usearch_traversal_t traversal, usearch_traversal_stats_t* stats,
-                               usearch_predicate_t predicate, usearch_progress_t progress) {
-    std::size_t const rows = index.entries.size();
+static std::size_t search_queries(dense_index_t& index, usearch_rows_view_t const& queries, std::size_t count,
+                                  ranked_landing_t const& landing, std::size_t expansion_factor,
+                                  usearch_traversal_t traversal, usearch_traversal_stats_t* stats,
+                                  usearch_predicate_t predicate, usearch_progress_t progress) {
+    std::size_t const entries = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
-    // A scan scores every row, as the engine's does; the expansion factor moves a walk's work.
+    // A scan scores every entry, as the engine's does; the expansion factor moves a walk's work.
     bool const scanning = traversal == usearch_traversal_scan_k;
-    if (stats) stats->computed_distances += scanning ? rows * count : expansion_factor * count;
+    if (stats) stats->computed_distances += scanning ? entries * count : expansion_factor * count;
 
     std::vector<double> query_row(dimensions);
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != count; ++query) {
         read_row(row_at<std::byte>(queries.data, query, queries.stride, query_bytes), queries.scalar, query_row);
         rank<dense_payload_t>(
-            std::span<dense_entry_t const>(index.entries).first(rows), predicate,
+            std::span<dense_entry_t const>(index.entries).first(entries), predicate,
             [&](dense_payload_t const& payload) { return distance(index.options.metric, query_row, payload); }, ranked);
         landing.write(query, ranked);
         if (stats) {
-            stats->visited_members += rows;
+            stats->visited_members += entries;
             if (!scanning) stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
@@ -251,7 +251,7 @@ static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& 
 
 #pragma region Serialization
 
-/** What @c load needs before it can read a row. The blob is this file's own memory image
+/** What @c load needs before it can read an entry. The blob is this file's own memory image
  *  rather than a format: no magic, no version, and nothing but the stand-in reads it back. */
 struct dense_checkpoint_prefix_t {
 
@@ -261,37 +261,37 @@ struct dense_checkpoint_prefix_t {
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
 
-    /** How many rows follow the prefix. */
+    /** How many entries follow the prefix. */
     std::size_t entries;
 
     /** What entries are compared by. */
     usearch_dense_metric_t metric;
 
-    /** The scalar kind the rows were frozen at, which metadata reports back. */
+    /** The scalar kind the vectors were frozen at, which metadata reports back. */
     usearch_scalar_t quantization;
 };
 
-static std::size_t stored_row_bytes(std::size_t dimensions) {
+static std::size_t stored_entry_bytes(std::size_t dimensions) {
     return sizeof(usearch_key_t) + dimensions * sizeof(double);
 }
 
-/** The whole blob's extent, empty when that many rows could not be addressed. */
-static std::optional<std::size_t> serialized_bytes(dense_index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(dense_checkpoint_prefix_t), rows, stored_row_bytes(index.options.dimensions));
+/** The whole blob's extent, empty when that many entries could not be addressed. */
+static std::optional<std::size_t> serialized_bytes(dense_index_t const& index, std::size_t entries) {
+    return blob_bytes(sizeof(dense_checkpoint_prefix_t), entries, stored_entry_bytes(index.options.dimensions));
 }
 
-static void write_into(dense_index_t const& index, std::size_t rows, bytes_span_t target) {
+static void write_into(dense_index_t const& index, std::size_t entries, bytes_span_t target) {
     dense_checkpoint_prefix_t prefix {};
     prefix.dimensions = index.options.dimensions;
     prefix.quantization = index.options.quantization;
     prefix.connectivity = index.options.connectivity;
-    prefix.entries = rows;
+    prefix.entries = entries;
     prefix.metric = index.options.metric;
     write_pod(target, prefix);
 
     bytes_span_t cursor = target.subspan(sizeof(prefix));
-    for (std::size_t row = 0; row != rows; ++row) {
-        dense_entry_t const& entry = index.entries[row];
+    for (std::size_t position = 0; position != entries; ++position) {
+        dense_entry_t const& entry = index.entries[position];
         std::size_t const payload_bytes = entry.payload.size() * sizeof(double);
         write_pod(cursor, entry.key);
         cursor = cursor.subspan(sizeof(usearch_key_t));
@@ -301,13 +301,13 @@ static void write_into(dense_index_t const& index, std::size_t rows, bytes_span_
     }
 }
 
-/** Reads the prefix and checks the blob is long enough for the rows it claims. */
+/** Reads the prefix and checks the blob is long enough for the entries it claims. */
 static bool parse_prefix(dense_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(dense_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
     prefix = read_pod<dense_checkpoint_prefix_t>(blob);
-    return fits_blob(blob, sizeof(dense_checkpoint_prefix_t), prefix.entries, stored_row_bytes(prefix.dimensions),
+    return fits_blob(blob, sizeof(dense_checkpoint_prefix_t), prefix.entries, stored_entry_bytes(prefix.dimensions),
                      outcome);
 }
 
@@ -340,11 +340,11 @@ static bool adopt(dense_index_options_t& options, dense_checkpoint_prefix_t cons
 static bool read_from(dense_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
     dense_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome) || reject_unstored(prefix.quantization, outcome)) return false;
-    std::size_t const rows = prefix.entries;
+    std::size_t const entries = prefix.entries;
     std::size_t const dimensions = prefix.dimensions;
     index.reset();
-    if (!index.accommodate(rows)) {
-        propagate_error(usearch_status_out_of_memory_k, outcome, "The checkpoint's rows could not be allocated");
+    if (!index.accommodate(entries)) {
+        propagate_error(usearch_status_out_of_memory_k, outcome, "The checkpoint's entries could not be allocated");
         return false;
     }
     if (!adopt(index.options, prefix)) {
@@ -354,7 +354,7 @@ static bool read_from(dense_index_t& index, bytes_view_t blob, usearch_outcome_t
 
     bytes_view_t cursor = blob.subspan(sizeof(dense_checkpoint_prefix_t));
     std::vector<double> payload(dimensions);
-    for (std::size_t row = 0; row != rows; ++row) {
+    for (std::size_t position = 0; position != entries; ++position) {
         usearch_key_t const key = read_pod<usearch_key_t>(cursor);
         cursor = cursor.subspan(sizeof(usearch_key_t));
         [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(payload.data(), payload.size()),
@@ -483,7 +483,8 @@ void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) {
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
-    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
+    // its zero cost.
     usearch_dense_index_handle_t* const index = open_checkpoint<usearch_dense_index_handle_t>(served.view(), outcome);
     if (!index) return;
     index->served = std::move(served);
@@ -507,7 +508,7 @@ void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
-    // Sizing the arena moves published rows, so no reader may be walking them.
+    // Sizing the arena moves published entries, so no reader may be walking them.
     std::unique_lock writers(index.mutex);
     reject_if(!index.accommodate(arguments->capacity), usearch_status_out_of_memory_k,
               "The capacity could not be reserved", outcome);
@@ -534,7 +535,7 @@ void usearch_dense_describe(usearch_dense_describe_t* arguments) {
         {options.metric, options.quantization, options.dimensions, options.connectivity},
         index.entries.size(),
         index.entries.capacity(),
-        index.entries.capacity() * stored_row_bytes(options.dimensions),
+        index.entries.capacity() * stored_entry_bytes(options.dimensions),
         usearch_cpu_class_serial_k,
         usearch_gpu_class_unknown_k,
         1,
@@ -562,11 +563,11 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     std::size_t const row_bytes = row_extent(vectors.scalar, dimensions);
     std::vector<double> payload(dimensions);
     std::size_t published = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        read_row(row_at<std::byte>(vectors.data, row, vectors.stride, row_bytes), vectors.scalar, payload);
-        index.append(key_at(arguments->keys, row), payload);
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        read_row(row_at<std::byte>(vectors.data, offset, vectors.stride, row_bytes), vectors.scalar, payload);
+        index.append(key_at(arguments->keys, offset), payload);
         ++published;
-        // Every row is claimed before the first report, so the handler only reports.
+        // Every entry is claimed before the first report, so the handler only reports.
         keep_going(arguments->progress, published, count);
     }
     if (arguments->stats) {
@@ -584,14 +585,14 @@ void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
     // An exact scan reaches every entry it holds in one level, as `usearch_dense_health` reports.
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -622,8 +623,8 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_rows(index, arguments->queries, count, landing, arguments->expansion_factor,
-                                             traversal, arguments->stats, arguments->predicate, arguments->progress);
+    std::size_t const answered = search_queries(index, arguments->queries, count, landing, arguments->expansion_factor,
+                                                traversal, arguments->stats, arguments->predicate, arguments->progress);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }
@@ -648,16 +649,17 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
-    if (rows.empty()) return;
+    std::vector<std::size_t> const entries = entries_under(index, arguments->key);
+    if (entries.empty()) return;
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = row_extent(scalar, dimensions);
-    std::byte* const landing = carve<std::byte>(*arena, rows.size() * row_bytes, outcome);
+    std::byte* const landing = carve<std::byte>(*arena, entries.size() * row_bytes, outcome);
     if (!landing) return;
-    for (std::size_t found = 0; found != rows.size(); ++found)
-        write_row(row_at<std::byte>(landing, found, row_bytes, row_bytes), scalar, index.entries[rows[found]].payload);
+    for (std::size_t found = 0; found != entries.size(); ++found)
+        write_row(row_at<std::byte>(landing, found, row_bytes, row_bytes), scalar,
+                  index.entries[entries[found]].payload);
     *arguments->vectors = {landing, row_bytes, dimensions, scalar};
-    if (arguments->written) *arguments->written = rows.size();
+    if (arguments->written) *arguments->written = entries.size();
 }
 
 void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
@@ -681,16 +683,17 @@ void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
         for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         delete std::exchange(donors[position], nullptr);
     }
-    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's rows could not be accommodated", outcome))
+    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
+                  outcome))
         return;
     // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
     // it.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -718,7 +721,7 @@ void usearch_dense_compact(usearch_dense_compact_t* arguments) {
     // One flat list holds no shards, so in place nothing moves and every other source appends.
     std::unique_lock writers(target.mutex);
     if (reject_if(!target.accommodate(landing), usearch_status_out_of_memory_k,
-                  "The sources' rows could not be accommodated", outcome))
+                  "The sources' entries could not be accommodated", outcome))
         return;
     for (std::size_t position = 0; position != sources_count; ++position) {
         if (sources[position] == arguments->target) continue;
@@ -726,9 +729,9 @@ void usearch_dense_compact(usearch_dense_compact_t* arguments) {
     }
     for (std::size_t position = 0; position != sources_count; ++position)
         if (sources[position] != arguments->target) delete std::exchange(sources[position], nullptr);
-    std::size_t const rows = target.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    std::size_t const entries = target.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 /** The stand-in's refinement: the donors it still lands, and how far its sweep got. It closes
@@ -743,7 +746,7 @@ struct usearch_dense_refinement_handle_t {
     usearch_dense_index_t* donors;
     std::size_t count;
 
-    /** Donors landed so far, and rows the sweep visited so far. */
+    /** Donors landed so far, and entries the sweep visited so far. */
     std::size_t landed;
     std::size_t swept;
 
@@ -795,7 +798,7 @@ void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
     for (; refinement.landed != refinement.count; ++refinement.landed) {
         usearch_dense_index_handle_t& donor = *refinement.donors[refinement.landed];
         if (reject_if(!index.accommodate(index.entries.size() + donor.entries.size()), usearch_status_out_of_memory_k,
-                      "The donor's rows could not be accommodated", outcome))
+                      "The donor's entries could not be accommodated", outcome))
             return;
         for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         delete std::exchange(refinement.donors[refinement.landed], nullptr);
@@ -812,14 +815,14 @@ void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
         writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    while (refinement.swept < rows && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, rows);
-    // The stand-in re-selects nothing, so its sweep visits every row and changes none.
+    while (refinement.swept < entries && !cancelled)
+        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
+    // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->visited) *arguments->visited = refinement.swept;
     if (arguments->stats) arguments->stats->visited_members = refinement.swept;
-    reject_if(cancelled && refinement.swept != rows, usearch_status_cancelled_k,
+    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
               "The caller's handler stopped the sweep", outcome);
 }
 
@@ -834,9 +837,9 @@ void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* argument
         return;
     usearch_dense_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    std::size_t const entries = index.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
@@ -977,17 +980,17 @@ void usearch_dense_save(usearch_dense_save_t* arguments) {
     if (through_executor<usearch_dense_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
-    // Saving is a reader: it demands only that nothing move or erase rows under it.
+    // Saving is a reader: it demands only that nothing move or erase entries under it.
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, rows);
+    std::size_t const entries = index.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(index, entries);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
     // The blob is one chunk, so the handler's only say is whether it is written at all.
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
-    write_into(index, rows, blob);
+    write_into(index, entries, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
     keep_going(arguments->progress, 1, 1);
 }
@@ -1000,15 +1003,15 @@ void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, rows);
+    std::size_t const entries = index.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(index, entries);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::byte* const landing = carve<std::byte>(*arena, *length, outcome);
     if (!landing) return;
-    write_into(index, rows, bytes_span_t {landing, *length});
+    write_into(index, entries, bytes_span_t {landing, *length});
     *arguments->monolith = as_bytes(bytes_view_t {landing, *length});
     keep_going(arguments->progress, 1, 1);
 }
@@ -1198,15 +1201,16 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = row_extent(scalar_kind, dimensions);
 
-    // A document is one key holding its token rows, so the grouping happens here rather than in
-    // the walk; an entry's rows need no ordering and two documents need not share a row count.
+    // A document is one key holding its token entries, so the grouping happens here rather than in
+    // the walk; a document's entries need no ordering and two documents need not share a token
+    // count.
     std::vector<usearch_key_t> documents;
-    std::vector<std::vector<std::size_t>> token_rows;
+    std::vector<std::vector<std::size_t>> token_entries;
     std::unordered_map<us::utilities::uuid_t, std::size_t> position_of;
-    for (std::size_t row = 0; row != index.entries.size(); ++row) {
-        auto const [slot, emplace_status] = position_of.emplace(keyed(index.entries[row].key), documents.size());
-        if (emplace_status) documents.push_back(index.entries[row].key), token_rows.emplace_back();
-        token_rows[slot->second].push_back(row);
+    for (std::size_t entry = 0; entry != index.entries.size(); ++entry) {
+        auto const [slot, emplace_status] = position_of.emplace(keyed(index.entries[entry].key), documents.size());
+        if (emplace_status) documents.push_back(index.entries[entry].key), token_entries.emplace_back();
+        token_entries[slot->second].push_back(entry);
     }
 
     std::vector<double> query_rows;
@@ -1226,7 +1230,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
             for (std::size_t row = 0; row != rows; ++row) {
                 std::span<double const> const query_row {query_rows.data() + row * dimensions, dimensions};
                 double best = std::numeric_limits<double>::lowest();
-                for (std::size_t stored : token_rows[document])
+                for (std::size_t stored : token_entries[document])
                     best = std::max(best, dot_product(query_row, index.entries[stored].payload));
                 summed += best;
             }

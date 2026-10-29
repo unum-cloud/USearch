@@ -435,12 +435,12 @@ public struct Match: Equatable, Sendable {
     public let distance: Distance
 }
 
-/// The ranked rows a search or a stream pull wrote into an arena, one per query, read in place.
+/// The ranked matches a search or a stream pull wrote into an arena, one list per query, read in place.
 /// Mirrors `usearch_matches_view_t`.
 public struct Matches: RandomAccessCollection {
-    /// The arena the rows live in, and which call wrote them.
+    /// The arena the matches live in, and which call wrote them.
     let write: ArenaWrite
-    /// The packed rows the call wrote.
+    /// The packed matches the call wrote.
     let view: usearch_matches_view_t
     /// One past the last query the call resolved.
     public let endIndex: Int
@@ -452,10 +452,10 @@ public struct Matches: RandomAccessCollection {
     public var columns: Int { view.columns }
 
     /// One query's matches, as many as the call wrote.
-    public subscript(query: Int) -> MatchesRow {
+    public subscript(query: Int) -> QueryMatches {
         write.check(query, below: endIndex)
         let start = query * view.columns
-        return MatchesRow(
+        return QueryMatches(
             write: write,
             keys: view.keys,
             scores: view.scores,
@@ -465,14 +465,14 @@ public struct Matches: RandomAccessCollection {
 }
 
 /// One query's matches, or one left row's pairs, read in place from the arena they live in.
-public struct MatchesRow: RandomAccessCollection {
-    /// The arena the row lives in, and which call wrote it.
+public struct QueryMatches: RandomAccessCollection {
+    /// The arena the matches live in, and which call wrote them.
     let write: ArenaWrite
-    /// The keys of every row of the call.
+    /// The keys of every query of the call.
     let keys: UnsafePointer<usearch_key_t>?
-    /// The scores of every row of the call, positionally paired with `keys`.
+    /// The scores of every query of the call, positionally paired with `keys`.
     let scores: UnsafePointer<usearch_distance_t>?
-    /// The cells of `keys` and `scores` this row spans.
+    /// The cells of `keys` and `scores` this query spans.
     let cells: Range<Int>
 
     /// The first match's position, which a collection walk starts from.
@@ -905,14 +905,14 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_residency_t) { self.raw = raw }
 }
 
-/// How a search reaches the rows it scores, carrying the C enumerator.
+/// How a search reaches the entries it scores, carrying the C enumerator.
 public struct Traversal: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: usearch_traversal_t
 
-    /// Walks the graph, scoring the rows the expansion reaches - approximate, the default.
+    /// Walks the graph, scoring the entries the expansion reaches - approximate, the default.
     public static let walk = Traversal(raw: usearch_traversal_walk_k)
-    /// Scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    /// Scores every entry published when the query's scan starts - exact, on RAM and NVMe handles.
     public static let scan = Traversal(raw: usearch_traversal_scan_k)
 
     /// The traversal rendered as the library spells it. Calls `usearch_traversal_name`.
@@ -996,6 +996,7 @@ public final class Executor: @unchecked Sendable {
                 ram: usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
+                    shard_capacity: 0,
                     cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
                 ),
                 threads: threads,
@@ -1024,6 +1025,7 @@ public final class Executor: @unchecked Sendable {
                 ram: usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
+                    shard_capacity: 0,
                     cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
                 ),
                 pool: pool,
@@ -1053,7 +1055,8 @@ public final class Executor: @unchecked Sendable {
                 outcome: landing.outcome,
                 nvme: nvme,
                 threads: threads,
-                deferred_limit: deferredLimit
+                deferred_limit: deferredLimit,
+                nvme_class: usearch_nvme_class_unknown_k
             )
             usearch_executor_for_nvme(&arguments)
         }
@@ -1088,6 +1091,7 @@ public final class Executor: @unchecked Sendable {
                     vram: usearch_vram_options_t(
                         devices: lentDevices,
                         devices_count: devices.count,
+                        shard_capacity: 0,
                         gpu_class: gpuClass?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     streams: streams == nil ? nil : lentStreams,

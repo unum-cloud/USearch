@@ -56,7 +56,8 @@ namespace stub {
 using geospatial_payload_t = usearch_geospatial_observation_t;
 using geospatial_entry_t = entry<geospatial_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<geospatial_entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<geospatial_entry_t>,
+              "reallocation must move entries, never copy them");
 
 /** What a handle froze at construction, or adopted from a checkpoint. */
 struct geospatial_index_options_t {
@@ -89,8 +90,8 @@ static bool reject_observations(usearch_geospatial_observation_t const* observat
                                 usearch_outcome_t* outcome) {
     if (reject_if(!observations && count, usearch_status_invalid_argument_k, "The batch must name storage", outcome))
         return true;
-    for (std::size_t row = 0; row != count; ++row) {
-        usearch_geospatial_observation_t const& observation = observations[row];
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        usearch_geospatial_observation_t const& observation = observations[offset];
         if (reject_if(std::isnan(observation.latitude_degrees) || std::isnan(observation.longitude_degrees),
                       usearch_status_invalid_argument_k, "An observation needs a latitude and a longitude", outcome))
             return true;
@@ -223,10 +224,10 @@ static double matched(usearch_geospatial_observation_t const& query, placed_t co
 /** One query's whole scan: every admitted entry that matches, nearest first. */
 static void rank_matches(geospatial_index_t const& index, usearch_geospatial_observation_t const& query,
                          usearch_geospatial_relation_t relation, usearch_geospatial_tolerance_t const& tolerance,
-                         std::size_t rows, usearch_predicate_t predicate, std::vector<match_t>& ranked) {
+                         std::size_t entries, usearch_predicate_t predicate, std::vector<match_t>& ranked) {
     placed_t const query_placed = placed(query);
     us::stub::rank<geospatial_payload_t>(
-        std::span<geospatial_entry_t const>(index.entries).first(rows), predicate,
+        std::span<geospatial_entry_t const>(index.entries).first(entries), predicate,
         [&](geospatial_payload_t const& entry) { return matched(query, query_placed, entry, relation, tolerance); },
         ranked);
     // Unmatched entries scored infinity and sorted last, so the matches are the finite prefix.
@@ -252,16 +253,16 @@ struct geospatial_checkpoint_prefix_t {
 
 constexpr std::size_t record_bytes_k = sizeof(usearch_key_t) + sizeof(usearch_geospatial_observation_t);
 
-static std::optional<std::size_t> serialized_bytes(std::size_t rows) {
-    return blob_bytes(sizeof(geospatial_checkpoint_prefix_t), rows, record_bytes_k);
+static std::optional<std::size_t> serialized_bytes(std::size_t entries) {
+    return blob_bytes(sizeof(geospatial_checkpoint_prefix_t), entries, record_bytes_k);
 }
 
-static void write_into(geospatial_index_t const& index, std::size_t rows, bytes_span_t target) {
-    write_pod(target, geospatial_checkpoint_prefix_t {index.options.connectivity, rows});
+static void write_into(geospatial_index_t const& index, std::size_t entries, bytes_span_t target) {
+    write_pod(target, geospatial_checkpoint_prefix_t {index.options.connectivity, entries});
     bytes_span_t cursor = target.subspan(sizeof(geospatial_checkpoint_prefix_t));
-    for (std::size_t row = 0; row != rows; ++row) {
-        write_pod(cursor, index.entries[row].key);
-        write_pod(cursor.subspan(sizeof(usearch_key_t)), index.entries[row].payload);
+    for (std::size_t position = 0; position != entries; ++position) {
+        write_pod(cursor, index.entries[position].key);
+        write_pod(cursor.subspan(sizeof(usearch_key_t)), index.entries[position].payload);
         cursor = cursor.subspan(record_bytes_k);
     }
 }
@@ -287,7 +288,7 @@ static bool read_from(geospatial_index_t& index, bytes_view_t blob, usearch_outc
     }
     index.options.connectivity = prefix.connectivity;
     bytes_view_t cursor = blob.subspan(sizeof(geospatial_checkpoint_prefix_t));
-    for (std::size_t row = 0; row != prefix.entries; ++row) {
+    for (std::size_t position = 0; position != prefix.entries; ++position) {
         usearch_key_t const key = read_pod<usearch_key_t>(cursor);
         index.append(key, read_pod<usearch_geospatial_observation_t>(cursor.subspan(sizeof(usearch_key_t))));
         cursor = cursor.subspan(record_bytes_k);
@@ -362,7 +363,8 @@ void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     if (reject_terrain(arguments->terrain, outcome)) return;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
-    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
+    // its zero cost.
     usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(served.view(),
                                                                                                         outcome);
     if (!index) return;
@@ -447,8 +449,8 @@ void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
 
     std::size_t const watermark = index.entries.size();
     std::size_t published = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        index.append(key_at(arguments->keys, row), arguments->observations[row]);
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        index.append(key_at(arguments->keys, offset), arguments->observations[offset]);
         ++published;
         if (!keep_going(arguments->progress, published, count)) break;
     }
@@ -473,14 +475,14 @@ void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
     // An exact scan reaches every entry it holds in one level.
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -501,16 +503,16 @@ void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
     if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     if (stats && arguments->expansion_factor) stats->computed_distances += arguments->expansion_factor * count;
     std::vector<match_t> ranked;
     std::size_t answered = 0;
     for (; answered != count; ++answered) {
-        rank_matches(index, arguments->queries[answered], arguments->relation, arguments->tolerance, rows,
+        rank_matches(index, arguments->queries[answered], arguments->relation, arguments->tolerance, entries,
                      arguments->predicate, ranked);
         landing.write(answered, ranked);
         if (stats) {
-            stats->visited_members += rows;
+            stats->visited_members += entries;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
@@ -550,17 +552,17 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     if (!offsets) return;
     std::shared_lock readers(index.mutex);
 
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     std::vector<match_t> ranked, balls;
     offsets[0] = 0;
     for (std::size_t query = 0; query != count; ++query) {
-        rank_matches(index, arguments->queries[query], arguments->relation, tolerance, rows, arguments->predicate,
+        rank_matches(index, arguments->queries[query], arguments->relation, tolerance, entries, arguments->predicate,
                      ranked);
         balls.insert(balls.end(), ranked.begin(), ranked.end());
         offsets[query + 1] = balls.size();
         if (stats) {
-            stats->visited_members += rows;
-            stats->computed_distances += rows;
+            stats->visited_members += entries;
+            stats->computed_distances += entries;
             stats->restarts += 1;
         }
         if (!keep_going(arguments->progress, query + 1, count))
@@ -593,14 +595,15 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
-    if (rows.empty()) return;
-    usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(*arena, rows.size(),
-                                                                                                   outcome);
+    std::vector<std::size_t> const entries = entries_under(index, arguments->key);
+    if (entries.empty()) return;
+    usearch_geospatial_observation_t* const observations = carve<usearch_geospatial_observation_t>(
+        *arena, entries.size(), outcome);
     if (!observations) return;
-    for (std::size_t found = 0; found != rows.size(); ++found) observations[found] = index.entries[rows[found]].payload;
+    for (std::size_t found = 0; found != entries.size(); ++found)
+        observations[found] = index.entries[entries[found]].payload;
     *arguments->observations = observations;
-    if (arguments->written) *arguments->written = rows.size();
+    if (arguments->written) *arguments->written = entries.size();
 }
 
 void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
@@ -629,12 +632,12 @@ void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
         return;
     // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
     // it.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -716,14 +719,14 @@ void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* ar
         writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    while (refinement.swept < rows && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, rows);
+    while (refinement.swept < entries && !cancelled)
+        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->visited) *arguments->visited = refinement.swept;
     if (arguments->stats) arguments->stats->visited_members = refinement.swept;
-    reject_if(cancelled && refinement.swept != rows, usearch_status_cancelled_k,
+    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
               "The caller's handler stopped the sweep", outcome);
 }
 
@@ -738,9 +741,9 @@ void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t
         return;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    std::size_t const entries = index.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
@@ -821,14 +824,14 @@ void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
                   "An NVMe view already is its checkpoint", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(rows);
+    std::size_t const entries = index.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(entries);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
-    write_into(index, rows, blob);
+    write_into(index, entries, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
     keep_going(arguments->progress, 1, 1);
 }

@@ -15,7 +15,7 @@
  *  lock: they bracket each call with the shard set's epoch, retry once when a window overlapped
  *  them, and answer @c contended_k when a second one did. A record's value owns heap memory a
  *  reader may still score, so a clear frees nothing: it retires the shards whole and fresh ones
- *  take the next rows, and retired shards keep their memory until the index dies.
+ *  take the next entries, and retired shards keep their memory until the index dies.
  */
 #pragma once
 
@@ -31,7 +31,7 @@
 #include <type_traits>  // `std::is_same_v` - the unfiltered walk
 #include <utility>      // `std::move`, `std::exchange`
 
-#include <forkunion.h> // `fu_memory_domain_id_t`
+#include <forkunion/forkunion.h> // `fu_memory_domain_id_t`
 
 #include "usearch/utilities/types.hpp"       // `shared_mutex` - the gate
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the plans' shard plans
@@ -59,15 +59,15 @@ struct record_keys_t {
  *  @tparam index_type_ The shard, a @c basic::ram_index whose allocator a memory domain builds. Its
  *      waiter and atomic reference serve the shard table too, so the defaults hold: the standard
  *      reference posts what ForkUnion's spell natively through @c atomic_add. Its node IDs are 32
- *      bits wide, as the shard table locates every row in 8 bytes; a lone @c basic::ram_index takes
- *      either width.
+ *      bits wide, as the shard table locates every node in 8 bytes; a lone @c basic::ram_index
+ *      takes either width.
  */
 template <typename index_type_>
     requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct ram_indexes {
     friend struct ram_indexes_cursor<ram_indexes>;
 
-    /** A reader's walk over the keys of every shard's published rows in placement order. */
+    /** A reader's walk over the keys of every shard's published nodes in placement order. */
     using cursor_t = ram_indexes_cursor<ram_indexes>;
 
     using index_t = index_type_;
@@ -90,7 +90,7 @@ struct ram_indexes {
     template <typename word_type_>
     using atomic_ref = typename index_t::template atomic_ref<word_type_>;
 
-    /** The shards and the rotation that routes new rows; the keys stay in their records. */
+    /** The shards and the rotation that routes new entries; the keys stay in their records. */
     using shards_t = shard_set<index_t, record_keys_t, key_t, std::hash<key_t>, index_t::template atomic_ref, wait_t>;
     using shard_t = typename shards_t::shard_t;
     using batch_split_t = typename shards_t::batch_split_t;
@@ -129,10 +129,10 @@ struct ram_indexes {
     ram_indexes(ram_indexes&&) = delete;
     ram_indexes& operator=(ram_indexes&&) = delete;
 
-    /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
-     *  insertion opens another shard generation on the same placements. Ignored once storage
+    /** Bounds every shard at @p nodes, clamped to the ID space; zero means the ID space. Past it,
+     *  an insertion opens another shard generation on the same placements. Ignored once storage
      *  exists. */
-    void bound_shards(std::size_t rows) noexcept { shards_.bound_shards(rows); }
+    void bound_shards(std::size_t nodes) noexcept { shards_.bound_shards(nodes); }
 
     /**
      *  Appends one empty shard placed on @p memory_domain; refused once storage exists.
@@ -148,8 +148,8 @@ struct ram_indexes {
     }
 
     /**
-     *  Covers @p capacity rows split evenly over the shards, each under the bound - a hint, since
-     *  the shards grow on demand; callable alongside every other verb.
+     *  Covers @p capacity entries split evenly over the shards, each under the bound - a hint,
+     *  since the shards grow on demand; callable alongside every other verb.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed yet.
@@ -168,7 +168,7 @@ struct ram_indexes {
     /** Shards past the retired ones, which every walk and checkpoint spans. */
     std::size_t live_shards_count() const noexcept { return shards_.size() - shards_.retired_shards(); }
 
-    /** Rows the live shards host without growing again; they grow past it on demand. */
+    /** Entries the live shards host without growing again; they grow past it on demand. */
     std::size_t capacity() const noexcept { return shards_.capacity(); }
 
     /** Bytes every shard's records and key map occupy, retired shards included. */
@@ -197,14 +197,14 @@ struct ram_indexes {
 
     /**
      *  @brief Empties the index without freeing anything a reader may hold: a fresh shard
-     *      generation on the same placements takes the next rows, and every shard before it retires
-     *      whole.
+     *      generation on the same placements takes the next entries, and every shard before it
+     *      retires whole.
      *
      *  Takes the gate alone and closes every shard first, so a call in flight, a batch holding
      *  claims or an absorb holding the index refuses it with @c contended_k, and an index holding
-     *  no rows stays as it is. The fresh shards open before any retires, so a refused build answers
-     *  @c bad_alloc_k with every row in place. A search it lands under reads values nothing frees,
-     *  and retries.
+     *  no nodes stays as it is. The fresh shards open before any retires, so a refused build
+     *  answers @c bad_alloc_k with every node in place. A search it lands under reads values
+     *  nothing frees, and retries.
      *
      *  @par Statuses:
      *  - @c contended_k A call holds the gate, or a batch, refine or absorb holds a shard's claims.
@@ -276,10 +276,10 @@ struct ram_indexes {
          *
          *  @par Statuses:
          *  - @c contended_k A mutator or an open plan holds the shard.
-         *  - @c config_mismatch_k The shard already publishes rows.
+         *  - @c config_mismatch_k The shard already publishes nodes.
          *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
-         *    zero to its element column's length, or a neighbor ID names no row.
-         *  - @c overflow_k The rows pass the shard's node IDs or key multimap seats, or a row's
+         *    zero to its element column's length, or a neighbor ID names no node.
+         *  - @c overflow_k The nodes pass the shard's node IDs or key multimap seats, or a node's
          *    capacity wraps.
          */
         static expected<typename index_t::load_plan_t> open_shard_load(
@@ -288,13 +288,13 @@ struct ram_indexes {
         }
 
         /**
-         *  Covers @p rows in shard @p shard under the set's shard bound.
+         *  Covers @p entries in shard @p shard under the set's shard bound.
          *
          *  @par Statuses:
-         *  - @c overflow_k @p rows passes the shard's node IDs or its key multimap's seats.
+         *  - @c overflow_k @p entries passes the shard's node IDs or its key multimap's seats.
          */
-        static expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t rows) noexcept {
-            return shards[shard].index->reserve({rows, shards.shard_capacity()});
+        static expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t entries) noexcept {
+            return shards[shard].index->reserve({entries, shards.shard_capacity()});
         }
 
         /** The shard's own save plan writes its records' keys, so nothing lands here. */
@@ -361,7 +361,7 @@ struct ram_indexes {
      *  - @c invalid_argument_k The checkpoint or a part path does not parse.
      *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do
      *    not parse.
-     *  - @c overflow_k The rows pass a shard's node IDs or key multimap.
+     *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
      */
     template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, codec_type_ const& codec, executor_type_& executor,
@@ -378,14 +378,14 @@ struct ram_indexes {
 
     /**
      *  @brief One batch in flight across the shards: one shard plan per shard of the open shard
-     *      generation and of every shard generation the batch opened, so its rows can only land,
+     *      generation and of every shard generation the batch opened, so its entries can only land,
      *      and @ref finish publishes them all at once.
      *
-     *  Rows are split across the open shard generation's shards round-robin from the starting shard
-     *  on, and rows past what fits under the bound fill fresh shard generations in turn, split the
-     *  same way. Every row must land before @ref finish, since each shard plan holds its shard's
-     *  later turns until then. Each step and @ref finish hold the gate's shared side for their own
-     *  call.
+     *  Entries are split across the open shard generation's shards round-robin from the starting
+     *  shard on, and entries past what fits under the bound fill fresh shard generations in turn,
+     *  split the same way. Every entry must land before @ref finish, since each shard plan holds
+     *  its shard's later turns until then. Each step and @ref finish hold the gate's shared side
+     *  for their own call.
      */
     struct [[nodiscard]] insert_plan_t {
 
@@ -401,11 +401,11 @@ struct ram_indexes {
         insert_plan_t& operator=(insert_plan_t const&) = delete;
 
         /**
-         *  @brief Lands rows @p first onward, one per value of @p values under its key in @p keys,
-         *      each in the shard its position falls to, as the shard plan's own step does.
+         *  @brief Lands entries @p first onward, one per value of @p values under its key in
+         *      @p keys, each in the shard its position falls to, as the shard plan's own step does.
          *
-         *  Any number of threads step one plan at once over disjoint rows, each with its own
-         *  @p metric and a @p context that @c index_t::reserve_traversal sized. Rows outside the
+         *  Any number of threads step one plan at once over disjoint entries, each with its own
+         *  @p metric and a @p context that @c index_t::reserve_traversal sized. Entries outside the
          *  plan or keys of another length land nothing, and @ref finish then refuses.
          */
         template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
@@ -426,7 +426,7 @@ struct ram_indexes {
             }
         }
 
-        /** Publishes every row at once: @c config_mismatch_k while any has yet to land, leaving
+        /** Publishes every entry at once: @c config_mismatch_k while any has yet to land, leaving
          *  the plan whole; then every shard's turn inside one commit, so a snapshot sees the batch
          *  whole or not at all. The plan is spent either way, a shard refusing its turn answering
          *  the first refusal after every other shard published, so a second call answers
@@ -434,7 +434,7 @@ struct ram_indexes {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k A row has yet to land.
+         *  - @c config_mismatch_k An entry has yet to land.
          */
         status_t finish() noexcept {
             if (!owner_) return status_t::uninitialized_k;
@@ -460,8 +460,8 @@ struct ram_indexes {
         }
 
         /** Invokes @p callback as <tt>callback(shard, range)</tt> for every shard the plan lands
-         *  rows in, with the IDs dispensed there, in placement order; before @ref finish, so a
-         *  caller can keep what it follows the published rows up with, as long links. */
+         *  entries in, with the IDs dispensed there, in placement order; before @ref finish, so a
+         *  caller can keep what it follows the published nodes up with, as long links. */
         template <typename callback_type_>
         void for_each_range(callback_type_&& callback) const noexcept {
             if (!owner_) return;
@@ -475,7 +475,7 @@ struct ram_indexes {
         friend ram_indexes;
 
         /** One plan per shard from the open shard generation's first, in placement order; an empty
-         *  one where no row lands. */
+         *  one where no entry lands. */
         growing_buffer<shard_insert_plan_t, forkunion_allocator_t> shard_plans_;
 
         /** The batch split across the shard generation open at planning, which the shard plans
@@ -488,15 +488,15 @@ struct ram_indexes {
     };
 
     /**
-     *  @brief Opens a batch of @p count rows: routes them over the open shard generation and as
+     *  @brief Opens a batch of @p count entries: routes them over the open shard generation and as
      *      many fresh ones as the bound makes them fill, then opens one shard plan per shard taking
-     *      rows, in placement order.
+     *      entries, in placement order.
      *
-     *  The rotation comes from the rows routed so far, which keeps a stream of small batches from
-     *  drifting onto shard zero. Every shard claims its rows before any dispenses, so a refusal
-     *  gives back every claim and strands no ID. Everything fallible past the shard plans belongs
-     *  before this call, as for a shard's own plan: building the values and sizing each stepping
-     *  thread's context.
+     *  The rotation comes from the entries routed so far, which keeps a stream of small batches
+     *  from drifting onto shard zero. Every shard claims its entries before any dispenses, so a
+     *  refusal gives back every claim and strands no ID. Everything fallible past the shard plans
+     *  belongs before this call, as for a shard's own plan: building the values and sizing each
+     *  stepping thread's context.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard placed yet.
@@ -611,10 +611,10 @@ struct ram_indexes {
         return search_if(query, metric, unrelated_t {}, predicate, context, config, watermarks, keys, distances);
     }
 
-    /** The exact sibling of @c search_if: every row below each shard's watermark scored as
+    /** The exact sibling of @c search_if: every entry below each shard's watermark scored as
      *  @c index_t::scan scores, the nearest @p keys can hold kept, as @p relate and @p predicate
      *  admit them. Each shard's rounds drain within the merged ranking's worst match once it is
-     *  full, so later shards score fewer rows.
+     *  full, so later shards score fewer entries.
      *
      *  @par Statuses:
      *  - @c contended_k Two windows overlapped the call or one outran the snapshot.
@@ -692,7 +692,7 @@ struct ram_indexes {
      *
      *  Steps of a phase are (shard, position) pairs over the shard plans' own steps, so any number
      *  of threads may @ref run them at once; @ref advance is the single-caller barrier, advancing
-     *  every shard plan together. While any shard plan lands, its rows move out of the donors, so
+     *  every shard plan together. While any shard plan lands, its nodes move out of the donors, so
      *  the donors' readers wait out a window spanning the landing phases. The plan holds every
      *  donor's unique side and this index sealed for its whole life, and its death reopens this
      *  index and every donor not consumed: one whose every shard landed stays empty, closed and
@@ -708,7 +708,7 @@ struct ram_indexes {
         };
         static_assert(sizeof(step_t) == 2 * sizeof(std::size_t));
 
-        /** What the shard plans' audits judge, summed: the published rows a driver's progress
+        /** What the shard plans' audits judge, summed: the published nodes a driver's progress
          *  counts against. */
         struct audit_t {
             std::size_t visible = 0;
@@ -797,14 +797,14 @@ struct ram_indexes {
             taken = steps().size();
         }
 
-        /** The published rows every shard plan's audit judges. */
+        /** The published nodes every shard plan's audit judges. */
         audit_t audit() const noexcept {
             audit_t total;
             for (shard_refine_plan_t const& shard_plan : shard_plans_) total.visible += shard_plan.audit.visible;
             return total;
         }
 
-        /** The budget planning reserved every row for, which every shard shares. */
+        /** The budget planning reserved every neighbor list for, which every shard shares. */
         std::size_t connectivity() const noexcept {
             std::size_t widest = 0;
             for (shard_refine_plan_t const& shard_plan : shard_plans_)
@@ -837,8 +837,8 @@ struct ram_indexes {
         bool consumed(std::size_t donor) const noexcept { return donor < donors_.size() && !donors_[donor]; }
 
         /**
-         *  @brief Invokes @p visit as <tt>visit(shard, rows)</tt> for every row range the plan
-         *      rewrote: every row of every shard a shard plan refined.
+         *  @brief Invokes @p visit as <tt>visit(shard, nodes)</tt> for every node range the plan
+         *      rewrote: every node of every shard a shard plan refined.
          *
          *  Called once the plan finished and before it dies, while the index stays sealed, so a
          *  rule the re-selection skips, like a modality's long links, is drawn again over them.
@@ -964,10 +964,10 @@ struct ram_indexes {
      *  stays closed and sealed once the plan dies, refusing insertions and clears with
      *  @c contended_k.
      *
-     *  @param[in,out] donors The indexes giving their rows up; the slots must outlive the plan.
+     *  @param[in,out] donors The indexes giving their nodes up; the slots must outlive the plan.
      *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
      *      plans.
-     *  @param[in] selector Carries the budget every row is reserved for.
+     *  @param[in] selector Carries the budget every neighbor list is reserved for.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
      *
      *  @par Statuses:
@@ -1042,14 +1042,14 @@ struct ram_indexes {
 
     /**
      *  @brief Opens a refinement of every live shard in place, each through its own plan over all
-     *      its rows, which re-selects, sweeps and heals as one pass.
+     *      its nodes, which re-selects, sweeps and heals as one pass.
      *
      *  Closes this index under its unique side and keeps it sealed for the plan's life, as an
      *  absorb does, while searches run throughout.
      *
      *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
      *      plans.
-     *  @param[in] selector Carries the budget every row is reserved for.
+     *  @param[in] selector Carries the budget every neighbor list is reserved for.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
      *
      *  @par Statuses:
@@ -1146,10 +1146,10 @@ struct ram_indexes {
 };
 
 /**
- *  @brief A reader's walk over the keys of every shard's published rows, in placement order.
+ *  @brief A reader's walk over the keys of every shard's published nodes, in placement order.
  *
- *  Each shard's watermark is snapshotted as the walk enters it, so a row once passed is never
- *  revisited, while a later shard may carry rows published after the walk began. The position
+ *  Each shard's watermark is snapshotted as the walk enters it, so a node once passed is never
+ *  revisited, while a later shard may carry nodes published after the walk began. The position
  *  holds only under the epoch the cursor opened in: once a destructive window moved it, every read
  *  answers @c contended_k.
  */
@@ -1162,10 +1162,10 @@ struct ram_indexes_cursor {
      *  epoch it reads now. */
     explicit ram_indexes_cursor(indexes_t const& indexes) noexcept : position_(indexes.shards_) {}
 
-    /** Copies the keys of up to @p keys.size() rows of @p indexes into @p keys, advancing past them
-     *  and answering the rows written. A destructive window since the cursor opened answers zero
-     *  rows with @c contended_k: retired shards keep their records, so a read that ran past one
-     *  touched nothing freed, and the check at its end discards it.
+    /** Copies the keys of up to @p keys.size() nodes of @p indexes into @p keys, advancing past
+     *  them and answering the keys written. A destructive window since the cursor opened answers
+     *  zero keys with @c contended_k: retired shards keep their records, so a read that ran past
+     *  one touched nothing freed, and the check at its end discards it.
      *
      *  @par Statuses:
      *  - @c contended_k A destructive window opened since the cursor did.
@@ -1182,7 +1182,7 @@ struct ram_indexes_cursor {
 
   private:
 
-    /** The shard and row the next read starts at, under the epoch the cursor opened in. */
+    /** The shard and node the next read starts at, under the epoch the cursor opened in. */
     shard_cursor<typename indexes_t::shards_t> position_;
 };
 

@@ -6,13 +6,13 @@
  *      beside the RAM index on the same data, judged by recall against exact neighbors, every
  *      reported distance against the serial kit the RAM suite checks against its oracle.
  *
- *  Strings are planted templates over the nucleotides with an eighth of their symbols edited, so
+ *  Sequences are planted templates over the nucleotides with an eighth of their symbols edited, so
  *  neighbors cluster by template while the bytes differ. One collection keeps to the two-word kit,
- *  another needs the four-word one, and the last needs a block per walk, its rows past 1 KiB split
- *  over four lanes each, so the walks, the selections and the merges run three kits. A fourth
+ *  another needs the four-word one, and the last needs a block per walk, its sequences past 1 KiB
+ *  split over four lanes each, so the walks, the selections and the merges run three kits. A fourth
  *  spells its nucleotides as runes of one to three bytes, for the rune kits, and a fifth scores
- *  window overlap at two widths, a warp to a row. The last two align nucleotides packed two bits
- *  apiece, one query a stripe and the longer ones several. Rows insert in three batches whose
+ *  window overlap at two widths, a warp to an entry. The last two align nucleotides packed two bits
+ *  apiece, one query a stripe and the longer ones several. Sequences insert in three batches whose
  *  tapes start past their own first byte, as an Arrow slice's do, so the later batches walk graphs
  *  whose reverse links earlier batches merged.
  */
@@ -98,9 +98,9 @@ static void pack_as_codes(std::vector<std::string>& strings) {
     for (std::string& symbols : strings) {
         std::vector<u8_t> codes;
         for (char const symbol : symbols) codes.push_back(static_cast<u8_t>(nucleotides_k.find(symbol)));
-        std::string row(packed_codes_bytes(codes.size(), 2), '\0');
-        pack_codes(codes, 2, bytes_of(row.data(), row.size()));
-        symbols = std::move(row);
+        std::string packed(packed_codes_bytes(codes.size(), 2), '\0');
+        pack_codes(codes, 2, bytes_of(packed.data(), packed.size()));
+        symbols = std::move(packed);
     }
 }
 
@@ -190,11 +190,11 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     auto serial_metric = make_sequence_metric<metric_, sz_cap_serial_k>(count, failures);
     for (std::size_t query = 0; query != queries_count; ++query) {
         serial_metric.reset(std::string_view {strings[count + query]});
-        for (std::size_t row = 0; row != count; ++row) serial_metric.push(std::string_view {strings[row]});
+        for (std::size_t entry = 0; entry != count; ++entry) serial_metric.push(std::string_view {strings[entry]});
         serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
     }
 
-    // The RAM index over the same rows, at the same breadth, which an exact-distance reference
+    // The RAM index over the same sequences, at the same breadth, which an exact-distance reference
     // leaves unbuilt and its recall at zero.
     std::size_t ram_matched = 0;
     if (reference == recall_reference_t::ram_index_k) {
@@ -202,10 +202,10 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         auto metric = make_sequence_metric<metric_, sz_cap_any_k>(expansion_k * connectivity_32_k, failures);
         ram_index_t::traversal_context_t ram_context {seed};
         failures += expect(bool(ram_index.reserve(count)));
-        for (std::size_t row = 0; row != count; ++row) {
+        for (std::size_t entry = 0; entry != count; ++entry) {
             ram_index_t::value_t value;
-            [[maybe_unused]] sz::status_t const assigned = value.assign(strings[row]);
-            us::utilities::uuid_t const key = uuid_of(row);
+            [[maybe_unused]] sz::status_t const assigned = value.assign(strings[entry]);
+            us::utilities::uuid_t const key = uuid_of(entry);
             failures += expect_eq(ram_index
                                       .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                               us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
@@ -304,43 +304,44 @@ struct sequence_vram_shards_t {
     }
 };
 
-/** Two shards on one device bounded at 1000 rows take 5000 strings in one batch, which opens two
- *  more generations of two: every key counts once across the six shards, and the merged recall at
- *  ten reaches one unbounded shard's, give or take a twentieth. */
+/** Two shards on one device bounded at 1000 entries take 5000 sequences in one batch, which opens
+ *  two more generations of two: every key counts once across the six shards, and the merged recall
+ *  at ten reaches one unbounded shard's, give or take a twentieth. */
 static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
     using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid_t, sequence_vram_shards_t>;
-    constexpr std::size_t rows_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
+    constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
     std::size_t failures = 0;
 
-    std::vector<std::string> const strings = generate_nucleotides(rows_k + queries_k, 100, seed);
+    std::vector<std::string> const strings = generate_nucleotides(entries_k + queries_k, 100, seed);
     std::string tape;
     std::vector<std::size_t> offsets {0};
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
     byte_t const* const tape_bytes = reinterpret_cast<byte_t const*>(tape.data());
-    tape_view<byte_t const> const rows {tape_bytes, {offsets.data(), rows_k + 1}};
-    tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + rows_k, queries_k + 1}};
-    std::vector<std::vector<sz_size_t>> exact(queries_k, std::vector<sz_size_t>(rows_k));
-    auto serial_metric = make_sequence_metric<usearch_sequence_metric_levenshtein_bytes_k, sz_cap_serial_k>(rows_k,
+    tape_view<byte_t const> const sequences {tape_bytes, {offsets.data(), entries_k + 1}};
+    tape_view<byte_t const> const queries {tape_bytes, {offsets.data() + entries_k, queries_k + 1}};
+    std::vector<std::vector<sz_size_t>> exact(queries_k, std::vector<sz_size_t>(entries_k));
+    auto serial_metric = make_sequence_metric<usearch_sequence_metric_levenshtein_bytes_k, sz_cap_serial_k>(entries_k,
                                                                                                             failures);
     for (std::size_t query = 0; query != queries_k; ++query) {
-        serial_metric.reset(std::string_view {strings[rows_k + query]});
-        for (std::size_t row = 0; row != rows_k; ++row) serial_metric.push(std::string_view {strings[row]});
+        serial_metric.reset(std::string_view {strings[entries_k + query]});
+        for (std::size_t entry = 0; entry != entries_k; ++entry) serial_metric.push(std::string_view {strings[entry]});
         serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
     }
-    std::vector<us::utilities::uuid_t> keys(rows_k);
-    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(row);
+    std::vector<us::utilities::uuid_t> keys(entries_k);
+    for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     indexes_t indexes {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
     indexes.bound_shards(shard_capacity_k);
     failures += expect_eq(indexes.emplace(executor.stream(0).device), status_t::success_k);
     failures += expect_eq(indexes.emplace(executor.stream(0).device), status_t::success_k);
-    failures += expect_eq(indexes.reserve({rows_k, connectivity_32_k, offsets[rows_k]}).status, status_t::success_k);
-    auto const [inserted, insert_status] = indexes.insert(keys, rows, executor, {expansion_k});
+    failures += expect_eq(indexes.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
+                          status_t::success_k);
+    auto const [inserted, insert_status] = indexes.insert(keys, sequences, executor, {expansion_k});
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect(inserted.computed_distances > 0);
     failures += expect_eq(indexes.shards_count(), std::size_t {6});
-    failures += expect_eq(indexes.size(), rows_k);
+    failures += expect_eq(indexes.size(), entries_k);
     std::size_t miscounted = 0;
     for (us::utilities::uuid_t const& key : keys) miscounted += indexes.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
@@ -363,14 +364,15 @@ static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& execu
     }
 
     index_t single {cuda_virtual_memory_allocator<byte_t> {executor.api(), executor.device(0)}};
-    failures += expect_eq(single.reserve({rows_k, connectivity_32_k, offsets[rows_k]}).status, status_t::success_k);
+    failures += expect_eq(single.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
+                          status_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
-    failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(rows, insert_config),
+    failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(sequences, insert_config),
                                                   single.traversal_memory_usage(queries, search_config))),
                           status_t::success_k);
     typename index_t::traversal_context_t context {
         cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
-    failures += expect_eq(single.insert(rows, context, insert_config).status, status_t::success_k);
+    failures += expect_eq(single.insert(sequences, context, insert_config).status, status_t::success_k);
     std::vector<u32_t> ids(queries_k * wanted_k);
     failures += expect_eq(single
                               .search(queries, {ids.data(), {queries_k, wanted_k}},

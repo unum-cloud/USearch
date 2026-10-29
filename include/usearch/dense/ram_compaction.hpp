@@ -9,7 +9,7 @@
  *  capacity of rows, each into the first with room, so it ends with as few shards as fit; an
  *  absorb packs the same way into the shard with the fewest rows. The shard a bin keeps stays
  *  resident with its IDs, every other source shard lands after it with its edges rebased and its
- *  keys beside it, and only the appended rows walk the target across the parts and link in, then
+ *  keys beside it, and only the appended nodes walk the target across the parts and link in, then
  *  each target shard heals. The landings and the walk are the absorb plan's own phases.
  */
 #pragma once
@@ -77,7 +77,7 @@ expected<compact_result_t> compact(std::span<indexes_type_* const> sources, inde
  *
  *  @ref run lands the sources still pending, the target's own shards first when it compacts in
  *  place, each source staying empty, closed and sealed once it landed, then drains the re-selection
- *  of the appended rows and the heal; a cancel pauses only that walk, and a later call continues
+ *  of the appended nodes and the heal; a cancel pauses only that walk, and a later call continues
  *  it.
  *  @ref finish heals what a stopped walk leaves, reopens the target and every source still pending,
  *  and reports.
@@ -93,7 +93,7 @@ struct [[nodiscard]] ram_compact_plan {
     ram_compact_plan() noexcept = default;
     ram_compact_plan(ram_compact_plan&& other) noexcept
         : refining_(std::move(other.refining_)), sources_(std::exchange(other.sources_, {})),
-          resident_shards_(other.resident_shards_), landed_(other.landed_), moved_rows_(other.moved_rows_) {}
+          resident_shards_(other.resident_shards_), landed_(other.landed_), moved_entries_(other.moved_entries_) {}
     ram_compact_plan& operator=(ram_compact_plan&&) = delete;
     ram_compact_plan(ram_compact_plan const&) = delete;
     ram_compact_plan& operator=(ram_compact_plan const&) = delete;
@@ -149,7 +149,7 @@ struct [[nodiscard]] ram_compact_plan {
         indexes_t* const target = refining_.owner_;
         if (!target) return {result, status_t::uninitialized_k};
         result.source_shards = refining_.landings_.size();
-        result.moved_rows = moved_rows_;
+        result.moved_entries = moved_entries_;
         // Before the refine plan unbinds the target, which tells the target among the sources.
         release_sources_();
         auto [graph, status] = refining_.finish(executor, traversals);
@@ -207,10 +207,10 @@ struct [[nodiscard]] ram_compact_plan {
         // Closed, no batch lands, so the rows counted here are the rows that move; a refusal from
         // here reopens everything as the plan dies.
         indexes_t const* shaped = target.capacity() ? &target : nullptr;
-        std::size_t resident_shards = 0, moved_rows = 0;
+        std::size_t resident_shards = 0, moved_entries = 0;
         for (indexes_t const* source : sources) {
             if (source == &target) resident_shards = target.shards_count();
-            moved_rows += source->size();
+            moved_entries += source->size();
             if (!source->capacity()) continue;
             if (!shaped) shaped = source;
             else if (!same_geometry(*source, *shaped)) return {{}, status_t::config_mismatch_k};
@@ -223,8 +223,8 @@ struct [[nodiscard]] ram_compact_plan {
             return {{}, status_t::bad_alloc_k};
         // Every source row moves but those of the target's own shards that stay where they are.
         for (std::size_t shard = 0; shard != resident_shards; ++shard)
-            if (refining.landings_[shard].into == shard) moved_rows -= target.shard(shard).size();
-        plan.moved_rows_ = moved_rows;
+            if (refining.landings_[shard].into == shard) moved_entries -= target.shard(shard).size();
+        plan.moved_entries_ = moved_entries;
         return {std::move(plan), status_t::success_k};
     }
 
@@ -285,7 +285,7 @@ struct [[nodiscard]] ram_compact_plan {
     std::size_t landed_ = 0;
 
     /** Source rows that change shard. */
-    std::size_t moved_rows_ = 0;
+    std::size_t moved_entries_ = 0;
 };
 
 template <typename indexes_type_>

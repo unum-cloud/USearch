@@ -8,7 +8,7 @@
  *
  *  Plain C++, so the host classes build with any compiler: the members reading the kit, which pick
  *  a launch's rung and size its spans, are defined beside the kit in the metric, which only the
- *  modality's NVIDIA unit compiles, as is the judging kernel. Rows are the 32-byte
+ *  modality's NVIDIA unit compiles, as is the judging kernel. Positions are the 32-byte
  *  @c earth_observation_t, in the caller's tape and in the index alike.
  */
 #pragma once
@@ -43,14 +43,14 @@ struct vram_nvidia_kits {
      *  see each cone's nearest candidate, as @c surface_keep_octants_t documents. */
     inline static constexpr u32_t build_breadth_k = 128;
 
-    /** The rung serving rows of @p longest bytes, or @c rungs_k when none does. Defined in
+    /** The rung serving positions of @p longest bytes, or @c rungs_k when none does. Defined in
      *  @c vram_nvidia_metric.cuh, as are the members below reading the kit. */
     static std::size_t rung_serving_(std::size_t longest) noexcept;
 
-    /** Lanes the kit scores a row with on @p rung. */
-    static u32_t lanes_per_row_(std::size_t rung) noexcept;
+    /** Lanes the kit scores a position with on @p rung. */
+    static u32_t lanes_per_entry_(std::size_t rung) noexcept;
 
-    /** Bytes the row at @p data takes once prepared. */
+    /** Bytes the position at @p data takes once prepared. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
 
     /** Bytes the @p stored observation saves into: its own 32, as the RAM codec saves it. */
@@ -97,7 +97,7 @@ struct vram_nvidia_kits {
 
 /** Similarity Search over observations on NVIDIA GPUs, under the squared chord the kit
  *  @c geospatial_ladder picks under @p capability_ scores: a lane scores each candidate, a warp
- *  walks each query, and rows keep their neighbors by tangent-plane cone. Node IDs are
+ *  walks each query, and nodes keep their neighbors by tangent-plane cone. Node IDs are
  *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
  *  over its kits and forwards its verbs, types and constants, which that graph documents. */
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
@@ -143,7 +143,7 @@ struct vram_nvidia_index {
     std::size_t traversal_memory_usage(tape_view<byte_t const> tape, insert_config_t config = {}) const noexcept {
         return graph_.traversal_memory_usage(tape, config);
     }
-    expected<insert_plan_t> plan_insert(std::size_t rows) noexcept { return graph_.plan_insert(rows); }
+    expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
     expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         return graph_.insert(tape, context, config);
@@ -161,11 +161,12 @@ struct vram_nvidia_index {
         return graph_.search(queries, result_ids, result_distances, context, config);
     }
 
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows) const noexcept {
-        return graph_.traversal_memory_usage(config, rows);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries) const noexcept {
+        return graph_.traversal_memory_usage(config, entries);
     }
-    std::size_t traversal_memory_usage(refine_config_t config, std::size_t rows, std::size_t receivers) const noexcept {
-        return graph_.traversal_memory_usage(config, rows, receivers);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries,
+                                       std::size_t receivers) const noexcept {
+        return graph_.traversal_memory_usage(config, entries, receivers);
     }
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                         refine_config_t config = {}) noexcept {

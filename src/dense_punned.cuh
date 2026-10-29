@@ -126,7 +126,7 @@ struct dense_verbs {
 
     void* (*create)(nk_kernel_kind_t kernel, forkunion_allocator_t tables) noexcept;
     void (*destroy)(void* index) noexcept;
-    void (*bound_shards)(void* index, std::size_t rows) noexcept;
+    void (*bound_shards)(void* index, std::size_t nodes) noexcept;
 
     /** Appends one shard on a host memory domain or a device's vendor ordinal. */
     status_t (*emplace)(void* index, int placement) noexcept;
@@ -151,7 +151,7 @@ struct dense_verbs {
                        u32_t expansion_factor) noexcept;
     refined_t (*refine)(void* index, executor_t& executor, u32_t expansion_factor, progress_ticks_t& ticks) noexcept;
 
-    /** Moves every row of each of @p donors in, nulling each slot whose index it consumed. */
+    /** Moves every node of each of @p donors in, nulling each slot whose index it consumed. */
     refined_t (*absorb)(void* index, std::span<void*> donors, executor_t& executor, u32_t expansion_factor,
                         progress_ticks_t& ticks) noexcept;
     expected<dense::compact_result_t> (*compact)(void* index, std::span<void* const> sources, executor_t& executor,

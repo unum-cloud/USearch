@@ -117,7 +117,7 @@ Calls depending on each other are ordered by joining the first before submitting
 
 ## Executors
 
-An executor owns the host threads or device streams a fanned-out verb runs on; an index owns rows.
+An executor owns the host threads or device streams a fanned-out verb runs on; an index owns entries.
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns.
 Its residency must match the residency of every handle it drives.
 The index itself runs a call on the calling thread instead: single-threaded on RAM, on the handle's device and default stream on VRAM.
@@ -177,10 +177,10 @@ try (Arena arena = new Arena(pool)) {
         total += matches.score(0, 0);
 }
 }
-try (Arena found = new Arena(); Arena rows = new Arena()) {          // two live results, two arenas
+try (Arena found = new Arena(); Arena fetched = new Arena()) {       // two live results, two arenas
     Matches hits = index.search(query, 10, found);
     for (int rank = 0; rank < hits.count(0); ++rank) {
-        rerank(hits.key(0, rank), index.get(hits.key(0, rank), Scalar.F32, rows));
+        rerank(hits.key(0, rank), index.get(hits.key(0, rank), Scalar.F32, fetched));
 }
 }
 List<Deferred<Matches>> calls = new ArrayList<>();
@@ -303,11 +303,11 @@ Sub-byte kinds count logical dimensions, so sixteen `U1X8` dimensions occupy two
 
 Every ranked verb answers its `Matches`, read in place out of the arena: a queries-by-`columns` matrix of keys, the scores positionally paired with them, and one match count per query.
 The wanted count is the "k" in kANN and bounds `columns`, the row width of both matrices the call wrote, and a recall sweep reuses one arena across every point, so it allocates once.
-`count`, `key` and `score` all address one query's row by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
+`count`, `key` and `score` all address one query by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
 
 The breadth of the candidates rides each call rather than the handle, which lets a recall sweep run against one immutable index with no mutation between points.
 Every verb with knobs beyond its inputs has a bare form and one taking its `Dense*Config`, named after the C structure it fills.
-`Traversal.WALK`, the default, walks the graph, and `Traversal.SCAN` scores every row published when the query's scan starts, exactly, on RAM and NVMe handles.
+`Traversal.WALK`, the default, walks the graph, and `Traversal.SCAN` scores every entry published when the query's scan starts, exactly, on RAM and NVMe handles.
 A `DenseTraversalStats` lent to a config is overwritten with what the walk reported, so one reading always belongs to one call.
 
 ```java
@@ -321,16 +321,16 @@ System.out.println(stats.computedDistances() + " distances computed by the wider
 
 ### Retrieval and Streaming
 
-`get` returns every row the key holds, however many there turn out to be, at the natural width of the kind asked for, with the `columns` and `strideBytes` the library reported.
+`get` returns every vector the key holds, however many there turn out to be, at the natural width of the kind asked for, with the `columns` and `strideBytes` the library reported.
 
 ```java
 DenseVectors every = index.get(Key.of(42), Scalar.F32, arena);
 float[] values = every.segment().toArray(ValueLayout.JAVA_FLOAT);
 ```
 
-A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-Without start keys it yields every row as stored, and `cursor(starts...)` yields the starts' own rows first, then the rows those link to breadth-first, each once.
-Each pull writes up to a wanted count of keys into the arena, and `nextLinks` the keys each links to beside them; the rows themselves come from `get`.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so an entry once passed is never revisited.
+Without start keys it yields every entry as stored, and `cursor(starts...)` yields the starts' own entries first, then the entries those link to breadth-first, each once.
+Each pull writes up to a wanted count of keys into the arena, and `nextLinks` the keys each links to beside them; the vectors themselves come from `get`.
 
 ```java
 try (DenseCursor cursor = index.on(pool).cursor()) {
@@ -363,7 +363,7 @@ while (index.on(pool).refine(wide) > index.describe().size() / 100) {}
 ### Absorbing & Splitting
 
 `absorb` appends donor indexes one after another, keeping their graphs and linking each in across the appended part, rather than re-inserting their vectors.
-Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its rows may already have landed.
+Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its entries may already have landed.
 Splitting is not in the C library yet.
 
 ```java
@@ -387,7 +387,7 @@ for (int row = 0; row < products.queries(); ++row) {
 
 ### Late Interaction
 
-`maxsim` scores multi-row queries against multi-row entries: every query row takes its best match within a key, and those maxima sum to that key's score.
+`maxsim` scores multi-row queries against multi-vector documents: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, so `valuesPerKey` bounds how many rows share a key and the wanted count is the "k" over documents rather than over rows.
 Every query carries the same number of rows, so a padded token batch applies as is.
 Each query's keys land largest score first in the same ragged `DenseProducts` that `multiply` returns, and a wanted count of zero keeps every key the query scored.

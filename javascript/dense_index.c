@@ -35,7 +35,8 @@ typedef struct usearch_js_dense_call_t {
     /** Donors an absorb names, which its settlement walks, or the rows on a verb's batch axis. */
     size_t count;
 
-    /** Entries under a key, nodes a refinement changed, or the rows or pairs a call landed. */
+    /** Entries under a key or a cursor pull landed, nodes a refinement changed, or the rows or
+     *  pairs a call landed. */
     size_t written;
 
     /** Pairs a product scored before its bound cut any, or keys a late interaction landed. */
@@ -675,7 +676,7 @@ static napi_value usearch_js_object(napi_env env, size_t count, char const* cons
     return NULL;
 }
 
-/** Views a ranked run of @p count rows inside @p arena as @c {keys, scores, counts, columns}. */
+/** Views a ranked run of @p count queries inside @p arena as @c {keys, scores, counts, columns}. */
 static napi_value usearch_js_matches_object(napi_env env, napi_value arena, usearch_matches_view_t const* matches,
                                             size_t count) {
     size_t const cells = count * matches->columns;
@@ -1187,7 +1188,7 @@ static napi_value usearch_js_index_attend(napi_env env, napi_callback_info info)
 
 #pragma region Cursors and Streams
 
-/** A row scan or a resumable search, and the index and executor every pull names again. */
+/** A cursor walk or a resumable search, and the index and executor every pull names again. */
 typedef struct usearch_js_walk_t {
 
     /** The engine cursor or stream, @c NULL once released. */
@@ -1301,19 +1302,19 @@ static napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value 
     return object;
 }
 
-/** Views the keys a cursor pull landed as @c {keys, rows}. */
+/** Views the keys a cursor pull landed as @c {keys, entries}. */
 static napi_value usearch_js_finish_cursor_keys(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
     usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
     size_t const bytes = dense->written * sizeof(usearch_key_t);
     napi_value const keys = usearch_js_arena_view(env, slots[usearch_js_slot_arena_k], napi_uint8_array,
                                                   (void*)dense->keys.data, bytes, bytes);
     if (!keys) return NULL;
-    static char const* const names[] = {"keys", "rows"};
+    static char const* const names[] = {"keys", "entries"};
     napi_value const values[] = {keys, usearch_js_number(env, dense->written)};
     return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
-/** Views the keys and links a cursor pull landed as @c {keys, rows, links: {offsets, keys}}. */
+/** Views the keys and links a cursor pull landed as @c {keys, entries, links: {offsets, keys}}. */
 static napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
     usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
     napi_value const arena = slots[usearch_js_slot_arena_k];
@@ -1335,8 +1336,9 @@ static napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t
     return batch;
 }
 
-/** @c next(wanted, arena, links) → @c {keys, rows, links}, the next batch viewed inside @p arena;
- *  @c links is present when the truthy flag asked for it, and zero rows mean the walk ended. */
+/** @c next(wanted, arena, links) → @c {keys, entries, links}, the next batch viewed inside
+ *  @p arena; @c links is present when the truthy flag asked for it, and zero entries mean the walk
+ *  ended. */
 static napi_value usearch_js_cursor_next(napi_env env, napi_callback_info info) {
     napi_value arguments[3];
     usearch_dense_cursor_next_t next = {0};
@@ -1364,8 +1366,8 @@ static napi_value usearch_js_cursor_next(napi_env env, napi_callback_info info) 
     return usearch_js_call_answer(env, &call.call, &call.call, slots, NULL);
 }
 
-/** @c next(wanted, arena) → @c {keys, scores, counts, columns}, one ranked row viewed inside
- *  @p arena; its count is zero once the walk is drained. */
+/** @c next(wanted, arena) → @c {keys, scores, counts, columns}, one query's ranked matches viewed
+ *  inside @p arena; its count is zero once the walk is drained. */
 static napi_value usearch_js_search_stream_next(napi_env env, napi_callback_info info) {
     napi_value arguments[2];
     usearch_dense_search_stream_next_t next = {0};
@@ -1413,7 +1415,7 @@ static napi_value usearch_js_search_stream_release(napi_env env, napi_callback_i
 }
 
 /** @c cursor(executor, starts) → a walk over the entries published so far, pulling on @p executor;
- *  @p starts is absent for every row as stored, else the keys to walk out from. */
+ *  @p starts is absent for every entry as stored, else the keys to walk out from. */
 static napi_value usearch_js_index_cursor(napi_env env, napi_callback_info info) {
     napi_value arguments[2], self = NULL;
     usearch_js_index_t* const index = usearch_js_index_self(env, info, 2, arguments, &self);

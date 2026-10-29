@@ -139,7 +139,7 @@ impl Default for usearch_rows_view_t {
     }
 }
 
-/// A ranked run a call wrote into its arena - the call's count of rows, `columns` packed columns each.
+/// A ranked run a call wrote into its arena - one list per query, `columns` packed columns each.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_matches_view_t {
@@ -161,18 +161,18 @@ impl Default for usearch_matches_view_t {
 }
 
 impl usearch_matches_view_t {
-    /// Row `query`, trimmed to the matches the call wrote; a call with nothing to report leaves
-    /// null counts, which read as empty rows.
+    /// Query `query`'s matches, trimmed to the ones the call wrote; a call with nothing to report
+    /// leaves null counts, which read as no matches.
     ///
     /// # Safety
     /// The view must be a finished call's output in host memory, and `query` below its count.
-    pub(crate) unsafe fn row<'arena>(&self, query: usize) -> MatchesRow<'arena> {
+    pub(crate) unsafe fn query<'arena>(&self, query: usize) -> QueryMatches<'arena> {
         let written = match self.counts.is_null() {
             true => 0,
             false => (*self.counts.add(query)).min(self.columns),
         };
         let start = query * self.columns;
-        MatchesRow {
+        QueryMatches {
             keys: arena_slice(self.keys.wrapping_add(start), written),
             distances: arena_slice(self.scores.wrapping_add(start), written),
         }
@@ -180,7 +180,7 @@ impl usearch_matches_view_t {
 }
 
 /// A ragged run of matches a call wrote into its arena - keys and scores end to end, and one
-/// more offset than rows.
+/// more offset than queries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_matches_tape_view_t {
@@ -200,25 +200,25 @@ impl Default for usearch_matches_tape_view_t {
 }
 
 impl usearch_matches_tape_view_t {
-    /// Row `row`, spanning its two offsets; a call with nothing to report leaves null offsets,
-    /// which read as empty rows.
+    /// Query `query`, spanning its two offsets; a call with nothing to report leaves null offsets,
+    /// which read as no matches.
     ///
     /// # Safety
-    /// The view must be a finished call's output in host memory, and `row` below its count.
-    pub(crate) unsafe fn row<'arena>(&self, row: usize) -> MatchesRow<'arena> {
+    /// The view must be a finished call's output in host memory, and `query` below its count.
+    pub(crate) unsafe fn query<'arena>(&self, query: usize) -> QueryMatches<'arena> {
         let (start, end) = match self.offsets.is_null() {
             true => (0, 0),
-            false => (*self.offsets.add(row), *self.offsets.add(row + 1)),
+            false => (*self.offsets.add(query), *self.offsets.add(query + 1)),
         };
-        MatchesRow {
+        QueryMatches {
             keys: arena_slice(self.keys.wrapping_add(start), end - start),
             distances: arena_slice(self.scores.wrapping_add(start), end - start),
         }
     }
 }
 
-/// A ragged run of keys a call wrote into its arena - every row's keys end to end, and one more
-/// offset than rows.
+/// A ragged run of keys a call wrote into its arena - every entry's keys end to end, and one
+/// more offset than entries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_keys_tape_view_t {
@@ -236,15 +236,15 @@ impl Default for usearch_keys_tape_view_t {
 }
 
 impl usearch_keys_tape_view_t {
-    /// Row `row`, spanning its two offsets; a call with nothing to report leaves null offsets,
-    /// which read as empty rows.
+    /// Entry `entry`'s keys, spanning its two offsets; a call with nothing to report leaves null
+    /// offsets, which read as no keys.
     ///
     /// # Safety
-    /// The view must be a finished call's output in host memory, and `row` below its count.
-    pub(crate) unsafe fn row<'arena>(&self, row: usize) -> &'arena [Key] {
+    /// The view must be a finished call's output in host memory, and `entry` below its count.
+    pub(crate) unsafe fn entry<'arena>(&self, entry: usize) -> &'arena [Key] {
         let (start, end) = match self.offsets.is_null() {
             true => (0, 0),
-            false => (*self.offsets.add(row), *self.offsets.add(row + 1)),
+            false => (*self.offsets.add(entry), *self.offsets.add(entry + 1)),
         };
         arena_slice(self.keys.wrapping_add(start), end - start)
     }
@@ -1035,8 +1035,8 @@ impl<Rows: RowsView + ?Sized> RowsView for &Rows {
 ///
 /// Rust-only.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct MatchesRow<'matches> {
-    /// The keys written for this row: nearest first for a search, largest score first for a
+pub struct QueryMatches<'matches> {
+    /// The keys written for this query: nearest first for a search, largest score first for a
     /// `maxsim`, and in traversal order for a `multiply`.
     pub keys: &'matches [Key],
     /// Positionally paired with the keys: distances for a search, summed similarities for a
@@ -1044,7 +1044,7 @@ pub struct MatchesRow<'matches> {
     pub distances: &'matches [Distance],
 }
 
-/// The ranked rows a search or a stream pull wrote into the arena it borrows; see
+/// The ranked matches a search or a stream pull wrote into the arena it borrows; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
 ///
 /// Mirrors `usearch_matches_view_t`.
@@ -1055,26 +1055,26 @@ pub struct Matches<'arena> {
 }
 
 impl<'arena> Matches<'arena> {
-    /// Query rows the call resolved.
+    /// Queries the call resolved.
     pub fn queries(&self) -> usize { self.queries }
 
     /// Matches written for one query, refused with [`Status::InvalidArgument`] when `query` is not
     /// below [`Matches::queries`] and with [`Status::Device`] over device memory.
-    pub fn row(&self, query: usize) -> Result<MatchesRow<'arena>> {
+    pub fn query(&self, query: usize) -> Result<QueryMatches<'arena>> {
         self.arena.host()?;
         match query < self.queries {
             // Safety: the arena holds a finished call's output in host memory.
-            true => Ok(unsafe { self.view.0.row(query) }),
-            false => Err(fail(Status::InvalidArgument, "the row is not below the call's count")),
+            true => Ok(unsafe { self.view.0.query(query) }),
+            false => Err(fail(Status::InvalidArgument, "the query is not below the call's count")),
         }
     }
 
-    /// Every query's row, in query order, refused with [`Status::Device`] over device memory.
-    pub fn rows(&self) -> Result<impl Iterator<Item = MatchesRow<'arena>>> {
+    /// Every query's matches, in query order, refused with [`Status::Device`] over device memory.
+    pub fn iter(&self) -> Result<impl Iterator<Item = QueryMatches<'arena>>> {
         self.arena.host()?;
         let view = self.view.0;
         // Safety: the arena holds a finished call's output in host memory.
-        Ok((0..self.queries).map(move |query| unsafe { view.row(query) }))
+        Ok((0..self.queries).map(move |query| unsafe { view.query(query) }))
     }
 }
 
@@ -1444,17 +1444,17 @@ impl FromStr for Residency {
     }
 }
 
-/// How a search reaches the indexed rows it scores.
+/// How a search reaches the indexed entries it scores.
 ///
 /// Mirrors `usearch_traversal_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
 pub enum Traversal {
-    /// Walks the graph, scoring the rows the expansion reaches - approximate.
+    /// Walks the graph, scoring the entries the expansion reaches - approximate.
     #[default]
     Walk = 1,
-    /// Scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    /// Scores every entry published when the query's scan starts - exact, on RAM and NVMe handles.
     Scan = 2,
 }
 

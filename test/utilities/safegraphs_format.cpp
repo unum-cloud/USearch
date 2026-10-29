@@ -12,9 +12,9 @@
  */
 #include <cmath>   // `std::sqrt` - the angular oracle
 #include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths
-#include <cstring> // `std::memcpy` - the codec's views of stored rows
+#include <cstring> // `std::memcpy` - the codec's views of stored entries
 
-#include <algorithm> // `std::find` - a saved row's keys
+#include <algorithm> // `std::find` - a query's saved keys
 #include <array>     // `std::array` - the fixed embedding
 #include <bit>       // `std::bit_cast` - byte images of the fixed payload
 #include <span>      // `std::span` - the metric's drain surface
@@ -82,13 +82,13 @@ struct embedding_codec_t {
         return status_t::success_k;
     }
 
-    /** What @ref view hands out for a stored row: the embedding itself, copied. */
+    /** What @ref view hands out for a stored entry: the embedding itself, copied. */
     using view_t = embedding_t;
 
-    /** The embedding a stored @p row holds. */
-    view_t view(bytes_view_t row) const noexcept {
+    /** The embedding a stored @p entry holds. */
+    view_t view(bytes_view_t entry) const noexcept {
         embedding_t value {};
-        if (row.size() == sizeof(embedding_t)) std::memcpy(value.data(), row.data(), sizeof(embedding_t));
+        if (entry.size() == sizeof(embedding_t)) std::memcpy(value.data(), entry.data(), sizeof(embedding_t));
         return value;
     }
 };
@@ -170,15 +170,15 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
     std::vector<uuid_t> expected_keys(nodes_k * wanted_k);
     std::vector<f32_t> expected_distances(nodes_k * wanted_k);
     serial_executor_t serial;
-    // A row ranks alike when its distances agree within noise and every key nearer than the row's
-    // last distance is one the saved index ranked there too: ties at the cut may swap keys.
-    auto ranked_alike = [&](std::size_t row, std::span<uuid_t const> keys, std::span<f32_t const> distances) {
+    // A query ranks alike when its distances agree within noise and every key nearer than the
+    // query's last distance is one the saved index ranked there too: ties at the cut may swap keys.
+    auto ranked_alike = [&](std::size_t query, std::span<uuid_t const> keys, std::span<f32_t const> distances) {
         std::size_t mismatches = 0;
-        std::span<uuid_t const> const wanted_keys = std::span<uuid_t const> {expected_keys}.subspan(row * wanted_k,
+        std::span<uuid_t const> const wanted_keys = std::span<uuid_t const> {expected_keys}.subspan(query * wanted_k,
                                                                                                     wanted_k);
-        f32_t const last = expected_distances[row * wanted_k + wanted_k - 1];
+        f32_t const last = expected_distances[query * wanted_k + wanted_k - 1];
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
-            mismatches += expect_near(distances[rank], expected_distances[row * wanted_k + rank]);
+            mismatches += expect_near(distances[rank], expected_distances[query * wanted_k + rank]);
             bool const before_cut = distances[rank] < last * (1 - 1e-3f);
             mismatches += before_cut &&
                           std::find(wanted_keys.begin(), wanted_keys.end(), keys[rank]) == wanted_keys.end();
@@ -193,12 +193,12 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         std::vector<node_id_t> assigned_ids;
         failures += expect(bool(source.reserve(nodes_k)));
         failures += basic_build<fixture_type_>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
-        for (std::size_t row = 0; row != nodes_k; ++row) {
-            failures += expect_eq(source.search(values[row], metric, context, {nodes_k}).status, status_t::success_k);
+        for (std::size_t query = 0; query != nodes_k; ++query) {
+            failures += expect_eq(source.search(values[query], metric, context, {nodes_k}).status, status_t::success_k);
             for (std::size_t rank = 0; rank != wanted_k && rank < context.results.size(); ++rank) {
                 auto const key = source.key_of(context.results[rank].node_id);
-                expected_keys[row * wanted_k + rank] = uuid_of(static_cast<u64_t>(key.value));
-                expected_distances[row * wanted_k + rank] = context.results[rank].distance;
+                expected_keys[query * wanted_k + rank] = uuid_of(static_cast<u64_t>(key.value));
+                expected_distances[query * wanted_k + rank] = context.results[rank].distance;
             }
         }
         failures += expect_eq(safegraphs_write_index(std::string_view {path}, source, embedding_codec_t {}, serial,
@@ -217,8 +217,9 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         failures += expect_eq(widened.size(), nodes_k);
         angular_metric_t metric;
         widened_index_t::traversal_context_t context {stream_key(seed, label), counting_allocator_t {ledger}};
-        for (std::size_t row = 0; row != nodes_k; ++row) {
-            failures += expect_eq(widened.search(values[row], metric, context, {nodes_k}).status, status_t::success_k);
+        for (std::size_t query = 0; query != nodes_k; ++query) {
+            failures += expect_eq(widened.search(values[query], metric, context, {nodes_k}).status,
+                                  status_t::success_k);
             failures += expect(context.results.size() >= wanted_k);
             if (context.results.size() < wanted_k) continue;
             std::array<uuid_t, wanted_k> keys;
@@ -226,7 +227,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
             for (std::size_t rank = 0; rank != wanted_k; ++rank)
                 keys[rank] = widened.key_of(context.results[rank].node_id).value,
                 distances[rank] = context.results[rank].distance;
-            failures += ranked_alike(row, keys, distances);
+            failures += ranked_alike(query, keys, distances);
         }
     }
 
@@ -248,8 +249,8 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         auto make_metric = [](auto const&, std::size_t) noexcept {
             return expected<angular_metric_t> {angular_metric_t {}, status_t::success_k};
         };
-        auto query_of = [&](std::size_t row, auto const&) noexcept {
-            return expected<embedding_t> {values[row], status_t::success_k};
+        auto query_of = [&](std::size_t query, auto const&) noexcept {
+            return expected<embedding_t> {values[query], status_t::success_k};
         };
         widened_view_t::search_config_t search_config;
         search_config.expansion_factor = nodes_k;
@@ -260,9 +261,9 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
                                                           std::span<uuid_t> {keys}, std::span<f32_t> {distances},
                                                           std::span<std::size_t> {counts});
         failures += expect_eq(search_status, status_t::success_k);
-        for (std::size_t row = 0; row != nodes_k; ++row)
-            failures += ranked_alike(row, std::span<uuid_t const> {keys}.subspan(row * wanted_k, wanted_k),
-                                     std::span<f32_t const> {distances}.subspan(row * wanted_k, wanted_k));
+        for (std::size_t query = 0; query != nodes_k; ++query)
+            failures += ranked_alike(query, std::span<uuid_t const> {keys}.subspan(query * wanted_k, wanted_k),
+                                     std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
     }
     fu_topology_delete(topology);
     std::remove(path);

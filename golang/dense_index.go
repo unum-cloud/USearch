@@ -104,7 +104,7 @@ func (metric DenseMetric) String() string {
 // usearch_dense_init_ram_t and usearch_dense_init_vram_t share.
 type DenseOptions struct {
 	// Dimensions is the width of the indexed vectors; zero leaves the geometry unfrozen, so the
-	// index admits no rows.
+	// index admits no entries.
 	Dimensions uint
 	// Metric is the distance kind used between vectors.
 	Metric DenseMetric
@@ -140,7 +140,7 @@ type DenseMetadata struct {
 	Dimensions uint
 	// Metric is the distance kind the checkpoint scores with.
 	Metric DenseMetric
-	// Quantization is the scalar type its rows are stored and quantized into.
+	// Quantization is the scalar type its vectors are stored and quantized into.
 	Quantization Scalar
 	// Connectivity is the connections per node the graph was built with.
 	Connectivity uint
@@ -372,7 +372,7 @@ type DenseInsertConfig struct {
 	// ExpansionFactor is the breadth of the candidates the build walk explores; zero derives it
 	// from the geometry.
 	ExpansionFactor uint
-	// Progress reports the rows inserted; every row is claimed before the first report, so a
+	// Progress reports the entries inserted; every entry is claimed before the first report, so a
 	// stop is ignored.
 	Progress ProgressCallback
 	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
@@ -403,7 +403,7 @@ type DenseSearchConfig struct {
 	// ExpansionFactor is the breadth of the candidates the walk explores; zero derives it from
 	// the geometry, and a scan ignores it.
 	ExpansionFactor uint
-	// Traversal walks the graph by default; TraversalScan scores every row exactly, on RAM and
+	// Traversal walks the graph by default; TraversalScan scores every entry exactly, on RAM and
 	// NVMe handles, and a VRAM handle refuses it with StatusUnsupported.
 	Traversal Traversal
 	// Predicate admits only the keys it approves; nil admits everything. Non-matching entries
@@ -562,37 +562,37 @@ func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
 }
 
 // DenseProducts is the ragged sparse product Multiply wrote into its arena: per left row, every pair
-// its walk scored, in traversal order. Maxsim lands its keys in the same shape, one row per query,
+// its walk scored, in traversal order. Maxsim lands its keys in the same shape, one run per query,
 // largest score first.
 //
 // Mirrors usearch_matches_tape_view_t.
 type DenseProducts struct {
 	exported
 	raw      C.usearch_matches_tape_view_t
-	rows     uint
+	queries  uint
 	required uint
 }
 
-// Rows reports how many left rows the call multiplied, or how many queries it scored.
-func (products DenseProducts) Rows() uint { return products.rows }
+// Queries reports how many left rows the call multiplied, or how many queries it scored.
+func (products DenseProducts) Queries() uint { return products.queries }
 
-// Required reports the pairs the walks scored across every row, or for Maxsim the keys scored
+// Required reports the pairs the walks scored across every left row, or for Maxsim the keys scored
 // across every query, before the wanted bound cut any.
 func (products DenseProducts) Required() uint { return products.required }
 
-// Row borrows one left row's pairs from the arena - a key naming each indexed row, and its product -
-// refused with StatusInvalidArgument when row is not below Rows.
-func (products DenseProducts) Row(row uint) ([]Key, []Distance, error) {
+// Query borrows one left row's pairs from the arena - a key naming each indexed entry, and its
+// product - or one query's keys, refused with StatusInvalidArgument when query is not below Queries.
+func (products DenseProducts) Query(query uint) ([]Key, []Distance, error) {
 	if err := products.host(); err != nil {
 		return nil, nil, err
 	}
-	if row >= products.rows {
-		return nil, nil, fail(StatusInvalidArgument, "the row is not below the call's count")
+	if query >= products.queries {
+		return nil, nil, fail(StatusInvalidArgument, "the query is not below the call's count")
 	}
-	offsets := unsafe.Slice((*uint)(unsafe.Pointer(products.raw.offsets)), products.rows+1)
-	keys := unsafe.Slice((*Key)(unsafe.Pointer(products.raw.keys)), offsets[products.rows])
-	scores := unsafe.Slice((*Distance)(unsafe.Pointer(products.raw.scores)), offsets[products.rows])
-	return keys[offsets[row]:offsets[row+1]], scores[offsets[row]:offsets[row+1]], nil
+	offsets := unsafe.Slice((*uint)(unsafe.Pointer(products.raw.offsets)), products.queries+1)
+	keys := unsafe.Slice((*Key)(unsafe.Pointer(products.raw.keys)), offsets[products.queries])
+	scores := unsafe.Slice((*Distance)(unsafe.Pointer(products.raw.scores)), offsets[products.queries])
+	return keys[offsets[query]:offsets[query+1]], scores[offsets[query]:offsets[query+1]], nil
 }
 
 // Monolith is the serialized index SaveBuffer wrote into its arena.
@@ -610,7 +610,7 @@ func (monolith Monolith) Bytes() ([]byte, error) {
 }
 
 // DenseBatch is one cursor pull written into its arena: the keys, and beside them the keys each links
-// to when NextLinks asked for them; the rows themselves come from Get.
+// to when NextLinks asked for them; the vectors themselves come from Get.
 type DenseBatch struct {
 	exported
 	keys    C.usearch_keys_view_t
@@ -1035,7 +1035,7 @@ func (on DenseIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) 
 //
 // A batch is all-or-nothing and becomes visible at once, since every fallible step runs before
 // the first entry identity is claimed. A VRAM call that fails after its first launch publishes
-// none of its rows, and leaves the handle refusing every later mutation. Calls
+// none of its entries, and leaves the handle refusing every later mutation. Calls
 // usearch_dense_insert.
 func (on DenseIndexOn) Insert(keys []Key, vectors RowsView, config *DenseInsertConfig) error {
 	_, err := block(on.insert(C.usearch_completion_blocking_k, keys, vectors, config))
@@ -1093,13 +1093,13 @@ func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, arena *Aren
 	return submitted(on.search(C.usearch_completion_deferred_k, queries, wanted, arena, config))
 }
 
-// Maxsim scores multi-row queries against multi-row entries by late interaction: every
+// Maxsim scores multi-row queries against multi-vector documents by late interaction: every
 // query row takes its best match within a key, and those maxima sum to that key's score.
 //
 // A document is one key holding its token rows, which is what ValuesPerKey above one exists
 // for. rowsPerQuery is the token count each query occupies, queries holds them end to end, and
 // wanted counts documents rather than rows, zero keeping every key a query scored. Each query's
-// keys land in arena as one row, largest score first. Runs on an inner-product index alone.
+// keys land in arena as one run, largest score first. Runs on an inner-product index alone.
 //
 // See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring. Calls
 // usearch_dense_maxsim.
@@ -1114,7 +1114,7 @@ func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uin
 	return submitted(on.maxsim(C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted, arena, config))
 }
 
-// Multiply is the approximate sparse product of a matrix against the indexed rows - the linear
+// Multiply is the approximate sparse product of a matrix against the indexed vectors - the linear
 // algebra sibling of Search, reporting every pair the traversal scored rather than only the
 // nearest. Pairs arrive in traversal order rather than sorted, and the pairs the walk never
 // reaches are the low and negative products. Runs on an inner-product index alone.
@@ -1152,7 +1152,7 @@ func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, aren
 }
 
 // Absorb moves every donor into this index, one after another, keeping their graphs rather than
-// re-inserting their vectors: each donor's rows append shard by shard, then a refinement links
+// re-inserting their vectors: each donor's entries append shard by shard, then a refinement links
 // them across the appended part. Donors must share the index's residency, scalar, metric and
 // geometry. Readers of a RAM index keep searching throughout; a VRAM one admits no overlapping
 // search.
@@ -1452,7 +1452,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	})
 	view := lent.rewound(arena)
 	lent.result = func() DenseProducts {
-		return DenseProducts{exported: view, raw: *matches, rows: count, required: uint(*required)}
+		return DenseProducts{exported: view, raw: *matches, queries: count, required: uint(*required)}
 	}
 	return lent
 }
@@ -1490,7 +1490,7 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 	})
 	view := lent.rewound(arena)
 	lent.result = func() DenseProducts {
-		return DenseProducts{exported: view, raw: *products, rows: left.rows, required: uint(*required)}
+		return DenseProducts{exported: view, raw: *products, queries: left.rows, required: uint(*required)}
 	}
 	return lent
 }
@@ -1668,7 +1668,7 @@ func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, aren
 
 // DenseCursor is a walk over the index contents, pulled blocking on the executor of the
 // receiver that opened it. Each shard's publication watermark is read as the walk enters that
-// shard, so a row once passed is never revisited.
+// shard, so an entry once passed is never revisited.
 //
 // Mirrors usearch_dense_cursor_t.
 type DenseCursor struct {
@@ -1676,8 +1676,8 @@ type DenseCursor struct {
 	receiver denseReceiver
 }
 
-// Cursor opens a walk over the current contents. Without starts it yields every row as stored; with them,
-// the start keys' own rows first in order, then the rows those link to breadth-first, each once.
+// Cursor opens a walk over the current contents. Without starts it yields every entry as stored; with them,
+// the start keys' own entries first in order, then the entries those link to breadth-first, each once.
 // Calls usearch_dense_cursor_init.
 func (on DenseIndexOn) Cursor(starts ...Key) (*DenseCursor, error) {
 	index, _, refusal := on.lower()
@@ -1796,8 +1796,8 @@ func (on DenseIndexOn) SearchStream(query RowsView, config *DenseSearchStreamIni
 	return block(lent)
 }
 
-// Next pulls up to wanted next-nearest matches into arena, as the one row of a search; a row of none
-// means the walk is drained. Calls usearch_dense_search_stream_next.
+// Next pulls up to wanted next-nearest matches into arena, as the one query of a search; a query
+// with none means the walk is drained. Calls usearch_dense_search_stream_next.
 func (stream *DenseSearchStream) Next(wanted uint, arena *Arena) (MatchesView, error) {
 	index, executor, refusal := stream.receiver.lower()
 	if refusal == nil && stream.handle == nil {

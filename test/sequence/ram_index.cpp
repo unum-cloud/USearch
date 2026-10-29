@@ -163,17 +163,17 @@ constexpr needleman_wunsch_costs_t nucleotide_costs() noexcept {
 
 constexpr needleman_wunsch_costs_t nucleotide_costs_k = nucleotide_costs();
 
-/** The codes of a packed @p row: its bits read low first from the byte past the first, as many as
+/** The codes of @p packed: its bits read low first from the byte past the first, as many as
  *  fit less the unused slots that first byte counts. */
-static std::vector<u32_t> unpacked_codes(std::string_view row, u32_t code_bits) {
+static std::vector<u32_t> unpacked_codes(std::string_view packed, u32_t code_bits) {
     std::vector<u32_t> codes;
-    if (row.empty()) return codes;
-    std::size_t const count = (row.size() - 1) * 8 / code_bits - static_cast<u8_t>(row[0]);
+    if (packed.empty()) return codes;
+    std::size_t const count = (packed.size() - 1) * 8 / code_bits - static_cast<u8_t>(packed[0]);
     for (std::size_t index = 0; index != count; ++index) {
         u32_t code = 0;
         for (u32_t bit = 0; bit != code_bits; ++bit) {
             std::size_t const position = index * code_bits + bit;
-            code |= (static_cast<u8_t>(row[1 + position / 8]) >> (position % 8) & 1u) << bit;
+            code |= (static_cast<u8_t>(packed[1 + position / 8]) >> (position % 8) & 1u) << bit;
         }
         codes.push_back(code);
     }
@@ -182,20 +182,20 @@ static std::vector<u32_t> unpacked_codes(std::string_view row, u32_t code_bits) 
 
 /** @p codes packed at @p code_bits apiece behind the count of unused slots, as the metric reads
  *  them. */
-static std::string packed_row(std::span<u32_t const> codes, u32_t code_bits) {
+static std::string packed_sequence(std::span<u32_t const> codes, u32_t code_bits) {
     std::size_t const data_bytes = (codes.size() * code_bits + 7) / 8;
-    std::string row(1 + data_bytes, '\0');
-    row[0] = static_cast<char>(data_bytes * 8 / code_bits - codes.size());
+    std::string packed(1 + data_bytes, '\0');
+    packed[0] = static_cast<char>(data_bytes * 8 / code_bits - codes.size());
     for (std::size_t index = 0; index != codes.size(); ++index)
         for (u32_t bit = 0; bit != code_bits; ++bit) {
             std::size_t const position = index * code_bits + bit;
-            row[1 + position / 8] = static_cast<char>(static_cast<u8_t>(row[1 + position / 8]) |
-                                                      ((codes[index] >> bit & 1u) << (position % 8)));
+            packed[1 + position / 8] = static_cast<char>(static_cast<u8_t>(packed[1 + position / 8]) |
+                                                         ((codes[index] >> bit & 1u) << (position % 8)));
         }
-    return row;
+    return packed;
 }
 
-/** The Needleman-Wunsch cost between two packed rows under @p costs through the two-row
+/** The Needleman-Wunsch cost between two packed sequences under @p costs through the two-row
  *  recurrence: the oracle, sharing no code with the metric's kernels or unpacking. */
 static sz_size_t needleman_wunsch_oracle(std::string_view first, std::string_view second,
                                          needleman_wunsch_costs_t const& costs) {
@@ -218,7 +218,7 @@ static sz_size_t needleman_wunsch_oracle(std::string_view first, std::string_vie
 static std::string packed_nucleotides(std::string_view text) {
     std::vector<u32_t> codes;
     for (char const nucleotide : text) codes.push_back(static_cast<u32_t>(overlap_alphabet_k.find(nucleotide)));
-    return packed_row(codes, 2);
+    return packed_sequence(codes, 2);
 }
 
 /** Three stored strings and their pairwise distances, stated by hand. */
@@ -404,7 +404,7 @@ std::size_t check_overlap_kit(u64_t seed) {
         overlap_metric<typename overlap_ladder<capability_>::kit_t> metric;
         failures += expect_eq(metric.init(candidates_k, sequence_window_widths_k), status_t::success_k);
         for (sz_size_t const radius : {unbounded_radius<sz_size_t>(), overlap_resolution_k / 2}) {
-            // A batch scores every query's row as that query alone would, and the empty query
+            // A batch scores every query as that query alone would, and the empty query
             // reopened right after it is prepared anew rather than taken for the batch.
             std::array<std::string_view, 2> const batch {candidates[0], candidates[candidates_k - 1]};
             metric.reset(std::span<std::string_view const>(batch));
@@ -484,7 +484,7 @@ std::size_t check_needleman_wunsch_kit(u64_t seed) {
                                                                   : length_distribution(random_generator) + 1;
         std::vector<u32_t> codes(length);
         for (u32_t& code : codes) code = code_distribution(random_generator);
-        candidates.push_back(packed_row(codes, costs.code_bits));
+        candidates.push_back(packed_sequence(codes, costs.code_bits));
     }
 
     needleman_wunsch_metric<typename needleman_wunsch_ladder<capability_>::kit_t> metric;
@@ -533,8 +533,8 @@ std::size_t check_sequence_nvme(u64_t seed) {
         status_t const ready = metric.init(staging);
         return expected<metric_t> {std::move(metric), ready};
     };
-    auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
-        return expected<std::string_view> {texts[row], status_t::success_k};
+    auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
+        return expected<std::string_view> {texts[query], status_t::success_k};
     };
     auto matches = [&](std::size_t entry, std::string_view view) noexcept { return view == texts[entry]; };
     return test_basic_nvme_view<levenshtein_bytes_fixture_t, nvme_indexes_t>(seed, texts.size(), "levenshtein",
@@ -577,43 +577,43 @@ std::size_t check_sequence_nvme_node_ids(u64_t seed) {
         status_t const ready = metric.init(staging);
         return expected<metric_t> {std::move(metric), ready};
     };
-    auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
-        return expected<std::string_view> {texts[row], status_t::success_k};
+    auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
+        return expected<std::string_view> {texts[query], status_t::success_k};
     };
     return test_basic_nvme_node_ids<levenshtein_wide_fixture_t, nvme_indexes_t, mismatched_nvme_indexes_t>(
         seed, texts.size(), "levenshtein", make_text, make_metric, query_of);
 }
 
-/** Two shards bounded at 1000 rows take 5000 strings in one plan, which opens two more generations
- *  of two: every key counts once across the six shards, and the merged searches find the true best
- *  as often as one unbounded index does, the merged scans always. A donor's rows absorbed then
- *  count once too, and a clear empties every shard. */
+/** Two shards bounded at 1000 entries take 5000 strings in one plan, which opens two more
+ *  generations of two: every key counts once across the six shards, and the merged searches find
+ *  the true best as often as one unbounded index does, the merged scans always. A donor's entries
+ *  absorbed then count once too, and a clear empties every shard. */
 std::size_t check_sequence_plural(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using indexes_t = us::basic::ram_indexes<index_t>;
     using value_t = index_t::value_t;
     using distance_t = index_t::distance_t;
-    constexpr std::size_t rows_k = 5000, shard_capacity_k = 1000, wanted_k = 10;
+    constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, wanted_k = 10;
     std::size_t failures = 0;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
         for (sequence_value_t const& value :
-             generate_values(rows_k + basic_recall_samples_k, stream_key(seed, "plural"), levenshtein_alphabet_k,
+             generate_values(entries_k + basic_recall_samples_k, stream_key(seed, "plural"), levenshtein_alphabet_k,
                              levenshtein_symbols_k, counting_allocator_t {ledger}))
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
     auto make_values = [&] {
         std::vector<value_t> values;
-        values.reserve(rows_k);
-        for (std::size_t row = 0; row != rows_k; ++row) [[maybe_unused]]
-            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[row]);
+        values.reserve(entries_k);
+        for (std::size_t entry = 0; entry != entries_k; ++entry) [[maybe_unused]]
+            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
         return values;
     };
-    std::vector<us::utilities::uuid_t> keys(rows_k);
-    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(0x91A7A100ull + row);
+    std::vector<us::utilities::uuid_t> keys(entries_k);
+    for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x91A7A100ull + entry);
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     keep_diverse_t const selector {basic_connectivity_k};
     index_t::traversal_context_t context {stream_key(seed, "plural"), allocator};
@@ -623,17 +623,17 @@ std::size_t check_sequence_plural(u64_t seed) {
     indexes.bound_shards(shard_capacity_k);
     failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
     failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
-    failures += expect(bool(indexes.reserve(rows_k)));
+    failures += expect(bool(indexes.reserve(entries_k)));
     std::vector<value_t> values = make_values();
-    auto [plan, plan_status] = indexes.plan_insert(rows_k);
+    auto [plan, plan_status] = indexes.plan_insert(entries_k);
     failures += expect_eq(plan_status, status_t::success_k);
     if (failed(plan_status)) return failures;
-    for (std::size_t row = 0; row != rows_k; ++row)
-        plan.insert(row, std::span<value_t>(values).subspan(row, 1),
-                    std::span<us::utilities::uuid_t const>(keys).subspan(row, 1), metric, context, selector);
+    for (std::size_t entry = 0; entry != entries_k; ++entry)
+        plan.insert(entry, std::span<value_t>(values).subspan(entry, 1),
+                    std::span<us::utilities::uuid_t const>(keys).subspan(entry, 1), metric, context, selector);
     failures += expect_eq(plan.finish(), status_t::success_k);
     failures += expect_eq(indexes.shards_count(), std::size_t {6});
-    failures += expect_eq(indexes.size(), rows_k);
+    failures += expect_eq(indexes.size(), entries_k);
     std::size_t miscounted = 0;
     for (us::utilities::uuid_t const& key : keys) miscounted += indexes.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
@@ -651,10 +651,10 @@ std::size_t check_sequence_plural(u64_t seed) {
     dummy_predicate_t unfiltered;
     std::size_t plural_best = 0, single_best = 0;
     for (std::size_t sample = 0; sample != basic_recall_samples_k; ++sample) {
-        std::string_view const query = texts[rows_k + sample];
+        std::string_view const query = texts[entries_k + sample];
         sz_size_t best = std::numeric_limits<sz_size_t>::max();
-        for (std::size_t row = 0; row != rows_k; ++row)
-            best = std::min(best, levenshtein_oracle(query, texts[row], sz_levenshtein_bytes_k));
+        for (std::size_t entry = 0; entry != entries_k; ++entry)
+            best = std::min(best, levenshtein_oracle(query, texts[entry], sz_levenshtein_bytes_k));
         auto const [found, status] = indexes.search_if(query, metric, unfiltered, context, {}, watermarks, found_keys,
                                                        found_distances);
         failures += expect_eq(status, status_t::success_k);
@@ -665,27 +665,27 @@ std::size_t check_sequence_plural(u64_t seed) {
     failures += expect(plural_best * 100 >= basic_minimal_recall_percent_k * basic_recall_samples_k);
     failures += expect(plural_best + basic_recall_samples_k / 10 >= single_best);
     for (std::size_t sample = 0; sample != 4; ++sample) {
-        std::string_view const query = texts[rows_k + sample];
+        std::string_view const query = texts[entries_k + sample];
         sz_size_t best = std::numeric_limits<sz_size_t>::max();
-        for (std::size_t row = 0; row != rows_k; ++row)
-            best = std::min(best, levenshtein_oracle(query, texts[row], sz_levenshtein_bytes_k));
+        for (std::size_t entry = 0; entry != entries_k; ++entry)
+            best = std::min(best, levenshtein_oracle(query, texts[entry], sz_levenshtein_bytes_k));
         auto const [found, status] = indexes.scan(query, metric, unfiltered, context, watermarks, found_keys,
                                                   found_distances);
         failures += expect_eq(status, status_t::success_k);
         failures += expect(found == wanted_k && found_distances[0] == best);
     }
 
-    // The donor's rows are the single index's strings under keys of their own.
-    constexpr std::size_t donor_rows_k = 300;
+    // The donor's entries are the single index's strings under keys of their own.
+    constexpr std::size_t donor_entries_k = 300;
     indexes_t donor {allocator};
     failures += expect_eq(donor.emplace(no_memory_domain_k), status_t::success_k);
-    std::vector<us::utilities::uuid_t> donor_keys(donor_rows_k);
-    for (std::size_t row = 0; row != donor_rows_k; ++row) donor_keys[row] = uuid_of(0xD0A0A100ull + row);
+    std::vector<us::utilities::uuid_t> donor_keys(donor_entries_k);
+    for (std::size_t entry = 0; entry != donor_entries_k; ++entry) donor_keys[entry] = uuid_of(0xD0A0A100ull + entry);
     std::vector<value_t> donor_values = make_values();
-    auto [donor_plan, donor_status] = donor.plan_insert(donor_rows_k);
+    auto [donor_plan, donor_status] = donor.plan_insert(donor_entries_k);
     failures += expect_eq(donor_status, status_t::success_k);
     if (failed(donor_status)) return failures;
-    donor_plan.insert(0, std::span<value_t>(donor_values).first(donor_rows_k),
+    donor_plan.insert(0, std::span<value_t>(donor_values).first(donor_entries_k),
                       std::span<us::utilities::uuid_t const>(donor_keys), metric, context, selector);
     failures += expect_eq(donor_plan.finish(), status_t::success_k);
     std::array<indexes_t*, 1> donors {&donor};
@@ -699,7 +699,7 @@ std::size_t check_sequence_plural(u64_t seed) {
         while (absorbing.advance());
         failures += expect_eq(absorbing.finish().status, status_t::success_k);
     }
-    failures += expect_eq(indexes.size(), rows_k + donor_rows_k);
+    failures += expect_eq(indexes.size(), entries_k + donor_entries_k);
     failures += expect_eq(donor.size(), std::size_t {0});
     // A consumed donor stays closed and sealed: its landed shard keeps its claims closed, so even a
     // clear refuses.
@@ -715,10 +715,11 @@ std::size_t check_sequence_plural(u64_t seed) {
     return failures;
 }
 
-/** Searches racing a clear of one shard read only retired rows nothing frees: each answers rows of
- *  the batch or @c contended_k, never a foreign key, while the clear retires the shard and a fresh
- *  one takes the next batch, which the only shard then names. A cursor opened before a clear
- *  answers @c contended_k after it. Under a sanitizer, a value freed under a search would trap. */
+/** Searches racing a clear of one shard read only retired entries nothing frees: each answers
+ *  entries of the batch or @c contended_k, never a foreign key, while the clear retires the shard
+ *  and a fresh one takes the next batch, which the only shard then names. A cursor opened before a
+ *  clear answers @c contended_k after it. Under a sanitizer, a value freed under a search would
+ *  trap. */
 std::size_t check_sequence_plural_clear_race(u64_t seed) {
     using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
@@ -726,19 +727,19 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
     using value_t = index_t::value_t;
     using distance_t = index_t::distance_t;
     using metric_t = levenshtein_bytes_fixture_t::metric_t;
-    constexpr std::size_t rows_k = 400, searchers_k = 4, rounds_k = 4, wanted_k = 8;
+    constexpr std::size_t entries_k = 400, searchers_k = 4, rounds_k = 4, wanted_k = 8;
     std::size_t failures = 0;
     std::vector<std::string> texts;
     {
         allocation_ledger_t ledger;
         for (sequence_value_t const& value :
-             generate_values(rows_k, stream_key(seed, "plural_clear_race"), levenshtein_alphabet_k,
+             generate_values(entries_k, stream_key(seed, "plural_clear_race"), levenshtein_alphabet_k,
                              levenshtein_symbols_k, counting_allocator_t {ledger}))
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    std::vector<us::utilities::uuid_t> keys(rows_k);
-    for (std::size_t row = 0; row != rows_k; ++row) keys[row] = uuid_of(0xC1EA0000ull + row);
+    std::vector<us::utilities::uuid_t> keys(entries_k);
+    for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0xC1EA0000ull + entry);
     keep_diverse_t const selector {basic_connectivity_k};
     std::vector<index_t::traversal_context_t> contexts;
     std::vector<metric_t> metrics;
@@ -755,10 +756,10 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
     failures += expect_eq(indexes.emplace(no_memory_domain_k), status_t::success_k);
     auto insert_batch = [&] {
         std::vector<value_t> values;
-        values.reserve(rows_k);
-        for (std::size_t row = 0; row != rows_k; ++row) [[maybe_unused]]
-            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[row]);
-        auto [plan, plan_status] = indexes.plan_insert(rows_k);
+        values.reserve(entries_k);
+        for (std::size_t entry = 0; entry != entries_k; ++entry) [[maybe_unused]]
+            sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
+        auto [plan, plan_status] = indexes.plan_insert(entries_k);
         failures += expect_eq(plan_status, status_t::success_k);
         if (failed(plan_status)) return;
         plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid_t const>(keys), metrics[0],
@@ -772,13 +773,13 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
     fu::standard_atomic_ref<std::size_t> const foreign {foreign_count};
     for (std::size_t round = 0; round != rounds_k; ++round) {
         insert_batch();
-        failures += expect_eq(indexes.size(), rows_k);
+        failures += expect_eq(indexes.size(), entries_k);
         indexes_t::cursor_t cursor {indexes};
         bool cleared = false;
         std::size_t searched = 0;
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
-                // Every searcher walks the rows once first, so the clear lands under live walks.
+                // Every searcher walks the entries once first, so the clear lands under live walks.
                 while (fu::standard_atomic_ref<std::size_t>(searched).load(std::memory_order_acquire) < searchers_k)
                     std::this_thread::yield();
                 while (indexes.clear() == status_t::contended_k) std::this_thread::yield();
@@ -789,14 +790,14 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
             std::array<us::utilities::uuid_t, wanted_k> found_keys;
             std::array<distance_t, wanted_k> found_distances;
             dummy_predicate_t unfiltered;
-            for (std::size_t row = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
-                 row = (row + searchers_k) % rows_k) {
+            for (std::size_t entry = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
+                 entry = (entry + searchers_k) % entries_k) {
                 watermarks.resize(indexes.shards_count());
                 if (indexes.snapshot(watermarks).status == status_t::shape_mismatch_k) continue;
-                auto const [found, status] = indexes.search_if(std::string_view {texts[row]}, metrics[thread],
+                auto const [found, status] = indexes.search_if(std::string_view {texts[entry]}, metrics[thread],
                                                                unfiltered, contexts[thread], {}, watermarks, found_keys,
                                                                found_distances);
-                if (row == thread) fu::standard_atomic_ref<std::size_t>(searched).add(1, std::memory_order_release);
+                if (entry == thread) fu::standard_atomic_ref<std::size_t>(searched).add(1, std::memory_order_release);
                 if (status == status_t::contended_k) continue;
                 if (failed(status)) foreign.add(1);
                 else
@@ -816,8 +817,8 @@ std::size_t check_sequence_plural_clear_race(u64_t seed) {
 
     // The fresh shard takes a batch whole, and a clear of an empty index retires nothing.
     insert_batch();
-    failures += expect_eq(indexes.size(), rows_k);
-    failures += expect_eq(indexes.count(keys[rows_k - 1]), std::size_t {1});
+    failures += expect_eq(indexes.size(), entries_k);
+    failures += expect_eq(indexes.count(keys[entries_k - 1]), std::size_t {1});
     failures += expect_eq(indexes.clear(), status_t::success_k);
     failures += expect_eq(indexes.clear(), status_t::success_k);
     failures += expect_eq(indexes.shards_count(), rounds_k + 2);

@@ -188,9 +188,9 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
     return failures;
 }
 
-/** The codec-rejection row of the hostile battery: a poison byte in the values
- *  section must surface the codec's own refusal through @c load, and an insert into the
- *  failed index meets neither the dead attempt's keys nor its rows. */
+/** The codec-rejection case of the hostile battery: a poison byte in the values section must
+ *  surface the codec's own refusal through @c load, and an insert into the failed index meets
+ *  neither the dead attempt's keys nor its values. */
 static std::size_t check_sentences_codec_poison(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -216,7 +216,8 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         failures += expect(bool(poisoned.reserve(values.size())));
         failures += expect_eq(poisoned.load(columns.view(), codec), status_t::malformed_k);
 
-        // The dead plan decoded every row but the last, so the IDs an insert now dispenses held its keys and rows.
+        // The dead plan decoded every entry but the last, so the IDs an insert now dispenses held
+        // its keys and values.
         auto fresh_values = sentences_fixture_t::make_values(2, stream_key(seed, "codec_poison", 2),
                                                              counting_allocator_t {ledger});
         std::array<u64_t, 2> const fresh_keys {sentences_fixture_t::make_key(values.size()),
@@ -232,9 +233,9 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
     return failures;
 }
 
-/** A batch publishes whole: a two-value batch on an empty index parks in its second row's walk,
- *  which already admitted the first row through its `wired_k` bit, and no reader sees either row
- *  until the batch's turn. */
+/** A batch publishes whole: a two-value batch on an empty index parks in its second entry's walk,
+ *  which already admitted the first entry through its @c wired_k bit, and no reader sees either
+ *  entry until the batch's turn. */
 static std::size_t check_sentences_whole_batch(u64_t seed) {
     using index_t = sentences_fixture_t::index_t;
     using context_t = index_t::traversal_context_t;
@@ -275,7 +276,7 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
         failures += expect_eq(thread_failures_count, 0u);
         failures += expect_eq(index.size(), 2u);
         failures += expect(index.contains(keys[1]));
-        failures += expect_eq(index.degree_of(1).value, 1u); // Linked to the first row before either published.
+        failures += expect_eq(index.degree_of(1).value, 1u); // Linked to the first entry before either published.
     }
     failures += expect_eq(ledger.live_bytes, 0);
     return failures;

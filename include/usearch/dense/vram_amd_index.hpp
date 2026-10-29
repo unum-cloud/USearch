@@ -208,7 +208,7 @@ struct vram_amd_kernels {
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const candidate_slots = core.candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
-            core.walk_selection_rows_(expansion, candidate_slots),
+            core.walk_selection_nodes_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // The walks keep as many blocks resident as a search on the same rung, an attend no more.
         u32_t const resident_blocks = resident_blocks_(vram_kernel_t::search_k, wide ? 0 : candidate_slots);
@@ -276,13 +276,13 @@ struct vram_amd_kernels {
                                              : frontier_kind_t::register_ladder_k;
         u32_t const candidate_slots = core.candidate_slots_for_(expansion, minimum_slots);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
-            core.walk_selection_rows_(expansion, candidate_slots), frontier);
+            core.walk_selection_nodes_(expansion, candidate_slots), frontier);
         // A search, an indexed search and a multiply keep as many blocks resident on one rung.
         u32_t const rung_slots = frontier == frontier_kind_t::wide_arena_k ? 0 : candidate_slots;
         u32_t const resident_blocks = attend_k ? resident_blocks_(vram_dense_kernel_t::attend_k, rung_slots)
                                                : resident_blocks_(vram_kernel_t::search_k, rung_slots);
         u32_t const concurrent_walks = core.device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
-        u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
+        u32_t const filling = filling_nodes<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
         std::size_t const arena_warps = std::size_t {core.walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
@@ -308,7 +308,7 @@ struct vram_amd_kernels {
             return {{}, imported};
         if (core.api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 hip_success_k ||
-            core.api().fill_async(context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
+            core.api().fill_async(context.assigned_nodes_.get(), 0, 2 * sizeof(u32_t), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         vram_rescoring_t rescoring {};
@@ -341,8 +341,8 @@ struct vram_amd_kernels {
                                   arena_shape,
                                   epoch_base,
                                   context.telemetry_.get(),
-                                  context.assigned_rows_.get(),
-                                  context.assigned_rows_.get() + 1,
+                                  context.assigned_nodes_.get(),
+                                  context.assigned_nodes_.get() + 1,
                                   concurrent_walks,
                                   filling};
         return {{view, candidate_slots, frontier, staging + rows_bytes + import_bytes + weights_bytes, rescoring},
@@ -525,12 +525,12 @@ struct vram_amd_kernels {
         auto const [epoch_base, epochs_status] = context.take_epochs(walk_count, arena_bytes_before);
         if (failed(epochs_status)) return epochs_status;
 
-        u32_t const selection_rows = core.walk_selection_rows_(expansion, candidate_slots);
+        u32_t const selection_nodes = core.walk_selection_nodes_(expansion, candidate_slots);
         vram_refine_t view {core.storage(), //
                             passes.shadow_neighbors,
                             nodes.bound,
-                            arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_rows),
-                            selection_rows,
+                            arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_nodes),
+                            selection_nodes,
                             nodes.first,
                             arena,
                             arena_shape,
@@ -720,7 +720,7 @@ struct vram_amd_kernels {
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
         u32_t const blocks = core.device_.multiprocessor_count *
                              resident_blocks_(vram_kernel_t::insert_k, candidate_slots);
-        u32_t const back_link_rows = core.reselection_rows_();
+        u32_t const back_link_rows = core.reselection_nodes_();
         u32_t const back_link_scratch = build.arena_shape.scratch_bytes
                                             ? 0u
                                             : core.build_scratch_bytes_per_warp(back_link_rows);
@@ -736,16 +736,16 @@ struct vram_amd_kernels {
             arguments.build.first_id = wave_first;
             arguments.build.end_id = wave_end;
             arguments.build.epoch_base = build.epoch_base + offset;
-            status_t launched = zeroed(build.assigned_rows) && zeroed(build.touched_count) ? status_t::success_k
-                                                                                           : status_t::device_error_k;
+            status_t launched = zeroed(build.assigned_nodes) && zeroed(build.touched_count) ? status_t::success_k
+                                                                                            : status_t::device_error_k;
             if (succeeded(launched))
                 launched = launch_(vram_kernel_t::insert_k, candidate_slots, blocks,
                                    vram_warps_per_block_k * build.scratch_bytes_per_warp, stream, arguments);
             if (failed(launched)) return offset ? core.fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
-            arguments.build.selection_rows = back_link_rows;
-            if (!zeroed(build.assigned_rows)) return core.fail_(status_t::device_error_k);
+            arguments.build.selection_nodes = back_link_rows;
+            if (!zeroed(build.assigned_nodes)) return core.fail_(status_t::device_error_k);
             if (status_t const linked = launch_(vram_kernel_t::back_link_k, 0, blocks,
                                                 vram_warps_per_block_k * back_link_scratch, stream, arguments);
                 failed(linked))
@@ -776,10 +776,10 @@ struct vram_amd_kernels {
         arguments.refine = view;
         arguments.refine.scratch_bytes_per_warp = view.arena_shape.scratch_bytes
                                                       ? 0u
-                                                      : core.build_scratch_bytes_per_warp(core.reselection_rows_());
-        arguments.refine.selection_rows = core.reselection_rows_();
+                                                      : core.build_scratch_bytes_per_warp(core.reselection_nodes_());
+        arguments.refine.selection_nodes = core.reselection_nodes_();
         // The merge's claim counter follows the walk's.
-        arguments.refine.assigned_rows = view.assigned_rows + 1;
+        arguments.refine.assigned_nodes = view.assigned_nodes + 1;
         arguments.refine.node_ids = nullptr;
         arguments.refine.first_id = 0;
         arguments.refine.end_id = view.sampling_bound;
@@ -795,7 +795,7 @@ struct vram_amd_kernels {
     status_t launch_fold_(core_t const& core, vram_fold_t fold, traversal_context_t& context) const noexcept {
         static_assert(resident_blocks_(vram_dense_kernel_t::fold_k, 0) <= resident_blocks_(vram_kernel_t::refine_k, 0),
                       "A fold keeps no more blocks resident than the builders its scratch is checked against");
-        u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_rows);
+        u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_nodes);
         bool const shared = build_scratch_fits(core, scratch_bytes);
         u32_t const blocks = core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::fold_k, 0);
         fold.arena_shape = gpu_arena_shape(0, 0, shared ? 0u : scratch_bytes);
@@ -804,10 +804,10 @@ struct vram_amd_kernels {
                                           fold.arena_shape.slice_bytes<node_id_t>());
         if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
         fold.telemetry = context.telemetry_.get();
-        fold.assigned_rows = context.assigned_rows_.get();
+        fold.assigned_nodes = context.assigned_nodes_.get();
         if (core.api().fill_async(fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 hip_success_k ||
-            core.api().fill_async(fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != hip_success_k)
+            core.api().fill_async(fold.assigned_nodes, 0, sizeof(u32_t), context.stream()) != hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
@@ -993,8 +993,8 @@ struct vram_amd_index {
         return core_.non_zero_expansion_factor(config);
     }
 
-    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
-        return core_.build_scratch_bytes_per_warp(selection_rows);
+    u32_t build_scratch_bytes_per_warp(u32_t selection_nodes) const noexcept {
+        return core_.build_scratch_bytes_per_warp(selection_nodes);
     }
 
     bool build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {

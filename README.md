@@ -54,7 +54,7 @@ USearch is a widely deployed open-source search engine, powering Vector Search i
 - ✅ __Many Modalities__ - Dense Vectors, Sequences, Shapes, & Geospatial Sets, with experimental engines beyond Dense.
 - ✅ __Three Residencies__ - RAM, VRAM, & NVMe, exchanging portable [SafeGraphs](docs/format.md) files.
 - ✅ __128-bit Keys__ - Built around UUIDs for large-scale systems, with several vectors allowed under one key.
-- ✅ __Atomic Visibility__ - RAM insertion batches publish complete rows & keys behind each shard's watermark.
+- ✅ __Atomic Visibility__ - RAM insertion batches publish complete entries & keys behind each shard's watermark.
 - ✅ __Concurrent Mutability__ - RAM indexing, refinement, & queries can overlap.
 - ✅ __14 Programming Languages__ - From IoT & mobile to GPU neoclouds, through one C ABI & a lower-level C++ core.
 
@@ -111,7 +111,7 @@ Blackwell kits score candidate batches in `mma.sync` tiles fed by 256-bit loads,
 `io_uring` submits those reads through kernel-managed rings; SPDK uses user-space storage drivers & polling.
 The traversal's latency hiding depends on keeping useful work ready between memory accesses, device instructions, or I/O completions.
 
-`search_if` makes sense in RAM & NVMe because a host predicate can admit results while excluded rows still route the walk.
+`search_if` makes sense in RAM & NVMe because a host predicate can admit results while excluded entries still route the walk.
 An arbitrary host callback cannot run inside a device-resident GPU traversal.
 `insert` grows RAM & VRAM indexes; NVMe views serve immutable parts, with separate build & refinement operations writing new parts.
 See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C guide](c/README.md) for the verbs served by each residency.

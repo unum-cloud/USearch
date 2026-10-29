@@ -3,13 +3,14 @@
  *  @author Ash Vardanian
  *  @date October 25, 2026
  *  @brief What the suites, benchmarks and tools share over the C interface: flags and settings,
- *      keys minted from rows, sessions of executors and arenas, owned index handles, checkpoint
+ *      keys minted from offsets, sessions of executors and arenas, owned index handles, checkpoint
  *      round trips, mapped datasets, and recall against an exact scan.
  *
  *  Every helper reaches the library through its C verbs alone, and reads GPU outputs back through
  *  the vendor's runtime, so a suite or a benchmark built on this header exercises exactly what a
- *  binding does. Rows travel as opaque version-4 UUIDs minted from the seed by @ref key_of_row, and
- *  come back through @ref row_of_key, which refuses a key it never minted.
+ *  binding does. Entries travel as opaque version-4 UUIDs minted from the seed by
+ *  @ref key_of_offset, and come back through @ref offset_of_key, which refuses a key it never
+ *  minted.
  *
  *  Settings come from the environment first and the command line second:
  *
@@ -69,7 +70,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h> // `fmt::join` - the devices, the shard sizes
 
-#include <forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index` - the domains shards repeat over
+#include <forkunion/forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index` - the domains shards repeat over
 
 #include "usearch/usearch.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t` - the dataset parts, the compared checkpoints
@@ -469,10 +470,10 @@ inline void parse_or_exit(int argc, char const* const* argv, std::string_view sy
     std::exit(1);
 }
 
-/** Rows below this bound get keys: a version-4 UUID leaves 62 bits beside its variant. */
-inline constexpr u64_t key_rows_k = u64_t {1} << 62;
+/** Offsets below this bound get keys: a version-4 UUID leaves 62 bits beside its variant. */
+inline constexpr u64_t key_offsets_k = u64_t {1} << 62;
 
-/** The odd multipliers of the row mix, SplitMix64's. */
+/** The odd multipliers of the offset mix, SplitMix64's. */
 inline constexpr u64_t key_multipliers_k[2] = {0xbf58476d1ce4e5b9ull, 0x94d049bb133111ebull};
 
 /** The inverse of the odd @p multiplier modulo 2^64, by Newton's iteration. */
@@ -490,21 +491,22 @@ constexpr u64_t mix_(u64_t word) noexcept {
 }
 
 /** The leading eight bytes of a key whose trailing eight are @p trailing : a version-4 tag over a
- *  mix of those and @p seed, which @ref row_of_key checks. */
+ *  mix of those and @p seed, which @ref offset_of_key checks. */
 constexpr u64_t leading_word_(u64_t seed, u64_t trailing) noexcept {
     return (mix_(trailing ^ mix_(seed)) & ~u64_t {0xF000}) | 0x4000;
 }
 
 /**
- *  @brief The key the harness mints for @p row under @p seed : a random-looking version-4 UUID with
- *      no table behind it.
+ *  @brief The key the harness mints for @p offset under @p seed : a random-looking version-4 UUID
+ *      with no table behind it.
  *
- *  The trailing eight bytes hold the variant over an invertible mix of the row within 62 bits, and
- *  the leading eight a mix of them, so @ref row_of_key inverts the first and checks the second.
+ *  The trailing eight bytes hold the variant over an invertible mix of the offset within 62 bits,
+ *  and the leading eight a mix of them, so @ref offset_of_key inverts the first and checks the
+ *  second.
  */
-inline usearch_key_t key_of_row(u64_t seed, u64_t row) noexcept {
-    u64_t mixed = (row ^ mix_(seed)) & (key_rows_k - 1);
-    for (u64_t const multiplier : key_multipliers_k) mixed = (mixed ^ mixed >> 31) * multiplier & (key_rows_k - 1);
+inline usearch_key_t key_of_offset(u64_t seed, u64_t offset) noexcept {
+    u64_t mixed = (offset ^ mix_(seed)) & (key_offsets_k - 1);
+    for (u64_t const multiplier : key_multipliers_k) mixed = (mixed ^ mixed >> 31) * multiplier & (key_offsets_k - 1);
     u64_t const trailing = u64_t {2} << 62 | (mixed ^ mixed >> 31);
     u64_t const leading = leading_word_(seed, trailing);
     usearch_key_t key;
@@ -515,19 +517,20 @@ inline usearch_key_t key_of_row(u64_t seed, u64_t row) noexcept {
     return key;
 }
 
-/** The row @ref key_of_row minted @p key for under @p seed , or none for a key it never minted. */
-inline std::optional<u64_t> row_of_key(u64_t seed, usearch_key_t const& key) noexcept {
+/** The offset @ref key_of_offset minted @p key for under @p seed , or none for a key it never
+ *  minted. */
+inline std::optional<u64_t> offset_of_key(u64_t seed, usearch_key_t const& key) noexcept {
     u64_t leading = 0, trailing = 0;
     for (std::size_t byte = 0; byte != 8; ++byte)
         leading = leading << 8 | key.bytes[byte], trailing = trailing << 8 | key.bytes[8 + byte];
     if (trailing >> 62 != 2 || leading != leading_word_(seed, trailing)) return std::nullopt;
-    u64_t mixed = trailing & (key_rows_k - 1);
+    u64_t mixed = trailing & (key_offsets_k - 1);
     mixed ^= mixed >> 31;
     for (std::size_t round = std::size(key_multipliers_k); round--;) {
-        mixed = mixed * inverse_of_(key_multipliers_k[round]) & (key_rows_k - 1);
+        mixed = mixed * inverse_of_(key_multipliers_k[round]) & (key_offsets_k - 1);
         mixed ^= mixed >> 31;
     }
-    return (mixed ^ mix_(seed)) & (key_rows_k - 1);
+    return (mixed ^ mix_(seed)) & (key_offsets_k - 1);
 }
 
 /** The packed run of @p keys as a batch names its identities. */
@@ -755,7 +758,7 @@ inline std::vector<usearch_gpu_device_t> listed_devices() {
 struct session_t {
     usearch_residency_t residency = usearch_residency_ram_k;
 
-    /** The seed every key this session's entries take is minted under, by @ref key_of_row. */
+    /** The seed every key this session's entries take is minted under, by @ref key_of_offset. */
     std::uint32_t seed = 0;
 
     /** The class every index this session opens dispatches as. */
@@ -1466,27 +1469,28 @@ handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometr
 }
 
 /** Reserves room for @p count more entries, then inserts @p count entries of @p inputs into
- *  @p index in batches of @p batch, keyed by @ref key_of_row from row @p first_row on, summing
- *  every batch's telemetry into @p totals and reporting each landed count to @p progress. */
+ *  @p index in batches of @p batch, keyed by @ref key_of_offset from offset @p first_offset on,
+ *  summing every batch's telemetry into @p totals and reporting each landed count to
+ *  @p progress. */
 template <typename verbs_type_, typename progress_type_ = dummy_progress_t>
 usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
-                                 std::size_t first_row, std::size_t batch, std::size_t expansion,
+                                 std::size_t first_offset, std::size_t batch, std::size_t expansion,
                                  usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_rows = std::max<std::size_t>(1, std::min(batch, count));
-    std::vector<usearch_key_t> keys(batch_rows);
-    for (std::size_t first = 0; first < count; first += batch_rows) {
-        std::size_t const rows = std::min(batch_rows, count - first);
-        std::span<usearch_key_t> const batch_keys = std::span {keys}.first(rows);
-        for (std::size_t row = 0; row != rows; ++row)
-            batch_keys[row] = key_of_row(index.session->seed, first_row + first + row);
+    std::size_t const batch_entries = std::max<std::size_t>(1, std::min(batch, count));
+    std::vector<usearch_key_t> keys(batch_entries);
+    for (std::size_t first = 0; first < count; first += batch_entries) {
+        std::size_t const entries = std::min(batch_entries, count - first);
+        std::span<usearch_key_t> const batch_keys = std::span {keys}.first(entries);
+        for (std::size_t offset = 0; offset != entries; ++offset)
+            batch_keys[offset] = key_of_offset(index.session->seed, first_offset + first + offset);
         usearch_traversal_stats_t stats {};
-        verbs_type_::insert(index.get(), index.executor(), rows, keys_view(batch_keys),
+        verbs_type_::insert(index.get(), index.executor(), entries, keys_view(batch_keys),
                             verbs_type_::slice(inputs, first), expansion, &stats, &outcome);
         if (outcome.status != usearch_status_success_k) return outcome;
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
         totals.restarts += stats.restarts;
-        progress(first + rows);
+        progress(first + entries);
     }
     return outcome;
 }
@@ -1682,8 +1686,8 @@ class mapped_rows_t {
 
 #pragma region Recall
 
-/** The matches searches landed, copied off their arena: every row's keys and scores end to end, and
- *  how many each row holds, so whole searches compare and judge. */
+/** The matches searches landed, copied off their arena: every query's keys and scores end to end,
+ *  and how many each query holds, so whole searches compare and judge. */
 struct landed_matches_t {
     std::vector<uuid_t> keys;
     std::vector<usearch_distance_t> scores;
@@ -1692,7 +1696,7 @@ struct landed_matches_t {
     bool operator==(landed_matches_t const&) const = default;
 };
 
-/** Appends the matches each of the @p queries rows of @p matches holds to @p landed, read back from
+/** Appends the matches the first @p queries queries of @p matches hold to @p landed, read back from
  *  wherever the arena placed them; false when the copy failed. */
 inline bool append_landed(usearch_matches_view_t const& matches, std::size_t queries, landed_matches_t& landed) {
     std::vector<usearch_key_t> keys(queries * matches.columns);
@@ -1702,9 +1706,9 @@ inline bool append_landed(usearch_matches_view_t const& matches, std::size_t que
         !download(scores.data(), matches.scores, scores.size() * sizeof(usearch_distance_t)) ||
         !download(counts.data(), matches.counts, counts.size() * sizeof(std::size_t)))
         return false;
-    for (std::size_t row = 0; row != queries; ++row) {
-        landed.counts.push_back(counts[row]);
-        for (std::size_t match = row * matches.columns; match != row * matches.columns + counts[row]; ++match) {
+    for (std::size_t query = 0; query != queries; ++query) {
+        landed.counts.push_back(counts[query]);
+        for (std::size_t match = query * matches.columns; match != query * matches.columns + counts[query]; ++match) {
             landed.keys.push_back(std::bit_cast<uuid_t>(keys[match]));
             landed.scores.push_back(scores[match]);
         }
@@ -1712,11 +1716,12 @@ inline bool append_landed(usearch_matches_view_t const& matches, std::size_t que
     return true;
 }
 
-/** The matches each of the @p queries rows of @p matches holds, copied off a host arena. */
+/** The matches the first @p queries queries of @p matches hold, copied off a host arena. */
 inline landed_matches_t landed_matches(usearch_matches_view_t const& matches, std::size_t queries) {
     landed_matches_t landed {{}, {}, {matches.counts, matches.counts + queries}};
-    for (std::size_t row = 0; row != queries; ++row)
-        for (std::size_t match = row * matches.columns; match != row * matches.columns + matches.counts[row]; ++match) {
+    for (std::size_t query = 0; query != queries; ++query)
+        for (std::size_t match = query * matches.columns; match != query * matches.columns + matches.counts[query];
+             ++match) {
             landed.keys.push_back(std::bit_cast<uuid_t>(matches.keys[match]));
             landed.scores.push_back(matches.scores[match]);
         }
@@ -1731,16 +1736,16 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
                                  usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
                                  landed_matches_t& landed) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_rows = std::max<std::size_t>(1, std::min(batch, count));
-    for (std::size_t first = 0; first < count; first += batch_rows) {
-        std::size_t const rows = std::min(batch_rows, count - first);
+    std::size_t const batch_queries = std::max<std::size_t>(1, std::min(batch, count));
+    for (std::size_t first = 0; first < count; first += batch_queries) {
+        std::size_t const sliced = std::min(batch_queries, count - first);
         usearch_matches_view_t matches {};
         usearch_traversal_stats_t stats {};
-        verbs_type_::search(index.get(), index.executor(), index.session->arena, rows,
+        verbs_type_::search(index.get(), index.executor(), index.session->arena, sliced,
                             verbs_type_::slice(queries, first), wanted, expansion, traversal, &matches, &stats,
                             &outcome);
         if (outcome.status != usearch_status_success_k) return outcome;
-        if (!append_landed(matches, rows, landed))
+        if (!append_landed(matches, sliced, landed))
             return {usearch_status_device_k, "The matches could not be read back"};
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
         totals.restarts += stats.restarts;
@@ -1749,7 +1754,7 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
 }
 
 /** Fills @p oracle with the exact top @p wanted of the first @p judged queries of @p queries,
- *  nearest first with their distances, by a scan of every row @p index holds. */
+ *  nearest first with their distances, by a scan of every entry @p index holds. */
 template <typename verbs_type_>
 usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t judged,
                               std::size_t wanted, std::size_t batch, landed_matches_t& oracle) {
@@ -1757,14 +1762,14 @@ usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::
     return search_queries(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
 }
 
-/** The truth a ground-truth file lists: @p depth rows per query, each keyed by @ref key_of_row
- *  under @p seed, without distances. */
-inline landed_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> rows, std::size_t depth) {
+/** The truth a ground-truth file lists: @p depth offsets per query, each keyed by
+ *  @ref key_of_offset under @p seed, without distances. */
+inline landed_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> offsets, std::size_t depth) {
     landed_matches_t oracle;
-    std::size_t const queries = depth ? rows.size() / depth : 0;
+    std::size_t const queries = depth ? offsets.size() / depth : 0;
     oracle.counts.assign(queries, depth);
-    for (std::uint32_t const row : rows.first(queries * depth))
-        oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_row(seed, row)));
+    for (std::uint32_t const offset : offsets.first(queries * depth))
+        oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_offset(seed, offset)));
     return oracle;
 }
 
@@ -1773,10 +1778,11 @@ inline bool within(double found, double exact) noexcept {
     return found <= exact + 1e-6 * std::max(1.0, std::fabs(exact));
 }
 
-/** The offset of every row's first match in @p landed. */
-inline std::vector<std::size_t> row_offsets(landed_matches_t const& landed) {
+/** The offset of every query's first match in @p landed. */
+inline std::vector<std::size_t> match_offsets(landed_matches_t const& landed) {
     std::vector<std::size_t> offsets(landed.counts.size() + 1);
-    for (std::size_t row = 0; row != landed.counts.size(); ++row) offsets[row + 1] = offsets[row] + landed.counts[row];
+    for (std::size_t query = 0; query != landed.counts.size(); ++query)
+        offsets[query + 1] = offsets[query] + landed.counts[query];
     return offsets;
 }
 
@@ -1790,8 +1796,8 @@ inline std::vector<std::size_t> row_offsets(landed_matches_t const& landed) {
  *  file lists it, counts a match whose key it lists.
  */
 template <typename visit_type_>
-void judge_rows(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle, visit_type_&& visit) {
-    std::vector<std::size_t> const found_offsets = row_offsets(found), truth_offsets = row_offsets(oracle);
+void judge_queries(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle, visit_type_&& visit) {
+    std::vector<std::size_t> const found_offsets = match_offsets(found), truth_offsets = match_offsets(oracle);
     bool const scored = !oracle.scores.empty();
     std::vector<bool> hits;
     for (std::size_t query = 0; query != std::min(found.counts.size(), oracle.counts.size()); ++query) {
@@ -1815,7 +1821,7 @@ void judge_rows(std::size_t k, landed_matches_t const& found, landed_matches_t c
 inline double recall_at(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle) {
     double recall = 0;
     std::size_t answerable = 0;
-    judge_rows(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
+    judge_queries(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
         std::size_t hit_count = 0;
         for (bool const hit : hits) hit_count += hit;
         recall += static_cast<double>(std::min(hit_count, expected)) / static_cast<double>(expected);
@@ -1830,7 +1836,7 @@ inline double recall_at(std::size_t k, landed_matches_t const& found, landed_mat
 inline double ndcg_at(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle) {
     double gain_sum = 0;
     std::size_t answerable = 0;
-    judge_rows(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
+    judge_queries(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
         double gain = 0, ideal = 0;
         std::size_t counted = 0;
         for (std::size_t rank = 0; rank != hits.size() && counted != expected; ++rank)
@@ -2025,7 +2031,7 @@ enum class saved_bytes_t {
  *  A checkpoint of one shard is one monolith, and one of @p parts shards is that many parts beside
  *  a manifest. The copy in the index's own residency must land matches equivalent to those
  *  @p search lands on the original, as `search(handle) → landed_matches_t`, within @p score_band
- *  when the stored rows round on the way; every loaded copy must save again, byte for byte when
+ *  when the stored values round on the way; every loaded copy must save again, byte for byte when
  *  @p bytes says so; the view must answer the search. Every file the round trip wrote is removed.
  */
 template <typename verbs_type_, typename search_type_>
@@ -2189,10 +2195,10 @@ inline std::array<flag_t, 9> search_bench_flags(search_bench_settings_t& search)
  *  @brief Builds one index of @p geometry over the first @p base_count entries of @p entries and
  *      searches @p queries_count @p queries against one exact scan at every breadth.
  *
- *  The entries are keyed by their rows, and the index is served from @p checkpoint in the session's
- *  residency. An NVMe session serves a view of what it built from @p checkpoint, or from the
- *  temporary directory when that is empty, and any other session reopens what it saved only when
- *  @p checkpoint names a path; the reopened index takes @p served, so a search may score under
+ *  The entries are keyed by their offsets, and the index is served from @p checkpoint in the
+ *  session's residency. An NVMe session serves a view of what it built from @p checkpoint, or from
+ *  the temporary directory when that is empty, and any other session reopens what it saved only
+ *  when @p checkpoint names a path; the reopened index takes @p served, so a search may score under
  *  other weights than the build. Each breadth's matches go to @p on_swept as
  *  `(expansion, matches)`.
  *

@@ -159,7 +159,7 @@ def self_recall(
         keys = keys[chosen]
 
     if vectors is None:
-        vectors = np.concatenate([np.array(index.get(row, arena)) for row in keys], axis=0)
+        vectors = np.concatenate([np.array(index.get(key, arena)) for key in keys], axis=0)
     vectors = np.atleast_2d(np.asarray(vectors))
 
     stats = DenseTraversalStats() if stats is None else stats

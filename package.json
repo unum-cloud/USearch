@@ -29,12 +29,13 @@
     "node": ">=22"
   },
   "files": [
-    "binding.gyp",
+    "CMakeLists.txt",
     "c",
     "cpp",
     "cmake",
     "numkong",
     "include",
+    "src",
     "javascript",
     "prebuilds"
   ],

@@ -55,11 +55,11 @@ public struct DenseMetric: Hashable, Sendable, CustomStringConvertible {
 
 /// The construction options of a dense index, as `initRam` and `initVram` freeze them.
 ///
-/// Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and
+/// Stored vectors always round up to the SIMD step quantum, so they stay cache-line aligned and
 /// every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
 public struct DenseOptions: Sendable {
     /// The width of the indexed vectors; zero leaves the geometry unfrozen, so the index admits
-    /// no rows.
+    /// no entries.
     public var dimensions: Int
     /// The distance kind used between vectors.
     public var metric: DenseMetric
@@ -106,7 +106,7 @@ public struct DenseMetadata: Sendable {
     public var dimensions: Int
     /// The distance kind the checkpoint scores with.
     public var metric: DenseMetric
-    /// The scalar type its rows are stored and quantized into.
+    /// The scalar type its vectors are stored and quantized into.
     public var quantization: Scalar
     /// The connections-per-node bound the graph was built with.
     public var connectivity: Int
@@ -130,15 +130,21 @@ public struct DenseIndexDescription: Sendable {
     public var capacity: Int
     /// The bytes the handle holds; traversal scratch is the executor's.
     public var memoryUsage: Int
-    /// The capability codename the index dispatched to on this machine.
-    public var capabilities: String
+    /// The CPU class whose kits the index dispatched to on RAM and NVMe; nil on VRAM.
+    public var cpuClass: CPUClass?
+    /// The GPU class whose kernels the index dispatched to on VRAM; nil on RAM and NVMe.
+    public var gpuClass: GPUClass?
+    /// The live shards, each a graph of its own.
+    public var shardsCount: Int
 
     init(_ raw: usearch_dense_index_description_t) {
         metadata = DenseMetadata(raw.metadata)
         size = raw.size
         capacity = raw.capacity
         memoryUsage = raw.memory_usage
-        capabilities = raw.capabilities.map { String(cString: $0) } ?? ""
+        cpuClass = raw.cpu_class == usearch_cpu_class_unknown_k ? nil : CPUClass(raw: raw.cpu_class)
+        gpuClass = raw.gpu_class == usearch_gpu_class_unknown_k ? nil : GPUClass(raw: raw.gpu_class)
+        shardsCount = raw.shards_count
     }
 }
 
@@ -230,7 +236,7 @@ public struct DenseInsertConfig {
     /// The breadth of the candidates the insertion walk searches for neighbors with; zero derives it
     /// from the geometry.
     public var expansionFactor: Int
-    /// Called with rows admitted; it reports and cannot cancel.
+    /// Called with entries admitted; it reports and cannot cancel.
     public var progress: Progress?
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     public var progressSteps: Int
@@ -279,7 +285,7 @@ public struct DenseSearchConfig {
     /// The breadth of the candidates the walk explores; zero derives it from the geometry, and a
     /// scan ignores it.
     public var expansionFactor: Int
-    /// Walks the graph by default; `.scan` scores every row exactly, on RAM and NVMe handles, and
+    /// Walks the graph by default; `.scan` scores every entry exactly, on RAM and NVMe handles, and
     /// a VRAM handle refuses it with `unsupported`.
     public var traversal: Traversal
     /// Narrows the matches to the keys it approves. Non-matching entries still route the
@@ -338,7 +344,7 @@ public struct DenseMaxsimConfig {
 
 /// The knobs of `multiply`. Every zeroed field derives.
 public struct DenseMultiplyConfig {
-    /// The bound on pairs kept per row, the first ones its walk scored; zero keeps every pair.
+    /// The bound on pairs kept per left row, the first ones its walk scored; zero keeps every pair.
     public var wanted: Int
     /// The breadth of the candidates, which widens the emitted pattern; zero derives.
     public var expansionFactor: Int
@@ -701,18 +707,18 @@ public struct DenseProducts: RandomAccessCollection {
     let products: usearch_matches_tape_view_t
     /// One past the last left row or query.
     public let endIndex: Int
-    /// Pairs the walks scored across every row, or keys scored across every query, before the
+    /// Pairs the walks scored across every left row, or keys scored across every query, before the
     /// wanted bound cut any.
     public let required: Int
 
-    /// The first row's position, which a collection walk starts from.
+    /// The first query's position, which a collection walk starts from.
     public var startIndex: Int { 0 }
 
-    /// One left row's pairs, in traversal order.
-    public subscript(row: Int) -> MatchesRow {
-        write.check(row, below: endIndex)
-        let cells = products.offsets[row] ..< products.offsets[row + 1]
-        return MatchesRow(write: write, keys: products.keys, scores: products.scores, cells: cells)
+    /// One left row's pairs, in traversal order, or one query's keys, largest score first.
+    public subscript(query: Int) -> QueryMatches {
+        write.check(query, below: endIndex)
+        let cells = products.offsets[query] ..< products.offsets[query + 1]
+        return QueryMatches(write: write, keys: products.keys, scores: products.scores, cells: cells)
     }
 }
 
@@ -784,6 +790,7 @@ public final class DenseIndex: @unchecked Sendable {
                 ram: usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
+                    shard_capacity: 0,
                     cpu_class: options.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                 )
             )
@@ -809,6 +816,7 @@ public final class DenseIndex: @unchecked Sendable {
                 vram: usearch_vram_options_t(
                     devices: lentDevices,
                     devices_count: devices.count,
+                    shard_capacity: 0,
                     gpu_class: options.gpuClass?.raw ?? usearch_gpu_class_unknown_k
                 )
             )
@@ -840,6 +848,7 @@ public final class DenseIndex: @unchecked Sendable {
                     ram: usearch_ram_options_t(
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
+                        shard_capacity: 0,
                         cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
@@ -871,6 +880,7 @@ public final class DenseIndex: @unchecked Sendable {
                     vram: usearch_vram_options_t(
                         devices: devices,
                         devices_count: config.devices.count,
+                        shard_capacity: 0,
                         gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
@@ -902,6 +912,7 @@ public final class DenseIndex: @unchecked Sendable {
                     ram: usearch_ram_options_t(
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
+                        shard_capacity: 0,
                         cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
@@ -933,6 +944,7 @@ public final class DenseIndex: @unchecked Sendable {
                     vram: usearch_vram_options_t(
                         devices: devices,
                         devices_count: config.devices.count,
+                        shard_capacity: 0,
                         gpu_class: config.gpuClass?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     values_per_key: config.valuesPerKey,
@@ -1077,9 +1089,9 @@ public final class DenseIndex: @unchecked Sendable {
     /// vector is a one-row matrix. Overlaps safely with concurrent searches on the same handle.
     ///
     /// The input scalar type is independent of the stored quantization; the library converts on
-    /// ingest. A batch is all-or-nothing, and its rows become visible at once: every fallible step
+    /// ingest. A batch is all-or-nothing, and its entries become visible at once: every fallible step
     /// runs before the first entry identity is claimed, so a thrown failure leaves the index
-    /// untouched. Every row is claimed before the handler's first report, so it reports but cannot
+    /// untouched. Every entry is claimed before the handler's first report, so it reports but cannot
     /// cancel. Calls `usearch_dense_insert`.
     public func insert(
         keys: [Key],
@@ -1118,12 +1130,12 @@ public final class DenseIndex: @unchecked Sendable {
         try here.search(queries, wanted: wanted, arena: arena, config: config)
     }
 
-    /// Late-interaction scoring of multi-row queries against multi-row entries: every query row
-    /// takes its best match within a key, and those maxima sum to that key's score.
+    /// Late-interaction scoring of multi-row queries against multi-vector documents: every query
+    /// row takes its best match within a key, and those maxima sum to that key's score.
     ///
     /// A document is one key holding its token rows, which is what a `valuesPerKey` above one
     /// exists for. `rowsPerQuery` is the token count each query occupies, `queries` holds them end
-    /// to end, and up to `wanted` documents land in `arena` as one ragged run, one row per whole
+    /// to end, and up to `wanted` documents land in `arena` as one ragged run, one run per whole
     /// query rather than per token, largest score first; a zero `wanted` keeps every document the
     /// query scored. Approximate downward only: a token whose neighborhood the walk never entered
     /// contributes no maximum, so a key can score below its exact value but never above it. Runs on
@@ -1141,7 +1153,7 @@ public final class DenseIndex: @unchecked Sendable {
         try here.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
     }
 
-    /// The approximate sparse product of rows against the indexed rows - the linear-algebra
+    /// The approximate sparse product of rows against the indexed vectors - the linear-algebra
     /// sibling of `search`, reporting every pair the traversal scored rather than only the
     /// nearest of them.
     ///
@@ -1209,9 +1221,9 @@ public final class DenseIndex: @unchecked Sendable {
     }
 
     /// Opens a walk over the current contents, for export or migration. Each shard's publication
-    /// watermark is read as the walk enters it, so a row once passed is never revisited. Without
-    /// `starts` it yields every row as stored; with them, the start keys' own rows first in order,
-    /// then the rows those link to breadth-first, each once. Calls `usearch_dense_cursor_init`.
+    /// watermark is read as the walk enters it, so an entry once passed is never revisited. Without
+    /// `starts` it yields every entry as stored; with them, the start keys' own entries first in
+    /// order, then the entries those link to breadth-first, each once. Calls `usearch_dense_cursor_init`.
     public func cursor(starts: [Key] = []) throws(USearchError) -> DenseCursor { try here.cursor(starts: starts) }
 
     /// Opens a resumable nearest-neighbor stream over one query row, so a caller that post-filters
@@ -2006,7 +2018,7 @@ private final class AdmissionState {
 private let admissionTrampoline: usearch_predicate_callback_t = { keys, admissions, count, state in
     guard let keys, let admissions else { return }
     // A lost state means the trampoline is broken. Admitting would turn a filtered search into
-    // an unfiltered one and answer wrong rows without saying so.
+    // an unfiltered one and answer wrong matches without saying so.
     guard let state else { return admissions.update(repeating: usearch_reject_k, count: count) }
     let admission = Unmanaged<AdmissionState>.fromOpaque(state).takeUnretainedValue()
     for index in 0 ..< count {
@@ -2096,7 +2108,7 @@ public final class DenseCursor {
     }
 
     /// Copies up to `wanted` next keys into `arena`, each with the keys it links to; an empty batch
-    /// means the walk is exhausted. The rows themselves come from `get`. Calls
+    /// means the walk is exhausted. The vectors themselves come from `get`. Calls
     /// `usearch_dense_cursor_next`.
     public func nextLinks(wanted: Int, arena: Arena) throws(USearchError) -> (keys: DenseKeys, links: DenseLinks) {
         let (keys, links) = try pull(wanted, true, arena)
@@ -2159,8 +2171,8 @@ public final class DenseSearchStream {
     /// Calls `usearch_dense_search_stream_free`.
     deinit { usearch_dense_search_stream_free(raw) }
 
-    /// Pulls up to `wanted` more matches into `arena`, as the one row of a search, nearest first;
-    /// an empty row means the traversal is drained. Calls `usearch_dense_search_stream_next`.
+    /// Pulls up to `wanted` more matches into `arena`, as the one query of a search, nearest first;
+    /// an empty query means the traversal is drained. Calls `usearch_dense_search_stream_next`.
     public func next(wanted: Int, arena: Arena) throws(USearchError) -> Matches {
         guard let handle = index.raw else {
             throw USearchError(status: .uninitialized, message: "an absorb consumed this index")

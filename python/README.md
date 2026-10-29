@@ -82,7 +82,7 @@ Constructors address no index yet, so no receiver offers them; the ones the C AB
 
 ## Executors
 
-An executor owns host threads or device streams; an index owns rows.
+An executor owns host threads or device streams; an index owns entries.
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns it rather than hidden in a constructor.
 Its residency must match that of every index it drives.
 
@@ -122,7 +122,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pins a `bytearray`, so the next call naming that arena raises `ContendedError` until the export is released.
-A stale output raises `UninitializedError` from `memoryview`, from indexing a `Matches` and from `DenseProducts.row`, but `np.asarray` swallows that error into a 0-d object array, so read through those or copy with `np.array(...)` while the output is fresh.
+A stale output raises `UninitializedError` from `memoryview`, from indexing a `Matches` and from `DenseProducts.query`, but `np.asarray` swallows that error into a 0-d object array, so read through those or copy with `np.array(...)` while the output is fresh.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `DeviceError`.
 It serves only calls on that executor, any other or none raising `DeviceError`, and holds the executor until it is freed, so an executor closed first keeps its streams until then.
 Its views export `__cuda_array_interface__` instead, for CuPy, PyTorch or Numba, and `arena.residency` tells the two apart.
@@ -132,16 +132,16 @@ hits, arena = 0, usearch.Arena(pool)
 for batch in batches:
     matches = index.on(pool).search(batch, 10, arena)  # rewinds: last batch's matches are gone
     hits += int(np.asarray(matches.counts).sum())  # an array kept past here would pin the arena
-found, rows = usearch.Arena(), usearch.Arena()  # two live results, two arenas
+found, fetched = usearch.Arena(), usearch.Arena()  # two live results, two arenas
 for key, _ in index.search(query, 10, found)[0]:
-    rerank(key, index.get(key, rows))
+    rerank(key, index.get(key, fetched))
 arenas = [usearch.Arena(pool) for _ in shards]  # one arena per submitted call
 calls = [shard.deferred(pool).search(queries, 10, arena) for shard, arena in zip(shards, arenas)]
 results = [call.wait() for call in calls]  # or, in a coroutine: await call
 ```
 
 `search` answers a `usearch.Matches`, `get` and `attend` answer `usearch.DenseVectors`, a cursor's batches `usearch.DenseBatch`, `multiply` and `maxsim` answer `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
-Their `len()` counts rows, or bytes of a monolith.
+Their `len()` counts queries, entries or rows, or bytes of a monolith.
 
 ## Keys
 
@@ -159,7 +159,7 @@ Key(uuid.uuid4())  # from a `uuid.UUID`
 
 A key equals and hashes as the integer or `uuid.UUID` it reads as, never as the text or bytes it parses from, and pickles as its sixteen bytes.
 No NumPy dtype expresses a 128-bit integer, so batch keys travel in both directions as big-endian sixteen-byte rows, an `(N, 16)` buffer of `uint8`.
-`usearch.keys` carries `integers_to_keys` and `keys_to_integers` for the common case where keys really are just row numbers.
+`usearch.keys` carries `integers_to_keys` and `keys_to_integers` for the common case where keys really are just entry numbers.
 
 ## Errors
 
@@ -275,7 +275,7 @@ for expansion_factor in (16, 32, 64, 128, 256):
     print(expansion_factor, stats.computed_distances)
 ```
 
-`traversal=usearch.Traversal.SCAN` skips the walk and scores every row exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
+`traversal=usearch.Traversal.SCAN` skips the walk and scores every entry exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
 `+=` adds one reading into another when the totals across a sweep are what is wanted:
 
 ```python
@@ -296,25 +296,25 @@ index.on(pool).search(queries, 10, arena, predicate=lambda key: int(key) % 2 == 
 ```
 
 A `progress` handler is called with `(completed, total)` units; `False` stops the call, and `None`, what a bare `print` answers, carries on.
-`insert` is the exception: every row is claimed before the first report, so its handler reports and cannot stop the batch.
+`insert` is the exception: every entry is claimed before the first report, so its handler reports and cannot stop the batch.
 The first exception any callback raises outranks the outcome it turned into, whether the call blocked or was deferred.
 
 ### Retrieval and Streaming
 
 ```python
 index.get(42, arena)  # a (count, dimensions) `DenseVectors` of what is stored under it
-cursor = index.on(pool).cursor()  # row scan, pulled in batches; `cursor([42])` walks out from key 42
+cursor = index.on(pool).cursor()  # entry scan, pulled in batches; `cursor([42])` walks out from key 42
 while batch := cursor.next(1024, arena, links=True):
-    ...  # batch.keys, and batch.links as (offsets, keys) when asked; rows come from `get`
+    ...  # batch.keys, and batch.links as (offsets, keys) when asked; vectors come from `get`
 with index.on(pool).search_stream(query) as stream:  # resumable best-first stream
-    while pulled := stream.next(16, arena)[0]:  # one row of `Matches`, empty once drained
+    while pulled := stream.next(16, arena)[0]:  # one query of `Matches`, empty once drained
         if pulled[-1].distance > 0.3:
             break
 ```
 
 `get` for an absent key answers an empty, falsy `DenseVectors`.
 Every pull names its arena and rewinds it like any other call, so one arena serves a scan and any other verb in turn.
-A drained cursor answers an empty, falsy `DenseBatch`, and a drained stream a row with no matches.
+A drained cursor answers an empty, falsy `DenseBatch`, and a drained stream a query with no matches.
 A cursor or a stream releases its walk on `close()` or at the end of a `with` block, so an `absorb` waiting on it need not wait for the collector, and a later pull raises `UninitializedError`.
 
 ### Refinement
@@ -350,16 +350,16 @@ How many pairs a walk scores is known only once it ends, so they come back ragge
 
 ```python
 products = index.on(pool).multiply(rows, 0, arena)  # 0 keeps every pair; a bound keeps the first ones
-offsets = np.asarray(products.offsets)  # (rows + 1,): row `i` spans offsets[i] to offsets[i + 1]
-columns = np.asarray(products.keys)  # (pairs, 16): which indexed row each pair names
+offsets = np.asarray(products.offsets)  # (rows + 1,): left row `i` spans offsets[i] to offsets[i + 1]
+columns = np.asarray(products.keys)  # (pairs, 16): which indexed entry each pair names
 scores = np.asarray(products.scores)  # (pairs,): the exact products
 products.required  # pairs scored before the bound cut any
-row_keys, row_scores = products.row(0)  # one row's pairs, for each of the len(products) rows
+row_keys, row_scores = products.query(0)  # one left row's pairs, for each of the len(products) rows
 ```
 
 ### Late Interaction
 
-`maxsim` scores multi-row queries against multi-row entries, where every query row takes its best match within a key and those maxima sum to that key's score.
+`maxsim` scores multi-row queries against multi-vector documents, where every query row takes its best match within a key and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what `values_per_key` above one exists for, and the result is the ragged run `multiply` answers, one run of documents per query, largest first.
 A zero `wanted` keeps every document a query scored.
 

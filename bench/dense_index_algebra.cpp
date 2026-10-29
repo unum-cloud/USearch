@@ -138,7 +138,7 @@ inline void lookup_values(void* state, usearch_key_t const* keys, std::size_t co
                           void const** rows) {
     value_table_t const& table = *static_cast<value_table_t const*>(state);
     for (std::size_t position = 0; position != count; ++position) {
-        u64_t const row = row_of_key(table.seed, keys[position]).value_or(key_rows_k);
+        u64_t const row = offset_of_key(table.seed, keys[position]).value_or(key_offsets_k);
         rows[position] = row >= table.first_row && row - table.first_row < table.count
                              ? table.rows.data() + (row - table.first_row) * table.row_bytes
                              : nullptr;
@@ -279,7 +279,7 @@ inline bool run_multiply(handle<dense_verbs_t>& index, usearch_rows_view_t queri
             return false;
         for (std::size_t row = 0; row != kept; ++row)
             for (std::size_t pair = offsets[row]; pair != offsets[row + 1]; ++pair) {
-                std::optional<u64_t> const paired = row_of_key(index.session->seed, keys[pair]);
+                std::optional<u64_t> const paired = offset_of_key(index.session->seed, keys[pair]);
                 if (!paired) return fmt::println(stderr, "A multiplied pair names a key no row was minted"), false;
                 pairs[first + row].push_back({*paired, dots[pair]});
             }

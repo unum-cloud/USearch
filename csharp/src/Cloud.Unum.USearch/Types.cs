@@ -755,7 +755,7 @@ public readonly struct RowsView
 #region Results
 
 /// <summary>
-/// A ranked run a call wrote into its <see cref="Arena"/> - one row per query of up to
+/// A ranked run a call wrote into its <see cref="Arena"/> - one list per query of up to
 /// <see cref="Columns"/> keys, each paired with its distance. Mirrors <c>usearch_matches_view_t</c>.
 /// </summary>
 /// <remarks>
@@ -781,13 +781,13 @@ public readonly unsafe struct Matches
     /// <summary>How many queries the call resolved.</summary>
     public int Queries { get; }
 
-    /// <summary>The columns per row the call wrote, at most its wanted - the "k" in kANN.</summary>
+    /// <summary>The columns per query the call wrote, at most its wanted - the "k" in kANN.</summary>
     public int Columns => (int)this._view.Columns;
 
-    /// <summary>Reads one query's row of the run.</summary>
-    /// <param name="query">The query row.</param>
+    /// <summary>Reads one query's matches from the run.</summary>
+    /// <param name="query">The query's offset in the batch.</param>
     /// <returns>That query's matches, as many as the call wrote.</returns>
-    public MatchesRow this[int query]
+    public QueryMatches this[int query]
     {
         get
         {
@@ -797,16 +797,16 @@ public readonly unsafe struct Matches
             }
 
             nuint first = (nuint)query * this._view.Columns;
-            return new MatchesRow(
+            return new QueryMatches(
                 this._arena, this._generation, this._view.Keys + first, this._view.Scores + first,
                 this._view.Counts + query);
         }
     }
 }
 
-/// <summary>One query's row of a <see cref="Matches"/> run, or one pull of a
+/// <summary>One query's matches from a <see cref="Matches"/> run, or one pull of a
 /// <see cref="DenseSearchStream"/>, read in place from the arena.</summary>
-public readonly unsafe struct MatchesRow
+public readonly unsafe struct QueryMatches
 {
     private readonly Arena _arena;
     private readonly int _generation;
@@ -814,7 +814,7 @@ public readonly unsafe struct MatchesRow
     private readonly double* _distances;
     private readonly nuint* _count;
 
-    internal MatchesRow(Arena arena, int generation, Key* keys, double* distances, nuint* count)
+    internal QueryMatches(Arena arena, int generation, Key* keys, double* distances, nuint* count)
     {
         this._arena = arena;
         this._generation = generation;
@@ -823,7 +823,7 @@ public readonly unsafe struct MatchesRow
         this._count = count;
     }
 
-    /// <summary>How many matches the call wrote for the row.</summary>
+    /// <summary>How many matches the call wrote for the query.</summary>
     public int Count
     {
         get
@@ -879,12 +879,12 @@ public enum Residency : int
     Nvme = 3,
 }
 
-/// <summary>How a search reaches the indexed rows it scores. Mirrors <c>usearch_traversal_t</c>.</summary>
+/// <summary>How a search reaches the indexed entries it scores. Mirrors <c>usearch_traversal_t</c>.</summary>
 public enum Traversal : int
 {
-    /// <summary>Walk the graph, scoring the rows the expansion reaches - approximate, the default.</summary>
+    /// <summary>Walk the graph, scoring the entries the expansion reaches - approximate, the default.</summary>
     Walk = 1,
-    /// <summary>Score every row published when the query's scan starts - exact, on RAM and NVMe
+    /// <summary>Score every entry published when the query's scan starts - exact, on RAM and NVMe
     /// handles.</summary>
     Scan = 2,
 }
@@ -973,7 +973,7 @@ public enum GPUClass : int
 /// The workers every fanned-out verb runs on, shared across indexes.
 /// </summary>
 /// <remarks>
-/// An executor owns host threads or device streams; an index owns rows. Keeping them apart is what
+/// An executor owns host threads or device streams; an index owns entries. Keeping them apart is what
 /// lets one pool serve several indexes, and what makes the cost of spawning visible at the line
 /// that spawns rather than hidden in a constructor.
 /// <para>
@@ -1530,7 +1530,7 @@ internal static unsafe class Calls
     /// <returns>The handle that owns the call until final.</returns>
     internal static Deferred<TResult> Defer<TResult>(ICall<TResult> call) => new(call, Submitted(call));
 
-    /// <summary>Lowers a bound on matches per row, refusing a negative one, which no <c>size_t</c> spells.</summary>
+    /// <summary>Lowers a bound on matches per query, refusing a negative one, which no <c>size_t</c> spells.</summary>
     /// <param name="wanted">The bound the caller asked for.</param>
     /// <returns>The bound the library reads.</returns>
     internal static nuint Bound(int wanted) => wanted >= 0
@@ -1677,40 +1677,40 @@ internal struct NativeRowsView
     public Scalar Scalar;
 }
 
-/// <summary>A ranked run a call wrote into its arena - the call's count of rows of packed
-/// columns.</summary>
+/// <summary>A ranked run a call wrote into its arena - one list of packed columns per query of the
+/// call's count.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeMatchesView
 {
-    /// <summary>The first row of the keys, columns per row.</summary>
+    /// <summary>The first query's keys, columns per query.</summary>
     public Key* Keys;
-    /// <summary>The first row of the scores, positionally paired with the keys.</summary>
+    /// <summary>The first query's scores, positionally paired with the keys.</summary>
     public double* Scores;
-    /// <summary>The matches written per row, one entry per row.</summary>
+    /// <summary>The matches written per query, one count per query.</summary>
     public nuint* Counts;
-    /// <summary>The columns per row the call wrote, at most its wanted - the "k" in kANN.</summary>
+    /// <summary>The columns per query the call wrote, at most its wanted - the "k" in kANN.</summary>
     public nuint Columns;
 }
 
 /// <summary>A ragged run of matches a call wrote into its arena: keys and scores end to end, and one
-/// more offset than rows.</summary>
+/// more offset than queries.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeMatchesTapeView
 {
-    /// <summary>Every row's keys, end to end.</summary>
+    /// <summary>Every query's keys, end to end.</summary>
     public Key* Keys;
-    /// <summary>Every row's scores, positionally paired with the keys.</summary>
+    /// <summary>Every query's scores, positionally paired with the keys.</summary>
     public double* Scores;
     /// <summary>The call's count plus one non-decreasing offsets into the keys and scores.</summary>
     public nuint* Offsets;
 }
 
-/// <summary>A ragged run of keys a call wrote into its arena: every row's keys end to end, and one
-/// more offset than rows.</summary>
+/// <summary>A ragged run of keys a call wrote into its arena: every entry's keys end to end, and one
+/// more offset than entries.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeKeysTapeView
 {
-    /// <summary>Every row's keys, end to end.</summary>
+    /// <summary>Every entry's keys, end to end.</summary>
     public Key* Keys;
     /// <summary>The call's written count plus one non-decreasing offsets into the keys.</summary>
     public nuint* Offsets;
@@ -1724,7 +1724,7 @@ internal struct NativeRamOptions
     public IntPtr MemoryDomains;
     /// <summary>How many node IDs the list holds; zero derives.</summary>
     public nuint MemoryDomainsCount;
-    /// <summary>Rows one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
+    /// <summary>Entries one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
     public nuint ShardCapacity;
     /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
     public int CpuClass;
@@ -1738,7 +1738,7 @@ internal struct NativeVramOptions
     public IntPtr Devices;
     /// <summary>How many ordinals the list holds; zero derives.</summary>
     public nuint DevicesCount;
-    /// <summary>Rows one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
+    /// <summary>Entries one shard holds before another generation of shards opens; zero leaves it unbounded.</summary>
     public nuint ShardCapacity;
     /// <summary>The GPU class to dispatch as; zero derives the devices' own.</summary>
     public int GpuClass;

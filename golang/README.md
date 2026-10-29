@@ -15,7 +15,7 @@ To build them from a checkout of the main repository and point cgo at them for t
 
 ```sh
 cmake --preset library -B build_release && cmake --build build_release
-export CGO_CFLAGS="-I$PWD/include" CGO_LDFLAGS="-L$PWD/build_release"
+export CGO_CFLAGS="-I$PWD/c" CGO_LDFLAGS="-L$PWD/build_release"
 ```
 
 Every release also carries prebuilt libraries and headers, where `<release_tag>`, `<arch>` and `<usearch_version>` name the release and the machine:
@@ -91,7 +91,7 @@ defer arena.Close()
 	if err != nil {
 		log.Fatal(err)
 }
-	found, distances, err := matches.Row(0)
+	found, distances, err := matches.Query(0)
 	if err != nil {
 		log.Fatal(err)
 }
@@ -145,7 +145,7 @@ The slices a deferred verb is handed must not change until it is final, since th
 
 ## Executors
 
-An index owns rows; an executor owns the threads or device streams a verb runs on, so one executor serves several indexes and the cost of spawning shows at the line that spawns it.
+An index owns entries; an executor owns the threads or device streams a verb runs on, so one executor serves several indexes and the cost of spawning shows at the line that spawns it.
 There is a constructor per C one, each taking every argument its own hardware has, and ending with the `deferredLimit` sizing its table of deferred calls:
 
 ```go
@@ -206,18 +206,18 @@ for _, batch := range batches {
 	if err != nil {
 		log.Fatal(err)
 }
-	keys, _, _ := matches.Row(0)
+	keys, _, _ := matches.Query(0)
 	kept = append(kept, keys...) // a slice into the arena goes stale unchecked, so copy what outlives the loop
 }
 
 found, _ := usearch.NewArena(nil) // two live results, two arenas
 defer found.Close()
-rows, _ := usearch.NewArena(nil)
-defer rows.Close()
+fetched, _ := usearch.NewArena(nil)
+defer fetched.Close()
 matches, _ := index.Search(query, 10, found, nil)
-neighbors, _, _ := matches.Row(0)
+neighbors, _, _ := matches.Query(0)
 for _, key := range neighbors {
-	vectors, _ := index.Get(key, usearch.ScalarF32, rows) // rewinds rows, never found
+	vectors, _ := index.Get(key, usearch.ScalarF32, fetched) // rewinds fetched, never found
 	rerank(key, vectors)
 }
 
@@ -363,11 +363,11 @@ fmt.Println(stats.ComputedDistances, "distances computed")
 ```
 
 A search returns a `MatchesView` over its arena, holding up to `wanted` keys per query and the distances paired with them.
-`Row` borrows one query's results, trimmed to the count that query reported, and copies nothing:
+`Query` borrows one query's results, trimmed to the count that query reported, and copies nothing:
 
 ```go
 for query := range matches.Queries() {
-	found, distances, err := matches.Row(query)
+	found, distances, err := matches.Query(query)
 	if err != nil {
 		log.Fatal(err)
 }
@@ -378,7 +378,7 @@ for query := range matches.Queries() {
 ```
 
 The breadth of the candidates rides each call as `ExpansionFactor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-`Traversal: usearch.TraversalScan` skips the walk and scores every row exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
+`Traversal: usearch.TraversalScan` skips the walk and scores every entry exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
 
 Insertion, refinement and every walk report traversal telemetry when asked.
 Each call overwrites the struct rather than accumulating, so a sweep sums them itself:
@@ -433,10 +433,10 @@ vectors, _ := index.Get(usearch.KeyFromUint64(42), usearch.ScalarF32, arena)
 values, _ := usearch.DenseValues[float32](vectors)
 ```
 
-A cursor walks the contents, each pull writing up to `wanted` keys, and the keys each links to for `NextLinks`, into an arena; the rows themselves come from `Get`.
+A cursor walks the contents, each pull writing up to `wanted` keys, and the keys each links to for `NextLinks`, into an arena; the vectors themselves come from `Get`.
 `NextKeys` pulls the keys alone, and a batch of none means the walk is exhausted.
-`Cursor()` yields every row as stored, and `Cursor(starts...)` the starts' own rows first, then the rows those link to breadth-first, each once.
-Cursors answer on RAM and NVMe handles, while VRAM rows are read back by key or by search.
+`Cursor()` yields every entry as stored, and `Cursor(starts...)` the starts' own entries first, then the entries those link to breadth-first, each once.
+Cursors answer on RAM and NVMe handles, while VRAM entries are read back by key or by search.
 
 ```go
 cursor, _ := index.On(executor).Cursor()
@@ -453,7 +453,7 @@ for {
 ```
 
 A search stream resumes one query's walk, so a caller that post-filters aggressively pulls until satisfied instead of guessing the wanted count upfront.
-Each `Next` writes up to `wanted` next-nearest matches into an arena as the one row of a search, and a row of none means the walk is drained.
+Each `Next` writes up to `wanted` next-nearest matches into an arena as the one query of a search, and a query with none means the walk is drained.
 Ordering beyond the expansion horizon is best-effort nearest rather than globally exact.
 No residency streams matches yet, so `SearchStream` answers `StatusUnsupported` today.
 
@@ -468,7 +468,7 @@ for accepted := 0; accepted < 10; {
 	if err != nil {
 		log.Fatal(err)
 }
-	found, _, _ := matches.Row(0)
+	found, _, _ := matches.Query(0)
 	if len(found) == 0 {
 		break // the walk is drained
 }
@@ -499,7 +499,7 @@ for {
 
 ### Absorbing
 
-`Absorb` moves donor indexes into one, one after another, keeping their graphs rather than re-inserting their rows, then refines every shard that took one across the appended part.
+`Absorb` moves donor indexes into one, one after another, keeping their graphs rather than re-inserting their vectors, then refines every shard that took one across the appended part.
 A donor must share the index's residency, scalar, metric and geometry, or the call answers `StatusConfigMismatch`.
 Each absorbed donor is consumed, and every later verb on it reports `StatusUninitialized`; a stop between donors, or a failure, leaves the rest live, still yours to close.
 
@@ -514,26 +514,26 @@ It runs on an inner-product index alone, and its keys, products and row offsets 
 
 ```go
 products, err := index.On(executor).Multiply(usearch.RowsOf(left, dimensions), arena, &usearch.DenseMultiplyConfig{Wanted: 64})
-for row := range products.Rows() {
-	columns, scores, _ := products.Row(row)
+for row := range products.Queries() {
+	columns, scores, _ := products.Query(row)
 	accumulate(row, columns, scores)
 }
 ```
 
 ### Late Interaction
 
-`Maxsim` scores multi-row queries against multi-row entries: every query row takes its best match within a key, and those maxima sum to that key's score.
+`Maxsim` scores multi-row queries against multi-vector documents: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `ValuesPerKey` above one exists for, and the wanted count is over documents rather than rows.
 It runs on an inner-product index alone, since a sum of maxima needs logits rather than distances.
-The keys land as `Multiply`'s pairs do, one `DenseProducts` row per query, largest score first, and a zero wanted count keeps every key a query scored.
+The keys land as `Multiply`'s pairs do, one `DenseProducts` run per query, largest score first, and a zero wanted count keeps every key a query scored.
 
 ```go
 options.Metric = usearch.DenseMetricInner
 options.ValuesPerKey = 512
 
 documents, err := index.On(executor).Maxsim(usearch.RowsOf(tokens, dimensions), tokensPerQuery, 10, arena, nil)
-for query := range documents.Rows() {
-	keys, scores, _ := documents.Row(query)
+for query := range documents.Queries() {
+	keys, scores, _ := documents.Query(query)
 	rerank(query, keys, scores)
 }
 ```

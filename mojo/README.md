@@ -35,10 +35,10 @@ def main() raises:
     var arena = Arena(executor)
     var query = [Float32(0.2), 0.6, 0.4]
     var matches = index.on(executor).search(RowsView.of(query, 3), 10, arena)  # the same verb, on an executor
-    print(matches.row_keys(0)[0], matches.row_distances(0)[0])  # 00000000-0000-0000-0000-00000000002a 0.0
+    print(matches.query_keys(0)[0], matches.query_distances(0)[0])  # 00000000-0000-0000-0000-00000000002a 0.0
 ```
 
-An index owns rows; an `Executor` owns the threads or streams a call runs on; an `Arena` owns the outputs a call writes.
+An index owns entries; an `Executor` owns the threads or streams a call runs on; an `Arena` owns the outputs a call writes.
 `Library()` opens the engine once, and every handle created through it keeps it mapped.
 
 ## Receivers & Deferred Calls
@@ -62,7 +62,7 @@ A `Deferred` owns its outcome and outputs until the call is final, and borrows t
 var call = index.deferred(executor).search(queries, 10, arena)
 if call.status() == Status.DEFERRED:
     pass  # other work
-print(call.wait().row_keys(0)[0])  # the matches, read in place from your arena
+print(call.wait().query_keys(0)[0])  # the matches, read in place from your arena
 ```
 
 Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `usearch_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
@@ -103,19 +103,19 @@ An arena from a VRAM executor holds device memory, which host accessors refuse w
 var arena = Arena(executor)  # Arena(library) makes host pages for the calling thread
 for position in range(len(batches)):
     var matches = index.on(executor).search(batches[position], 10, arena)  # rewinds: the last batch's matches are gone
-    total += matches.row_distances(0)[0]
+    total += matches.query_distances(0)[0]
 
 var found = Arena(executor)
-var rows = Arena(executor)  # two live results, two arenas
+var fetched = Arena(executor)  # two live results, two arenas
 var hits = index.on(executor).search(query, 10, found)
-for key in hits.row_keys(0):
-    rerank(key, index.on(executor).get[DType.float32](key, rows))
+for key in hits.query_keys(0):
+    rerank(key, index.on(executor).get[DType.float32](key, fetched))
 
 var east_arena = Arena(executor)
 var west_arena = Arena(executor)  # one arena per submitted call
 var east = east_shard.deferred(executor).search(queries, 10, east_arena)
 var west = west_shard.deferred(executor).search(queries, 10, west_arena)
-print(east.wait().row_keys(0)[0], west.wait().row_keys(0)[0])
+print(east.wait().query_keys(0)[0], west.wait().query_keys(0)[0])
 ```
 
 The arena is the verb's last required argument, before the optional config, on every receiver.
@@ -191,9 +191,9 @@ The metadata carries only the four fields a checkpoint froze, so `values_per_key
 
 ## Dense Indexes
 
-`DenseOptions` freezes an index's geometry: its dimensions, metric, quantization, connectivity and `values_per_key`, angular over `BF16` rows unless told otherwise, with every zeroed optional field derived.
-`DenseMetric` names `INNER`, `ANGULAR`, `EUCLIDEAN`, `HAMMING` and `JACCARD`; the last two read rows as `ScalarKind.U1X8` bit sets and refuse any other quantization.
-Insertions and searches overlap freely on one handle: a search never writes to the graph, and an insertion publishes a row only once it is reachable.
+`DenseOptions` freezes an index's geometry: its dimensions, metric, quantization, connectivity and `values_per_key`, angular over `BF16` vectors unless told otherwise, with every zeroed optional field derived.
+`DenseMetric` names `INNER`, `ANGULAR`, `EUCLIDEAN`, `HAMMING` and `JACCARD`; the last two read vectors as `ScalarKind.U1X8` bit sets and refuse any other quantization.
+Insertions and searches overlap freely on one handle: a search never writes to the graph, and an insertion publishes an entry only once it is reachable.
 `multiply`, `maxsim` and `attend` treat the index as a sparse operand, folding their arithmetic into the walk instead of materializing a match list, and need logits rather than distances, so they run on `DenseMetric.INNER` alone and refuse other metrics with `Status.CONFIG_MISMATCH`.
 
 ### Rows & Scalars
@@ -230,17 +230,17 @@ print(stats.computed_distances, "distances computed")
 A `stats` slot is overwritten whole by every call it is lent to, so a reused one reads the last call's figures rather than a running total.
 
 A search answers `Matches`: a queries-by-`wanted` grid of keys, the distances paired with them, and one match count per query, all written into the arena.
-`row_keys` and `row_distances` borrow one query's results, nearest first, trimmed to the count that query reported:
+`query_keys` and `query_distances` borrow one query's results, nearest first, trimmed to the count that query reported:
 
 ```mojo
 var matches = index.search(queries, 10, arena)
 for query in range(len(matches)):
-    for rank in range(len(matches.row_keys(query))):
-        print(query, matches.row_keys(query)[rank], matches.row_distances(query)[rank])
+    for rank in range(len(matches.query_keys(query))):
+        print(query, matches.query_keys(query)[rank], matches.query_distances(query)[rank])
 ```
 
 The breadth of the candidates rides each call as `expansion_factor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-`DenseSearchConfig(traversal=Traversal.SCAN)` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
+`DenseSearchConfig(traversal=Traversal.SCAN)` scores every entry instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
 ### Filtered Search
 
@@ -252,7 +252,7 @@ var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admi
 ```
 
 The predicate runs on the executor's threads together, so it must be safe for concurrent use.
-This binding installs no progress handler, so an `insert` batch is all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no row.
+This binding installs no progress handler, so an `insert` batch is all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no entry.
 
 ### Retrieval and Streaming
 
@@ -262,8 +262,8 @@ This binding installs no progress handler, so an `insert` batch is all-or-nothin
 var stored = index.get[DType.float32](Key(integer=42), arena)  # empty when the key is absent
 ```
 
-A cursor walks the contents, landing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the rows come from `get`.
-Without start keys it yields every row as stored; `cursor(starts)` yields the starts' own rows first, then the rows those link to breadth-first, each once.
+A cursor walks the contents, landing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the vectors come from `get`.
+Without start keys it yields every entry as stored; `cursor(starts)` yields the starts' own entries first, then the entries those link to breadth-first, each once.
 
 ```mojo
 var cursor = index.on(executor).cursor()
@@ -280,8 +280,8 @@ No residency of the engine implements the stream yet, so it answers `Status.UNSU
 ```mojo
 var stream = index.on(executor).search_stream(RowsView.of(query, 768))
 while True:
-    var pulled = stream.next(16, arena)  # one row of Matches, empty once drained
-    if len(pulled.row_keys(0)) == 0:
+    var pulled = stream.next(16, arena)  # one query of Matches, empty once drained
+    if len(pulled.query_keys(0)) == 0:
         break
 ```
 
@@ -300,7 +300,7 @@ while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)) != 0:
 
 ### Absorbing & Splitting
 
-Bigger indexes come from absorbing, never mutating: `absorb` takes its donors by value, appends each one's rows with its graph, then refines across the appended part, and the engine frees each donor it absorbs.
+Bigger indexes come from absorbing, never mutating: `absorb` takes its donors by value, appends each one's entries with its graph, then refines across the appended part, and the engine frees each donor it absorbs.
 Splitting is not in the C library yet.
 
 ```mojo
@@ -329,7 +329,7 @@ The keys land as `multiply`'s pairs do, query `i` spanning `offsets()[i]` up to 
 ```mojo
 var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  # DenseProducts, as multiply answers
 var offsets = documents.offsets()
-for query in range(documents.rows):
+for query in range(documents.queries):
     print(query, Int(offsets[query + 1] - offsets[query]), "documents")
 ```
 

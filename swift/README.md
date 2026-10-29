@@ -116,9 +116,9 @@ for batch in batches {
     let matches = try index.on(executor).search(batch, wanted: 10, arena: arena) // rewinds: last batch's matches are gone
     total += matches.joined().reduce(0) { $0 + $1.distance }
 }
-let found = try Arena(), rows = try Arena()                                      // two live results, two arenas
+let found = try Arena(), fetched = try Arena()                                   // two live results, two arenas
 for match in try index.search(query, wanted: 10, arena: found)[0] {
-    rerank(match.key, try index.get(key: match.key, as: Float.self, arena: rows))
+    rerank(match.key, try index.get(key: match.key, as: Float.self, arena: fetched))
 }
 let calls = try zip(shards, arenas).map { shard, arena in
     try shard.deferred(executor).search(queries, wanted: 10, arena: arena) // one arena per submitted call
@@ -232,9 +232,9 @@ let row = [BFloat16(float: 0.3), BFloat16(float: 0.5), BFloat16(float: 1.2)]
 
 ### Search
 
-A search writes up to `wanted` matches per query into its arena, ranked nearest first, and answers `Matches` reading them in place: `matches[query]` is one query's row, so neither level copies a row out.
-A row's own `count` stops at the matches the call wrote, however many were wanted.
-Both levels are `RandomAccessCollection`, so a row walks, maps and slices like any other sequence.
+A search writes up to `wanted` matches per query into its arena, ranked nearest first, and answers `Matches` reading them in place: `matches[query]` is one query's `QueryMatches`, so neither level copies a match out.
+A query's own `count` stops at the matches the call wrote, however many were wanted.
+Both levels are `RandomAccessCollection`, so a query walks, maps and slices like any other sequence.
 
 ```swift
 let stats = DenseTraversalStats()
@@ -254,7 +254,7 @@ Insertions and searches overlap freely on one handle: searches read only entries
 
 The predicate runs on the executor's threads, so it must be `@Sendable` and safe for concurrent use; an error it throws rejects that key.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-`DenseSearchConfig(traversal: .scan)` skips the walk and scores every row exactly, on RAM and NVMe handles, the fallback for a filter too selective for a walk to cross.
+`DenseSearchConfig(traversal: .scan)` skips the walk and scores every entry exactly, on RAM and NVMe handles, the fallback for a filter too selective for a walk to cross.
 
 ```swift
 let even = try index.on(executor).search(queries, wanted: 10, arena: arena, config: DenseSearchConfig(
@@ -277,14 +277,14 @@ try index.on(executor).refine(config: DenseRefineConfig(
 `get` lands every vector stored under a key in its arena, one row per entry sharing the key, converted to the scalar kind `as:` names.
 
 ```swift
-let rows = try index.get(key: 42, as: Float.self, arena: arena)
-print(rows.count, rows.columns, rows.stride, Array(rows[0]))
+let vectors = try index.get(key: 42, as: Float.self, arena: arena)
+print(vectors.count, vectors.columns, vectors.stride, Array(vectors[0]))
 ```
 
 `cursor()` opens a walk over the contents in batches, which is what export and migration want.
-Each shard's publication watermark is read as the walk enters it, so a row once passed is never revisited.
-Without `starts:` it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
-Every pull lands up to `wanted` keys in its arena, and `nextLinks` lands the keys each links to beside them; the rows themselves come from `get`.
+Each shard's publication watermark is read as the walk enters it, so an entry once passed is never revisited.
+Without `starts:` it yields every entry as stored; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
+Every pull lands up to `wanted` keys in its arena, and `nextLinks` lands the keys each links to beside them; the vectors themselves come from `get`.
 
 ```swift
 let cursor = try index.on(executor).cursor()
@@ -323,7 +323,7 @@ while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 1
 
 ### Absorbing & Splitting
 
-Bigger indexes come from absorbing, never mutating: `absorb` appends every donor's rows with its graph, then refines across the appended part.
+Bigger indexes come from absorbing, never mutating: `absorb` appends every donor's entries with its graph, then refines across the appended part.
 It consumes every donor it absorbs, so every later verb on one reports `uninitialized`, and an absorb stopped early hands the rest back to their indexes.
 
 ```swift
@@ -336,7 +336,7 @@ Three verbs, `multiply`, `maxsim` and `attend`, treat the index as a sparse oper
 All three read logits rather than distances, so they run on an inner-product index alone.
 
 `multiply` is a sparse matrix product, reporting every pair the traversal scored rather than only the nearest.
-How many pairs a walk scores is known only once it ends, so the call returns them as `DenseProducts` read in place from an arena: one row of pairs per left row, in traversal order, and `required` counting every pair scored before a non-zero `wanted` cut any.
+How many pairs a walk scores is known only once it ends, so the call returns them as `DenseProducts` read in place from an arena: one run of pairs per left row, in traversal order, and `required` counting every pair scored before a non-zero `wanted` cut any.
 
 ```swift
 let products = try index.on(executor).multiply(left, arena: arena, config: DenseMultiplyConfig(wanted: 64))
@@ -347,7 +347,7 @@ for pair in products[0] { print(pair.key, pair.distance) }
 
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `valuesPerKey` above one exists for, and the outputs are sized over documents rather than rows.
-The call returns the same `DenseProducts` as `multiply`, one ragged row per whole query with its documents largest score first, and a zero `wanted` keeps every document the query scored.
+The call returns the same `DenseProducts` as `multiply`, one ragged run per whole query with its documents largest score first, and a zero `wanted` keeps every document the query scored.
 
 ```swift
 let documents = try index.on(executor).maxsim(tokens, rowsPerQuery: tokensPerQuery, wanted: 10, arena: arena)
@@ -378,7 +378,7 @@ let context = try carry.withUnsafeMutableBufferPointer { carry in
 ```swift
 let description = try index.describe()
 print(description.metadata.dimensions, description.metadata.connectivity)
-print(description.size, description.capacity, description.memoryUsage, description.capabilities)
+print(description.size, description.capacity, description.memoryUsage, description.cpuClass, description.shardsCount)
 print(try index.count(key: 42), try index.contains(key: 42))
 
 let reachability = try index.on(executor).health()

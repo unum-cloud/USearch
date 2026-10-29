@@ -82,7 +82,8 @@ struct sequence_index_options_t {
 using sequence_payload_t = std::vector<std::byte>;
 using sequence_entry_t = entry<sequence_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<sequence_entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<sequence_entry_t>,
+              "reallocation must move entries, never copy them");
 
 using sequence_index_t = handle<sequence_payload_t, sequence_index_options_t>;
 
@@ -244,18 +245,18 @@ static bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
     return bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
 }
 
-/** The output twin of @c viewed: lands the entries at @p rows into @p arena as one tape, writing
+/** The output twin of @c viewed: lands the entries at @p entries into @p arena as one tape, writing
  *  @p tape only once every byte landed, and answers false once @p outcome records why not. */
-static bool land_entries(sequence_index_t const& index, std::span<std::size_t const> rows,
+static bool land_entries(sequence_index_t const& index, std::span<std::size_t const> entries,
                          usearch_arena_handle_t& arena, usearch_tape_view_t& tape, usearch_outcome_t* outcome) {
     std::size_t total_bytes = 0;
-    for (std::size_t row : rows) total_bytes += index.entries[row].payload.size();
-    std::size_t* const offsets = carve<std::size_t>(arena, rows.size() + 1, outcome);
+    for (std::size_t entry : entries) total_bytes += index.entries[entry].payload.size();
+    std::size_t* const offsets = carve<std::size_t>(arena, entries.size() + 1, outcome);
     std::byte* const bytes = offsets ? carve<std::byte>(arena, total_bytes, outcome) : nullptr;
     if (!bytes) return false;
     offsets[0] = 0;
-    for (std::size_t found = 0; found != rows.size(); ++found) {
-        sequence_payload_t const& payload = index.entries[rows[found]].payload;
+    for (std::size_t found = 0; found != entries.size(); ++found) {
+        sequence_payload_t const& payload = index.entries[entries[found]].payload;
         std::copy(payload.begin(), payload.end(), bytes + offsets[found]);
         offsets[found + 1] = offsets[found] + payload.size();
     }
@@ -271,7 +272,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_traversal_stats_t* stats, usearch_predicate_t predicate,
                                usearch_progress_t progress) {
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
     sequence_search_scratch_t scratch;
@@ -279,11 +280,11 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
     for (std::size_t query = 0; query != count; ++query) {
         bytes_view_t const query_view = viewed(queries, query);
         rank<sequence_payload_t>(
-            std::span<sequence_entry_t const>(index.entries).first(rows), predicate,
+            std::span<sequence_entry_t const>(index.entries).first(entries), predicate,
             [&](sequence_payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
         landing.write(query, ranked);
         if (stats) {
-            stats->visited_members += rows;
+            stats->visited_members += entries;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
@@ -301,7 +302,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
  *      image rather than a format: no magic, no version, and nothing else reads it back.
  *
  *  Entries are ragged, so the payload is a run of `{key, length, bytes}` records rather than
- *  fixed-width rows, and the prefix carries their summed extent to size the read.
+ *  fixed-width ones, and the prefix carries their summed extent to size the read.
  */
 struct sequence_checkpoint_prefix_t {
 
@@ -327,9 +328,10 @@ struct sequence_checkpoint_prefix_t {
 /** The per-entry overhead of the blob: the key, then the byte length that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(std::size_t);
 
-static std::size_t payload_extent(sequence_index_t const& index, std::size_t rows) {
+static std::size_t payload_extent(sequence_index_t const& index, std::size_t entries) {
     std::size_t extent = 0;
-    for (std::size_t row = 0; row != rows; ++row) extent += record_overhead_k + index.entries[row].payload.size();
+    for (std::size_t entry = 0; entry != entries; ++entry)
+        extent += record_overhead_k + index.entries[entry].payload.size();
     return extent;
 }
 
@@ -337,15 +339,15 @@ static std::size_t parameter_bytes(sequence_index_t const& index) {
     return index.options.substitution.size() + index.options.window_widths.size() * sizeof(std::size_t);
 }
 
-static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + parameter_bytes(index), payload_extent(index, rows), 1);
+static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index, std::size_t entries) {
+    return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + parameter_bytes(index), payload_extent(index, entries), 1);
 }
 
-static void write_into(sequence_index_t const& index, std::size_t rows, bytes_span_t target) {
+static void write_into(sequence_index_t const& index, std::size_t entries, bytes_span_t target) {
     sequence_checkpoint_prefix_t prefix {};
     prefix.connectivity = index.options.connectivity;
-    prefix.entries = rows;
-    prefix.payload_bytes = payload_extent(index, rows);
+    prefix.entries = entries;
+    prefix.payload_bytes = payload_extent(index, entries);
     prefix.metric = index.options.metric;
     prefix.gap = index.options.gap;
     prefix.window_widths_count = index.options.window_widths.size();
@@ -362,8 +364,8 @@ static void write_into(sequence_index_t const& index, std::size_t rows, bytes_sp
         write_pod(cursor, width);
         cursor = cursor.subspan(sizeof(width));
     }
-    for (std::size_t row = 0; row != rows; ++row) {
-        sequence_entry_t const& entry = index.entries[row];
+    for (std::size_t position = 0; position != entries; ++position) {
+        sequence_entry_t const& entry = index.entries[position];
         std::size_t const length = entry.payload.size();
         write_pod(cursor, entry.key);
         cursor = cursor.subspan(sizeof(usearch_key_t));
@@ -401,9 +403,9 @@ static bool adopt(sequence_index_options_t& options, sequence_checkpoint_prefix_
 static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
     sequence_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
-    std::size_t const rows = prefix.entries;
+    std::size_t const entries = prefix.entries;
     index.reset();
-    if (!index.accommodate(rows)) {
+    if (!index.accommodate(entries)) {
         propagate_error(usearch_status_out_of_memory_k, outcome, "The checkpoint's entries could not be allocated");
         return false;
     }
@@ -429,7 +431,7 @@ static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcom
     }
 
     sequence_payload_t payload;
-    for (std::size_t row = 0; row != rows; ++row) {
+    for (std::size_t position = 0; position != entries; ++position) {
         if (cursor.size() < record_overhead_k) {
             index.reset();
             propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
@@ -552,7 +554,8 @@ void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
-    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
+    // its zero cost.
     usearch_sequence_index_handle_t* const index = open_checkpoint<usearch_sequence_index_handle_t>(
         served.view(), arguments->weights, outcome);
     if (!index) return;
@@ -638,10 +641,10 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
     std::size_t const watermark = index.entries.size();
     sequence_payload_t payload;
     std::size_t published = 0;
-    for (std::size_t row = 0; row != count; ++row) {
-        bytes_view_t const sequence = viewed(arguments->sequences, row);
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        bytes_view_t const sequence = viewed(arguments->sequences, offset);
         payload.assign(sequence.begin(), sequence.end());
-        index.append(key_at(arguments->keys, row), payload);
+        index.append(key_at(arguments->keys, offset), payload);
         ++published;
         if (!keep_going(arguments->progress, published, count)) break;
     }
@@ -666,14 +669,14 @@ void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
     usearch_sequence_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
     // An exact scan reaches every entry it holds in one level.
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -725,10 +728,10 @@ void usearch_sequence_get(usearch_sequence_get_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
-    if (rows.empty()) return;
-    if (!land_entries(index, rows, *arena, *arguments->sequences, outcome)) return;
-    if (arguments->written) *arguments->written = rows.size();
+    std::vector<std::size_t> const entries = entries_under(index, arguments->key);
+    if (entries.empty()) return;
+    if (!land_entries(index, entries, *arena, *arguments->sequences, outcome)) return;
+    if (arguments->written) *arguments->written = entries.size();
 }
 
 void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
@@ -757,12 +760,12 @@ void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
         return;
     // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
     // it.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments->progress, row + 1, rows);
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments->progress, entry + 1, entries);
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -848,14 +851,14 @@ void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* argume
         writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
-    std::size_t const rows = index.entries.size();
+    std::size_t const entries = index.entries.size();
     bool cancelled = false;
-    while (refinement.swept < rows && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, rows);
+    while (refinement.swept < entries && !cancelled)
+        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->visited) *arguments->visited = refinement.swept;
     if (arguments->stats) arguments->stats->visited_members = refinement.swept;
-    reject_if(cancelled && refinement.swept != rows, usearch_status_cancelled_k,
+    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
               "The caller's handler stopped the sweep", outcome);
 }
 
@@ -870,9 +873,9 @@ void usearch_sequence_refinement_finish(usearch_sequence_refinement_finish_t* ar
         return;
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = rows;
-    if (arguments->reachability) *arguments->reachability = {rows, rows, rows ? 1u : 0u};
+    std::size_t const entries = index.entries.size();
+    if (arguments->stats) arguments->stats->visited_members = entries;
+    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
@@ -961,14 +964,14 @@ void usearch_sequence_save(usearch_sequence_save_t* arguments) {
                   "An NVMe view already is its checkpoint", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, rows);
+    std::size_t const entries = index.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(index, entries);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
     if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
-    write_into(index, rows, blob);
+    write_into(index, entries, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
     keep_going(arguments->progress, 1, 1);
 }

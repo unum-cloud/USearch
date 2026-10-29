@@ -32,7 +32,7 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h> // `fmt::join`
 
-#include <forkunion.h>
+#include <forkunion/forkunion.h>
 #include <forkunion/capabilities.hpp> // `fu::preferred_cache_hints_t` - the engines' line hints
 #include <forkunion/topology.hpp>     // `fu::cache_line_bytes` - the line they step by
 #include <numkong/numkong.h>
@@ -355,7 +355,7 @@ struct settings_t {
      *  calibration-free navigability probe, with a search phase as long as the ingestion. */
     switch_t self_search = switch_t::absent_k;
 
-    /** Answer every query by an exact scan of every stored row instead of a walk. */
+    /** Answer every query by an exact scan of every stored vector instead of a walk. */
     switch_t scan = switch_t::absent_k;
 
     /** Checkpoint name to serialize every domain index into after ingestion, resolved through

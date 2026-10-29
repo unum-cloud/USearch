@@ -30,20 +30,20 @@ enum metal_extent_t : unsigned int {
 
 };
 
-/** Rows a walk expands per hop, the twin of the host's @c walk_width: @p concurrent_walks, the
+/** Nodes a walk expands per hop, the twin of the host's @c walk_width: @p concurrent_walks, the
  *  walks the hardware runs at once, divided among the walks that need them, at least one and at
- *  most @p filling_rows. */
+ *  most @p filling_nodes. */
 constexpr unsigned int walk_width(unsigned int concurrent_walks, unsigned int live_walks, unsigned int unstarted_walks,
-                                  unsigned int filling_rows) {
+                                  unsigned int filling_nodes) {
     unsigned int const started = unstarted_walks < concurrent_walks ? unstarted_walks : concurrent_walks;
     unsigned int const walks = live_walks < started ? started : live_walks;
     unsigned int const share = concurrent_walks / walks ? concurrent_walks / walks : 1;
-    return share < filling_rows ? share : filling_rows;
+    return share < filling_nodes ? share : filling_nodes;
 }
 
-/** The counter words a launch binds: the batch's assigned rows, the walks still running, the
- *  published rows, the changed nodes and the value-lookup miss word a walk raises at a node with no
- *  value row, then the walks' telemetry, each tally a low and a high word, so a batch's totals
+/** The counter words a launch binds: the batch's assigned entries, the walks still running, the
+ *  published nodes, the changed nodes and the value-lookup miss word a walk raises at a node with
+ *  no value row, then the walks' telemetry, each tally a low and a high word, so a batch's totals
  *  outgrow 32 bits as on CUDA and HIP. */
 enum metal_counter_t : unsigned int {
     metal_assigned_k = 0,

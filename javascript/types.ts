@@ -74,14 +74,14 @@ export enum Residency {
 }
 
 /**
- *  How a search reaches the rows it scores.
+ *  How a search reaches the entries it scores.
  *  @enum {string}
  *  @readonly
  */
 export enum Traversal {
-  /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
+  /** Walks the graph, scoring the entries the expansion reaches - approximate, the default. */
   Walk = "walk",
-  /** Scores every row published when the query's scan starts - exact, on RAM and NVMe handles. */
+  /** Scores every entry published when the query's scan starts - exact, on RAM and NVMe handles. */
   Scan = "scan",
 }
 
@@ -387,7 +387,7 @@ export interface ExecutorForNvmeConfig {
 /**
  *  The workers a fanned-out verb runs on, shared across indexes.
  *
- *  An executor owns host threads or device streams; an index owns rows. Keeping them apart is
+ *  An executor owns host threads or device streams; an index owns entries. Keeping them apart is
  *  what lets one pool serve several indexes, and what makes the cost of spawning visible at the
  *  line that spawns it. The collector frees it eventually; `free` joins the workers now.
  */
@@ -496,9 +496,9 @@ export abstract class ArenaView {
 /**
  *  The matches of one query, borrowed out of a run rather than copied.
  *
- *  Both arrays are subarrays of the run's own storage, so reading a row costs nothing.
+ *  Both arrays are subarrays of the run's own storage, so reading a query costs nothing.
  */
-export class MatchesRow {
+export class QueryMatches {
   constructor(
     /** Sixteen bytes per match found for this query. */
     public readonly keys: Uint8Array,
@@ -513,13 +513,13 @@ export class MatchesRow {
 }
 
 /**
- *  The ranked rows a search or a stream pull wrote into its arena: `queries` rows of `columns`
- *  cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
+ *  The ranked matches a search or a stream pull wrote into its arena: `queries` rows of `columns`
+ *  cells, query `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
  */
 export class Matches extends ArenaView {
-  /** Rows the call resolved, one per query. */
+  /** Queries the call resolved. */
   readonly queries: number;
-  /** Columns per row the call wrote, at most its `wanted` - the "k" in "kANN". */
+  /** Columns per query the call wrote, at most its `wanted` - the "k" in "kANN". */
   readonly columns: number;
   readonly #landed: CompiledMatches;
 
@@ -541,7 +541,7 @@ export class Matches extends ArenaView {
     return this.live(this.#landed.scores);
   }
 
-  /** Matches written per query, one entry per query. */
+  /** Matches written per query, one count per query. */
   get counts(): BigUint64Array {
     return this.live(this.#landed.counts);
   }
@@ -552,12 +552,12 @@ export class Matches extends ArenaView {
    *  @param queryIndex - Which query of the run to read.
    *  @returns The keys and scores that query found.
    */
-  get(queryIndex: number): MatchesRow {
+  get(queryIndex: number): QueryMatches {
     if (!Number.isInteger(queryIndex) || queryIndex < 0 || queryIndex >= this.queries)
       throw fail(Status.InvalidArgument, `No query ${queryIndex} in a run of ${this.queries}.`);
     const offset = queryIndex * this.columns;
     const count = Number(this.counts[queryIndex]);
-    return new MatchesRow(
+    return new QueryMatches(
       this.keys.subarray(offset * keyBytes, (offset + count) * keyBytes),
       this.scores.subarray(offset, offset + count),
     );

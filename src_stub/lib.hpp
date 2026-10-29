@@ -180,9 +180,10 @@ inline bool reject_keys(usearch_keys_view_t keys, usearch_outcome_t* outcome) {
     return reject_if(!keys.data, usearch_status_invalid_argument_k, "The key run must name storage", outcome);
 }
 
-/** The @p row -th key of a run, where a zero stride repeats the first. */
-inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t row) {
-    return *reinterpret_cast<usearch_key_t const*>(reinterpret_cast<std::byte const*>(keys.data) + row * keys.stride);
+/** The key at @p offset of a run, where a zero stride repeats the first. */
+inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) {
+    return *reinterpret_cast<usearch_key_t const*>(reinterpret_cast<std::byte const*>(keys.data) +
+                                                   offset * keys.stride);
 }
 
 /** Refuses a tape without its storage or offsets, or whose offsets ever decrease. */
@@ -697,7 +698,7 @@ std::span<value_type_ const> row_at(void const* base, std::size_t row, std::size
 
 #pragma region Storage
 
-/** One stored row: its key, and whatever the modality calls a payload. */
+/** One stored entry: its key, and whatever the modality calls a payload. */
 template <typename payload_>
 struct entry {
     usearch_key_t key;
@@ -712,8 +713,8 @@ inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uu
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
  *      is what keeps a search overlapping an insertion.
  *
- *  Reallocating @c entries moves each row without copying the buffer it owns - true only while the
- *  payload's move constructor stays @c noexcept, which the modality files assert.
+ *  Reallocating @c entries moves each entry without copying the buffer it owns - true only while
+ *  the payload's move constructor stays @c noexcept, which the modality files assert.
  */
 template <typename payload_, typename options_>
 struct handle {
@@ -721,10 +722,10 @@ struct handle {
     /** The options the handle was initialized with, or a checkpoint later adopted. */
     options_ options {};
 
-    /** The rows themselves, in insertion order. */
+    /** The entries themselves, in insertion order. */
     std::vector<entry<payload_>> entries;
 
-    /** Row positions under each key, so a lookup is not a scan; keys need not be unique. */
+    /** Entry positions under each key, so a lookup is not a scan; keys need not be unique. */
     std::unordered_multimap<uuid_t, std::size_t> by_key;
 
     /** Held shared by every reader, exclusively by every mutation. */
@@ -736,7 +737,7 @@ struct handle {
     /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
     usearch_residency_t residency = usearch_residency_ram_k;
 
-    /** Drops every row, which @c clear promises without touching the frozen options. */
+    /** Drops every entry, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }
 
     /** Sizes both containers for @p total entries, answering whether the memory came. */
@@ -751,13 +752,13 @@ struct handle {
         return true;
     }
 
-    /** Appends one row and indexes its key, the only way a row is ever added. */
+    /** Appends one entry and indexes its key, the only way an entry is ever added. */
     void append(usearch_key_t key, payload_ payload) {
         by_key.emplace(keyed(key), entries.size());
         entries.push_back({key, std::move(payload)});
     }
 
-    /** Drops every row published past @p watermark, which an unwound batch reverts to. */
+    /** Drops every entry published past @p watermark, which an unwound batch reverts to. */
     void unwind(std::size_t watermark) {
         for (std::size_t position = entries.size(); position != watermark; --position) {
             auto const range = by_key.equal_range(keyed(entries[position - 1].key));
@@ -775,7 +776,7 @@ struct handle {
  *  @brief Refuses a batch that would carry any key past @p values_per_key entries, as the tape
  *      modalities' headers promise. A zeroed bound derives to one, so keys stay unique.
  *
- *  The whole batch is refused rather than the offending row, since a smaller retry cannot help,
+ *  The whole batch is refused rather than the offending entry, since a smaller retry cannot help,
  *  and the count spans both the entries already stored and the duplicates the batch itself brings.
  */
 template <typename handle_>
@@ -783,8 +784,8 @@ bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::
                            std::size_t values_per_key, usearch_outcome_t* outcome) {
     std::size_t const bound = values_per_key ? values_per_key : 1;
     std::unordered_map<uuid_t, std::size_t> admitted;
-    for (std::size_t row = 0; row != count; ++row) {
-        uuid_t const key = keyed(key_at(keys, row));
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        uuid_t const key = keyed(key_at(keys, offset));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
         if (reject_if(held > bound, usearch_status_overflow_k, "A key would hold more entries than the index admits",
                       outcome))
@@ -800,16 +801,16 @@ bool reject_read_only(handle_ const& index, usearch_outcome_t* outcome) {
                      outcome);
 }
 
-/** Row positions under @p key, ascending - the insertion order every @c get promises.
+/** Entry positions under @p key, ascending - the insertion order every @c get promises.
  *  An unordered multimap keeps equivalent keys adjacent but in no stated order, so the
  *  ascending sort is what restores the contract rather than a tidiness. */
 template <typename handle_>
-std::vector<std::size_t> rows_under(handle_ const& index, usearch_key_t key) {
-    std::vector<std::size_t> rows;
+std::vector<std::size_t> entries_under(handle_ const& index, usearch_key_t key) {
+    std::vector<std::size_t> entries;
     auto const range = index.by_key.equal_range(keyed(key));
-    for (auto position = range.first; position != range.second; ++position) rows.push_back(position->second);
-    std::sort(rows.begin(), rows.end());
-    return rows;
+    for (auto position = range.first; position != range.second; ++position) entries.push_back(position->second);
+    std::sort(entries.begin(), entries.end());
+    return entries;
 }
 
 #pragma endregion Storage
@@ -841,26 +842,29 @@ struct match_t {
     usearch_key_t key;
 };
 
-/** A ranked run's storage inside a claimed arena: @c wanted keys and scores per row, and a count per row. */
+/** A ranked run's storage inside a claimed arena: @c wanted keys and scores per query, and a count
+ *  per query. */
 struct ranked_landing_t {
     usearch_key_t* keys;
     usearch_distance_t* scores;
     std::size_t* counts;
     std::size_t wanted;
 
-    /** Lands the first @c wanted of @p ranked as row @p row, and their number as its count. */
-    void write(std::size_t row, std::span<match_t const> ranked) const noexcept {
+    /** Lands the first @c wanted of @p ranked as the matches of @p query, and their number as its
+     *  count. */
+    void write(std::size_t query, std::span<match_t const> ranked) const noexcept {
         std::size_t const found = std::min(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
-            keys[row * wanted + match] = ranked[match].key, scores[row * wanted + match] = ranked[match].distance;
-        counts[row] = found;
+            keys[query * wanted + match] = ranked[match].key, scores[query * wanted + match] = ranked[match].distance;
+        counts[query] = found;
     }
 
-    /** The view the call publishes once every row landed. */
+    /** The view the call publishes once every query landed. */
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** Carves @p count rows of @p wanted matches out of a claimed @p arena; false once @p outcome records why not. */
+/** Carves @p wanted matches for each of @p count queries out of a claimed @p arena; false once
+ *  @p outcome records why not. */
 inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
                          ranked_landing_t& landing, usearch_outcome_t* outcome) {
     landing.wanted = wanted;
@@ -878,13 +882,13 @@ void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicat
     std::vector<usearch_admission_t> admissions(entries.size(), usearch_admit_k);
     if (predicate.callback && !entries.empty()) {
         std::vector<usearch_key_t> keys(entries.size());
-        for (std::size_t row = 0; row != entries.size(); ++row) keys[row] = entries[row].key;
+        for (std::size_t entry = 0; entry != entries.size(); ++entry) keys[entry] = entries[entry].key;
         predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
     }
     ranked.clear();
     ranked.reserve(entries.size());
-    for (std::size_t row = 0; row != entries.size(); ++row)
-        if (admissions[row] == usearch_admit_k) ranked.push_back({score(entries[row].payload), entries[row].key});
+    for (std::size_t entry = 0; entry != entries.size(); ++entry)
+        if (admissions[entry] == usearch_admit_k) ranked.push_back({score(entries[entry].payload), entries[entry].key});
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](match_t const& left, match_t const& right) { return left.distance < right.distance; });
 }
@@ -902,13 +906,13 @@ inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
     return mixed ^ (mixed >> 31);
 }
 
-/** The rows below @p rows that @p within admits - a sample's region - in the order @p seed draws
- *  them. */
+/** The entries below @p count that @p within admits - a sample's region - in the order @p seed
+ *  draws them. */
 template <typename within_>
-std::vector<std::size_t> drawing_order(std::size_t rows, u64_t seed, within_ const& within) {
+std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ const& within) {
     std::vector<std::size_t> order;
-    for (std::size_t row = 0; row != rows; ++row)
-        if (within(row)) order.push_back(row);
+    for (std::size_t entry = 0; entry != count; ++entry)
+        if (within(entry)) order.push_back(entry);
     // The slot breaks a tie between equal ranks, so the order is total and repeats exactly.
     std::sort(order.begin(), order.end(), [seed](std::size_t first, std::size_t second) {
         u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
@@ -933,9 +937,9 @@ void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> e
     // Every kind ranks nearest-first, inner products as `1 - dot` and alignments by their negated
     // scores, so a radius bounds from above.
     bool const bounded = !anchors.empty() && arguments.radius != 0;
-    std::vector<std::size_t> const order = drawing_order(entries.size(), arguments.seed, [&](std::size_t row) {
+    std::vector<std::size_t> const order = drawing_order(entries.size(), arguments.seed, [&](std::size_t entry) {
         return !bounded || std::any_of(anchors.begin(), anchors.end(), [&](anchor_ const& anchor) {
-            return score(anchor, entries[row].payload) <= arguments.radius;
+            return score(anchor, entries[entry].payload) <= arguments.radius;
         });
     });
     std::size_t const first = std::min(arguments.offset, order.size());
@@ -982,7 +986,7 @@ void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> e
 #pragma region Graph Walks
 
 /**
- *  @brief The rows entry @p from links to: its @c connectivity nearest other rows below @p limit by
+ *  @brief The nodes @p from links to: its @c connectivity nearest other nodes below @p limit by
  *      @p score, nearest first, ties in storage order.
  *
  *  A stand-in keeps no graph, so these are the lists a perfectly refined graph would hold, where
@@ -992,8 +996,8 @@ template <typename handle_, typename score_>
 std::vector<std::size_t> links_of(handle_ const& index, std::size_t from, std::size_t limit, score_ const& score) {
     std::vector<std::pair<double, std::size_t>> nearest;
     nearest.reserve(limit);
-    for (std::size_t row = 0; row != limit; ++row)
-        if (row != from) nearest.push_back({score(index.entries[from].payload, index.entries[row].payload), row});
+    for (std::size_t node = 0; node != limit; ++node)
+        if (node != from) nearest.push_back({score(index.entries[from].payload, index.entries[node].payload), node});
     std::size_t const kept = std::min(nearest.size(), index.options.connectivity);
     std::partial_sort(nearest.begin(), nearest.begin() + static_cast<std::ptrdiff_t>(kept), nearest.end());
     std::vector<std::size_t> linked(kept);
@@ -1001,8 +1005,8 @@ std::vector<std::size_t> links_of(handle_ const& index, std::size_t from, std::s
     return linked;
 }
 
-/** A stand-in's cursor: every row below the creation watermark as stored, or the start keys' rows
- *  and then, breadth-first, the rows they link to, each once. */
+/** A stand-in's cursor: every node below the creation watermark as stored, or the start keys' nodes
+ *  and then, breadth-first, the nodes they link to, each once. */
 template <typename handle_>
 struct graph_cursor {
 
@@ -1012,19 +1016,20 @@ struct graph_cursor {
     /** The creation watermark, which later insertions cannot raise. */
     std::size_t limit = 0;
 
-    /** Rows already handed out. */
+    /** Nodes already handed out. */
     std::size_t position = 0;
 
-    /** The breadth-first order discovered so far; empty for a scan, which yields rows as stored. */
+    /** The breadth-first order discovered so far; empty for a scan, which yields nodes as
+     *  stored. */
     std::vector<std::size_t> order;
 
-    /** Per row below @c limit, whether @c order holds it; empty for a scan. */
+    /** Per node below @c limit, whether @c order holds it; empty for a scan. */
     std::vector<std::uint8_t> seen;
 
-    /** Rows of @c order whose links are already queued behind them. */
+    /** Nodes of @c order whose links are already queued behind them. */
     std::size_t expanded = 0;
 
-    /** Each row's links, kept once a pull or an expansion computed them. */
+    /** Each node's links, kept once a pull or an expansion computed them. */
     std::unordered_map<std::size_t, std::vector<std::size_t>> links;
 
     /** Bit zero is set while a pull runs, so an overlapping pull is refused instead of racing. */
@@ -1032,7 +1037,7 @@ struct graph_cursor {
 };
 
 /** Opens @p cursor on @p index: a scan without @p starts, else a walk beginning with the start
- *  keys' own rows, in the order given, each once. */
+ *  keys' own nodes, in the order given, each once. */
 template <typename handle_>
 void open_walk(graph_cursor<handle_>& cursor, std::type_identity_t<handle_> const& index, usearch_key_t const* starts,
                std::size_t starts_count) {
@@ -1041,21 +1046,21 @@ void open_walk(graph_cursor<handle_>& cursor, std::type_identity_t<handle_> cons
     if (!starts_count) return;
     cursor.seen.assign(cursor.limit, 0);
     for (std::size_t start = 0; start != starts_count; ++start)
-        for (std::size_t row : rows_under(index, starts[start]))
-            if (row < cursor.limit && !cursor.seen[row]) cursor.seen[row] = 1, cursor.order.push_back(row);
+        for (std::size_t node : entries_under(index, starts[start]))
+            if (node < cursor.limit && !cursor.seen[node]) cursor.seen[node] = 1, cursor.order.push_back(node);
 }
 
-/** The links of @p row, computed on first use and kept. */
+/** The links of @p node, computed on first use and kept. */
 template <typename handle_, typename score_>
-std::vector<std::size_t> const& walk_links(graph_cursor<handle_>& cursor, std::size_t row, score_ const& score) {
-    auto found = cursor.links.find(row);
+std::vector<std::size_t> const& walk_links(graph_cursor<handle_>& cursor, std::size_t node, score_ const& score) {
+    auto found = cursor.links.find(node);
     if (found == cursor.links.end())
-        found = cursor.links.emplace(row, links_of(*cursor.opened_on, row, cursor.limit, score)).first;
+        found = cursor.links.emplace(node, links_of(*cursor.opened_on, node, cursor.limit, score)).first;
     return found->second;
 }
 
 /**
- *  @brief The body of every modality's @c cursor_next: lands the next @c wanted rows' keys and,
+ *  @brief The body of every modality's @c cursor_next: lands the next @c wanted nodes' keys and,
  *      when asked, their links as a keys tape. A walk expands only as far as the pull needs.
  *
  *  A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
@@ -1065,10 +1070,10 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
                usearch_arena_handle_t& arena, usearch_outcome_t* outcome) {
     handle_ const& index = *cursor.opened_on;
     std::size_t const wanted = arguments.wanted;
-    std::vector<std::size_t> rows;
+    std::vector<std::size_t> nodes;
     if (cursor.seen.empty()) {
         std::size_t const taking = std::min(wanted, cursor.limit - std::min(cursor.position, cursor.limit));
-        for (std::size_t row = 0; row != taking; ++row) rows.push_back(cursor.position + row);
+        for (std::size_t offset = 0; offset != taking; ++offset) nodes.push_back(cursor.position + offset);
     }
     else {
         while (cursor.order.size() < cursor.position + wanted && cursor.expanded < cursor.order.size()) {
@@ -1077,74 +1082,74 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
             ++cursor.expanded;
         }
         std::size_t const end = std::min(cursor.order.size(), cursor.position + wanted);
-        rows.assign(cursor.order.begin() + static_cast<std::ptrdiff_t>(cursor.position),
-                    cursor.order.begin() + static_cast<std::ptrdiff_t>(end));
+        nodes.assign(cursor.order.begin() + static_cast<std::ptrdiff_t>(cursor.position),
+                     cursor.order.begin() + static_cast<std::ptrdiff_t>(end));
     }
     std::size_t total_links = 0;
     if (arguments.links)
-        for (std::size_t row : rows) total_links += walk_links(cursor, row, score).size();
-    usearch_key_t* const keys = carve<usearch_key_t>(arena, rows.size(), outcome);
-    std::size_t* const offsets = keys && arguments.links ? carve<std::size_t>(arena, rows.size() + 1, outcome)
+        for (std::size_t node : nodes) total_links += walk_links(cursor, node, score).size();
+    usearch_key_t* const keys = carve<usearch_key_t>(arena, nodes.size(), outcome);
+    std::size_t* const offsets = keys && arguments.links ? carve<std::size_t>(arena, nodes.size() + 1, outcome)
                                                          : nullptr;
     usearch_key_t* const linked_keys = offsets ? carve<usearch_key_t>(arena, total_links, outcome) : nullptr;
     if (!keys || (arguments.links && !linked_keys)) return;
-    for (std::size_t row = 0; row != rows.size(); ++row) keys[row] = index.entries[rows[row]].key;
+    for (std::size_t offset = 0; offset != nodes.size(); ++offset) keys[offset] = index.entries[nodes[offset]].key;
     if (arguments.links) {
         offsets[0] = 0;
-        for (std::size_t row = 0; row != rows.size(); ++row) {
-            std::vector<std::size_t> const& linked = walk_links(cursor, rows[row], score);
+        for (std::size_t offset = 0; offset != nodes.size(); ++offset) {
+            std::vector<std::size_t> const& linked = walk_links(cursor, nodes[offset], score);
             for (std::size_t link = 0; link != linked.size(); ++link)
-                linked_keys[offsets[row] + link] = index.entries[linked[link]].key;
-            offsets[row + 1] = offsets[row] + linked.size();
+                linked_keys[offsets[offset] + link] = index.entries[linked[link]].key;
+            offsets[offset + 1] = offsets[offset] + linked.size();
         }
         *arguments.links = {linked_keys, offsets};
     }
-    cursor.position += rows.size();
+    cursor.position += nodes.size();
     *arguments.keys = {keys, sizeof(usearch_key_t)};
-    *arguments.written = rows.size();
+    *arguments.written = nodes.size();
 }
 
 #pragma endregion Graph Walks
 
 #pragma region Splitting
 
-/** The part each row of @p index lands in, of @p parts: roots drawn from @p seed, each part grown
- *  breadth-first over the links from its root, one row per part per round and capped at an equal
- *  share, and every row no root reached joining the smallest part. */
+/** The part each node of @p index lands in, of @p parts: roots drawn from @p seed, each part grown
+ *  breadth-first over the links from its root, one node per part per round and capped at an equal
+ *  share, and every node no root reached joining the smallest part. */
 template <typename handle_, typename score_>
-std::vector<std::size_t> partition_rows(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
-    std::size_t const rows = index.entries.size();
+std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
+    std::size_t const nodes = index.entries.size();
     std::size_t const unassigned = std::numeric_limits<std::size_t>::max();
-    std::size_t const cap = divide_round_up(rows, parts);
-    std::vector<std::size_t> part_of(rows, unassigned), sizes(parts, 0), heads(parts, 0);
+    std::size_t const cap = divide_round_up(nodes, parts);
+    std::vector<std::size_t> part_of(nodes, unassigned), sizes(parts, 0), heads(parts, 0);
     std::vector<std::vector<std::size_t>> frontiers(parts);
-    std::vector<std::size_t> const order = drawing_order(rows, seed, [](std::size_t) { return true; });
-    for (std::size_t part = 0; part != std::min(parts, rows); ++part)
+    std::vector<std::size_t> const order = drawing_order(nodes, seed, [](std::size_t) { return true; });
+    for (std::size_t part = 0; part != std::min(parts, nodes); ++part)
         part_of[order[part]] = part, sizes[part] = 1, frontiers[part].push_back(order[part]);
     for (bool grew = true; grew;) {
         grew = false;
         for (std::size_t part = 0; part != parts; ++part) {
             if (heads[part] == frontiers[part].size() || sizes[part] >= cap) continue;
             std::size_t const from = frontiers[part][heads[part]++];
-            for (std::size_t linked : links_of(index, from, rows, score))
+            for (std::size_t linked : links_of(index, from, nodes, score))
                 if (part_of[linked] == unassigned && sizes[part] < cap)
                     part_of[linked] = part, ++sizes[part], frontiers[part].push_back(linked);
             grew = true;
         }
     }
-    for (std::size_t row = 0; row != rows; ++row) {
-        if (part_of[row] != unassigned) continue;
+    for (std::size_t node = 0; node != nodes; ++node) {
+        if (part_of[node] != unassigned) continue;
         std::size_t const smallest = static_cast<std::size_t>(std::min_element(sizes.begin(), sizes.end()) -
                                                               sizes.begin());
-        part_of[row] = smallest, ++sizes[smallest];
+        part_of[node] = smallest, ++sizes[smallest];
     }
     return part_of;
 }
 
 /**
- *  @brief Moves every row of @p index into @p receivers, part @c p of @ref partition_rows landing
- *      in receiver @c p in storage order, and empties @p index; false once @p outcome records why
- *      not, having moved nothing.
+ *  @brief Moves every entry of @p index into @p receivers, part @c p of @ref partition_nodes
+ *      landing in receiver @c p in storage order, and empties @p index; false once @p outcome
+ *      records why not, having moved nothing.
  *
  *  Every receiver must be a distinct, empty handle other than @p index whose options
  *  @p same_kind accepts beside the source's. Keeping no edges, a part loses none to rebase.
@@ -1176,15 +1181,15 @@ bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t see
                       "A receiver must share the index's kind and geometry", outcome))
             return false;
     }
-    std::vector<std::size_t> const part_of = partition_rows(index, receivers.size(), seed, score);
+    std::vector<std::size_t> const part_of = partition_nodes(index, receivers.size(), seed, score);
     std::vector<std::size_t> sizes(receivers.size(), 0);
     for (std::size_t part : part_of) ++sizes[part];
     for (std::size_t part = 0; part != receivers.size(); ++part)
         if (reject_if(!receivers[part]->accommodate(sizes[part]), usearch_status_out_of_memory_k,
                       "A receiver could not accommodate its part", outcome))
             return false;
-    for (std::size_t row = 0; row != part_of.size(); ++row)
-        receivers[part_of[row]]->append(index.entries[row].key, std::move(index.entries[row].payload));
+    for (std::size_t entry = 0; entry != part_of.size(); ++entry)
+        receivers[part_of[entry]]->append(index.entries[entry].key, std::move(index.entries[entry].payload));
     index.reset();
     return true;
 }
@@ -1209,7 +1214,7 @@ bool reject_receivers(arguments_ const& arguments, usearch_outcome_t* outcome) {
     return false;
 }
 
-/** The body of every modality's @c split: moves the rows as @ref split_into does, then reports a
+/** The body of every modality's @c split: moves the entries as @ref split_into does, then reports a
  *  closing sweep over every receiver, which re-selects nothing in a stand-in keeping no edges. */
 template <typename arguments_, typename handle_, typename score_, typename same_kind_>
 void land_split(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
@@ -1220,13 +1225,13 @@ void land_split(arguments_ const& arguments, handle_& index, score_ const& score
         return;
     std::span<receiver_t* const> const receivers {arguments.receivers, arguments.receivers ? arguments.count : 0};
     if (!split_into(index, receivers, arguments.seed, score, same_kind, outcome)) return;
-    std::size_t rows = 0, reached = 0;
-    for (receiver_t* receiver : receivers) rows += receiver->entries.size(), reached += !receiver->entries.empty();
+    std::size_t entries = 0, reached = 0;
+    for (receiver_t* receiver : receivers) entries += receiver->entries.size(), reached += !receiver->entries.empty();
     bool cancelled = false;
-    for (std::size_t row = 0; row != rows && !cancelled; ++row)
-        cancelled = !keep_going(arguments.progress, row + 1, rows);
-    if (arguments.stats) arguments.stats->visited_members = rows;
-    if (arguments.reachability) *arguments.reachability = {rows, rows, reached ? 1u : 0u};
+    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
+        cancelled = !keep_going(arguments.progress, entry + 1, entries);
+    if (arguments.stats) arguments.stats->visited_members = entries;
+    if (arguments.reachability) *arguments.reachability = {entries, entries, reached ? 1u : 0u};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -1234,7 +1239,7 @@ void land_split(arguments_ const& arguments, handle_& index, score_ const& score
 
 #pragma region Files
 
-/** The extent of a checkpoint, empty when that many rows cannot be addressed. Every
+/** The extent of a checkpoint, empty when that many entries cannot be addressed. Every
  *  modality's blob is a prefix followed by @p count entries of @p each bytes. */
 inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t count, std::size_t each) {
     if (each && count > (std::numeric_limits<std::size_t>::max() - prefix) / each) return std::nullopt;

@@ -1666,30 +1666,30 @@ PyTypeObject DeferredType = {
 
 #pragma region Executors
 
-static char const doc_Executor[] =                                                          //
-    "Executor\n"                                                                            //
-    "\n"                                                                                    //
-    "The workers a verb runs on, shared across indexes.\n"                                  //
-    "\n"                                                                                    //
-    "An executor owns host threads or device streams; an index owns rows. Keeping them\n"   //
-    "apart is what lets one pool serve several indexes, and what makes the cost of\n"       //
-    "spawning visible at the line that spawns rather than hidden in a constructor.\n"       //
-    "\n"                                                                                    //
-    "Construct one through the residency it drives - `for_ram`, `on_pool`, `for_vram` or\n" //
-    "`for_nvme` - since each spawns something different and takes different arguments.\n"   //
-    "Its residency must match that of every index it is handed to. A receiver names it:\n"  //
-    "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. Calls\n"  //
-    "start in submission order, a blocking one after every earlier submission finishes,\n"  //
-    "and a deferred one finding its `deferred_limit` table full raises `ContendedError`\n"  //
-    "once waited for. Used in a `with` block, it waits for its calls and closes on exit,\n" //
-    "or leaves both to the last GPU arena it made that is still alive.\n"                   //
-    "\n"                                                                                    //
-    "Example:\n"                                                                            //
-    "  >>> from array import array\n"                                                       //
-    "  >>> pool = usearch.Executor.for_ram(threads=8)\n"                                    //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                             //
-    "  >>> index.reserve(1)\n"                                                              //
-    "  >>> index.on(pool).insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                  //
+static char const doc_Executor[] =                                                           //
+    "Executor\n"                                                                             //
+    "\n"                                                                                     //
+    "The workers a verb runs on, shared across indexes.\n"                                   //
+    "\n"                                                                                     //
+    "An executor owns host threads or device streams; an index owns entries. Keeping them\n" //
+    "apart is what lets one pool serve several indexes, and what makes the cost of\n"        //
+    "spawning visible at the line that spawns rather than hidden in a constructor.\n"        //
+    "\n"                                                                                     //
+    "Construct one through the residency it drives - `for_ram`, `on_pool`, `for_vram` or\n"  //
+    "`for_nvme` - since each spawns something different and takes different arguments.\n"    //
+    "Its residency must match that of every index it is handed to. A receiver names it:\n"   //
+    "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. Calls\n"   //
+    "start in submission order, a blocking one after every earlier submission finishes,\n"   //
+    "and a deferred one finding its `deferred_limit` table full raises `ContendedError`\n"   //
+    "once waited for. Used in a `with` block, it waits for its calls and closes on exit,\n"  //
+    "or leaves both to the last GPU arena it made that is still alive.\n"                    //
+    "\n"                                                                                     //
+    "Example:\n"                                                                             //
+    "  >>> from array import array\n"                                                        //
+    "  >>> pool = usearch.Executor.for_ram(threads=8)\n"                                     //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                              //
+    "  >>> index.reserve(1)\n"                                                               //
+    "  >>> index.on(pool).insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                   //
     "  >>> pool.drain(usearch.Mood.PARKED)";
 
 /**
@@ -2547,14 +2547,14 @@ static PyObject* Matches_item(Matches* self, Py_ssize_t query_index) {
     // exceed the column width outright - so it bounds a read here rather than defining one.
     size_t const found = counts[query_index] < self->columns ? counts[query_index] : self->columns;
     size_t const offset = (size_t)query_index * self->columns;
-    PyObject* row = PyTuple_New((Py_ssize_t)found);
-    for (size_t match_index = 0; row && match_index != found; ++match_index) {
+    PyObject* matches = PyTuple_New((Py_ssize_t)found);
+    for (size_t match_index = 0; matches && match_index != found; ++match_index) {
         PyObject* const match = usearch_py_match_to_object(keys[offset + match_index], distances[offset + match_index]);
-        if (!match) Py_CLEAR(row);
-        else PyTuple_SET_ITEM(row, (Py_ssize_t)match_index, match);
+        if (!match) Py_CLEAR(matches);
+        else PyTuple_SET_ITEM(matches, (Py_ssize_t)match_index, match);
     }
     arena_buffer_unpin(keys_buffer);
-    return row;
+    return matches;
 }
 
 static PyObject* Matches_repr(Matches* self) {
@@ -2593,10 +2593,10 @@ PyTypeObject MatchesType = {
 typedef struct DenseProducts {
     PyObject ob_base;
 
-    /** The (rows + 1,) @c ArenaBuffer of Apache Arrow offsets. */
+    /** The (queries + 1,) @c ArenaBuffer of Apache Arrow offsets. */
     PyObject* offsets;
 
-    /** The (pairs, 16) @c ArenaBuffer naming each pair's indexed row. */
+    /** The (pairs, 16) @c ArenaBuffer naming each pair's indexed entry. */
     PyObject* keys;
 
     /** The (pairs,) @c ArenaBuffer of float64 products, positionally paired with @c keys. */
@@ -2605,31 +2605,32 @@ typedef struct DenseProducts {
     /** The pairs scored before the bound cut any, an @c int. */
     PyObject* required;
 
-    /** The left rows, one more than the offsets. */
-    size_t rows;
+    /** The left rows or queries, one fewer than the offsets. */
+    size_t queries;
 } DenseProducts;
 
-static char const doc_DenseProducts[] =                                                          //
-    "DenseProducts\n"                                                                            //
-    "\n"                                                                                         //
-    "The ragged sparse product `multiply` wrote into an `Arena`, viewing it until it rewinds:\n" //
-    "per left row, every pair its walk scored, in traversal order, ragged by Apache Arrow\n"     //
-    "offsets.\n"                                                                                 //
-    "\n"                                                                                         //
-    "`offsets` is a (rows + 1,) run of unsigned words, row `i` spanning pairs `offsets[i]`\n"    //
-    "up to `offsets[i + 1]`. `keys`, a (pairs, 16) run naming each pair's indexed row, and\n"    //
-    "`scores`, the (pairs,) float64 products, sit beside them. `required` counts the pairs\n"    //
-    "scored before `wanted` cut any. `len()` counts the left rows, and `row(i)` answers the\n"   //
-    "(keys, scores) of one. `maxsim` lands its documents alike, one run per query, largest\n"    //
-    "first, its `required` counting the documents scored before `wanted` cut any.";
+static char const doc_DenseProducts[] =                                                           //
+    "DenseProducts\n"                                                                             //
+    "\n"                                                                                          //
+    "The ragged sparse product `multiply` wrote into an `Arena`, viewing it until it rewinds:\n"  //
+    "per left row, every pair its walk scored, in traversal order, ragged by Apache Arrow\n"      //
+    "offsets.\n"                                                                                  //
+    "\n"                                                                                          //
+    "`offsets` is a (queries + 1,) run of unsigned words, left row `i` spanning pairs\n"          //
+    "`offsets[i]` up to `offsets[i + 1]`. `keys`, a (pairs, 16) run naming each pair's indexed\n" //
+    "entry, and `scores`, the (pairs,) float64 products, sit beside them. `required` counts\n"    //
+    "the pairs scored before `wanted` cut any. `len()` counts the left rows, and `query(i)`\n"    //
+    "answers the (keys, scores) of one. `maxsim` lands its documents alike, one run per\n"        //
+    "query, largest first, its `required` counting the documents scored before `wanted`\n"        //
+    "cut any.";
 
-PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* view, size_t rows, size_t pairs,
-                                  size_t required) {
-    Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)rows + 1};
+PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* view, size_t queries,
+                                  size_t pairs, size_t required) {
+    Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)queries + 1};
     Py_ssize_t const keys_shape[2] = {(Py_ssize_t)pairs, (Py_ssize_t)sizeof(usearch_key_t)};
     DenseProducts* products = PyObject_New(DenseProducts, &DenseProductsType);
     if (!products) return NULL;
-    products->rows = rows;
+    products->queries = queries;
     products->keys = products->scores = products->required = NULL;
     products->offsets = usearch_py_arena_buffer(&ArenaBufferType, arena, view->offsets, "N", sizeof(size_t),
                                                 offsets_shape, 1);
@@ -2651,19 +2652,19 @@ static void DenseProducts_dealloc(DenseProducts* self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static Py_ssize_t DenseProducts_length(DenseProducts* self) { return (Py_ssize_t)self->rows; }
+static Py_ssize_t DenseProducts_length(DenseProducts* self) { return (Py_ssize_t)self->queries; }
 
-static PyObject* DenseProducts_row(DenseProducts* self, PyObject* row_object) {
-    Py_ssize_t const row = PyNumber_AsSsize_t(row_object, PyExc_IndexError);
-    if (row == -1 && PyErr_Occurred()) return NULL;
-    if (row < 0 || (size_t)row >= self->rows) {
-        PyErr_SetString(PyExc_IndexError, "row index out of range");
+static PyObject* DenseProducts_query(DenseProducts* self, PyObject* query_object) {
+    Py_ssize_t const query = PyNumber_AsSsize_t(query_object, PyExc_IndexError);
+    if (query == -1 && PyErr_Occurred()) return NULL;
+    if (query < 0 || (size_t)query >= self->queries) {
+        PyErr_SetString(PyExc_IndexError, "query index out of range");
         return NULL;
     }
     ArenaBuffer const* const offsets_buffer = (ArenaBuffer const*)self->offsets;
     if (arena_buffer_pin(offsets_buffer) != 0) return NULL;
     size_t const* const offsets = (size_t const*)offsets_buffer->data;
-    size_t const begin = offsets[row], end = offsets[row + 1];
+    size_t const begin = offsets[query], end = offsets[query + 1];
     arena_buffer_unpin(offsets_buffer);
     PyObject* const keys = arena_buffer_slice((ArenaBuffer*)self->keys, begin, end);
     PyObject* const scores = keys ? arena_buffer_slice((ArenaBuffer*)self->scores, begin, end) : NULL;
@@ -2674,18 +2675,19 @@ static PyObject* DenseProducts_row(DenseProducts* self, PyObject* row_object) {
 }
 
 static PyObject* DenseProducts_repr(DenseProducts* self) {
-    return PyUnicode_FromFormat("DenseProducts(rows=%zu, required=%S)", self->rows, self->required);
+    return PyUnicode_FromFormat("DenseProducts(queries=%zu, required=%S)", self->queries, self->required);
 }
 
 static PyMethodDef DenseProducts_methods[] = {
-    {"row", (PyCFunction)DenseProducts_row, METH_O,
-     "The (keys, scores) of left row `i`, viewing the arena. Python-only."},
+    {"query", (PyCFunction)DenseProducts_query, METH_O,
+     "The (keys, scores) of left row or query `i`, viewing the arena. Python-only."},
     {NULL, NULL, 0, NULL},
 };
 
 static PyMemberDef DenseProducts_members[] = {
-    {"offsets", Py_T_OBJECT_EX, offsetof(DenseProducts, offsets), Py_READONLY, "(rows + 1,) Apache Arrow offsets."},
-    {"keys", Py_T_OBJECT_EX, offsetof(DenseProducts, keys), Py_READONLY, "(pairs, 16) identities of the indexed rows."},
+    {"offsets", Py_T_OBJECT_EX, offsetof(DenseProducts, offsets), Py_READONLY, "(queries + 1,) Apache Arrow offsets."},
+    {"keys", Py_T_OBJECT_EX, offsetof(DenseProducts, keys), Py_READONLY,
+     "(pairs, 16) identities of the indexed entries."},
     {"scores", Py_T_OBJECT_EX, offsetof(DenseProducts, scores), Py_READONLY, "(pairs,) float64 products."},
     {"required", Py_T_OBJECT_EX, offsetof(DenseProducts, required), Py_READONLY,
      "Pairs scored before the bound cut any."},

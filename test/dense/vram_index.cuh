@@ -37,11 +37,11 @@ inline constexpr bool vram_compiled = (vendor_ == gpu_vendor_t::nvidia_k && USEA
                                       (vendor_ == gpu_vendor_t::amd_k && USEARCH_ARCH_ROCM_) ||
                                       (vendor_ == gpu_vendor_t::apple_k && USEARCH_ARCH_METAL_);
 
-/** Builds and refines rows of 2 KB whatever the dtype, too wide for shared memory to fit a
+/** Builds and refines vectors of 2 KB whatever the dtype, too wide for shared memory to fit a
  *  builder's candidate cache, so every insert, refine and merge keeps its scratch in the warp's
- *  arena slice; the refine must reach every row and the walks must find them, then the ledger must
- *  balance. The rows are sign sketches, since independent values this wide leave every pair of
- *  rows near-equidistant. */
+ *  arena slice; the refine must reach every node and the walks must find them, then the ledger must
+ *  balance. The vectors are sign sketches, since independent values this wide leave every pair of
+ *  vectors near-equidistant. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -57,7 +57,7 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
         failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
                            status_t::success_k);
         // Apple keeps every builder's scratch in the arena, so only shared-memory devices can miss,
-        // even caching no more than a full row and the node's own.
+        // even caching no more than a full neighbor list and the node's own.
         if constexpr (requires { index.device_specs().shared_memory_per_block_bytes; })
             failures += expect(!index.build_scratch_fits(index.build_scratch_bytes_per_warp(connectivity_16_k + 1)));
         failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
@@ -65,7 +65,7 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
         auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0 &&
                            refined.changed_nodes <= refined.reselected_nodes);
-        // A dot graph's hubs can stall the heal short of every row.
+        // A dot graph's hubs can stall the heal short of every node.
         if constexpr (kernel_ != nk_kernel_dot_k) {
             failures += expect_eq(refined.health.reachable_nodes, dense_growth_nodes_k);
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
@@ -76,7 +76,7 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
 
 /** Builds and refines the growth set at an expansion past the widest register candidates of 32
  *  lanes, so both walk the arena frontier's rung: no tail entry drops, the walks still find the
- *  rows, and the ledger must balance. */
+ *  entries, and the ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -101,7 +101,7 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
         broad_refine.expansion_factor = 1024;
         failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context, broad_refine).status ==
                            status_t::success_k);
-        // The greedy over many tile blocks of a wide pool keeps every row findable.
+        // The greedy over many tile blocks of a wide pool keeps every entry findable.
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
     }

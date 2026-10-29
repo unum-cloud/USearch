@@ -13,7 +13,7 @@
  *  mixed-precision math to the same bits. One kit covers both metrics, picked at run time by the
  *  kernel kind the view carries, as dense quads kits pick their metric.
  *
- *  A stored row is its NumKong pack byte for byte, and a walk prepares one by copying it into its
+ *  A stored shape is its NumKong pack byte for byte, and a walk prepares one by copying it into its
  *  span, so the bodies read the same pack either way. The whole warp scores one candidate, its
  *  lanes splitting the outer cloud's points: a lane alone wins only on clouds of a few points,
  *  which a pack's bytes cannot tell apart from larger ones. A block walks each query while its four
@@ -52,24 +52,24 @@ struct vram_pack_query_t {
     byte_t const* pack;
 };
 
-/** Lays the pack @p row holds out in @p span, every lane of the warp copying 16 bytes at a time;
+/** Lays the pack @p shape holds out in @p span, every lane of the warp copying 16 bytes at a time;
  *  packs are whole alignment lines, so no tail remains. */
-__device__ __forceinline__ vram_pack_query_t vram_prepare_pack(basic::vram_row_t row, byte_t* span,
+__device__ __forceinline__ vram_pack_query_t vram_prepare_pack(basic::vram_entry_t shape, byte_t* span,
                                                                u32_t lane) noexcept {
     using line_t = uint4;
-    line_t const* const source = reinterpret_cast<line_t const*>(row.data);
+    line_t const* const source = reinterpret_cast<line_t const*>(shape.data);
     line_t* const target = reinterpret_cast<line_t*>(span);
-    for (u32_t line = lane; line < row.bytes / sizeof(line_t); line += cuda_warp_t::width_k)
+    for (u32_t line = lane; line < shape.bytes / sizeof(line_t); line += cuda_warp_t::width_k)
         target[line] = source[line];
     cuda_warp_t::sync();
     return {span};
 }
 
-/** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a row. */
+/** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape. */
 struct f16_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
-    inline static constexpr u32_t lanes_per_row_k = 32;
+    inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using query_t = vram_pack_query_t;
@@ -82,34 +82,36 @@ struct f16_ampere_shapes_kit_t {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
-        return vram_prepare_pack(row, span, lane);
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+        return vram_prepare_pack(shape, span, lane);
     }
 
     /** The gap between the two clouds' largest radii, from their headers alone, bounds Hausdorff;
      *  nothing bounds Chamfer. */
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, row.data) : 0;
+                                                             basic::vram_entry_t shape) noexcept {
+        return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, shape.data)
+                                                       : 0;
     }
 
     static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_row_t row, distance_t radius, u32_t lane) noexcept {
+                                                       basic::vram_entry_t shape, distance_t radius,
+                                                       u32_t lane) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
-                   ? nk_hausdorff_warp_packed_f16_cuda_(query.pack, row.data, radius, lane)
-                   : nk_chamfer_warp_packed_f16_cuda_(query.pack, row.data, radius, lane);
+                   ? nk_hausdorff_warp_packed_f16_cuda_(query.pack, shape.data, radius, lane)
+                   : nk_chamfer_warp_packed_f16_cuda_(query.pack, shape.data, radius, lane);
     }
 };
 
 #if NUMKONG_TARGET_BLACKWELL
 
-/** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a row, each lane scanning two
+/** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape, each lane scanning two
  *  inner points per step through packed f32x2 and the f16 widening folded into every difference;
  *  the Ampere kit's distances bit for bit. */
 struct f16_blackwell_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     inline static constexpr bool compiled_k = true;
-    inline static constexpr u32_t lanes_per_row_k = 32;
+    inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using query_t = vram_pack_query_t;
@@ -120,18 +122,20 @@ struct f16_blackwell_shapes_kit_t {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
-        return vram_prepare_pack(row, span, lane);
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+        return vram_prepare_pack(shape, span, lane);
     }
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, row.data) : 0;
+                                                             basic::vram_entry_t shape) noexcept {
+        return kernel == nk_kernel_hausdorffs_packed_k ? nk_hausdorff_bound_packed_f16_simt_(query.pack, shape.data)
+                                                       : 0;
     }
     static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_row_t row, distance_t radius, u32_t lane) noexcept {
+                                                       basic::vram_entry_t shape, distance_t radius,
+                                                       u32_t lane) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
-                   ? nk_hausdorff_warp_packed_f16_blackwell_(query.pack, row.data, radius, lane)
-                   : nk_chamfer_warp_packed_f16_blackwell_(query.pack, row.data, radius, lane);
+                   ? nk_hausdorff_warp_packed_f16_blackwell_(query.pack, shape.data, radius, lane)
+                   : nk_chamfer_warp_packed_f16_blackwell_(query.pack, shape.data, radius, lane);
     }
 };
 #else
@@ -144,11 +148,11 @@ struct f16_blackwell_shapes_kit_t {
 };
 #endif // NUMKONG_TARGET_BLACKWELL
 
-/** Chamfer and Hausdorff between f32 packs in f64 math, a warp to a row. */
+/** Chamfer and Hausdorff between f32 packs in f64 math, a warp to a shape. */
 struct f32_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
-    inline static constexpr u32_t lanes_per_row_k = 32;
+    inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
     using query_t = vram_pack_query_t;
@@ -159,20 +163,21 @@ struct f32_ampere_shapes_kit_t {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
-        return vram_prepare_pack(row, span, lane);
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t shape, byte_t* span, u32_t lane) noexcept {
+        return vram_prepare_pack(shape, span, lane);
     }
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t kernel, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
+                                                             basic::vram_entry_t shape) noexcept {
         return kernel == nk_kernel_hausdorffs_packed_k
-                   ? static_cast<distance_t>(nk_hausdorff_bound_packed_f32_simt_(query.pack, row.data))
+                   ? static_cast<distance_t>(nk_hausdorff_bound_packed_f32_simt_(query.pack, shape.data))
                    : 0;
     }
     static __device__ __forceinline__ distance_t score(nk_kernel_kind_t kernel, query_t const& query,
-                                                       basic::vram_row_t row, distance_t radius, u32_t lane) noexcept {
+                                                       basic::vram_entry_t shape, distance_t radius,
+                                                       u32_t lane) noexcept {
         return static_cast<distance_t>(kernel == nk_kernel_hausdorffs_packed_k
-                                           ? nk_hausdorff_warp_packed_f32_cuda_(query.pack, row.data, radius, lane)
-                                           : nk_chamfer_warp_packed_f32_cuda_(query.pack, row.data, radius, lane));
+                                           ? nk_hausdorff_warp_packed_f32_cuda_(query.pack, shape.data, radius, lane)
+                                           : nk_chamfer_warp_packed_f32_cuda_(query.pack, shape.data, radius, lane));
     }
 };
 
@@ -202,9 +207,9 @@ std::size_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
+u32_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
     using kit_t = typename shapes_ladder<scalar_, capability_>::kit_t;
-    return kit_t::lanes_per_row_k;
+    return kit_t::lanes_per_entry_k;
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>

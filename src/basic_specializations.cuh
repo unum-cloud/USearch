@@ -16,7 +16,7 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstring> // `std::memcpy` - a row an NVMe read borrowed, kept past it
+#include <cstring> // `std::memcpy` - an entry an NVMe read borrowed, kept past it
 
 #include <array>       // `std::array` - the one key a view scans for
 #include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
@@ -138,7 +138,7 @@ using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
 #pragma region Fan Outs
 
 /** Runs @p per_task over @p tasks taken in ascending order by the executor's threads; a refused
- *  fan-out runs them all on the calling thread, since a dispensed row must still land. */
+ *  fan-out runs them all on the calling thread, since a dispensed entry must still land. */
 template <template <typename> class atomic_ref_template_, typename per_task_type_>
 void drain_in_order(forkunion_executor_t& executor, std::size_t tasks, per_task_type_&& per_task) noexcept {
     if (!tasks) return;
@@ -214,7 +214,8 @@ struct thread_scratch {
  *  Everything fallible runs before the plan dispenses: the keys and values, the traversals and the
  *  metrics. A refused build frees every value built so far and leaves the index untouched. Once the
  *  plan dispensed, every position lands and the progress handler can no longer cancel. The plan
- *  routes the rows over the shards of @p indexes, and their walks run on each shard's own scratch.
+ *  routes the entries over the shards of @p indexes, and their walks run on each shard's own
+ *  scratch.
  */
 template <typename indexes_type_, typename make_metric_type_, typename build_type_>
 expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, std::size_t count,
@@ -235,15 +236,15 @@ expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_key
     growing_buffer<value_t, thread_allocator_t> values {caller};
     if (failed(identities.reserve_exactly(count)) || failed(values.reserve_exactly(count)))
         return {{}, status_t::bad_alloc_k};
-    for (std::size_t row = 0; row != count; ++row) {
-        identities.push_back_reserved(uuid_of(key_at(keys, row)));
+    for (std::size_t offset = 0; offset != count; ++offset) {
+        identities.push_back_reserved(uuid_of(key_at(keys, offset)));
         values.push_back_reserved(std::make_obj_using_allocator<value_t>(index.get_allocator()));
     }
     status_t built = status_t::success_k;
     drain_in_order<indexes_type_::template atomic_ref>(
-        executor, count, [&](std::size_t row, std::size_t thread) noexcept {
+        executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
             if (succeeded(typename indexes_type_::template atomic_ref<status_t>(built).load(std::memory_order_relaxed)))
-                keep_first_failure<indexes_type_::template atomic_ref>(built, build(row, values[row], thread));
+                keep_first_failure<indexes_type_::template atomic_ref>(built, build(offset, values[offset], thread));
         });
     if (failed(built)) return {{}, built};
 
@@ -252,24 +253,24 @@ expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_key
     basic::keep_diverse_t const selector {connectivity};
     typename indexes_type_::insert_config_t const config {expansion};
     drain_in_order<indexes_type_::template atomic_ref>(
-        executor, count, [&](std::size_t row, std::size_t thread) noexcept {
-            plan.insert(row, to_writable_span(values).subspan(row, 1), to_span(identities).subspan(row, 1),
+        executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
+            plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
                         scratch.metrics[thread], scratch.traversals[thread], selector, config);
-            [[maybe_unused]] continuation_t const heard = ticks(row);
+            [[maybe_unused]] continuation_t const heard = ticks(offset);
         });
     if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
     return {scratch.telemetry(), status_t::success_k};
 }
 
 /** The scratch of one call driving the plural @p plan over shards of @p shard_type_, a metric from
- *  @p make_metric per thread, sized for @p row_width, the widest row a walk copies, or the plan's
- *  connectivity when that is wider. */
+ *  @p make_metric per thread, sized for @p widest_list, the widest neighbor list a walk copies, or
+ *  the plan's connectivity when that is wider. */
 template <typename shard_type_, typename plan_type_, typename make_metric_type_>
 expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_refinement(
-    plan_type_ const& plan, std::size_t row_width, make_metric_type_&& make_metric,
+    plan_type_ const& plan, std::size_t widest_list, make_metric_type_&& make_metric,
     forkunion_executor_t& executor) noexcept {
     thread_scratch<shard_type_, made_metric<make_metric_type_>> scratch {executor};
-    status_t const prepared = scratch.prepare(executor, max_of(row_width, plan.connectivity()),
+    status_t const prepared = scratch.prepare(executor, max_of(widest_list, plan.connectivity()),
                                               plan.walk().expansion_factor, plan.audit().visible + plan.ticked,
                                               make_metric);
     return {std::move(scratch), prepared};
@@ -368,12 +369,13 @@ status_t snapshot_shards(indexes_type_ const& indexes, watermarks_type_& waterma
 
 /**
  *  @brief Searches @p count queries on the executor's threads, each built by @p query_of, which
- *      hands the query it prepared to a continuation, and lands every row in @p landing.
+ *      hands the query it prepared to a continuation, and lands every query's matches in
+ *      @p landing.
  *
- *  A predicate narrows each row to the entries it admits: a walk routes past the rest until the
- *  admitted ones fill its breadth, and a scan asks only about rows that would enter the row. Every
- *  row walks each shard of @p indexes below one snapshot taken for the whole call, so a batch
- *  counts in every row on all its shards or none, and lands the merged ranking. A handler
+ *  A predicate narrows each query to the entries it admits: a walk routes past the rest until the
+ *  admitted ones fill its breadth, and a scan asks only about entries that would enter the ranking.
+ *  Every query walks each shard of @p indexes below one snapshot taken for the whole call, so a
+ *  batch counts in every query on all its shards or none, and lands the merged ranking. A handler
  *  answering cancel stops the queries no thread has taken yet.
  */
 template <typename indexes_type_, typename make_metric_type_, typename query_of_type_>
@@ -390,7 +392,7 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
     using metric_t = made_metric<make_metric_type_>;
     using traversal_context_t = typename thread_scratch<shard_t, metric_t>::traversal_context_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the merges resolve them");
-    // Pools narrower than the row they fill would short every row.
+    // Pools narrower than the ranking they fill would short every query.
     std::size_t const breadth = max_of(expansion ? expansion : std::size_t(connectivity_32_k) * 2, wanted);
     thread_scratch<shard_t, metric_t> scratch {executor};
     if (status_t const prepared = scratch.prepare(executor, connectivity, breadth, indexes.size(), make_metric);
@@ -409,16 +411,16 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
         [&]<typename admits_of_type_>(admits_of_type_&& admits_of) noexcept {
             using admits_t = std::invoke_result_t<admits_of_type_&, std::size_t>;
             drain_in_order<indexes_type_::template atomic_ref>(
-                executor, count, [&](std::size_t row, std::size_t thread) noexcept {
+                executor, count, [&](std::size_t query_index, std::size_t thread) noexcept {
                     if (failed(typename indexes_type_::template atomic_ref<status_t>(searched).load(
                             std::memory_order_relaxed)))
                         return;
                     traversal_context_t& context = scratch.traversals[thread];
                     metric_t& metric = scratch.metrics[thread];
                     admits_t admits = admits_of(thread);
-                    std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys) + row * wanted, wanted};
+                    std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys) + query_index * wanted, wanted};
                     std::span<distance_t> const scores {distances.data() + thread * wanted, wanted};
-                    status_t const answered = query_of(row, thread, [&](auto const& query) noexcept {
+                    status_t const answered = query_of(query_index, thread, [&](auto const& query) noexcept {
                         auto const [found, status] = scanning
                                                          ? indexes.scan(query, metric, admits, context,
                                                                         to_span(watermarks), keys, scores)
@@ -426,13 +428,13 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
                                                                              to_span(watermarks), keys, scores);
                         if (failed(status)) return status;
                         for (std::size_t match = 0; match != found; ++match)
-                            landing.scores[row * wanted + match] = static_cast<usearch_distance_t>(scores[match]) *
-                                                                   distance_unit<metric_t>;
-                        landing.counts[row] = found;
+                            landing.scores[query_index * wanted + match] =
+                                static_cast<usearch_distance_t>(scores[match]) * distance_unit<metric_t>;
+                        landing.counts[query_index] = found;
                         return status;
                     });
                     keep_first_failure<indexes_type_::template atomic_ref>(searched, answered);
-                    if (ticks(row) == continuation_t::cancel_k)
+                    if (ticks(query_index) == continuation_t::cancel_k)
                         keep_first_failure<indexes_type_::template atomic_ref>(searched, status_t::cancelled_k);
                 });
         });
@@ -466,12 +468,12 @@ void entries_under(indexes_type_ const& indexes, usearch_key_t key,
 /**
  *  @brief Ranks @p count queries on an NVMe view a progress step at a time, each step one call of
  *      the view with the walks of many queries in flight on every thread of @p executor, and lands
- *      every row in @p landing; a handler answering cancel stops the steps not begun.
+ *      every query's matches in @p landing; a handler answering cancel stops the steps not begun.
  *
- *  Query @c i is built by @p query_of, and @p relation tests the stored values a row would admit;
+ *  Query @c i is built by @p query_of, and @p relation tests the stored values a query would admit;
  *  a per-thread relation family is rebuilt every step, as every step rewinds the arenas. A
- *  predicate narrows each row to the entries it admits, while every row still routes the walks: a
- *  cheap one is asked a quad at a time, and an expensive one once per completion batch of each
+ *  predicate narrows each query to the entries it admits, while every entry still routes the walks:
+ *  a cheap one is asked a quad at a time, and an expensive one once per completion batch of each
  *  executor thread's walks, or once per staged round of each thread's scan.
  */
 template <typename index_type_, typename make_metric_type_, typename query_of_type_, typename relation_type_>
@@ -484,7 +486,7 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
     using key_t = typename index_type_::key_t;
     using search_result_t = typename index_type_::search_result_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walks resolve them");
-    // Pools narrower than the row they fill would short every row.
+    // Pools narrower than the ranking they fill would short every query.
     typename index_type_::search_config_t const config {max_of(index.non_zero_expansion_factor({expansion}), wanted)};
     bool const scanning = traversal == usearch_traversal_scan_k;
     dummy_predicate_t unfiltered;
@@ -496,8 +498,8 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
         std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys) + first * wanted, taking * wanted};
         std::span<usearch_distance_t> const scores {landing.scores + first * wanted, taking * wanted};
         std::span<std::size_t> const counts {landing.counts + first, taking};
-        auto step_query_of = [&](std::size_t row, thread_allocator_t const& allocator) noexcept {
-            return query_of(first + row, allocator);
+        auto step_query_of = [&](std::size_t query_index, thread_allocator_t const& allocator) noexcept {
+            return query_of(first + query_index, allocator);
         };
         if constexpr (requires { relation.prepare(executor); })
             if (status_t const prepared = relation.prepare(executor); failed(prepared)) return {telemetry, prepared};
@@ -535,10 +537,12 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
 
 /**
  *  @brief Searches @p count queries on an NVMe view, the walks of many in flight on every thread of
- *      @p executor, each query built by @p query_of as the view takes it, and lands every row in
- *      @p landing; progress lands a step at a time, as @ref rank_nvme_queries ranks them.
+ *      @p executor, each query built by @p query_of as the view takes it, and lands every query's
+ *      matches in @p landing; progress lands a step at a time, as @ref rank_nvme_queries ranks
+ *      them.
  *
- *  A predicate narrows each row to the entries it admits, while every row still routes the walks.
+ *  A predicate narrows each query to the entries it admits, while every entry still routes the
+ *  walks.
  */
 template <typename index_type_, typename make_metric_type_, typename query_of_type_>
 expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t count, std::size_t wanted,
@@ -552,9 +556,9 @@ expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t c
                                                                      predicate, make_metric, query_of, relation,
                                                                      landing, ticks, executor);
     if (failed(ranked.status)) return ranked;
-    for (std::size_t row = 0; row != count; ++row)
-        for (std::size_t match = 0; match != landing.counts[row]; ++match)
-            landing.scores[row * wanted + match] *= distance_unit<metric_t>;
+    for (std::size_t query = 0; query != count; ++query)
+        for (std::size_t match = 0; match != landing.counts[query]; ++match)
+            landing.scores[query * wanted + match] *= distance_unit<metric_t>;
     return ranked;
 }
 
@@ -573,15 +577,16 @@ status_t values_under(index_type_ const& index, usearch_key_t key, nvme_executor
     return index.get(identities, held, entries, executor, on_value);
 }
 
-/** Copies @p row, borrowed for one read, into thread @p thread 's arena as @p kept, which outlives
- *  the read until the executor's next reservation. */
-inline status_t keep_row(nvme_executor_t& executor, std::size_t thread, bytes_view_t row, bytes_view_t& kept) noexcept {
+/** Copies @p entry, borrowed for one read, into thread @p thread 's arena as @p kept, which
+ *  outlives the read until the executor's next reservation. */
+inline status_t keep_entry(nvme_executor_t& executor, std::size_t thread, bytes_view_t entry,
+                           bytes_view_t& kept) noexcept {
     kept = {};
-    if (row.empty()) return status_t::success_k;
-    byte_t* const copy = reinterpret_cast<byte_t*>(executor.arena(thread).allocate(row.size(), default_alignment_k));
+    if (entry.empty()) return status_t::success_k;
+    byte_t* const copy = reinterpret_cast<byte_t*>(executor.arena(thread).allocate(entry.size(), default_alignment_k));
     if (!copy) return status_t::bad_alloc_k;
-    std::memcpy(copy, row.data(), row.size());
-    kept = {copy, row.size()};
+    std::memcpy(copy, entry.data(), entry.size());
+    kept = {copy, entry.size()};
     return status_t::success_k;
 }
 
@@ -720,7 +725,7 @@ void pull_entries(variant_type_& variant, ram_cursor_of<variant_type_>& cursor, 
                   growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
     using key_t = typename variant_type_::index_t::key_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the cursor reads them");
-    // No more rows remain than every shard publishes now, so the carve never outgrows the read.
+    // No more entries remain than every shard publishes now, so the carve never outgrows the read.
     std::size_t const taking = min_of(variant.index.size(), arguments.wanted);
     usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
     if (taking && !keys)
@@ -736,21 +741,21 @@ void pull_entries(variant_type_& variant, ram_cursor_of<variant_type_>& cursor, 
 /** Pulls the next keys of an NVMe view into @p memory through the executor. */
 template <typename traits_type_, typename variant_type_, typename arguments_type_>
     requires is_nvme_index<variant_type_>
-void pull_entries(variant_type_& variant, std::size_t& row, arguments_type_ const& arguments,
+void pull_entries(variant_type_& variant, std::size_t& offset, arguments_type_ const& arguments,
                   growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
     usearch_executor_handle_t call_executor;
     nvme_executor_t* const executor = executor_of(variant, arguments.executor, call_executor, outcome);
     if (!executor) return;
-    std::size_t const taking = min_of(variant.index.size() - row, arguments.wanted);
+    std::size_t const taking = min_of(variant.index.size() - offset, arguments.wanted);
     if (!taking) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
     usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
     if (!keys) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
     // The values the read passes along stay unread, as a pull lands keys alone.
     auto skip = [](std::size_t, std::size_t, auto const&) noexcept {};
     std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-    if (status_t const read = variant.index.read_rows(row, identities, *executor, skip); failed(read))
+    if (status_t const read = variant.index.read_entries(offset, identities, *executor, skip); failed(read))
         return propagate_error(read, outcome), void();
-    row += taking;
+    offset += taking;
     *arguments.keys = {keys, sizeof(usearch_key_t)};
     *arguments.written = taking;
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -776,8 +781,8 @@ struct vram_nvidia_refine_plan_t {
     expected<basic::refine_result_t> finish() const noexcept { return {{}, status_t::unsupported_k}; }
 };
 
-/** Reserves @p entries rows of @p connectivity neighbors and @p bytes of values over every shard of
- *  a GPU variant's @p index, freezing the connectivity. */
+/** Reserves @p entries nodes of @p connectivity neighbors and @p bytes of values over every shard
+ *  of a GPU variant's @p index, freezing the connectivity. */
 template <typename indexes_type_>
 status_t vram_nvidia_reserve(indexes_type_& index, std::size_t entries, std::size_t connectivity,
                              std::size_t bytes) noexcept {
@@ -798,7 +803,7 @@ status_t vram_nvidia_save(indexes_type_& index, std::string_view path, codec_typ
     return index.save(path, codec, executor, config, metric, ticks);
 }
 
-/** Inserts the rows of @p tape under the keys of @p keys_view as one batch over the shards of
+/** Inserts the entries of @p tape under the keys of @p keys_view as one batch over the shards of
  *  @p index, freezing @p connectivity first unless a reservation did. */
 template <typename indexes_type_>
 expected<traversal_telemetry_t> vram_nvidia_insert(indexes_type_& index, usearch_keys_view_t keys_view,
@@ -813,7 +818,7 @@ expected<traversal_telemetry_t> vram_nvidia_insert(indexes_type_& index, usearch
             return {{}, reserved};
     growing_buffer<us::utilities::uuid_t, forkunion_allocator_t> keys {forkunion_allocator_t {no_memory_domain_k}};
     if (failed(keys.reserve_exactly(count))) return {{}, status_t::bad_alloc_k};
-    for (std::size_t row = 0; row != count; ++row) keys.push_back_reserved(uuid_of(key_at(keys_view, row)));
+    for (std::size_t offset = 0; offset != count; ++offset) keys.push_back_reserved(uuid_of(key_at(keys_view, offset)));
     typename indexes_type_::insert_config_t const config {static_cast<u32_t>(expansion)};
     auto const [inserted, status] = index.insert(to_span(keys), tape, executor, config);
     if (failed(status)) return {{}, status};
@@ -825,7 +830,7 @@ expected<traversal_telemetry_t> vram_nvidia_insert(indexes_type_& index, usearch
 }
 
 /** Searches the queries of @p queries a progress step at a time, each step one merged search over
- *  every shard of @p index, landing each row's matches in @p landing on host pages; a handler
+ *  every shard of @p index, landing each query's matches in @p landing on host pages; a handler
  *  answering cancel stops the steps not begun. A search wanting no matches answers before reading
  *  a query. */
 template <typename indexes_type_>
@@ -836,7 +841,7 @@ expected<traversal_telemetry_t> vram_nvidia_search(indexes_type_& index, tape_vi
     using face_t = typename indexes_type_::index_t;
     std::size_t const count = queries.size();
     if (!wanted) {
-        for (std::size_t row = 0; row != count; ++row) landing.counts[row] = 0;
+        for (std::size_t query = 0; query != count; ++query) landing.counts[query] = 0;
         return {{}, status_t::success_k};
     }
     using key_t = us::utilities::uuid_t;
@@ -955,9 +960,9 @@ struct specialized_variant {
                        usearch_outcome_t* outcome) noexcept {
         return bodies_t::freeze(of(variant), geometry, input, outcome);
     }
-    static void bound_shards(void* variant, std::size_t rows) noexcept {
-        if constexpr (requires(variant_t& typed) { typed.index.bound_shards(rows); })
-            of(variant).index.bound_shards(rows);
+    static void bound_shards(void* variant, std::size_t nodes) noexcept {
+        if constexpr (requires(variant_t& typed) { typed.index.bound_shards(nodes); })
+            of(variant).index.bound_shards(nodes);
     }
     static status_t emplace(void* variant, int placement) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
@@ -1056,7 +1061,7 @@ struct specialized_variant {
         return of(variant).sample(arguments);
     }
 
-    /** Whether the variant at @p donor shares this one's geometry, so its rows land here. */
+    /** Whether the variant at @p donor shares this one's geometry, so its nodes land here. */
     static bool matches(void const* variant, void const* donor) noexcept {
         return bodies_t::matches(of(variant), of(donor));
     }
@@ -1103,8 +1108,8 @@ struct specialized_variant {
         else return refined_report(static_cast<basic_refinement_state<variant_t>*>(refining)->plan.finish().value);
     }
 
-    /** Skips the re-selection the refinement left, heals what it strands, and reports; one whose
-     *  donors have not all landed heals nothing and reports zeros. */
+    /** Skips the re-selection the refinement left, heals the islands it leaves, and reports; one
+     *  whose donors have not all landed heals nothing and reports zeros. */
     static expected<basic_refined_t> refinement_finish(void* variant, void* refining, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
         else {
@@ -1123,8 +1128,8 @@ struct specialized_variant {
         if constexpr (!viewed_k) delete static_cast<basic_refinement_state<variant_t>*>(refining);
     }
 
-    /** Opens a cursor on a RAM variant's snapshot or an NVMe view's first row; null once @p outcome
-     *  records why not. */
+    /** Opens a cursor on a RAM variant's snapshot or an NVMe view's first entry; null once
+     *  @p outcome records why not. */
     static void* cursor_open(void* variant, usearch_outcome_t* outcome) noexcept {
         void* opened = nullptr;
         if constexpr (is_ram_index<variant_t>) opened = new (std::nothrow) ram_cursor_of<variant_t>(of(variant).index);

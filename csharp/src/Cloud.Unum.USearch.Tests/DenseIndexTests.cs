@@ -754,13 +754,13 @@ public sealed class DenseIndexTests : IDisposable
 
         using Arena arena = new();
         Matches found = index.On(this._pool).Search(Rows(RowOf(1f)), wanted: 1, arena);
-        MatchesRow row = found[0];
-        Assert.Equal(Key.FromUInt64(1), row.Keys[0]);
+        QueryMatches query = found[0];
+        Assert.Equal(Key.FromUInt64(1), query.Keys[0]);
 
         // Any verb reuses any arena, and the next call's rewind retires every earlier view.
         DenseVectors second = index.On(this._pool).Get(2UL, arena);
         Assert.Equal(RowOf(2f), second.Row<float>(0).ToArray());
-        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => row.Count).Status);
+        Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => query.Count).Status);
         Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => found[0].Keys.Length).Status);
 
         // A refused call rewinds the arena all the same.
@@ -865,7 +865,7 @@ public sealed class DenseIndexTests : IDisposable
 
         using (stream)
         {
-            MatchesRow pulled = stream.Next(2, this._arena);
+            QueryMatches pulled = stream.Next(2, this._arena);
             Assert.Equal(2, pulled.Count);
             Assert.Equal(Key.FromUInt64(1), pulled.Keys[0]);
             Assert.Equal(Key.FromUInt64(2), pulled.Keys[1]);

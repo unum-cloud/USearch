@@ -32,7 +32,7 @@
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
 #include <numkong/shapes.hpp> // `nk::shapes_packed`
-#include <numkong/tensor.hpp> // `nk::matrix_view` - a row's borrowed cloud
+#include <numkong/tensor.hpp> // `nk::matrix_view` - a stored shape's borrowed points
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the default placement
@@ -130,13 +130,13 @@ struct codec {
         return status_t::success_k;
     }
 
-    /** What @ref view hands out for a stored row. */
+    /** What @ref view hands out for a stored shape. */
     using view_t = nk::matrix_view<scalar_t>;
 
-    /** The @b [points,3] cloud a stored @p row holds, borrowed: every whole point its bytes
+    /** The @b [points,3] coordinates a stored @p shape holds, borrowed: every whole point its bytes
      *  hold. */
-    view_t view(bytes_view_t row) const noexcept {
-        std::span<scalar_t const> const coordinates = elements_of<scalar_t>(row);
+    view_t view(bytes_view_t shape) const noexcept {
+        std::span<scalar_t const> const coordinates = elements_of<scalar_t>(shape);
         return nk::matrix_view<scalar_t>(coordinates.data(), coordinates.size() / 3, 3);
     }
 };
@@ -144,7 +144,7 @@ struct codec {
 /**
  *  @brief The shapes RAM index: the basic graph over packs of @p kit_type_ 's scalar, scored in its
  *      distance type.
- *  @tparam allocator_type_ Places the node records, the neighbor rows and the key map, and,
+ *  @tparam allocator_type_ Places the node records, the neighbor lists and the key map, and,
  *      rebound, every value.
  */
 template <typename kit_type_, typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,

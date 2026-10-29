@@ -424,10 +424,10 @@ struct nvme_indexes {
         if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (rows_count && left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
-        using row_t = multiply_row<product_type_, std::remove_reference_t<predicate_type_>>;
-        typename row_t::inputs_t const inputs {left, &predicate, keys, products, counts};
-        return walk_rows_<row_t>(rows_count, config, inputs, staged_rows_bytes(vector_dtype_k, 1, left.columns), counts,
-                                 latencies, executor);
+        using query_t = multiply_query<product_type_, std::remove_reference_t<predicate_type_>>;
+        typename query_t::inputs_t const inputs {left, &predicate, keys, products, counts};
+        return walk_queries_<query_t>(rows_count, config, inputs, staged_rows_bytes(vector_dtype_k, 1, left.columns),
+                                      counts, latencies, executor);
     }
 
     /** NumKong's aggregation over the stored scalar's dots, what a MaxSim total sums in. */
@@ -500,7 +500,7 @@ struct nvme_indexes {
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
         using slice_t = arena_allocator<byte_t>;
-        using row_t = search_row<dummy_heads_t, std::remove_reference_t<predicate_type_>, distance_t>;
+        using query_t = search_query<dummy_heads_t, std::remove_reference_t<predicate_type_>, distance_t>;
         if (query_offsets.empty()) return {{}, status_t::config_mismatch_k};
         std::size_t const queries_count = query_offsets.size() - 1, threads = executor.size();
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
@@ -517,7 +517,7 @@ struct nvme_indexes {
         // One call serves every pass: a walk's engines and arenas, then two scans.
         bool const scanning = config.traversal == traversal_t::scan_k;
         walk_shape_t const shape = scanning ? walk_shape_t {}
-                                            : index_t::template walk_shape_<row_t>(
+                                            : index_t::template walk_shape_<query_t>(
                                                   to_span(media_), to_span(parts_), kernel_, executor.queue_depth(),
                                                   threads, rows_count, non_zero_expansion_factor(config),
                                                   staged_rows_bytes(vector_dtype_k, 1, queries.columns));
@@ -618,11 +618,11 @@ struct nvme_indexes {
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
         if (columns != dimensions()) return {{}, status_t::config_mismatch_k};
-        using row_t = attend_row<value_lookup_type_, std::remove_reference_t<predicate_type_>>;
-        typename row_t::inputs_t const inputs {queries,     head_count, &value_lookup, &predicate,
-                                               score_scale, outputs,    carry};
-        expected<search_result_t> attended = walk_rows_<row_t>(rows_count / head_count, config, inputs,
-                                                               row_t::staged_bytes(inputs), {}, latencies, executor);
+        using query_t = attend_query<value_lookup_type_, std::remove_reference_t<predicate_type_>>;
+        typename query_t::inputs_t const inputs {queries,     head_count, &value_lookup, &predicate,
+                                                 score_scale, outputs,    carry};
+        expected<search_result_t> attended = walk_queries_<query_t>(
+            rows_count / head_count, config, inputs, query_t::staged_bytes(inputs), {}, latencies, executor);
         if (attended) attended.value.count = rows_count;
         return attended;
     }
@@ -814,7 +814,7 @@ struct nvme_indexes {
      *  each walk's admitted set instead. Each slot imports its query into its own staging, and
      *  distances land as @p score_type_. */
     template <typename heads_type_, typename predicate_type_, typename score_type_>
-    struct search_row {
+    struct search_query {
         using key_t = key_type_;
         using fold_t = dummy_fold_t;
 
@@ -845,7 +845,7 @@ struct nvme_indexes {
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        search_row(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
+        search_query(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
             : inputs(inputs), locators(allocator), allocator(allocator) {}
 
         status_t reserve(std::size_t, std::size_t) noexcept {
@@ -854,8 +854,8 @@ struct nvme_indexes {
             return status_t::success_k;
         }
 
-        void prime_row(std::size_t new_row) noexcept {
-            row = new_row;
+        void prime_query(std::size_t new_query_index) noexcept {
+            row = new_query_index;
             found = 0;
             query = import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(inputs.queries, row, 1,
                                                                                    inputs.kernel, staged)
@@ -887,7 +887,7 @@ struct nvme_indexes {
         std::size_t output_count() const noexcept { return found; }
         nvme_locator<u32_t> output_locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve_output_key(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
-        status_t finish_row() noexcept {
+        status_t finish_query() noexcept {
             inputs.counts[row] = found;
             return status_t::success_k;
         }
@@ -912,7 +912,7 @@ struct nvme_indexes {
      *  fold appends only the pairs @p predicate_type_ admits, by key. Each slot imports its
      *  left-hand row into its own staging. */
     template <typename product_type_, typename predicate_type_>
-    struct multiply_row {
+    struct multiply_query {
         using key_t = key_type_;
         inline static constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
         using fold_t = std::conditional_t<
@@ -939,7 +939,7 @@ struct nvme_indexes {
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        multiply_row(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
+        multiply_query(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
             : inputs(inputs), locators(allocator),
               staged(allocator.allocate(staged_rows_bytes(vector_dtype_k, 1, inputs.left.columns))),
               pairs {{}, {}, {}, *inputs.predicate} {}
@@ -949,8 +949,8 @@ struct nvme_indexes {
                        ? status_t::bad_alloc_k
                        : status_t::success_k;
         }
-        void prime_row(std::size_t new_row) noexcept {
-            row = new_row;
+        void prime_query(std::size_t new_query_index) noexcept {
+            row = new_query_index;
             // A product walks by dot, which never narrows at unit RMS.
             query = import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(inputs.left, row, 1, nk_kernel_dot_k,
                                                                                    staged)
@@ -989,7 +989,7 @@ struct nvme_indexes {
         std::size_t output_count() const noexcept { return filtered_k ? 0 : pairs.written; }
         nvme_locator<u32_t> output_locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve_output_key(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
-        status_t finish_row() noexcept {
+        status_t finish_query() noexcept {
             inputs.counts[row] = pairs.scored;
             return status_t::success_k;
         }
@@ -1011,7 +1011,7 @@ struct nvme_indexes {
      *  its own staging, past them the @c f32 rows and softmax states that outputs of another layout
      *  or an empty carry cannot hold. */
     template <typename value_lookup_type_, typename predicate_type_>
-    struct attend_row {
+    struct attend_query {
         using key_t = key_type_;
         using fold_t = dummy_fold_t;
         using rescoring_t = attention_rescoring<quads_kit_t, elementwise_kit_t, value_lookup_type_, predicate_type_&>;
@@ -1038,7 +1038,7 @@ struct nvme_indexes {
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        attend_row(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
+        attend_query(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
             : inputs(inputs), staged(allocator.allocate(staged_bytes(inputs))) {}
 
         /** Bytes one slot stages: the token's imported heads, then their @c f32 rows and states. */
@@ -1074,7 +1074,7 @@ struct nvme_indexes {
         status_t reserve(std::size_t, std::size_t) noexcept {
             return staged ? status_t::success_k : status_t::bad_alloc_k;
         }
-        void prime_row(std::size_t new_token) noexcept {
+        void prime_query(std::size_t new_token) noexcept {
             token = new_token;
             status = status_t::success_k;
             // Attention walks by dot, which never narrows at unit RMS.
@@ -1095,7 +1095,7 @@ struct nvme_indexes {
         std::size_t output_count() const noexcept { return 0; }
         nvme_locator<u32_t> output_locator(std::size_t) const noexcept { return {}; }
         void resolve_output_key(std::size_t, key_t const&) noexcept {}
-        status_t finish_row() noexcept {
+        status_t finish_query() noexcept {
             if (failed(status)) return status;
             rescoring_t const attention = rescoring();
             attention.finish();
@@ -1107,16 +1107,16 @@ struct nvme_indexes {
         }
     };
 
-    /** Walks @p rows_count rows of @p row_type_ over every shard, each walk as wide as @p config
+    /** Walks @p rows_count rows of @p query_type_ over every shard, each walk as wide as @p config
      *  asks and each row staging @p staged_bytes of imported queries. */
-    template <typename row_type_>
-    expected<search_result_t> walk_rows_(std::size_t rows_count, search_config_t config,
-                                         typename row_type_::inputs_t const& inputs, std::size_t staged_bytes,
-                                         std::span<std::size_t const> counts, std::span<u64_t> latencies,
-                                         executor_t& executor) noexcept {
-        return index_t::template walk_rows_<row_type_>(to_span(media_), to_span(parts_), kernel_, executor, rows_count,
-                                                       non_zero_expansion_factor(config), inputs, staged_bytes, counts,
-                                                       latencies);
+    template <typename query_type_>
+    expected<search_result_t> walk_queries_(std::size_t rows_count, search_config_t config,
+                                            typename query_type_::inputs_t const& inputs, std::size_t staged_bytes,
+                                            std::span<std::size_t const> counts, std::span<u64_t> latencies,
+                                            executor_t& executor) noexcept {
+        return index_t::template walk_queries_<query_type_>(to_span(media_), to_span(parts_), kernel_, executor,
+                                                            rows_count, non_zero_expansion_factor(config), inputs,
+                                                            staged_bytes, counts, latencies);
     }
 
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
@@ -1131,11 +1131,12 @@ struct nvme_indexes {
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (queries_count && queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
-        using row_t = search_row<heads_type_, predicate_type_, score_type_>;
-        typename row_t::inputs_t const inputs {
+        using query_t = search_query<heads_type_, predicate_type_, score_type_>;
+        typename query_t::inputs_t const inputs {
             queries, kernel_, &heads, &predicate, non_zero_expansion_factor(config), keys, distances, counts};
-        return walk_rows_<row_t>(queries_count, config, inputs, staged_rows_bytes(vector_dtype_k, 1, queries.columns),
-                                 counts, latencies, executor);
+        return walk_queries_<query_t>(queries_count, config, inputs,
+                                      staged_rows_bytes(vector_dtype_k, 1, queries.columns), counts, latencies,
+                                      executor);
     }
 
 #pragma endregion Rows
@@ -1683,7 +1684,7 @@ struct nvme_indexes {
                     for (std::size_t lane = 0; lane != lanes; ++lane)
                         contends[lane] |= lane_distances[lane] < share.thresholds[query];
                 }
-                auto keep_row = [&](scan_payload_t contender) noexcept {
+                auto keep_entry = [&](scan_payload_t contender) noexcept {
                     for (std::size_t query = 0; query != queries_count; ++query) {
                         distance_t const distance = share.quad_distances[query * quad_lanes_k + contender - row];
                         if (distance < share.thresholds[query])
@@ -1698,8 +1699,8 @@ struct nvme_indexes {
                     nodes[filled] = static_cast<node_id_t>(row + lane);
                     payloads[filled++] = static_cast<scan_payload_t>(row + lane);
                 }
-                ask_contenders(admits, nodes, payloads, filled, keep_row);
-                settle_predicate(admits, keep_row);
+                ask_contenders(admits, nodes, payloads, filled, keep_entry);
+                settle_predicate(admits, keep_entry);
             }
         };
         auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column), describe,
@@ -1764,7 +1765,7 @@ struct nvme_indexes {
                                            walk_shape_t const& shape, executor_t& executor, std::size_t wanted,
                                            std::span<std::size_t> scored, land_type_& land, predicate_type_& predicate,
                                            std::span<u64_t> latencies) noexcept {
-        using row_t = search_row<dummy_heads_t, predicate_type_, distance_t>;
+        using query_t = search_query<dummy_heads_t, predicate_type_, distance_t>;
         using matches_t = growing_buffer<maxsim_match_t, scratch_allocator_t>;
         std::size_t const queries_count = query_offsets.size() - 1, rows_count = query_rows.extent(0);
         std::size_t const width = shape.expansion_factor;
@@ -1781,16 +1782,16 @@ struct nvme_indexes {
             return {{}, status_t::bad_alloc_k};
         nk::matrix_span<key_t> const walk_keys {candidates.data(), rows_count, width};
         nk::matrix_span<distance_t> const walk_distances {distances.data(), rows_count, width};
-        typename row_t::inputs_t const inputs {queries.slice(query_offsets.front(), rows_count),
-                                               kernel_,
-                                               nullptr,
-                                               &predicate,
-                                               width,
-                                               walk_keys,
-                                               walk_distances,
-                                               to_writable_span(walked)};
-        auto [result, walk_status] = row_walker<index_t, row_t>::run_walks(to_span(media_), to_span(parts_), executor,
-                                                                           shape, inputs, to_span(walked), latencies);
+        typename query_t::inputs_t const inputs {queries.slice(query_offsets.front(), rows_count),
+                                                 kernel_,
+                                                 nullptr,
+                                                 &predicate,
+                                                 width,
+                                                 walk_keys,
+                                                 walk_distances,
+                                                 to_writable_span(walked)};
+        auto [result, walk_status] = query_walker<index_t, query_t>::run_walks(
+            to_span(media_), to_span(parts_), executor, shape, inputs, to_span(walked), latencies);
         result.count = 0;
         if (failed(walk_status)) return {result, walk_status};
 

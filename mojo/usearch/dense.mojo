@@ -108,11 +108,11 @@ struct DenseMetric(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime ANGULAR = Self(2)
     """Cosine distance in [0, 2], blind to magnitude."""
     comptime EUCLIDEAN = Self(3)
-    """L2 distance, zero only for identical rows."""
+    """L2 distance, zero only for identical vectors."""
     comptime HAMMING = Self(4)
     """Count of differing bits, so its range is the dimensionality."""
     comptime JACCARD = Self(5)
-    """Differing bits over union bits in [0, 1], ignoring the zeros both rows share."""
+    """Differing bits over union bits in [0, 1], ignoring the zeros both vectors share."""
 
 
 @fieldwise_init
@@ -223,7 +223,7 @@ struct DenseOptions(ImplicitlyCopyable):
         connectivity: Int = 0,
         values_per_key: Int = 0,
     ):
-        """Describes an index by its geometry, angular over `BF16` rows unless told otherwise.
+        """Describes an index by its geometry, angular over `BF16` vectors unless told otherwise.
 
         Args:
             dimensions: Dimensions per vector.
@@ -255,7 +255,7 @@ struct DenseMetadata(Defaultable, ImplicitlyCopyable):
     var metric: DenseMetric
     """The metric kind the checkpoint scores with."""
     var quantization: ScalarKind
-    """The scalar type its rows are stored and quantized into."""
+    """The scalar type its vectors are stored and quantized into."""
     var dimensions: c_size_t
     """Scalars per stored vector."""
     var connectivity: c_size_t
@@ -440,7 +440,7 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
 @fieldwise_init
 struct DenseProducts[origin: MutOrigin](Movable):
     """The ragged output of `multiply` and `maxsim` - `usearch_matches_tape_view_t` - read in place
-    from its arena: row `i` spans pairs `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and
+    from its arena: query `i` spans pairs `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and
     `scores()`.
 
     Parameters:
@@ -453,16 +453,16 @@ struct DenseProducts[origin: MutOrigin](Movable):
     """The arena's call these pairs came from, so a read after a later call is refused."""
     var view: MatchesTapeViewArguments
     """The keys, products and offsets, as the engine wrote them."""
-    var rows: Int
+    var queries: Int
     """Left-hand rows the call multiplied, or queries it scored."""
     var pairs: Int
-    """Pairs written across every row."""
+    """Pairs written across every query."""
     var required: Int
     """Pairs the walks scored, or keys the queries scored for `maxsim`, before `wanted` cut any;
-    above `pairs` means rows were truncated."""
+    above `pairs` means some lists were truncated."""
 
     def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
-        """One more offset than left-hand rows, as Apache Arrow lays a ragged batch out.
+        """One more offset than queries, as Apache Arrow lays a ragged batch out.
 
         Returns:
             The offsets into `keys()` and `scores()`, borrowed from the arena this result reads.
@@ -471,10 +471,10 @@ struct DenseProducts[origin: MutOrigin](Movable):
             `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
         """
         _readable(self.arena, self.generation, "DenseProducts.offsets")
-        return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.rows + 1)
+        return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.queries + 1)
 
     def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
-        """Each pair's indexed row, borrowed from the arena this result reads.
+        """Each pair's indexed entry, borrowed from the arena this result reads.
 
         Returns:
             One key per pair.
@@ -583,7 +583,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     var expansion_factor: Int
     """The breadth of the candidates the walk explores; zero derives."""
     var traversal: Traversal
-    """A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
+    """A walk, or an exact scan of every entry on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
     var predicate: Address
     """A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all."""
     var predicate_state: Address
@@ -606,7 +606,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
 
         Args:
             expansion_factor: The breadth of the candidates the walk explores; zero derives.
-            traversal: A walk, or an exact scan of every row on RAM and NVMe handles.
+            traversal: A walk, or an exact scan of every entry on RAM and NVMe handles.
             predicate: A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all.
             predicate_state: The opaque state forwarded into every predicate call.
             stats: Receives this call's traversal telemetry; absent skips reporting.
@@ -656,7 +656,7 @@ struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implici
     """
 
     var wanted: Int
-    """Pairs kept per row, the first ones its walk scored; zero keeps every pair."""
+    """Pairs kept per left row, the first ones its walk scored; zero keeps every pair."""
     var expansion_factor: Int
     """The breadth of the candidates, which widens the emitted pattern; zero derives."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
@@ -674,7 +674,7 @@ struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implici
         """Names only the knobs that differ from the derived ones.
 
         Args:
-            wanted: Pairs kept per row, the first ones its walk scored; zero keeps every pair.
+            wanted: Pairs kept per left row, the first ones its walk scored; zero keeps every pair.
             expansion_factor: The breadth of the candidates, which widens the emitted pattern; zero derives.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
@@ -1947,7 +1947,7 @@ struct DenseIndex(DenseVerbs, Movable):
     """A dense vector index, released when it goes out of scope.
 
     Insertions and searches overlap freely on one handle: a search never writes to the graph, and
-    an insertion publishes a row only once it is reachable, so a concurrent walk sees a consistent
+    an insertion publishes an entry only once it is reachable, so a concurrent walk sees a consistent
     graph at every instant. Calls on one executor run in submission order.
 
     Verbs called on the index run on the calling thread; `index.on(executor)` runs the same verbs
@@ -2389,10 +2389,10 @@ struct DenseIndex(DenseVerbs, Movable):
         return _block(self.library, call^, self.address, NULL_ADDRESS)
 
     def cursor(ref self) raises Error -> DenseCursor[ImmOrigin(origin_of(self))]:
-        """Opens a walk over every row as stored, its pulls on the calling thread.
+        """Opens a walk over every entry as stored, its pulls on the calling thread.
         Calls `usearch_dense_cursor_init`.
 
-        Each shard's publication watermark is read as the walk enters that shard, so a row once
+        Each shard's publication watermark is read as the walk enters that shard, so an entry once
         passed is never revisited.
 
         Returns:
@@ -2408,7 +2408,7 @@ struct DenseIndex(DenseVerbs, Movable):
     ](ref self, starts: Span[Key, starts_origin]) raises Error -> DenseCursor[ImmOrigin(origin_of(self))]:
         """Opens a walk from `starts`, its pulls on the calling thread. Calls `usearch_dense_cursor_init`.
 
-        It yields the start keys' own rows first, in order, then the rows those link to
+        It yields the start keys' own entries first, in order, then the entries those link to
         breadth-first, each once.
 
         Parameters:
@@ -2509,7 +2509,7 @@ trait DenseVerbs:
 
         A batch is all-or-nothing, because this binding installs no progress handler: every
         fallible step runs before the first entry identity is claimed, so a rejected batch leaves
-        the index untouched and publishes no row.
+        the index untouched and publishes no entry.
 
         Parameters:
             keys_origin: The key run's origin, inferred from the argument.
@@ -2693,12 +2693,12 @@ trait DenseVerbs:
         mut arena: Arena,
         config: DenseMultiplyConfig[stats_origin] = DenseMultiplyConfig(),
     ) raises Error -> DenseProducts[origin_of(arena)]:
-        """Approximate sparse product of a run of rows against the indexed rows, into a lent arena.
+        """Approximate sparse product of a run of rows against the indexed vectors, into a lent arena.
         Calls `usearch_dense_multiply`.
 
         Reports every pair the traversal scored instead of only the nearest, in traversal order
         rather than sorted, and with no duplicates. Cost is roughly
-        `rows x expansion x connectivity x dimensions`, sublinear in the indexed rows, which is the
+        `rows x expansion x connectivity x dimensions`, sublinear in the indexed entries, which is the
         whole point of reading a product off a graph. Runs on `DenseMetric.INNER` alone.
 
         Parameters:
@@ -2837,7 +2837,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
         return _block(self.index[].library, call^, self.index[].address, self.executor)
 
     def cursor(self) raises Error -> DenseCursor[Self.origin]:
-        """Opens a walk over every row as stored, its pulls on the bound executor.
+        """Opens a walk over every entry as stored, its pulls on the bound executor.
         Calls `usearch_dense_cursor_init`.
 
         Returns:
@@ -2857,7 +2857,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
             starts_origin: The start keys' origin, inferred from the argument.
 
         Args:
-            starts: The keys to walk from, the walk yielding their rows first.
+            starts: The keys to walk from, the walk yielding their entries first.
 
         Returns:
             The cursor, which borrows the index and the executor and cannot outlive them.
@@ -3230,7 +3230,7 @@ struct DenseCursor[origin: ImmOrigin]:
             library: The loaded engine the cursor is opened through.
             index: The handle to scan.
             executor: The executor every pull runs on.
-            starts_count: The start keys at `starts`; zero walks every row as stored.
+            starts_count: The start keys at `starts`; zero walks every entry as stored.
             starts: The first start key, or `NULL_ADDRESS` for none.
 
         Raises:
@@ -3357,7 +3357,7 @@ struct DenseSearchStream[origin: ImmOrigin]:
         _ = self.library^
 
     def next(self, wanted: Int, mut arena: Arena) raises Error -> Matches[origin_of(arena)]:
-        """Pulls up to `wanted` next-nearest matches into a lent arena, as the one row of a search.
+        """Pulls up to `wanted` next-nearest matches into a lent arena, as the one query of a search.
         Calls `usearch_dense_search_stream_next`.
 
         Args:
@@ -3365,7 +3365,7 @@ struct DenseSearchStream[origin: ImmOrigin]:
             arena: The arena to rewind and refill, which the pull borrows; a failed call leaves it valid.
 
         Returns:
-            One row of matches, read in place from the arena; an empty row once the walk is drained.
+            One query's matches, read in place from the arena; an empty query once the walk is drained.
 
         Raises:
             `Error` if the engine refuses to advance.

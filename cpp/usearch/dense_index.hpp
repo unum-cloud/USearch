@@ -512,7 +512,7 @@ class dense_index_t {
     }
 
     /**
-     *  Answers the rows @c arguments.key holds; @c arguments.written counts them when the caller
+     *  Answers the vectors @c arguments.key holds; @c arguments.written counts them when the caller
      *  sets it.
      *
      *  @par Statuses:
@@ -547,7 +547,7 @@ class dense_index_t {
     }
 
     /**
-     *  Answers the next keys @p cursor walks to; the rows and their count land where the caller
+     *  Answers the next keys @p cursor walks to; the entries and their count land where the caller
      *  points.
      *
      *  @par Statuses:

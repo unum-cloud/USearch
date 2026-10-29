@@ -1284,7 +1284,7 @@ struct hip_traversal_context {
         : results {growing_buffer<scored_node_t, hip_pinned_allocator_t> {hip_pinned_allocator_t {allocator.api()}}},
           allocator_ {(hip_set_device(allocator.api(), allocator.device()), allocator)}, //
           telemetry_ {hip_make_unique(telemetry_allocator_t {allocator_}, 1)},
-          assigned_rows_ {hip_make_unique(counter_allocator_t {allocator_}, 2)},
+          assigned_nodes_ {hip_make_unique(counter_allocator_t {allocator_}, 2)},
           missed_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
           host_counters_ {take_counters_(allocator_.landings())},
           arena_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}},
@@ -1308,7 +1308,7 @@ struct hip_traversal_context {
     /** Whether this context can walk at all: every device-side word and its host twin claimed, and
      *  its event born. */
     explicit operator bool() const noexcept {
-        return telemetry_ && assigned_rows_ && missed_ && host_counters_ && event_;
+        return telemetry_ && assigned_nodes_ && missed_ && host_counters_ && event_;
     }
 
     /** Waits for every transfer and launch queued on this context's stream - one stream's
@@ -1400,9 +1400,9 @@ struct hip_traversal_context {
     /** The device-side counters of the last submission, zeroed when it was queued. */
     hip_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
 
-    /** Rows of the current launch's batch warps have assigned themselves so far: a builder's rows,
+    /** Entries the current launch's batch warps have assigned themselves so far: a builder's nodes,
      *  or a walk's queries; a walk's second word counts the walks running. */
-    hip_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
+    hip_unique_ptr<u32_t, counter_allocator_t> assigned_nodes_;
 
     /** The value-lookup miss word: raised by the last walk at a node its value lookup had no row
      *  for, zeroed when it was queued. */

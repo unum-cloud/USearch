@@ -630,13 +630,13 @@ void usearch_py_arena_unclaim(PyObject* arena);
 PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
                                   Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
 
-/** A new @c Matches over the @p queries rows a ranked verb wrote into @p arena; NULL with an
- *  exception set. */
+/** A new @c Matches over the @p queries a ranked verb wrote into @p arena; NULL with an exception
+ *  set. */
 PyObject* usearch_py_matches_new(PyObject* arena, usearch_matches_view_t const* matches, size_t queries);
 
-/** A new @c DenseProducts over the @p pairs across @p rows rows @c multiply or @c maxsim wrote into
- *  @p arena, and the pairs it @p required; NULL with an exception set. */
-PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* products, size_t rows,
+/** A new @c DenseProducts over the @p pairs across @p queries left rows or queries @c multiply or
+ *  @c maxsim wrote into @p arena, and the pairs it @p required; NULL with an exception set. */
+PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* products, size_t queries,
                                   size_t pairs, size_t required);
 
 extern char const doc_version[];

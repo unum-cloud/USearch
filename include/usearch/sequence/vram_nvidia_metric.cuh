@@ -14,10 +14,10 @@
  *  which each kernel takes beside the ladder's inputs, so a rung's kernels only reach the scorers
  *  of the word counts below it and keep their registers as narrow as the queries allow. Every
  *  scorer is out of line, one body per word count and symbol in the unit, whatever number of walks
- *  call it. The overlap kit scores on one rung, a warp to a row. The Needleman-Wunsch kit scores a
- *  row with a warp, an anti-diagonal wavefront over stripes of query codes, each lane holding a
- *  rung's worth of rows in registers. Only the modality's NVIDIA unit compiles this file, so
- *  dispatch never names a kit.
+ *  call it. The overlap kit scores on one rung, a warp to a sequence. The Needleman-Wunsch kit
+ *  scores a sequence with a warp, an anti-diagonal wavefront over stripes of query codes, each lane
+ *  holding a rung's worth of rows in registers. Only the modality's NVIDIA unit compiles this file,
+ *  so dispatch never names a kit.
  */
 #pragma once
 
@@ -25,7 +25,7 @@
 
 #include <cstring> // `std::memcpy` - lane zero's prepared overlap query, a word at a time
 
-#include <bit>         // `std::bit_ceil`, `std::popcount` - a row's distinct pages and bytes
+#include <bit>         // `std::bit_ceil`, `std::popcount` - a sequence's distinct pages and bytes
 #include <iterator>    // `std::size` - every rung's kernels
 #include <limits>      // `std::numeric_limits` - the widths and rows a `u32_t` states
 #include <span>        // `std::span` - the overlap kind's window widths
@@ -57,15 +57,15 @@ constexpr sz_levenshtein_group_lanes_t cuda_levenshtein_lanes_per_row_ampere(u32
     return words > sz_levenshtein_thread_words_max_simt_k ? sz_levenshtein_group_quad_k : sz_levenshtein_group_thread_k;
 }
 
-/** Bytes the @p bytes long row at @p data takes once prepared over @p symbol_, a multiple of 16: a
- *  class map over every byte value, or a page table with a class row per page its runes touch, then
- *  a mask row per class at the walk stride of the row's own words, one class per distinct symbol
- *  and one more. */
+/** Bytes the @p bytes long sequence at @p data takes once prepared over @p symbol_, a multiple of
+ *  16: a class map over every byte value, or a page table with a class row per page its runes
+ *  touch, then a mask row per class at the walk stride of the sequence's own words, one class per
+ *  distinct symbol and one more. */
 template <sz_levenshtein_symbol_t symbol_>
 std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t bytes) noexcept {
     if constexpr (symbol_ == sz_levenshtein_runes_k) {
         // Distinct pages in a bitset over every page, distinct runes in an open table twice the
-        // widest rung's runes wide, cleared only as wide as this row needs.
+        // widest rung's runes wide, cleared only as wide as this sequence needs.
         constexpr std::size_t table_slots_k = 2 * vram_levenshtein_widest_bytes_k;
         u64_t pages[sz_levenshtein_utf8_pages_k / 64] = {};
         u32_t table[table_slots_k];
@@ -74,7 +74,7 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
         sz_size_t runes = 0, rows = 1, classes = 1;
         for (sz_size_t position = 0; position < bytes; ++runes) {
             sz_rune_t const rune = sz_utf8_next_rune_(reinterpret_cast<sz_cptr_t>(data), bytes, &position);
-            // A row past the widest rung is refused before it prepares, so it needs no count.
+            // A sequence past the widest rung is refused before it prepares, so it needs no count.
             if (bytes * 2 > table_slots_k) {
                 ++classes;
                 continue;
@@ -106,45 +106,48 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
         16);
 }
 
-/** Lays @p row out as a query over @p symbol_ in @p span, every lane of the warp taking part. */
+/** Lays @p sequence out as a query over @p symbol_ in @p span, every lane of the warp taking
+ *  part. */
 template <sz_levenshtein_symbol_t symbol_>
-__device__ __forceinline__ sz_levenshtein_query_t cuda_levenshtein_prepare_ampere(basic::vram_row_t row, byte_t* span,
-                                                                                  u32_t lane) noexcept {
+__device__ __forceinline__ sz_levenshtein_query_t cuda_levenshtein_prepare_ampere(basic::vram_entry_t sequence,
+                                                                                  byte_t* span, u32_t lane) noexcept {
     sz_levenshtein_query_t query;
     if constexpr (symbol_ == sz_levenshtein_runes_k)
-        sz_levenshtein_query_prepare_utf8_simt_(reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
+        sz_levenshtein_query_prepare_utf8_simt_(reinterpret_cast<sz_cptr_t>(sequence.data), sequence.bytes,
                                                 reinterpret_cast<sz_ptr_t>(span), &query, lane);
     else
-        sz_levenshtein_query_prepare_simt_(reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
-                                           sz_levenshtein_walk_stride(sz_levenshtein_query_words(row.bytes)),
+        sz_levenshtein_query_prepare_simt_(reinterpret_cast<sz_cptr_t>(sequence.data), sequence.bytes,
+                                           sz_levenshtein_walk_stride(sz_levenshtein_query_words(sequence.bytes)),
                                            reinterpret_cast<sz_ptr_t>(span), &query, lane);
     return query;
 }
 
-/** No edit sequence is shorter than the two lengths' difference; a row of @c b bytes holds between
- *  a quarter of @c b runes and @c b of them. */
+/** No edit sequence is shorter than the two lengths' difference; a sequence of @c b bytes holds
+ *  between a quarter of @c b runes and @c b of them. */
 template <sz_levenshtein_symbol_t symbol_>
 __device__ __forceinline__ distance_t cuda_levenshtein_bound_ampere(sz_levenshtein_query_t const& query,
-                                                                    basic::vram_row_t row) noexcept {
-    u64_t const fewest = symbol_ == sz_levenshtein_runes_k ? divide_round_up<u64_t>(row.bytes, 4) : row.bytes;
-    u64_t const most = row.bytes;
+                                                                    basic::vram_entry_t sequence) noexcept {
+    u64_t const fewest = symbol_ == sz_levenshtein_runes_k ? divide_round_up<u64_t>(sequence.bytes, 4) : sequence.bytes;
+    u64_t const most = sequence.bytes;
     return static_cast<distance_t>(fewest > query.length ? fewest - query.length
                                    : query.length > most ? query.length - most
                                                          : 0);
 }
 
-/** The distance over @p symbol_ from @p query to @p row, scored by a group of @p lanes_ lanes
+/** The distance over @p symbol_ from @p query to @p sequence, scored by a group of @p lanes_ lanes
  *  owning @p lane_words_ Myers words apiece, exact within @p limit and the running score past it.
  *  Out of line, so each body compiles once per unit, whatever number of walks call it. */
 template <sz_levenshtein_symbol_t symbol_, sz_levenshtein_group_lanes_t lanes_, u32_t lane_words_>
-__device__ __noinline__ sz_ssize_t cuda_levenshtein_group_ampere(sz_levenshtein_query_t query, basic::vram_row_t row,
-                                                                 sz_ssize_t limit, u32_t lane) noexcept {
-    sz_cptr_t const text = reinterpret_cast<sz_cptr_t>(row.data);
+__device__ __noinline__ sz_ssize_t cuda_levenshtein_group_ampere(sz_levenshtein_query_t query,
+                                                                 basic::vram_entry_t sequence, sz_ssize_t limit,
+                                                                 u32_t lane) noexcept {
+    sz_cptr_t const text = reinterpret_cast<sz_cptr_t>(sequence.data);
     if constexpr (symbol_ == sz_levenshtein_runes_k)
-        return sz_levenshtein_group_score_utf8_simt_(&query, text, row.bytes, lane_words_, lanes_, limit, lane % lanes_,
-                                                     sz_group_shuffle_up_cuda_, sz_group_shuffle_index_cuda_);
+        return sz_levenshtein_group_score_utf8_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit,
+                                                     lane % lanes_, sz_group_shuffle_up_cuda_,
+                                                     sz_group_shuffle_index_cuda_);
     else
-        return sz_levenshtein_group_score_simt_(&query, text, row.bytes, lane_words_, lanes_, limit, lane % lanes_,
+        return sz_levenshtein_group_score_simt_(&query, text, sequence.bytes, lane_words_, lanes_, limit, lane % lanes_,
                                                 sz_group_shuffle_up_cuda_, sz_group_shuffle_index_cuda_);
 }
 
@@ -152,14 +155,14 @@ __device__ __noinline__ sz_ssize_t cuda_levenshtein_group_ampere(sz_levenshtein_
  *  among @p counts_ ; the host never launches a rung narrower than its longest query. */
 template <sz_levenshtein_symbol_t symbol_, u32_t... counts_>
 __device__ __forceinline__ sz_ssize_t
-cuda_levenshtein_thread_ampere(sz_levenshtein_query_t const& query, basic::vram_row_t row, sz_ssize_t limit,
+cuda_levenshtein_thread_ampere(sz_levenshtein_query_t const& query, basic::vram_entry_t sequence, sz_ssize_t limit,
                                std::integer_sequence<u32_t, counts_...>) noexcept {
     sz_ssize_t distance = 0;
     u32_t const words = static_cast<u32_t>(sz_levenshtein_query_words(query.length));
     [[maybe_unused]] bool const scored =
         ((words == counts_ + 1 &&
-          (distance = cuda_levenshtein_group_ampere<symbol_, sz_levenshtein_group_thread_k, counts_ + 1>(query, row,
-                                                                                                         limit, 0),
+          (distance = cuda_levenshtein_group_ampere<symbol_, sz_levenshtein_group_thread_k, counts_ + 1>(
+               query, sequence, limit, 0),
            true)) ||
          ...);
     return distance;
@@ -172,29 +175,29 @@ cuda_levenshtein_thread_ampere(sz_levenshtein_query_t const& query, basic::vram_
  *  Up to sixteen words a lane scores a candidate alone at the query's exact word count, so the
  *  verticals stay in registers. Past them the four lanes of a group split a candidate's words, a
  *  quarter of the rung's apiece, and a block's four warps score a hop's candidates together. An
- *  empty side scores the other's symbols, a UTF-8 row's counted in runes.
+ *  empty side scores the other's symbols, a UTF-8 sequence's counted in runes.
  */
 template <sz_levenshtein_symbol_t symbol_, u32_t words_>
 __device__ __forceinline__ distance_t cuda_levenshtein_score_ampere(sz_levenshtein_query_t const& query,
-                                                                    basic::vram_row_t row, distance_t radius,
+                                                                    basic::vram_entry_t sequence, distance_t radius,
                                                                     u32_t lane) noexcept {
-    if (!query.length || !row.bytes) {
-        sz_size_t symbols = row.bytes;
+    if (!query.length || !sequence.bytes) {
+        sz_size_t symbols = sequence.bytes;
         if constexpr (symbol_ == sz_levenshtein_runes_k) {
             symbols = 0;
-            for (sz_size_t position = 0; position < row.bytes; ++symbols)
-                sz_utf8_next_rune_(reinterpret_cast<sz_cptr_t>(row.data), row.bytes, &position);
+            for (sz_size_t position = 0; position < sequence.bytes; ++symbols)
+                sz_utf8_next_rune_(reinterpret_cast<sz_cptr_t>(sequence.data), sequence.bytes, &position);
         }
         return static_cast<distance_t>(query.length + symbols);
     }
     sz_ssize_t const limit = radius < 0x1p62f ? static_cast<sz_ssize_t>(radius) : STRINGZILLA_SSIZE_MAX;
     constexpr sz_levenshtein_group_lanes_t lanes_k = cuda_levenshtein_lanes_per_row_ampere(words_);
     if constexpr (lanes_k == sz_levenshtein_group_thread_k)
-        return static_cast<distance_t>(
-            cuda_levenshtein_thread_ampere<symbol_>(query, row, limit, std::make_integer_sequence<u32_t, words_> {}));
+        return static_cast<distance_t>(cuda_levenshtein_thread_ampere<symbol_>(
+            query, sequence, limit, std::make_integer_sequence<u32_t, words_> {}));
     else
         return static_cast<distance_t>(
-            cuda_levenshtein_group_ampere<symbol_, lanes_k, words_ / lanes_k>(query, row, limit, lane));
+            cuda_levenshtein_group_ampere<symbol_, lanes_k, words_ / lanes_k>(query, sequence, limit, lane));
 }
 
 /** Levenshtein over bytes on the Ampere floor, through StringZilla's grouped Myers scorers, the
@@ -216,23 +219,24 @@ struct u8_ampere_levenshtein_kit_t {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_bytes_k>(data, bytes);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
-        return cuda_levenshtein_prepare_ampere<sz_levenshtein_bytes_k>(row, span, lane);
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
+        return cuda_levenshtein_prepare_ampere<sz_levenshtein_bytes_k>(sequence, span, lane);
     }
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        return cuda_levenshtein_bound_ampere<sz_levenshtein_bytes_k>(query, row);
+                                                             basic::vram_entry_t sequence) noexcept {
+        return cuda_levenshtein_bound_ampere<sz_levenshtein_bytes_k>(query, sequence);
     }
     template <u32_t words_>
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
-                                                       distance_t radius, u32_t lane) noexcept {
-        return cuda_levenshtein_score_ampere<sz_levenshtein_bytes_k, words_>(query, row, radius, lane);
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t sequence, distance_t radius,
+                                                       u32_t lane) noexcept {
+        return cuda_levenshtein_score_ampere<sz_levenshtein_bytes_k, words_>(query, sequence, radius, lane);
     }
 };
 
 /** Levenshtein over UTF-8 runes on the Ampere floor, each rune's class from the page table its
- *  query's span holds. A row of @c b bytes holds at most @c b runes, so the byte kit's rows bound
- *  its rungs too. */
+ *  query's span holds. A sequence of @c b bytes holds at most @c b runes, so the byte kit's
+ *  sequences bound its rungs too. */
 struct utf8_ampere_levenshtein_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
@@ -249,17 +253,18 @@ struct utf8_ampere_levenshtein_kit_t {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_runes_k>(data, bytes);
     }
 
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t* span, u32_t lane) noexcept {
-        return cuda_levenshtein_prepare_ampere<sz_levenshtein_runes_k>(row, span, lane);
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
+        return cuda_levenshtein_prepare_ampere<sz_levenshtein_runes_k>(sequence, span, lane);
     }
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        return cuda_levenshtein_bound_ampere<sz_levenshtein_runes_k>(query, row);
+                                                             basic::vram_entry_t sequence) noexcept {
+        return cuda_levenshtein_bound_ampere<sz_levenshtein_runes_k>(query, sequence);
     }
     template <u32_t words_>
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
-                                                       distance_t radius, u32_t lane) noexcept {
-        return cuda_levenshtein_score_ampere<sz_levenshtein_runes_k, words_>(query, row, radius, lane);
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t sequence, distance_t radius,
+                                                       u32_t lane) noexcept {
+        return cuda_levenshtein_score_ampere<sz_levenshtein_runes_k, words_>(query, sequence, radius, lane);
     }
 };
 
@@ -278,16 +283,16 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
 };
 
 /**
- *  @brief The overlap distance from @p query to @p row, the aligned group of @p lanes lanes holding
- *      @p lane taking part: the share of the longer side's windows the candidate misses, at
+ *  @brief The overlap distance from @p query to @p sequence, the aligned group of @p lanes lanes
+ *      holding @p lane taking part: the share of the longer side's windows the candidate misses, at
  *      @c overlap_resolution_k, exact within @p radius and above it past.
  *
  *  A float radius rounds, so the misses StringZilla may stop past are those of the integer radius a
  *  float spacing above it, @c 2^7 at this scale. Out of line, so the body compiles once per unit.
  */
-__device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_t query, basic::vram_row_t row,
+__device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_t query, basic::vram_entry_t sequence,
                                                                distance_t radius, u32_t lane, u32_t lanes) noexcept {
-    u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
+    u64_t const candidate_windows = sz_overlap_windows(sequence.bytes, query.widths, query.widths_count);
     u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
     if (!longer) return overlap_distance(longer, 0);
     sz_size_t misses_limit = STRINGZILLA_SIZE_MAX;
@@ -295,8 +300,8 @@ __device__ __noinline__ inline u64_t cuda_overlap_score_ampere(sz_overlap_query_
         u64_t const admitted = static_cast<u64_t>(radius > 0 ? radius : 0) + (u64_t {1} << 7);
         misses_limit = ((admitted + 1) * longer - 1) / static_cast<u64_t>(overlap_resolution_k);
     }
-    u64_t const matches = sz_overlap_candidate_matches_simt_(&query, reinterpret_cast<sz_cptr_t>(row.data), row.bytes,
-                                                             misses_limit, lane % lanes, lanes,
+    u64_t const matches = sz_overlap_candidate_matches_simt_(&query, reinterpret_cast<sz_cptr_t>(sequence.data),
+                                                             sequence.bytes, misses_limit, lane % lanes, lanes,
                                                              sz_group_shuffle_index_cuda_);
     return overlap_distance(longer, matches);
 }
@@ -313,11 +318,11 @@ struct u8_ampere_overlap_kit_t {
     using query_t = sz_overlap_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
-    /** A rung is its lanes per row. */
+    /** A rung is its lanes per sequence. */
     static constexpr u32_t lanes_per_row(u32_t lanes) noexcept { return lanes; }
     static_assert(vram_overlap_rungs_k[std::size(vram_overlap_rungs_k) - 1] <= warp_t::width_k);
 
-    /** Every rung scores a row of any length its byte count can state. */
+    /** Every rung scores a sequence of any length its byte count can state. */
     static constexpr bool serves(u32_t, std::size_t bytes) noexcept {
         return bytes <= std::numeric_limits<u32_t>::max();
     }
@@ -325,15 +330,15 @@ struct u8_ampere_overlap_kit_t {
         return round_up_to_multiple<std::size_t>(sz_overlap_query_span_bytes(bytes, widths.data(), widths.size()), 16);
     }
 
-    /** Prepares @p row with the warp, then hands every lane lane zero's query, the only one
+    /** Prepares @p sequence with the warp, then hands every lane lane zero's query, the only one
      *  StringZilla records. */
-    static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_row_t row, byte_t* span,
-                                                      u32_t lane) noexcept {
+    static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_entry_t sequence,
+                                                      byte_t* span, u32_t lane) noexcept {
         static_assert(sizeof(query_t) % sizeof(u32_t) == 0, "The query crosses lanes a word at a time");
         u32_t const* const widths = reinterpret_cast<u32_t const*>(parameters);
         query_t query;
-        sz_overlap_query_prepare_simt_(reinterpret_cast<sz_cptr_t>(row.data), row.bytes, widths + 1, widths[0],
-                                       reinterpret_cast<sz_ptr_t>(span), &query, lane, sz_shuffle_up_cuda_,
+        sz_overlap_query_prepare_simt_(reinterpret_cast<sz_cptr_t>(sequence.data), sequence.bytes, widths + 1,
+                                       widths[0], reinterpret_cast<sz_ptr_t>(span), &query, lane, sz_shuffle_up_cuda_,
                                        sz_shuffle_index_cuda_, sz_lanes_ballot_cuda_);
         u32_t words[sizeof(query_t) / sizeof(u32_t)];
         std::memcpy(words, &query, sizeof(query_t));
@@ -344,16 +349,17 @@ struct u8_ampere_overlap_kit_t {
 
     /** No candidate matches more windows than the shorter side holds. */
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        u64_t const candidate_windows = sz_overlap_windows(row.bytes, query.widths, query.widths_count);
+                                                             basic::vram_entry_t sequence) noexcept {
+        u64_t const candidate_windows = sz_overlap_windows(sequence.bytes, query.widths, query.widths_count);
         u64_t const longer = max_of<u64_t>(candidate_windows, query.windows);
         u64_t const shorter = min_of<u64_t>(candidate_windows, query.windows);
         return static_cast<distance_t>(overlap_distance(longer, shorter));
     }
     template <u32_t lanes_>
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
-                                                       distance_t radius, u32_t lane) noexcept {
-        return static_cast<distance_t>(cuda_overlap_score_ampere(query, row, radius, lane, lanes_));
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t sequence, distance_t radius,
+                                                       u32_t lane) noexcept {
+        return static_cast<distance_t>(cuda_overlap_score_ampere(query, sequence, radius, lane, lanes_));
     }
 };
 
@@ -368,7 +374,7 @@ struct overlap_ladder<caps_> {
 inline constexpr std::size_t cuda_needleman_wunsch_stripe_bytes_k = needleman_wunsch_classes_k * cuda_warp_t::width_k *
                                                                     sizeof(u64_t);
 
-/** Codes of the longest row the widest Needleman-Wunsch rung scores, as many as the widest
+/** Codes of the longest sequence the widest Needleman-Wunsch rung scores, as many as the widest
  *  Levenshtein rung's bytes; longer ones are refused. */
 inline constexpr std::size_t cuda_needleman_wunsch_widest_codes_k = vram_levenshtein_widest_bytes_k;
 
@@ -406,16 +412,14 @@ struct cuda_needleman_wunsch_query_t {
     u8_t gap;
 };
 
-/** Lays the packed @p row out as a query in @p span under the costs at @p parameters, every lane of
- *  the warp writing its own profile words. */
-__device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_prepare_ampere(byte_t const* parameters,
-                                                                                              basic::vram_row_t row,
-                                                                                              byte_t* span,
-                                                                                              u32_t lane) noexcept {
+/** Lays the packed @p sequence out as a query in @p span under the costs at @p parameters, every
+ *  lane of the warp writing its own profile words. */
+__device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_prepare_ampere(
+    byte_t const* parameters, basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
     needleman_wunsch_costs_t const& costs = *reinterpret_cast<needleman_wunsch_costs_t const*>(parameters);
     cuda_needleman_wunsch_query_t query;
     query.span = span, query.code_bits = costs.code_bits, query.gap = costs.gap;
-    query.codes = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, costs.code_bits));
+    query.codes = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, costs.code_bits));
     query.rows_per_lane = static_cast<u8_t>(cuda_needleman_wunsch_rows_per_lane(query.codes));
     u32_t const stripes = cuda_needleman_wunsch_stripes(query.codes);
     u64_t* const profile = reinterpret_cast<u64_t*>(span);
@@ -426,8 +430,9 @@ __device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_p
             for (u32_t row_in_lane = 0; row_in_lane != query.rows_per_lane; ++row_in_lane) {
                 u32_t const index = lane_first + row_in_lane;
                 if (index < query.codes)
-                    costs_word |= u64_t {costs.substitutions[packed_code_at(row.data, index, costs.code_bits)][code]}
-                                  << (8 * row_in_lane);
+                    costs_word |=
+                        u64_t {costs.substitutions[packed_code_at(sequence.data, index, costs.code_bits)][code]}
+                        << (8 * row_in_lane);
             }
             profile[(stripe * needleman_wunsch_classes_k + code) * cuda_warp_t::width_k + lane] = costs_word;
         }
@@ -437,9 +442,9 @@ __device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_p
 }
 
 /**
- *  @brief The Needleman-Wunsch cost from @p query to @p row, a warp's anti-diagonal wavefront over
- *      stripes of query codes, @p rows_ codes at most to a lane: exact within @p radius, and past
- *      it a stripe's bottom row minimum above it.
+ *  @brief The Needleman-Wunsch cost from @p query to @p sequence, a warp's anti-diagonal wavefront
+ *      over stripes of query codes, @p rows_ codes at most to a lane: exact within @p radius, and
+ *      past it a stripe's bottom row minimum above it.
  *
  *  Lane @c l holds a stripe's rows from its @c l -th share down and enters column @c j at step
  *  @c j+l, taking the cell above and the next column's code from lane @c l-1 in one shuffled word,
@@ -449,12 +454,12 @@ __device__ __forceinline__ cuda_needleman_wunsch_query_t cuda_needleman_wunsch_p
  */
 template <u32_t rows_>
 __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needleman_wunsch_query_t query,
-                                                                      basic::vram_row_t row, distance_t radius,
+                                                                      basic::vram_entry_t sequence, distance_t radius,
                                                                       u32_t lane) noexcept {
     using warp_t = cuda_warp_t;
     constexpr u32_t lanes_k = warp_t::width_k;
     u32_t const gap = query.gap, rows = query.codes, rows_per_lane = query.rows_per_lane;
-    u32_t const columns = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, query.code_bits));
+    u32_t const columns = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, query.code_bits));
     if (!rows || !columns) return static_cast<distance_t>((rows + columns) * gap);
     u32_t const stripe_rows = lanes_k * rows_per_lane, stripes = cuda_needleman_wunsch_stripes(rows);
     u64_t const* const profile = reinterpret_cast<u64_t const*>(query.span);
@@ -475,13 +480,13 @@ __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needl
         auto const load_columns = [&](u32_t first_column) noexcept {
             u32_t const column = first_column + lane;
             u32_t const top = column > columns ? 0u : stripe ? boundary[column] : column * gap;
-            u32_t const next_code = column < columns ? packed_code_at(row.data, column, query.code_bits) : 0u;
+            u32_t const next_code = column < columns ? packed_code_at(sequence.data, column, query.code_bits) : 0u;
             return top << 5 | next_code;
         };
         // A cell rides one word with the code its receiver scores a step later, the cell in the
         // high bits, as far as 2^27 reaches; so each step loads the next step's costs before its
         // own cells.
-        u32_t const first_code = packed_code_at(row.data, 0, query.code_bits);
+        u32_t const first_code = packed_code_at(sequence.data, 0, query.code_bits);
         u32_t handed = lane == 0 ? first_code : 0u, loaded = load_columns(1);
         u64_t costs_word = stripe_profile[first_code * lanes_k];
         u32_t diagonal_above = lane_first * gap, bottom_minimum = (stripe + 1) * stripe_rows * gap;
@@ -524,7 +529,7 @@ __device__ __noinline__ distance_t cuda_needleman_wunsch_score_ampere(cuda_needl
     return static_cast<distance_t>(result);
 }
 
-/** Needleman-Wunsch over packed codes on the Ampere floor: a warp to a row, an anti-diagonal
+/** Needleman-Wunsch over packed codes on the Ampere floor: a warp to a sequence, an anti-diagonal
  *  wavefront down stripes of the query, its costs a profile the walk lays out in its span from the
  *  folded table the face uploads as the parameters. */
 struct packed_ampere_needleman_wunsch_kit_t {
@@ -535,7 +540,7 @@ struct packed_ampere_needleman_wunsch_kit_t {
     using query_t = cuda_needleman_wunsch_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
-    /** Every rung scores a row with the whole warp. */
+    /** Every rung scores a sequence with the whole warp. */
     static constexpr u32_t lanes_per_row(u32_t) noexcept { return warp_t::width_k; }
 
     /** A rung serves queries of up to @p codes whose stripe it holds whole, the widest one any
@@ -546,8 +551,8 @@ struct packed_ampere_needleman_wunsch_kit_t {
                                 : codes <= std::size_t {rows} * warp_t::width_k;
     }
 
-    /** Bytes the packed @p bytes long row at @p data takes once prepared: its profile stripes, and
-     *  a boundary row per warp of a block when it takes more than one. */
+    /** Bytes the packed @p bytes long sequence at @p data takes once prepared: its profile stripes,
+     *  and a boundary row per warp of a block when it takes more than one. */
     static std::size_t span_bytes(u32_t code_bits, byte_t const* data, std::size_t bytes) noexcept {
         u32_t const stripes = cuda_needleman_wunsch_stripes(packed_codes_count(data, bytes, code_bits));
         std::size_t const boundaries =
@@ -555,22 +560,23 @@ struct packed_ampere_needleman_wunsch_kit_t {
         return stripes * cuda_needleman_wunsch_stripe_bytes_k + boundaries;
     }
 
-    static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_row_t row, byte_t* span,
-                                                      u32_t lane) noexcept {
-        return cuda_needleman_wunsch_prepare_ampere(parameters, row, span, lane);
+    static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_entry_t sequence,
+                                                      byte_t* span, u32_t lane) noexcept {
+        return cuda_needleman_wunsch_prepare_ampere(parameters, sequence, span, lane);
     }
 
     /** Every code one side holds past the other's length faces a gap. */
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const& query,
-                                                             basic::vram_row_t row) noexcept {
-        u32_t const columns = static_cast<u32_t>(packed_codes_count(row.data, row.bytes, query.code_bits));
+                                                             basic::vram_entry_t sequence) noexcept {
+        u32_t const columns = static_cast<u32_t>(packed_codes_count(sequence.data, sequence.bytes, query.code_bits));
         u32_t const difference = columns > query.codes ? columns - query.codes : query.codes - columns;
         return static_cast<distance_t>(difference * query.gap);
     }
     template <u32_t rows_>
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
-                                                       distance_t radius, u32_t lane) noexcept {
-        return cuda_needleman_wunsch_score_ampere<rows_>(query, row, radius, lane);
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t sequence, distance_t radius,
+                                                       u32_t lane) noexcept {
+        return cuda_needleman_wunsch_score_ampere<rows_>(query, sequence, radius, lane);
     }
 };
 
@@ -633,7 +639,7 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
     std::size_t longest) const noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-    // A Needleman-Wunsch rung serves codes, the most a row of these bytes packs.
+    // A Needleman-Wunsch rung serves codes, the most a sequence of these bytes packs.
     if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) {
         if (host_parameters_.empty()) return rungs_k;
         longest = longest ? (longest - 1) * 8 / costs_().code_bits : 0;
@@ -641,7 +647,7 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
     std::size_t rung = 0;
     while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
     if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
-        // Lanes past the longest row's widest windows would roll none of their own.
+        // Lanes past the longest sequence's widest windows would roll none of their own.
         u32_t widest = 0;
         for (std::size_t index = 1; index < host_parameters_.size(); ++index)
             widest = max_of(widest, host_parameters_[index]);
@@ -652,7 +658,8 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t rung) noexcept {
+u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_entry_(
+    std::size_t rung) noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
     return kit_t::lanes_per_row(rungs[rung]);
@@ -705,8 +712,8 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::l
 #pragma region Kernels
 
 /** Every NVIDIA sequence kernel: @p kernel_ picks the walk, @p capability_ and @p metric_ the kit
- *  through its ladder, @p rung_ its rung, Myers words or lanes per row, @p node_id_type_ the IDs of
- *  the records, and @p slots_ the register rung. */
+ *  through its ladder, @p rung_ its rung, Myers words or lanes per sequence, @p node_id_type_ the
+ *  IDs of the records, and @p slots_ the register rung. */
 template <vram_kernel_t kernel_, sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t rung_,
           typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))

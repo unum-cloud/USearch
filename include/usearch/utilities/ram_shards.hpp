@@ -38,16 +38,16 @@ using shard_keys_column = chunked_column<key_type_, chunk_schedule<10, 20>, inde
                                          forkunion_allocator_t, atomic_ref_template_>;
 
 /** The host key column of a shard whose key storage is that column alone. */
-template <typename key_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+template <typename key_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
           template <typename> class atomic_ref_template_>
-chunked_column<key_type_, schedule_type_, max_rows_, allocator_type_, atomic_ref_template_>& host_keys(
-    chunked_column<key_type_, schedule_type_, max_rows_, allocator_type_, atomic_ref_template_>& keys) noexcept {
+chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_>& host_keys(
+    chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_>& keys) noexcept {
     return keys;
 }
-template <typename key_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+template <typename key_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
           template <typename> class atomic_ref_template_>
-chunked_column<key_type_, schedule_type_, max_rows_, allocator_type_, atomic_ref_template_> const& host_keys(
-    chunked_column<key_type_, schedule_type_, max_rows_, allocator_type_, atomic_ref_template_> const& keys) noexcept {
+chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_> const& host_keys(
+    chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_> const& keys) noexcept {
     return keys;
 }
 

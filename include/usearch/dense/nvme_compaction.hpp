@@ -402,7 +402,7 @@ struct [[nodiscard]] nvme_compact_plan {
         /** Rows per target part, each next range landing in the next target part. */
         std::size_t stride = 0;
 
-        /** The source rows whose edges may survive; empty writes no edges at all. */
+        /** The source nodes whose edges may survive; empty writes no edges at all. */
         iota_view<std::size_t> kept;
     };
 
@@ -420,7 +420,7 @@ struct [[nodiscard]] nvme_compact_plan {
         /** The rows the re-select phase re-selects, all of them unless the plan narrows them. */
         iota_view<std::size_t> selected;
 
-        /** The first row of the appended rows of a compaction or a build, every row below it
+        /** The first row of the appended nodes of a compaction or a build, every row below it
          *  linking to no appended row yet; zero for none. */
         std::size_t resident = 0;
     };
@@ -476,7 +476,7 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** The rows of a re-select batch: every scored row of every walk is offered to the row's
      *  candidates with its bytes, the row itself excepted. */
-    struct reselect_row_t {
+    struct reselect_query_t {
         using key_t = typename indexes_t::key_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
         inline static constexpr bool admitting_k = false;
@@ -484,7 +484,7 @@ struct [[nodiscard]] nvme_compact_plan {
         /** Offers every scored lane of a quad to the row's candidates with the bytes its rescoring
          *  saw. */
         struct fold_t {
-            reselect_row_t* row = nullptr;
+            reselect_query_t* row = nullptr;
 
             walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>) const noexcept {
                 inputs_t const& inputs = row->inputs;
@@ -516,13 +516,13 @@ struct [[nodiscard]] nvme_compact_plan {
         /** The quad being scored, between its rescoring and its fold. */
         quad<vector_view_t> landed {};
 
-        reselect_row_t(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
+        reselect_query_t(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
 
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        /** Primes @p new_row; its candidates keep what earlier walks of the batch kept. */
-        void prime_row(std::size_t new_row) noexcept {
-            row = new_row;
+        /** Primes @p new_query_index; its candidates keep what earlier walks of the batch kept. */
+        void prime_query(std::size_t new_query_index) noexcept {
+            row = new_query_index;
             query = inputs.queries.row(row).as_vector();
         }
         void rescore_quad(quad<node_id_t> const&, quad<vector_view_t> const& vectors, quad<vector_norms_t> const&,
@@ -535,7 +535,7 @@ struct [[nodiscard]] nvme_compact_plan {
         std::size_t output_count() const noexcept { return 0; }
         nvme_locator<u32_t> output_locator(std::size_t) const noexcept { return {}; }
         void resolve_output_key(std::size_t, key_t const&) noexcept {}
-        status_t finish_row() noexcept { return status_t::success_k; }
+        status_t finish_query() noexcept { return status_t::success_k; }
     };
 
     /** One column a scan lands: where its row zero sits in the part, a row's width, and where row
@@ -751,7 +751,7 @@ struct [[nodiscard]] nvme_compact_plan {
                 source.stride = limit;
                 for (std::size_t first = 0; first < source.rows; first += limit)
                     if (failed(rows.push_back(min_of(limit, source.rows - first)))) return status_t::bad_alloc_k;
-                result_.compaction.moved_rows += source.rows - limit;
+                result_.compaction.moved_entries += source.rows - limit;
                 continue;
             }
             std::size_t bin = 0;
@@ -760,7 +760,7 @@ struct [[nodiscard]] nvme_compact_plan {
             source.target = bin;
             source.base = rows[bin];
             rows[bin] += source.rows;
-            if (source.base) result_.compaction.moved_rows += source.rows;
+            if (source.base) result_.compaction.moved_entries += source.rows;
         }
         return status_t::success_k;
     }
@@ -923,7 +923,7 @@ struct [[nodiscard]] nvme_compact_plan {
         std::size_t const values_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t);
         std::size_t bytes = workspace_allocator_t::reserved_bytes(ram_index_t::audit_memory_usage(rows));
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
-            std::size_t const chunk_rows = schedule_t::rows_in(chunk);
+            std::size_t const chunk_rows = schedule_t::nodes_in(chunk);
             bytes += workspace_allocator_t::reserved_bytes(chunk_rows * values_bytes) +
                      workspace_allocator_t::reserved_bytes(chunk_rows * norms_bytes_()) +
                      workspace_allocator_t::reserved_bytes(chunk_rows * neighbors_row_bytes_());
@@ -1560,7 +1560,7 @@ struct [[nodiscard]] nvme_compact_plan {
 #pragma region Reselection and Back Links
 
     /** Re-selects target rows @p step.nodes: each walks the target part from random landmarks, the
-     *  appended rows of a compaction or a build walking across into the resident rows alone first,
+     *  appended nodes of a compaction or a build walking across into the resident rows alone first,
      *  its candidates keeping the best rows it scored and its current neighbors, then a diverse
      *  pick lands as its row and spills its back-links. A whole part the workspace holds is refined
      *  in RAM instead. */
@@ -1583,8 +1583,8 @@ struct [[nodiscard]] nvme_compact_plan {
 
         candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_()};
         std::memset(counts, 0, count * sizeof(u32_t));
-        using row_t = reselect_row_t;
-        typename row_t::inputs_t const inputs {
+        using query_t = reselect_query_t;
+        typename query_t::inputs_t const inputs {
             vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_()}, candidates,
             static_cast<node_id_t>(first), expansion_factor_()};
         search_config_t config {};
@@ -1595,14 +1595,14 @@ struct [[nodiscard]] nvme_compact_plan {
         if (target.resident && first >= target.resident) {
             u32_t& part_nodes = target.view.parts_[0].nodes;
             u32_t const all_nodes = std::exchange(part_nodes, static_cast<u32_t>(target.resident));
-            auto const [crossed, cross_status] = target.view.template walk_rows_<row_t>(count, config, inputs, 0, {},
-                                                                                        {}, executor);
+            auto const [crossed, cross_status] = target.view.template walk_queries_<query_t>(count, config, inputs, 0,
+                                                                                             {}, {}, executor);
             part_nodes = all_nodes;
             if (failed(cross_status)) return cross_status;
             absorb_walks_(crossed);
         }
-        auto const [walked, walk_status] = target.view.template walk_rows_<row_t>(count, config, inputs, 0, {}, {},
-                                                                                  executor);
+        auto const [walked, walk_status] = target.view.template walk_queries_<query_t>(count, config, inputs, 0, {}, {},
+                                                                                       executor);
         if (failed(walk_status)) return walk_status;
         absorb_walks_(walked);
 

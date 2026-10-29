@@ -340,7 +340,7 @@ static std::size_t check_positions_radius(u64_t seed) {
         failures += basic_build<positions_fixture_t>(index, metric, values, assigned_ids, context,
                                                      surface_keep_octants_t {});
 
-        std::size_t const widest_row = surface_keep_octants_t {}.connectivity;
+        std::size_t const widest_list = surface_keep_octants_t {}.connectivity;
         std::array<i64_t, 3> const radii_centimetres {200'000, 800'000, 2'500'000}; // 2 km, 8 km, 25 km.
         for (std::size_t probe = 0; probe != probes_k; ++probe) {
             earth_fixed_t const query = stored[probe * (nodes_k / probes_k)].position;
@@ -348,14 +348,14 @@ static std::size_t check_positions_radius(u64_t seed) {
                 std::size_t expected = 0;
                 for (earth_observation_t const& candidate : stored)
                     expected += chord_squared(query, candidate.position) <= radius * radius;
-                radius_result_t const complete = within(index, query, radius, radius_margin_t::spanner_k, widest_row,
+                radius_result_t const complete = within(index, query, radius, radius_margin_t::spanner_k, widest_list,
                                                         metric, context);
                 failures += expect(bool(complete));
                 failures += expect_eq(complete.count, expected);
                 failures += expect(complete.candidates_count >= complete.count);
                 for (std::size_t position = 0; position != complete.count; ++position)
                     failures += expect(context.results[position].distance <= static_cast<u64_t>(radius * radius));
-                radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, widest_row, metric,
+                radius_result_t const plain = within(index, query, radius, radius_margin_t::none_k, widest_list, metric,
                                                      context);
                 failures += expect(bool(plain));
                 failures += expect(plain.count <= expected);
@@ -461,8 +461,8 @@ static std::size_t check_positions_nvme(u64_t seed) {
         status_t const ready = metric.init(staging);
         return expected<metric_t> {std::move(metric), ready};
     };
-    auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
-        return expected<earth_observation_t> {values[row], status_t::success_k};
+    auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
+        return expected<earth_observation_t> {values[query], status_t::success_k};
     };
     auto matches = [&](std::size_t entry, earth_observation_t const& view) noexcept { return view == values[entry]; };
     return test_basic_nvme_view<positions_fixture_t, nvme_indexes_t>(seed, values.size(), "chord", make_value,
@@ -502,11 +502,11 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
         std::vector<index_t::node_id_t> assigned_ids;
         failures += basic_build<positions_fixture_t>(index, metric, values, assigned_ids, context,
                                                      surface_keep_octants_t {});
-        std::size_t const widest_row = surface_keep_octants_t {}.connectivity;
+        std::size_t const widest_list = surface_keep_octants_t {}.connectivity;
         for (std::size_t query = 0; query != queries_count; ++query) {
             i64_t const radius = radii_centimetres[query % radii_centimetres.size()];
             radius_result_t const complete = within(index, queries[query].position, radius, radius_margin_t::spanner_k,
-                                                    widest_row, metric, context);
+                                                    widest_list, metric, context);
             failures += expect(bool(complete));
             for (std::size_t position = 0; position != complete.count; ++position)
                 walked[query].push_back(index.key_of(context.results[position].node_id).value);
@@ -534,7 +534,7 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
         auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
             return expected<earth_observation_t> {queries[query], status_t::success_k};
         };
-        // Every reach is exclusive, so a row exactly at the radius lands as the walk keeps it.
+        // Every reach is exclusive, so an entry exactly at the radius lands as the walk keeps it.
         std::vector<nk_u64_t> reaches(queries_count);
         for (std::size_t query = 0; query != queries_count; ++query) {
             i64_t const radius = radii_centimetres[query % radii_centimetres.size()];

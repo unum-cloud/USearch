@@ -234,7 +234,7 @@ function (usearch_setup_target target_)
                                /DEBUG>
         )
     endif ()
-    target_link_libraries(${target_} PRIVATE usearch_warnings)
+    target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:usearch_warnings>)
 
     # One source of truth for header paths: whatever the interface target advertises, including what the dependencies
     # carry, without inheriting its compile features onto pure-C targets.
@@ -268,7 +268,7 @@ function (usearch_setup_target target_)
 
     # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
     # artifact needs NumKong's library or its dispatch points.
-    target_link_libraries(${target_} PRIVATE numkong::header)
+    target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:numkong::header>)
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
     if (USEARCH_WITH_SPDK)

@@ -1679,7 +1679,7 @@ check_cmake_conventions() { # check_cmake_conventions <path> <staged-text> <adde
             if (cached && forced) hit("force", "forces a cache entry, which is written once")
             if (cached) return
             if (variable ~ /^[a-z_](.*[^_])?$/) hit("lowercase", "sets a lowercase local without a trailing `_`")
-            if (variable ~ /^[A-Z]/ && variable !~ "^(CMAKE|" toupper(siblings) ")_" &&
+            if (variable ~ /^[A-Z]/ && variable !~ "^(CMAKE|CPACK|" toupper(siblings) ")_" &&
                 !index(published, " " variable " "))
                 hit("uppercase", "sets an uppercase name outside CMake, the siblings, and the published and third-party lists")
         }

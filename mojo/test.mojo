@@ -157,7 +157,7 @@ def _engine_is_present() raises -> Bool:
 
 
 def _basis(library: Library) raises -> DenseIndex:
-    """Builds the two-row inner-product index over the identity basis most verbs below score against.
+    """Builds the two-entry inner-product index over the identity basis most verbs below score against.
 
     Args:
         library: The loaded engine, kept so the shared object stays mapped.
@@ -201,16 +201,16 @@ def test_engine_round_trips_when_present() raises:
     var arena = Arena(executor)
     var matches = on.search(RowsView.of(query, 3), 2, arena, DenseSearchConfig(stats=Pointer(to=stats)))
     assert_equal(len(matches), 1, "one query answered")
-    assert_equal(len(matches.row_keys(0)), 2, "the one query filled its own output row")
-    assert_true(matches.row_keys(0)[0] == Key(integer=0), "the nearest row is the query itself")
+    assert_equal(len(matches.query_keys(0)), 2, "the one query filled its own output")
+    assert_true(matches.query_keys(0)[0] == Key(integer=0), "the nearest entry is the query itself")
     assert_equal(Int(stats.computed_distances), 3, "the walk reported what it computed")
     var counted = on.search(RowsView.of(query, 3), 0, arena)
-    assert_equal(len(counted.row_keys(0)), 0, "a zero wanted lands only the counts")
+    assert_equal(len(counted.query_keys(0)), 0, "a zero wanted lands only the counts")
 
     var exported = on.get[DType.float32](Key(integer=0), arena)
     assert_equal(len(exported), 1, "one entry sits under that key")
     assert_equal(len(exported[0]), 3, "three values wide")
-    assert_equal(exported[0][0], Float32(1), "the stored row is read in place from the arena")
+    assert_equal(exported[0][0], Float32(1), "the stored vector is read in place from the arena")
     assert_equal(on.count(Key(integer=0)), 1, "and the count agrees")
     var absent = on.get[DType.float32](Key(integer=9), arena)
     assert_equal(len(absent), 0, "an absent key exports nothing")
@@ -360,17 +360,17 @@ def test_caller_thread_executor_drives_every_verb() raises:
     var rows = [Float32(0), 0, Float32(5), 5]
     var keys = [Key(integer=1), Key(integer=2)]
     on.insert(keys, RowsView.of(rows, 2))
-    assert_equal(on.count(Key(integer=2)), 1, "the inline lookup sees the row")
+    assert_equal(on.count(Key(integer=2)), 1, "the inline lookup sees the entry")
 
     var query = [Float32(4), 4]
     var arena = Arena(inline)
     var matches = on.search(RowsView.of(query, 2), 1, arena)
-    assert_true(matches.row_keys(0)[0] == Key(integer=2), "the inline walk still finds the nearest row")
+    assert_true(matches.query_keys(0)[0] == Key(integer=2), "the inline walk still finds the nearest entry")
     inline.drain(Mood.SPINNING)
 
 
 def test_buffers_round_trip_through_the_arena() raises:
-    """A monolith read in place from the arena loads back with the geometry and rows it froze."""
+    """A monolith read in place from the arena loads back with the geometry and entries it froze."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -390,7 +390,7 @@ def test_buffers_round_trip_through_the_arena() raises:
     assert_true(frozen.metric == DenseMetric.INNER, "and the metric")
 
     var restored = DenseIndex.load_ram_buffer(executor, monolith.bytes())
-    assert_equal(Int(restored.describe().size), 2, "both rows load back")
+    assert_equal(Int(restored.describe().size), 2, "both entries load back")
     assert_equal(restored.get[DType.float32](Key(integer=6), arena)[0][1], Float32(4), "with their values")
 
 
@@ -415,9 +415,9 @@ def test_search_stream_pulls_in_distance_order() raises:
         return
     var stream = index.on(executor).search_stream(RowsView.of(query, 2))
     var arena = Arena(executor)
-    assert_true(stream.next(1, arena).row_keys(0)[0] == Key(integer=2), "the first pull lands the nearest")
-    assert_true(stream.next(1, arena).row_keys(0)[0] == Key(integer=1), "the second resumes to the farther")
-    assert_equal(len(stream.next(1, arena).row_keys(0)), 0, "then the stream is drained")
+    assert_true(stream.next(1, arena).query_keys(0)[0] == Key(integer=2), "the first pull lands the nearest")
+    assert_true(stream.next(1, arena).query_keys(0)[0] == Key(integer=1), "the second resumes to the farther")
+    assert_equal(len(stream.next(1, arena).query_keys(0)), 0, "then the stream is drained")
 
 
 def test_cursor_walks_every_row_once() raises:
@@ -458,7 +458,7 @@ def test_health_audits_every_entry() raises:
 
 
 def test_absorb_consumes_its_donors() raises:
-    """An absorb takes in every donor's rows, and the donors it consumed are freed exactly once."""
+    """An absorb takes in every donor's entries, and the donors it consumed are freed exactly once."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -472,7 +472,7 @@ def test_absorb_consumes_its_donors() raises:
     var donors = List[DenseIndex]()
     donors.append(donor^)
     index.absorb(donors^)
-    assert_equal(Int(index.describe().size), 3, "the donor's row joined")
+    assert_equal(Int(index.describe().size), 3, "the donor's entry joined")
     assert_equal(index.count(Key(integer=3)), 1, "under its own key")
 
 
@@ -500,7 +500,7 @@ def test_mutating_a_view_is_refused_as_read_only() raises:
 
 
 def test_scans_find_every_query_itself() raises:
-    """A scan scores every row rather than the ones a walk reaches, so every query finds itself first."""
+    """A scan scores every entry rather than the ones a walk reaches, so every query finds itself first."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -514,7 +514,7 @@ def test_scans_find_every_query_itself() raises:
     var matches = index.search(RowsView.of(rows, 2), 1, arena, DenseSearchConfig(traversal=Traversal.SCAN))
     assert_equal(len(matches), 3, "every row is a query")
     for query in range(3):
-        assert_true(matches.row_keys(query)[0] == keys[query], "each query finds itself first")
+        assert_true(matches.query_keys(query)[0] == keys[query], "each query finds itself first")
 
 
 # endregion Engine
@@ -534,9 +534,9 @@ def test_deferred_calls_wait_until_final() raises:
     var arena = Arena(executor)
     var call = index.deferred(executor).search(RowsView.of(query, 2), 1, arena)
     assert_true(call.status() == Status.DEFERRED, "pending right after submission")
-    assert_true(call.wait().row_keys(0)[0] == Key(integer=1), "the nearest row")
+    assert_true(call.wait().query_keys(0)[0] == Key(integer=1), "the nearest entry")
     assert_true(call.status() == Status.SUCCESS, "final once waited")
-    assert_true(call.wait().row_keys(0)[0] == Key(integer=1), "and the same answer when asked again")
+    assert_true(call.wait().query_keys(0)[0] == Key(integer=1), "and the same answer when asked again")
 
 
 def test_deferred_failures_repeat() raises:
@@ -645,7 +645,7 @@ def test_maxsim_scores_over_documents_rather_than_rows() raises:
     var tokens = [Float32(1), 0, Float32(0), 1]
     var arena = Arena(library)
     var matches = index.maxsim(RowsView.of(tokens, 2), 2, 2, arena)
-    assert_equal(matches.rows, 1, "two token rows are one query")
+    assert_equal(matches.queries, 1, "two token rows are one query")
     var bounded = Int(matches.offsets()[1] - matches.offsets()[0])
     assert_equal(bounded, 2, "over two documents")
     var every = index.maxsim(RowsView.of(tokens, 2), 2, 0, arena)

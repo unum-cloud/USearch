@@ -53,7 +53,7 @@ func bfloat16Of(value float32) BFloat16 {
 	return BFloat16((bits + 0x7FFF + (bits>>16)&1) >> 16)
 }
 
-// sequentialKeys names rows one through count.
+// sequentialKeys names entries one through count.
 func sequentialKeys(count uint) []Key {
 	keys := make([]Key, count)
 	for row := uint(0); row < count; row++ {
@@ -121,7 +121,7 @@ func angularBF16(dimensions uint) DenseOptions {
 	return options
 }
 
-// populated fills a fresh index with unit rows named one through count.
+// populated fills a fresh index with unit vectors named one through count.
 func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []Key, []float32) {
 	t.Helper()
 	index := newIndex(t, options, count)
@@ -140,7 +140,7 @@ func searchOne(t *testing.T, index *DenseIndex, query []float32, dimensions uint
 	if err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	keys, _, err := matches.Row(0)
+	keys, _, err := matches.Query(0)
 	if err != nil {
 		t.Fatalf("the matches must read: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the holding call must succeed: %v", err)
 	}
-	if found, _, err := matches.Row(0); err != nil || len(found) != 2 {
+	if found, _, err := matches.Query(0); err != nil || len(found) != 2 {
 		t.Fatalf("the holding call's view read %d matches: %v", len(found), err)
 	}
 	if _, err := DenseValues[float32](second); !errors.Is(err, StatusUninitialized) {
@@ -426,7 +426,7 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 	if err := arena.Close(); err != nil {
 		t.Fatalf("the arena must close: %v", err)
 	}
-	if _, _, err := matches.Row(0); !errors.Is(err, StatusUninitialized) {
+	if _, _, err := matches.Query(0); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a view over a closed arena read with %v", err)
 	}
 	for name, refused := range map[string]*Arena{"closed": arena, "nil": nil} {
@@ -434,7 +434,7 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 			t.Errorf("a %s arena served with %v", name, err)
 		}
 	}
-	if _, _, err := (MatchesView{}).Row(0); !errors.Is(err, StatusUninitialized) {
+	if _, _, err := (MatchesView{}).Query(0); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a view no call wrote read with %v", err)
 	}
 	device := exported{arena: &Arena{residency: ResidencyVram}}
@@ -621,7 +621,7 @@ func TestInsertsAndGetsVectorsIntact(t *testing.T) {
 	}
 }
 
-// Products land ragged, so the offsets the library writes beside them are what split them into rows.
+// Products land ragged, so the offsets the library writes beside them are what split them by left row.
 func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -636,15 +636,15 @@ func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the product must resolve: %v", err)
 	}
-	if products.Rows() != 3 || products.Required() < 3*4 {
-		t.Fatalf("the product spans %d rows of %d pairs", products.Rows(), products.Required())
+	if products.Queries() != 3 || products.Required() < 3*4 {
+		t.Fatalf("the product spans %d rows of %d pairs", products.Queries(), products.Required())
 	}
-	for row := uint(0); row < products.Rows(); row++ {
-		if keys, scores, err := products.Row(row); err != nil || len(keys) != 4 || len(scores) != 4 {
+	for row := uint(0); row < products.Queries(); row++ {
+		if keys, scores, err := products.Query(row); err != nil || len(keys) != 4 || len(scores) != 4 {
 			t.Errorf("row %d kept %d pairs: %v", row, len(keys), err)
 		}
 	}
-	if _, _, err := products.Row(3); !errors.Is(err, StatusInvalidArgument) {
+	if _, _, err := products.Query(3); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a row past the end reported %v", err)
 	}
 
@@ -653,14 +653,14 @@ func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	if !errors.Is(err, StatusConfigMismatch) {
 		t.Errorf("a product over distances reported %v", err)
 	}
-	if failed.Rows() != 0 {
-		t.Errorf("a failed product spans %d rows", failed.Rows())
+	if failed.Queries() != 0 {
+		t.Errorf("a failed product spans %d rows", failed.Queries())
 	}
 }
 
 // A cursor takes the row width from the index, so the rows it lands must be the ones inserted, in
 // the scalar kind the caller asked for.
-func TestCursorsWalkEveryRowOnce(t *testing.T) {
+func TestCursorsWalkEveryEntryOnce(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	const count = 5
@@ -716,7 +716,7 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	}
 }
 
-// A stream pulls one row of a search at a time, so its first pull is the nearest match.
+// A stream pulls one query of a search at a time, so its first pull is the nearest match.
 func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -740,7 +740,7 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the stream must pull: %v", err)
 		}
-		found, _, err := matches.Row(0)
+		found, _, err := matches.Query(0)
 		if err != nil {
 			t.Fatalf("the pull must read: %v", err)
 		}
@@ -819,7 +819,7 @@ func TestRejectsMalformedShapes(t *testing.T) {
 
 // A batch is where the output row pitch earns its keep: every query's slice must land in its own
 // row, and the three positional size_t fields of the telemetry must land in theirs.
-func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
+func TestBatchSearchFillsEveryQuery(t *testing.T) {
 	t.Parallel()
 	const (
 		dimensions = 64
@@ -839,7 +839,7 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 		t.Fatalf("the outputs describe %d queries of %d", outputs.Queries(), outputs.Columns())
 	}
 	for query := uint(0); query < queries; query++ {
-		found, distances, err := outputs.Row(query)
+		found, distances, err := outputs.Query(query)
 		if err != nil || uint(len(found)) != wanted || uint(len(distances)) != wanted {
 			t.Fatalf("query %d reported %d of %d matches: %v", query, len(found), wanted, err)
 		}
@@ -847,16 +847,16 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 			t.Errorf("query %d found %v nearest", query, found[0])
 		}
 	}
-	if _, _, err := outputs.Row(queries); !errors.Is(err, StatusInvalidArgument) {
+	if _, _, err := outputs.Query(queries); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a query past the end reported %v", err)
 	}
 
-	// A zero wanted lands the counts alone, so a row reads empty rather than through absent keys.
+	// A zero wanted lands the counts alone, so a query reads empty rather than through absent keys.
 	none, err := index.Search(RowsOf(slab[:queries*dimensions], dimensions), 0, newArena(t, nil), nil)
 	if err != nil {
 		t.Fatalf("a search wanting nothing reported %v", err)
 	}
-	if found, distances, err := none.Row(queries - 1); err != nil || len(found) != 0 || len(distances) != 0 {
+	if found, distances, err := none.Query(queries - 1); err != nil || len(found) != 0 || len(distances) != 0 {
 		t.Errorf("a search wanting nothing found %d matches: %v", len(found), err)
 	}
 
@@ -892,7 +892,7 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 	}
 	seen := 0
 	for query := uint(0); query < 3; query++ {
-		found, _, err := admitted.Row(query)
+		found, _, err := admitted.Query(query)
 		if err != nil {
 			t.Fatalf("query %d must read: %v", query, err)
 		}
@@ -913,7 +913,7 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 		t.Fatalf("a rejecting filter must still resolve: %v", err)
 	}
 	for query := uint(0); query < 3; query++ {
-		if found, _, _ := rejected.Row(query); len(found) != 0 {
+		if found, _, _ := rejected.Query(query); len(found) != 0 {
 			t.Fatalf("a rejecting filter admitted %d matches", len(found))
 		}
 	}
@@ -960,7 +960,7 @@ func TestProgressHandlersReportAndStop(t *testing.T) {
 	}
 }
 
-// A scan scores every row exactly, so each row queried against its own index finds itself first.
+// A scan scores every entry exactly, so each vector queried against its own index finds itself first.
 func TestScanFindsEveryRowItself(t *testing.T) {
 	t.Parallel()
 	const dimensions = 16
@@ -972,7 +972,7 @@ func TestScanFindsEveryRowItself(t *testing.T) {
 		t.Fatalf("the scan must resolve: %v", err)
 	}
 	for query := uint(0); query < count; query++ {
-		if found, _, err := outputs.Row(query); err != nil || len(found) == 0 || found[0] != keys[query] {
+		if found, _, err := outputs.Query(query); err != nil || len(found) == 0 || found[0] != keys[query] {
 			t.Errorf("query %d found %v first: %v", query, found, err)
 		}
 	}
@@ -1026,7 +1026,7 @@ func TestEveryMetricAndQuantizationCrosses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("packed rows must search: %v", err)
 			}
-			if found, _, _ := outputs.Row(0); len(found) == 0 {
+			if found, _, _ := outputs.Query(0); len(found) == 0 {
 				t.Error("a packed walk reported no matches")
 			}
 		})
@@ -1075,11 +1075,11 @@ func TestMaxsimSizesItsOutputsOverDocuments(t *testing.T) {
 		t.Fatalf("the unbounded late interaction must resolve: %v", err)
 	}
 	for query := uint(0); query < queries; query++ {
-		found, _, err := outputs.Row(query)
+		found, _, err := outputs.Query(query)
 		if err != nil || len(found) != documents {
 			t.Errorf("query %d scored %d of %d documents: %v", query, len(found), documents, err)
 		}
-		if scored, _, err := every.Row(query); err != nil || len(scored) < len(found) {
+		if scored, _, err := every.Query(query); err != nil || len(scored) < len(found) {
 			t.Errorf("query %d kept %d keys unbounded, below the %d of a bound: %v", query, len(scored), len(found), err)
 		}
 	}
@@ -1210,7 +1210,7 @@ func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
 		t.Fatalf("the absorb reported %v", err)
 	}
 	if counted, err := index.Count(KeyFromUint64(7)); err != nil || counted != 1 {
-		t.Errorf("the absorbed row counted %d with %v", counted, err)
+		t.Errorf("the absorbed entry counted %d with %v", counted, err)
 	}
 	if _, err := donors[0].Describe(); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a consumed donor described with %v", err)
@@ -1361,8 +1361,8 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 		t.Fatalf("the blocking search must succeed: %v", err)
 	}
 	for query := uint(0); query < queries; query++ {
-		later, _, _ := deferred.Row(query)
-		now, _, _ := blocking.Row(query)
+		later, _, _ := deferred.Query(query)
+		now, _, _ := blocking.Query(query)
 		if len(now) != wanted || !slices.Equal(later, now) {
 			t.Fatalf("query %d found %v rather than %v", query, later, now)
 		}
@@ -1439,7 +1439,7 @@ func TestDeferredPredicatesAdmitOnlyApprovedKeys(t *testing.T) {
 	if admissions.Load() == 0 {
 		t.Error("the predicate never ran")
 	}
-	found, _, err := matches.Row(0)
+	found, _, err := matches.Query(0)
 	if err != nil {
 		t.Fatalf("the matches must read: %v", err)
 	}

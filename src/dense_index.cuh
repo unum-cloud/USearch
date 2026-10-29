@@ -29,7 +29,7 @@
 #include <utility>          // `std::exchange` - nulling each donor slot an absorb consumes
 #include <variant>          // `std::variant`, `std::visit`
 
-#include <forkunion.h>           // `fu_topology_new` - the executor factories' discovery
+#include <forkunion/forkunion.h> // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
 #include <forkunion/types.hpp>   // `fu::spin_mutex` - the ticks' lock
 #include <numkong/cast.h>        // `nk_cast_best` - converting foreign scalar rows at the boundary
@@ -662,7 +662,8 @@ extern "C" {
 #pragma region Lifetime
 
 /** Freezes the geometry @p handle was created with on every shard through a reservation of no
- *  rows, so a fresh index takes rows without one, and a later reservation only hints capacity. */
+ *  entries, so a fresh index takes entries without one, and a later reservation only hints
+ *  capacity. */
 static status_t freeze_geometry(usearch_dense_index_handle_t const& handle) noexcept {
     return std::visit(
         [&](auto const* verbs) noexcept {
@@ -937,7 +938,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
             // No walk serves zero matches; the counts are zeros staged on the host.
             auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
             if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
-            for (std::size_t row = 0; row != count; ++row) zeros.counts[row] = 0;
+            for (std::size_t query = 0; query != count; ++query) zeros.counts[query] = 0;
             auto const [matches, publish_status] = publish_matches(*arena, zeros, count);
             if (failed(publish_status)) return propagate_error(publish_status, outcome), void();
             *arguments->matches = matches;
@@ -1347,15 +1348,15 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         using key_t = typename dense_verbs<home_>::key_t;
         static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-        // A row's scored count lands one past its offset, which it becomes once compacted.
+        // A query's scored count lands one past its offset, which it becomes once compacted.
         std::size_t* offsets = carve<std::size_t>(arena->memory, count + 1);
         if (!offsets)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
         std::span<std::size_t> const scored {offsets + 1, count};
         usearch_key_t* keys = nullptr;
         usearch_distance_t* scores = nullptr;
-        // Every row keeps the pairs its walks scored until `width` of them fill its row, compacted
-        // once the counts are known.
+        // Every query keeps the pairs its walks scored until `width` of them fill its row,
+        // compacted once the counts are known.
         auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
             keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
             scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
@@ -1376,25 +1377,25 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
             return for_each_dense_chunk(punned, arguments->executor, count, arguments->left, 1,
                                         arguments->expansion_factor, progress, arguments->stats, outcome, sink);
         };
-        // Keeping every pair needs the widest row first, which only a counting walk can tell.
+        // Keeping every pair needs the widest query first, which only a counting walk can tell.
         std::size_t width = arguments->wanted;
         if (!width) {
             if (!walk(0, usearch_progress_t {})) return;
-            for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
+            for (std::size_t const query_scored : scored) width = max_of(width, query_scored);
         }
         if (!walk(width, arguments->progress)) return;
 
         std::size_t required = 0;
         offsets[0] = 0;
-        for (std::size_t row = 0; row != count; ++row) {
-            std::size_t const row_scored = offsets[row + 1], kept = min_of(row_scored, width);
-            required += row_scored;
-            offsets[row + 1] = offsets[row] + kept;
+        for (std::size_t query = 0; query != count; ++query) {
+            std::size_t const query_scored = offsets[query + 1], kept = min_of(query_scored, width);
+            required += query_scored;
+            offsets[query + 1] = offsets[query] + kept;
             if (!kept) continue;
             // A run starts no later than its own row, so moving rows in order overwrites only rows
             // already moved.
-            std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
-            std::memmove(scores + offsets[row], scores + row * width, kept * sizeof(usearch_distance_t));
+            std::memmove(keys + offsets[query], keys + query * width, kept * sizeof(usearch_key_t));
+            std::memmove(scores + offsets[query], scores + query * width, kept * sizeof(usearch_distance_t));
         }
         auto const [products, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
         if (failed(publish_status))

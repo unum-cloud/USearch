@@ -48,11 +48,11 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
 /**
  *  @brief An insertion arriving while an absorb into the index runs answers @c contended_k and
  *      lands nothing, and an absorb meeting a batch in flight answers the same and leaves the
- *      donor whole; every row that did land resolves exactly once.
+ *      donor whole; every entry that did land resolves exactly once.
  *
  *  One thread absorbs, retrying while a racing insertion holds a batch in flight, while another
- *  inserts single rows until the absorb returns. A round that sees no refusal refills the donor and
- *  races again.
+ *  inserts single entries until the absorb returns. A round that sees no refusal refills the donor
+ *  and races again.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
@@ -78,7 +78,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     failures += expect(succeeded(recipient.insert(keys_of(0), rows_of(0), drivers[0].executor).status));
     failures += expect(succeeded(donor.insert(keys_of(part), rows_of(part), drivers[1].executor).status));
 
-    // Racing rows take keys past every part's, so each resolves to the one row it landed.
+    // Racing entries take keys past every part's, so each resolves to the one entry it landed.
     std::vector<key_t> landed_keys;
     u64_t next_number = keys.size() + 1;
     key_t next_key = dense_key<key_t>(next_number);
@@ -150,7 +150,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
 }
 
 /** A batch planned and dropped before its first step gives back the executor and every shard's
- *  claim, so planning the same batch again grows no shard and the rows then land. */
+ *  claim, so planning the same batch again grows no shard and the entries then land. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
@@ -229,8 +229,8 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     failures += expect((shard_sizes(filled) == std::vector<std::size_t> {1000, 1000, 1000, 1000, 500, 500}));
     failures += expect_eq(miscounted(filled, rows), 0u);
 
-    // 750 rows a shard, then a batch of 1000 tops both up to the bound and opens a generation for
-    // the other 500, whole, and a search reaches the new generation's rows.
+    // 750 entries a shard, then a batch of 1000 tops both up to the bound and opens a generation
+    // for the other 500, whole, and a search reaches the new generation's entries.
     indexes_type_ crossed {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(bounded(crossed));
     failures += expect(succeeded(crossed.insert(keys_of(0, 1500), rows_of(0, 1500), driver.executor).status));
@@ -250,7 +250,7 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
                            found_keys.begin() + result.count);
     }
 
-    // A batch filling the second generation exactly opens none, and one more row opens a third.
+    // A batch filling the second generation exactly opens none, and one more entry opens a third.
     failures += expect(succeeded(crossed.insert(keys_of(2500, 1500), rows_of(2500, 1500), driver.executor).status));
     failures += expect_eq(crossed.shards_count(), 4u);
     failures += expect(
@@ -259,9 +259,9 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     failures += expect_eq(crossed.size(), 4001u);
     failures += expect_eq(miscounted(crossed, 4001), 0u);
 
-    // Batches of 3500 over two shards bounded at 2500 rows: the second tops up the first
+    // Batches of 3500 over two shards bounded at 2500 entries: the second tops up the first
     // generation, fills a second and starts a third, and the third grows a fresh shard holding 250
-    // rows by 1750, more than the chunk the bound truncates adds, though only its deficit is
+    // entries by 1750, more than the chunk the bound truncates adds, though only its deficit is
     // missing.
     {
         constexpr std::size_t straddled_bound = 2500, batch = 3500, straddled_rows = 4 * batch;
@@ -302,10 +302,10 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     return failures;
 }
 
-/** Four even shards compact in place under a bound of half the rows into two, the kept ones
+/** Four even shards compact in place under a bound of half the entries into two, the kept ones
  *  keeping their IDs and the others staying as idle slots, while a looker counts every key once,
  *  then out of place into a fresh single shard, which empties the source. Every key resolves once
- *  with its row intact after each, and searches find sampled rows themselves within noise of
+ *  with its vector intact after each, and searches find sampled vectors themselves within noise of
  *  before. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_compact(u64_t seed) {
@@ -328,7 +328,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
             filled += indexes.shard(shard).size() != 0;
         return filled;
     };
-    // Sampled rows whose search returns their own key; a dot graph's hubs make self-search moot.
+    // Sampled vectors whose search returns their own key; a dot graph's hubs make self-search moot.
     auto self_hits = [&](indexes_type_& indexes) {
         std::size_t hits = 0;
         if constexpr (kernel_ != nk_kernel_dot_k) {
@@ -356,8 +356,8 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += expect_eq(filled_shards(indexes), 4u);
     std::size_t const hits_before = self_hits(indexes);
 
-    // In place: each kept shard takes one other, the only rows that move and re-select. A looker
-    // counts keys throughout, and each moved row's one locator swaps whole, so every key counts
+    // In place: each kept shard takes one other, the only entries that move and re-select. A looker
+    // counts keys throughout, and each moved entry's one locator swaps whole, so every key counts
     // once.
     std::array<indexes_type_*, 1> const in_place {&indexes};
     compact_config_t halves;
@@ -380,7 +380,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += expect_eq(miscounted, 0u);
     auto const [packed, packed_status] = compacted;
     failures += expect_eq(packed_status, status_t::success_k);
-    failures += expect(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_rows == rows / 2);
+    failures += expect(packed.source_shards == 4 && packed.target_shards == 2 && packed.moved_entries == rows / 2);
     failures += expect(packed.graph.reselected_nodes >= rows / 2);
     failures += expect_eq(indexes.shards_count(), 4u);
     failures += expect_eq(filled_shards(indexes), 2u);
@@ -398,12 +398,12 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     failures += expect(succeeded(indexes.plan_insert(1, executor).status));
     failures += expect(succeeded(mismatched.plan_insert(1, executor).status));
 
-    // Out of place into a fresh single shard: every row moves, and the source ends empty.
+    // Out of place into a fresh single shard: every entry moves, and the source ends empty.
     indexes_type_ single {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(single.emplace(no_memory_domain_k)));
     auto const [moved, moved_status] = compact(std::span<indexes_type_* const> {in_place}, single, executor);
     failures += expect_eq(moved_status, status_t::success_k);
-    failures += expect(moved.source_shards == 4 && moved.target_shards == 1 && moved.moved_rows == rows);
+    failures += expect(moved.source_shards == 4 && moved.target_shards == 1 && moved.moved_entries == rows);
     failures += expect_eq(indexes.size(), 0u);
     failures += dense_indexes_expect_restored(single, vectors, keys, dimensions, executor, seed);
     failures += expect(self_hits(single) * 100 + noise_percent_k * samples_k >= hits_before * 100);

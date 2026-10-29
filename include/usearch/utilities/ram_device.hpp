@@ -17,8 +17,8 @@
 #include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
-#include <forkunion.h>         // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
-#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
+#include <forkunion/forkunion.h> // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
+#include <forkunion/types.hpp>   // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`

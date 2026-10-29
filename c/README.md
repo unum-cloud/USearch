@@ -15,6 +15,18 @@ Put `c/` on the include path, or `include/` once installed, where the C headers 
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
+`-D USEARCH_INSTALL=1` adds the CMake package and a `.pc` file, and `cpack` then archives the preview SDK.
+It holds the stripped shared library, the C headers, the C++ wrappers in `cpp/usearch/`, the package, the `.pc` and the license, but neither the archive nor the header-only core.
+
+```sh
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_INSTALL=1 -D USEARCH_DENSE_DTYPES=11
+cmake --build build_release --config Release
+cpack --config build_release/CPackConfig.cmake # usearch-<version>-<platform>-sdk.tar.gz, a ZIP on Windows
+```
+
+Consumers link it as `usearch::shared` after `find_package(usearch)`, or through `pkg-config --cflags --libs usearch`.
+`cmake --install build_release --component static` adds `usearch::static`, and `--component core` the header-only templates as `usearch::header`.
+
 `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.
 It answers every verb of every modality by exhaustive scan with the C++ standard library alone, so a binding links and runs its suite in seconds without building the engine.
 Its search is exact, its traversal statistics are invented, and its checkpoints are its own memory image, readable by nothing else.
@@ -313,7 +325,7 @@ cudaStreamSynchronize(stream);
 usearch_arena_free(arena);
 ```
 
-A search's matches land in its arena too, so on a VRAM executor they are device memory: every shard ranks its own rows and the first device merges those rankings into the arena, so on NVIDIA and AMD no match crosses through the host, while on Apple the host merges them in the unified memory both share.
+A search's matches land in its arena too, so on a VRAM executor they are device memory: every shard ranks its own entries and the first device merges those rankings into the arena, so on NVIDIA and AMD no match crosses through the host, while on Apple the host merges them in the unified memory both share.
 A device that runs out of memory for an arena reports `usearch_status_out_of_memory_k` rather than falling back to the host, so where an output lands never depends on how full a device is.
 Free a device arena once your own device work on its outputs has finished, and before the executor that made it.
 
@@ -371,7 +383,7 @@ The dense metric kinds are:
 
 - `usearch_dense_metric_inner_k` - Inner Product distance, $1 - \sum_i a_i b_i$, unnormalized and scale-sensitive.
 - `usearch_dense_metric_angular_k` - Cosine distance, $1 - \frac{\sum_i a_i b_i}{\sqrt{\sum_i a_i^2} \sqrt{\sum_i b_i^2}}$, in $[0, 2]$ and blind to magnitude.
-- `usearch_dense_metric_euclidean_k` - Euclidean distance, $\sqrt{\sum_i (a_i - b_i)^2}$, zero only for identical rows.
+- `usearch_dense_metric_euclidean_k` - Euclidean distance, $\sqrt{\sum_i (a_i - b_i)^2}$, zero only for identical vectors.
 - `usearch_dense_metric_hamming_k` - Hamming distance, $\sum_i a_i \oplus b_i$, over `usearch_scalar_u1x8_k` bit sets.
 - `usearch_dense_metric_jaccard_k` - Jaccard distance, $\frac{\sum_i a_i \oplus b_i}{\sum_i a_i \lor b_i}$, in $[0, 1]$, over `usearch_scalar_u1x8_k` bit sets.
 
@@ -379,7 +391,7 @@ The dense metric kinds are:
 
 ### Search
 
-A search writes a `usearch_matches_view_t` into its arena: `count` rows of `columns` packed columns, row `i` holding `counts[i]` matches from `keys[i * columns]` and `scores[i * columns]` on, nearest first.
+A search writes a `usearch_matches_view_t` into its arena: `columns` packed columns for each of its `count` queries, query `i` holding `counts[i]` matches from `keys[i * columns]` and `scores[i * columns]` on, nearest first.
 `wanted` bounds the columns, the "k" in "kANN".
 The graph's `connectivity` is frozen when the index is created, while the `expansion_factor`, the breadth of the candidates a walk explores, is chosen per call.
 Higher expansion values buy recall at the cost of latency; zero derives a default from the connectivity.
@@ -398,7 +410,7 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                 .stats = &stats});
 ```
 
-`.traversal = usearch_traversal_scan_k` scores every published row instead of walking, the exact ground truth a walk approximates, on RAM, NVMe and NVIDIA VRAM.
+`.traversal = usearch_traversal_scan_k` scores every published entry instead of walking, the exact ground truth a walk approximates, on RAM, NVMe and NVIDIA VRAM.
 AMD and Apple VRAM handles refuse scans with `usearch_status_unsupported_k`.
 Every verb that walks the graph fills the optional `stats` with the members it visited, the distances it computed, and its restarts, a connectivity health signal rather than a cost.
 
@@ -429,7 +441,7 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
 The predicate judges a batch of candidates per call, a quad of them at a time during a walk, so a handler backed by an external store answers each batch in one round trip.
 
 Rejected entries still route the walk, so recall holds at low selectivity, and the predicate judges every scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
-An exact scan asks it only about rows closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
+An exact scan asks it only about entries closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
 A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_unsupported_k`.
 
 Long calls take a `usearch_progress_t`: a handler, which is also the only way to stop one, its state, and how many reports it hears:
@@ -445,16 +457,16 @@ usearch_dense_search(&(usearch_dense_search_t) {
     .wanted = 10, .arena = arena, .matches = &matches, .progress = {stop_when_asked, &stop, 20}});
 ```
 
-Counts are in whatever units the verb consumes, rows for an insertion, queries for a search, shards for a checkpoint, and the handler is never called concurrently or after the call is final.
+Counts are in whatever units the verb consumes, entries for an insertion, queries for a search, shards for a checkpoint, and the handler is never called concurrently or after the call is final.
 A call reports at most `steps` times, the last at completion, and zero steps derive to ten.
 A batch verb hands its engine one slice per step, and a call without a handler runs as one slice, since every engine bounds its own scratch.
 A stopped call reports `usearch_status_cancelled_k` and leaves its outputs `NULL`.
-An insertion claims every row before its first report, so its handler only reports, and all its rows publish at once.
+An insertion claims every entry before its first report, so its handler only reports, and all its entries publish at once.
 
 ### Retrieval and Streaming
 
 `usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` `NULL`.
-A cursor walks the graph, every row in storage order or breadth-first from `starts`, its keys and, when asked, each row's `links` landing in an arena batch by batch:
+A cursor walks the graph, every entry in storage order or breadth-first from `starts`, its keys and, when asked, each entry's `links` landing in an arena batch by batch:
 
 ```c
 usearch_dense_cursor_t cursor = NULL;
@@ -472,9 +484,9 @@ for (size_t written = 1; written != 0 && outcome.status == usearch_status_succes
 usearch_dense_cursor_free(cursor);
 ```
 
-Each shard's publication watermark is read as the walk enters it, so a row once passed is never revisited, while a later shard may carry rows published after the walk began.
-Opened at `starts`, a cursor yields their own rows first, in the order given, then breadth-first the rows they link to, each row once, so the first rows pulled carry the starts' immediate links.
-`links` is a `usearch_keys_tape_view_t`, row `i` spanning `offsets[i]` up to `offsets[i+1]`, and the vectors themselves come from `usearch_dense_get`.
+Each shard's publication watermark is read as the walk enters it, so an entry once passed is never revisited, while a later shard may carry entries published after the walk began.
+Opened at `starts`, a cursor yields their own entries first, in the order given, then breadth-first the entries they link to, each entry once, so the first entries pulled carry the starts' immediate links.
+`links` is a `usearch_keys_tape_view_t`, entry `i` spanning `offsets[i]` up to `offsets[i+1]`, and the vectors themselves come from `usearch_dense_get`.
 
 When a filter is selective enough that no `wanted` can be guessed upfront, a search stream keeps pulling matches in distance order:
 
@@ -529,22 +541,22 @@ It reports the running totals, the nodes re-selected so far, those whose neighbo
 
 ### Absorbing & Splitting
 
-`usearch_dense_absorb` moves an array of donor handles into one index, one donor after another, keeping their graphs rather than re-inserting their rows.
+`usearch_dense_absorb` moves an array of donor handles into one index, one donor after another, keeping their graphs rather than re-inserting their vectors.
 Donors are consumed and nulled as they go, so the array itself says which handles the caller still owns and must free, and a cancel stops only the closing refinement, answering `usearch_status_cancelled_k`.
-Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its rows across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every row no earlier one links to.
+Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its nodes across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every node no earlier one links to.
 A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
 An insertion in flight on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
 A VRAM-built donor joins a RAM index through a save and a load.
 
 `usearch_dense_split` is the inverse, emptying one index into `count` receivers, empty handles of its residency, scalar, class, metric, geometry and shard count.
-It grows one graph-local part per receiver from roots drawn from `seed`, breadth-first over the links and capped at an equal share, lands part `p` of shard `s` in shard `s` of receiver `p` with edges rebased and edges across parts dropped, and refines the rows that lost an edge.
+It grows one graph-local part per receiver from roots drawn from `seed`, breadth-first over the links and capped at an equal share, lands part `p` of shard `s` in shard `s` of receiver `p` with edges rebased and edges across parts dropped, and refines the nodes that lost an edge.
 `usearch_dense_refinement_init` takes `receivers` in place of `donors` for the resumable form, never both, refusing the pair with `usearch_status_invalid_argument_k`.
 The engine answers splitting with `usearch_status_unsupported_k` for now, while the stand-in partitions by brute force.
 
 ### Sparse Multiplication
 
 `usearch_dense_multiply` is an approximate $A \times B^T$ in the shape of BLAS `?GEMM`, with the indexed rows as $B$, reporting every pair the walks scored rather than only the nearest.
-The output pattern is whatever the walk touched, so its cost is roughly `count × expansion × connectivity × dimensions`, sublinear in the indexed rows, and the pairs it never reaches are the low and negative dots.
+The output pattern is whatever the walk touched, so its cost is roughly `count × expansion × connectivity × dimensions`, sublinear in the indexed entries, and the pairs it never reaches are the low and negative dots.
 Only the walks learn how many pairs there are, so keys, products and Apache Arrow offsets land in the arena as one ragged output:
 
 ```c
@@ -564,7 +576,7 @@ for (size_t row = 0; row != m; ++row)
         accumulate(row, products.keys[pair], products.scores[pair]);
 ```
 
-Pairs arrive in traversal order without duplicates, a non-zero `wanted` keeps each row's first pairs, and `required` reports how many there were before the cut.
+Pairs arrive in traversal order without duplicates, a non-zero `wanted` keeps each left row's first pairs, and `required` reports how many there were before the cut.
 The linear-algebra verbs run on `usearch_dense_metric_inner_k` alone, since products and softmaxes need logits rather than distances, and any other kind refuses with `usearch_status_config_mismatch_k`.
 
 ### Late Interaction
@@ -590,7 +602,7 @@ usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
 ```
 
 Query `i` spans `documents.offsets[i]` up to `documents.offsets[i+1]`, largest first, and `landed` counts every query's documents on the host, even when the arena lives in VRAM.
-The walks only nominate keys, and every row of a nominated key is scored, so a walk may miss a key but never scores one short, and widening the expansion narrows what it misses.
+The walks only nominate keys, and every entry of a nominated key is scored, so a walk may miss a key but never scores one short, and widening the expansion narrows what it misses.
 
 ### Attention
 

@@ -249,7 +249,7 @@ def measured_recall(
     """The share of true nearest neighbors the index returned, against the NumKong oracle."""
     truth = exact_matches(vectors, queries, wanted, metric=metric)
     found = keys_to_integers(index.on(executor).search(queries, wanted, Arena(executor)).keys)
-    hits = sum(len(set(found[row]) & set(truth[row])) for row in range(len(truth)))
+    hits = sum(len(set(found[query]) & set(truth[query])) for query in range(len(truth)))
     return hits / (len(truth) * wanted)
 
 

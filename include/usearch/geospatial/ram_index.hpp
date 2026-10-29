@@ -28,7 +28,7 @@
 #include <cmath>   // `std::sin`, `std::cos`, `std::atan2`, `std::sqrt`, `std::exp`, `std::log`, `std::llround`
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int32_t`, `std::int64_t`
-#include <cstring> // `std::memcpy` - a stored row read in place
+#include <cstring> // `std::memcpy` - a stored position read in place
 
 #include <array>   // `std::array`
 #include <bit>     // `std::bit_cast` - the codec's byte images
@@ -532,9 +532,9 @@ struct terrain_t {
 #pragma region Selector
 
 /**
- *  @brief Keeps the nearest candidate in each of eight tangent-plane cones around the base,
- *      then the longest of the remaining candidates up to the budget, so the row's long
- *      links outlive the reverse pass that re-selects a full row.
+ *  @brief Keeps the nearest candidate in each of eight tangent-plane cones around the base, then
+ *      the longest of the remaining candidates up to the budget, so the neighbor list's long links
+ *      outlive the reverse pass that re-selects a full neighbor list.
  *
  *  Never evaluates the metric between candidates: each candidate costs two integer dot
  *  products against the base's frame. Because the candidates arrive ascending, the first
@@ -543,9 +543,9 @@ struct terrain_t {
  *  The candidates decide exactness. A cone facing an ocean or a desert has its nearest neighbor far
  *  beyond the nearest few dozen candidates, so insert with an expansion of at least 128; the
  *  searcher's default of twice the budget leaves a quarter of the cone edges inexact on skewed
- *  data. And any candidates that re-select a published node's row must contain that row: selecting
- *  from fresh search results alone keeps their far tail as the long links and drops the real ones,
- *  and never converges.
+ *  data. And any candidates that re-select a published node's neighbors must contain them:
+ *  selecting from fresh search results alone keeps their far tail as the long links and drops the
+ *  real ones, and never converges.
  */
 struct surface_keep_octants_t {
 
@@ -553,7 +553,7 @@ struct surface_keep_octants_t {
      *  documents. */
     inline static constexpr std::size_t exact_candidates_k = 128;
 
-    /** The row budget: eight cone winners and four long links. */
+    /** The neighbor list budget: eight cone winners and four long links. */
     std::size_t connectivity = 12;
 
     /** Cones around every node; strictly under 60° each, which the routing bound needs. */
@@ -640,14 +640,14 @@ struct earth_observation_codec_t {
         return status_t::success_k;
     }
 
-    /** What @ref view hands out for a stored row. */
+    /** What @ref view hands out for a stored position. */
     using view_t = earth_observation_t;
 
-    /** The observation a stored @p row holds, its 32 bytes loaded straight into the value, since an
-     *  I/O buffer promises no alignment to point into. */
-    view_t view(bytes_view_t row) const noexcept {
+    /** The observation a stored @p position holds, its 32 bytes loaded straight into the value,
+     *  since an I/O buffer promises no alignment to point into. */
+    view_t view(bytes_view_t position) const noexcept {
         earth_observation_t value;
-        std::memcpy(&value, row.data(), sizeof(value));
+        std::memcpy(&value, position.data(), sizeof(value));
         return value;
     }
 };
@@ -683,14 +683,15 @@ f64_t uniform_unit(generator_type_& generator) noexcept {
  *  node, or on a neighbor it already links to, wires nothing and is not retried.
  *
  *  @param[in,out] index The index holding @p node, published.
- *  @param[in] node The node whose row receives the links.
+ *  @param[in] node The node whose neighbor list receives the links.
  *  @param[in] draws How many links to draw; four is the design's budget.
  *  @param[in,out] metric This thread's scoring instance.
  *  @param[in,out] context The calling thread's scratch, over any allocator.
  *  @param[in,out] generator The thread's random generator; seed distinctly per thread.
  *
  *  @par Statuses:
- *  - @c overflow_k A scratch capacity of @p context, or the grown row, wraps when rounded.
+ *  - @c overflow_k A scratch capacity of @p context, or the grown neighbor list, wraps when
+ *    rounded.
  *  - @c malformed_k @p node is unpublished.
  */
 template <typename index_type_, typename metric_type_, typename context_type_, typename generator_type_>
@@ -765,26 +766,26 @@ struct [[nodiscard]] radius_result_t {
  *  Under @c spanner_k the candidates widen to the radius times one plus twice the stretch, which
  *  the cone graph's spanner property makes complete; under @c none_k they stop at the radius
  *  itself. The candidates double from the searcher's default breadth to the index size, and a
- *  doubling that finds nothing new ends it. Each round scores the rows whose neighbors fill a
- *  walk's candidates, and a staging that fills ends a round early; a staging under one row reports
- *  @c config_mismatch_k.
+ *  doubling that finds nothing new ends it. Each round scores the nodes whose neighbors fill a
+ *  walk's candidates, and a staging that fills ends a round early; a staging under one neighbor
+ *  list reports @c config_mismatch_k.
  *
  *  @param[in,out] index The index to search.
  *  @param[in] query The position to search around.
  *  @param[in] radius_centimetres The radius the matches lie within.
  *  @param[in] margin Whether the candidates widen by the cone graph's stretch, @c spanner_k, or
  *      stop at the radius.
- *  @param[in] widest_row The most neighbors any row holds: the selector's budget plus the long
+ *  @param[in] widest_list The most neighbors any node holds: the selector's budget plus the long
  *      links drawn past it.
  *  @param[in,out] metric The metric the candidates are scored with.
  *  @param[in,out] context The traversal context the walks draw their buffers from.
  */
 template <typename index_type_, typename metric_type_, typename query_type_, typename context_type_>
 radius_result_t within(index_type_& index, query_type_ const& query, i64_t radius_centimetres, radius_margin_t margin,
-                       std::size_t widest_row, metric_type_& metric, context_type_& context) noexcept {
+                       std::size_t widest_list, metric_type_& metric, context_type_& context) noexcept {
     using search_config_t = typename index_type_::search_config_t;
     using distance_t = typename index_type_::distance_t;
-    if (metric.staging_limit() < widest_row) return {status_t::config_mismatch_k, 0, 0};
+    if (metric.staging_limit() < widest_list) return {status_t::config_mismatch_k, 0, 0};
     f64_t const radius = static_cast<f64_t>(radius_centimetres);
     f64_t const widened = margin == radius_margin_t::spanner_k ? radius * (1.0 + 2.0 * cone_graph_stretch_k) : radius;
     f64_t const widened_squared = widened * widened;

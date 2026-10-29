@@ -11,7 +11,7 @@ A single `basic::ram_index` is a complete index on its own.
 It needs no SafeGraphs files, no plural of shards and no UUIDs.
 Keys may be any hashable type, node IDs may be 32 or 64 bits wide, and every record keeps its own key.
 The plurals in `ram_indexes.hpp` and `vram_nvidia_indexes.hpp` are what the compiled library builds on top.
-Only they narrow the choice, to 32-bit shards whose rows a shard table locates in 8 bytes.
+Only they narrow the choice, to 32-bit shards whose nodes a shard table locates in 8 bytes.
 
 ## Residency
 
@@ -104,7 +104,7 @@ for (std::size_t i = 0; i != found.count; ++i) {
 The leading template parameter of `insert` and `search` is the caller's synchronization contract:
 
 - `concurrent_k`, the default, admits any mix of readers and writers.
-- `immutable_k` certifies no live mutators, so searches read neighbor rows without locks.
+- `immutable_k` certifies no live mutators, so searches read neighbor lists without locks.
 - `exclusive_k` certifies sole ownership, compiling every lock out for single-threaded builds.
 
 A violated certification answers `contended_k` instead of returning a silently wrong result.
@@ -176,5 +176,5 @@ It reaches ForkUnion through `utilities/nvme_device.hpp` and SmashTable for the 
 
 - `nvme_index::open(path, columns)` opens one part as its `persisted_columns_t` locates its rows.
 - `nvme_indexes::view(path, paths, metric, executor)` opens a monolith or a manifest, building the directories on the executor's threads.
-- `search(count, make_metric, query_of, executor, config, keys, distances, counts)` keeps one metric per row slot, built by the caller's factory on the slot's arena, and hands it every landed value as the codec's borrowed `view`.
+- `search(count, make_metric, query_of, executor, config, keys, distances, counts)` keeps one metric per query slot, built by the caller's factory on the slot's arena, and hands it every landed value as the codec's borrowed `view`.
 - `count`, `contains` and `get` scan the key columns, and `get` reads the value rows of the keys it found.

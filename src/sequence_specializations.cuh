@@ -145,8 +145,8 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::insert(usearch
                                                                          executor_t& executor) noexcept {
     std::size_t const connectivity = geometry.connectivity, expansion = arguments.expansion_factor;
     auto with_metric = [&](auto make_metric) noexcept {
-        auto build = [&](std::size_t row, value_t& value, std::size_t) noexcept {
-            return us::sequence::status_of(value.assign(chars_at(arguments.sequences, row)));
+        auto build = [&](std::size_t offset, value_t& value, std::size_t) noexcept {
+            return us::sequence::status_of(value.assign(chars_at(arguments.sequences, offset)));
         };
         return insert_entries(index, arguments.keys, arguments.count, connectivity,
                               expansion ? expansion : connectivity * 2, make_metric, build, ticks, executor);
@@ -160,8 +160,8 @@ expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch
                                                                          progress_ticks_t& ticks,
                                                                          executor_t& executor) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
-        auto query_of = [&](std::size_t row, std::size_t, auto&& answer) noexcept {
-            return answer(chars_at(arguments.queries, row));
+        auto query_of = [&](std::size_t query_index, std::size_t, auto&& answer) noexcept {
+            return answer(chars_at(arguments.queries, query_index));
         };
         return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity,
                               arguments.expansion_factor, arguments.traversal, arguments.predicate, make_metric,
@@ -272,8 +272,8 @@ expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearc
                                                                           progress_ticks_t& ticks,
                                                                           executor_t& executor) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
-        auto query_of = [&](std::size_t row, thread_allocator_t const&) noexcept {
-            return expected<std::string_view> {chars_at(arguments.queries, row), status_t::success_k};
+        auto query_of = [&](std::size_t query_index, thread_allocator_t const&) noexcept {
+            return expected<std::string_view> {chars_at(arguments.queries, query_index), status_t::success_k};
         };
         return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
                               arguments.predicate, make_metric, query_of, landing, ticks, executor);
@@ -510,7 +510,7 @@ struct variant_bodies<sequence_traits_t> {
     }
 
     static status_t keep(nvme_executor_t& executor, std::size_t thread, std::string_view value, kept_t& kept) noexcept {
-        return keep_row(executor, thread, bytes_of(value.data(), value.size()), kept);
+        return keep_entry(executor, thread, bytes_of(value.data(), value.size()), kept);
     }
 
     /** Lands @p count strings, the @c i th as @p value_at hands it, as one u8 tape in @p memory. */

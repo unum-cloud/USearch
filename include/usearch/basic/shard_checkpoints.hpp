@@ -7,21 +7,21 @@
  *      manifest, the live shard count picking which; a load opens one shard per part.
  *
  *  Each shard is lent to the SafeGraphs glue as a columned index through
- *  @ref unum::usearch::basic::shard_columns, which takes its rows through its residency's own
+ *  @ref unum::usearch::basic::shard_columns, which takes its nodes through its residency's own
  *  plans, so every residency shares one framing. What a residency does differently rides in as an
  *  object answering:
  *  - <tt>columns_extents(shards, shard, codec)</tt>, one sizing pass over a shard;
  *  - <tt>open_shard_save(shards, shard, columns, codec)</tt> and <tt>open_shard_load(shards, shard,
- *    columns)</tt>, one shard's own plans, landing rows through <tt>save(rows)</tt> and
- *    <tt>load(rows)</tt>, the codec passed along where they take one;
- *  - <tt>save_keys(shards, shard, keys)</tt>, the keys a save writes beside the rows;
- *  - <tt>claim_seats(shards, rows)</tt> and <tt>land_keys(shards, shard, first_row, keys,
- *    seats)</tt>, the keys a load lands beside the rows before they publish;
+ *    columns)</tt>, one shard's own plans, landing nodes through <tt>save(range)</tt> and
+ *    <tt>load(range)</tt>, the codec passed along where they take one;
+ *  - <tt>save_keys(shards, shard, keys)</tt>, the keys a save writes beside the nodes;
+ *  - <tt>claim_seats(shards, entries)</tt> and <tt>land_keys(shards, shard, first_node, keys,
+ *    seats)</tt>, the keys a load lands beside the nodes before they publish;
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part lands on, placed or
  *    opened;
- *  - <tt>reserve(shards, shard, rows)</tt>, growing a shard ahead of a load.
+ *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load.
  *
- *  A residency whose plans land rows in order is driven through
+ *  A residency whose plans land nodes in order is driven through
  *  @ref unum::usearch::utilities::serial_executor_t.
  */
 #pragma once
@@ -51,9 +51,9 @@ struct shard_columns {
     residency_type_& residency;
     std::size_t shard = 0;
 
-    /** A save of the shard's rows; its keys landed at planning. */
+    /** A save of the shard's nodes; its keys landed at planning. */
     struct save_plan_t {
-        typename index_t::save_plan_t rows;
+        typename index_t::save_plan_t plan;
 
         /**
          *  Copies @p range out through the shard's own save plan, a refusal of @p codec passing
@@ -61,12 +61,12 @@ struct shard_columns {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The shard's plan is empty or spent.
-         *  - @c config_mismatch_k @p range falls outside the plan's rows.
+         *  - @c config_mismatch_k @p range falls outside the plan's nodes.
          */
         template <typename codec_type_>
         status_t save(iota_view<node_id_t> range, codec_type_ const& codec) noexcept {
-            if constexpr (requires { rows.save(range, codec); }) return rows.save(range, codec);
-            else return rows.save(range);
+            if constexpr (requires { plan.save(range, codec); }) return plan.save(range, codec);
+            else return plan.save(range);
         }
 
         /**
@@ -74,15 +74,15 @@ struct shard_columns {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The shard's plan is empty or spent.
-         *  - @c config_mismatch_k The steps covered other than every row.
+         *  - @c config_mismatch_k The steps covered other than every node.
          */
-        status_t finish() noexcept { return rows.finish(); }
+        status_t finish() noexcept { return plan.finish(); }
     };
 
-    /** A load of the shard's rows, whose keys land through the residency before the rows publish,
+    /** A load of the shard's nodes, whose keys land through the residency before the nodes publish,
      *  the order an insert keeps. */
     struct load_plan_t {
-        typename index_t::load_plan_t rows;
+        typename index_t::load_plan_t plan;
         shard_columns* view = nullptr;
         std::span<key_t const> keys;
         typename shards_type_::locators_map_t::seats_t seats {};
@@ -93,35 +93,35 @@ struct shard_columns {
          *
          *  @par Statuses:
          *  - @c uninitialized_k The shard's plan is empty or spent.
-         *  - @c config_mismatch_k @p range falls outside the plan's rows.
+         *  - @c config_mismatch_k @p range falls outside the plan's nodes.
          */
         template <typename codec_type_>
         status_t load(iota_view<node_id_t> range, codec_type_ const& codec) noexcept {
-            if constexpr (requires { rows.load(range, codec); }) return rows.load(range, codec);
-            else return rows.load(range);
+            if constexpr (requires { plan.load(range, codec); }) return plan.load(range, codec);
+            else return plan.load(range);
         }
 
-        /** The row the shard's plan appends at: its own base, or zero for a plan filling an empty
+        /** The node the shard's plan appends at: its own base, or zero for a plan filling an empty
          *  shard whole. */
-        std::size_t first_row() const noexcept {
-            if constexpr (requires { rows.base; }) return rows.base;
+        std::size_t first_node() const noexcept {
+            if constexpr (requires { plan.base; }) return plan.base;
             else return 0;
         }
 
         /**
-         *  Lands the keys through the residency, then publishes the shard's rows.
+         *  Lands the keys through the residency, then publishes the shard's nodes.
          *
          *  @par Statuses:
-         *  - @c overflow_k On NVIDIA, the rows pass the key column's directory.
+         *  - @c overflow_k On NVIDIA, the nodes pass the key column's directory.
          *  - @c uninitialized_k The shard's plan is empty or spent.
-         *  - @c config_mismatch_k The steps covered other than every row.
+         *  - @c config_mismatch_k The steps covered other than every node.
          */
         status_t finish() noexcept {
             shards_type_& shards = view->shards;
-            if (status_t const landed = view->residency.land_keys(shards, view->shard, first_row(), keys, seats);
+            if (status_t const landed = view->residency.land_keys(shards, view->shard, first_node(), keys, seats);
                 failed(landed))
                 return landed;
-            if (status_t const finished = rows.finish(); failed(finished)) return finished;
+            if (status_t const finished = plan.finish(); failed(finished)) return finished;
             shards.reset_routing(shards.entries());
             return status_t::success_k;
         }
@@ -130,14 +130,14 @@ struct shard_columns {
     std::size_t capacity() const noexcept { return shards[shard].index->capacity(); }
 
     /**
-     *  Grows the shard to @p rows through the residency.
+     *  Grows the shard to @p entries through the residency.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k On NVIDIA, the connectivity is not a power of two or differs from
      *    the frozen one.
-     *  - @c overflow_k @p rows pass the shard's node IDs or its key multimap's seats.
+     *  - @c overflow_k @p entries pass the shard's node IDs or its key multimap's seats.
      */
-    expected<std::size_t> reserve(std::size_t rows) noexcept { return residency.reserve(shards, shard, rows); }
+    expected<std::size_t> reserve(std::size_t entries) noexcept { return residency.reserve(shards, shard, entries); }
 
     /**
      *  The counts a save of the shard needs, through the residency.
@@ -152,7 +152,7 @@ struct shard_columns {
     }
 
     /**
-     *  Opens the shard's save plan into @p columns, writing its keys beside the rows.
+     *  Opens the shard's save plan into @p columns, writing its keys beside the nodes.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k On NVIDIA, the shard has no stream.
@@ -162,29 +162,29 @@ struct shard_columns {
      */
     template <typename codec_type_>
     expected<save_plan_t> plan_save(columns_t columns, codec_type_ const& codec) noexcept {
-        auto [rows, status] = residency.open_shard_save(shards, shard, columns, codec);
+        auto [plan, status] = residency.open_shard_save(shards, shard, columns, codec);
         if (failed(status)) return {{}, status};
         residency.save_keys(shards, shard, columns.keys);
-        return {save_plan_t {std::move(rows)}, status_t::success_k};
+        return {save_plan_t {std::move(plan)}, status_t::success_k};
     }
 
     /**
      *  Claims the keys' seats through the residency, then opens the shard's load plan.
      *
      *  @par Statuses:
-     *  - @c overflow_k The rows pass the locator map, the shard's node IDs or its key multimap.
-     *  - @c config_mismatch_k The shard already publishes rows, or on NVIDIA has no stream.
+     *  - @c overflow_k The nodes pass the locator map, the shard's node IDs or its key multimap.
+     *  - @c config_mismatch_k The shard already publishes nodes, or on NVIDIA has no stream.
      *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity yet.
-     *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+     *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
      *  - @c contended_k A mutator, a batch, a load or a plan holds the shard.
      *  - @c malformed_k On RAM, a prefix-sum column or a neighbor ID is out of shape.
      */
     expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
         auto [seats, seat_status] = residency.claim_seats(shards, columns.keys.size());
         if (failed(seat_status)) return {{}, seat_status};
-        auto [rows, status] = residency.open_shard_load(shards, shard, columns);
+        auto [plan, status] = residency.open_shard_load(shards, shard, columns);
         if (failed(status)) return {{}, status};
-        return {load_plan_t {std::move(rows), this, columns.keys, seats}, status_t::success_k};
+        return {load_plan_t {std::move(plan), this, columns.keys, seats}, status_t::success_k};
     }
 };
 
@@ -193,7 +193,7 @@ struct shard_columns {
  *      path itself, or one monolith per live shard beside the manifest @p path names, the manifest
  *      landing last as the commit record.
  *
- *  Retired shards hold no rows and get no part, and each part keeps its shard's own IDs. A
+ *  Retired shards hold no nodes and get no part, and each part keeps its shard's own IDs. A
  *  refusal of @p codec passes through.
  *
  *  @par Statuses:
@@ -269,10 +269,10 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, std::strin
  *  - @c invalid_argument_k The checkpoint or a part path does not parse.
  *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do not
  *    parse.
- *  - @c overflow_k The rows pass a shard's node IDs, key multimap or the locator map.
+ *  - @c overflow_k The nodes pass a shard's node IDs, key multimap or the locator map.
  *  - @c contended_k The set is sealed while a shard generation must open, a mutator, batch,
  *    load or plan holds a shard, or the pool of @p executor runs another dispatch.
- *  - @c unsupported_k On NVIDIA, a row past every rung of the face's kits.
+ *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
  */
 template <typename shards_type_, typename residency_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>

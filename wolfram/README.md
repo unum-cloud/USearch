@@ -86,7 +86,7 @@ Constructors address no index yet, so they take no receiver; the ones the C inte
 
 ## Executors
 
-An executor owns the host threads or device streams; an index owns the rows.
+An executor owns the host threads or device streams; an index owns the entries.
 One executor serves several indexes, and its residency must match theirs.
 There is a constructor per C one, each taking every argument its own hardware has as an option, where zero and an empty list derive:
 
@@ -208,7 +208,7 @@ A query that finds fewer than `wanted` matches is not an error, and its lists ar
 No tensor holds zero rows either, so a search with no queries answers `<|"Keys"->{}, "Scores"->{}|>` in the package.
 
 The breadth of the candidates rides each call in the C interface rather than the handle, so it is an `"ExpansionFactor"` option on every verb that walks the graph, zero deriving it.
-`"Traversal"->"scan"` skips the walk and scores every row exactly, on RAM and NVMe handles:
+`"Traversal"->"scan"` skips the walk and scores every entry exactly, on RAM and NVMe handles:
 
 ```wolfram
 DenseSearch[index, queries, 10, arena, "ExpansionFactor"->64]
@@ -228,7 +228,7 @@ It is what makes the entries `DenseHealth` finds unreachable searchable again.
 
 `DenseMultiply[receiver, left, arena]` runs on the `inner` metric and answers `<|"Offsets"->…, "Keys"->…, "Scores"->…, "Required"->…|>`.
 Row `i` of the left matrix owns pairs `offsets[[i]] + 1` through `offsets[[i + 1]]`, in traversal order, and `"Required"` counts the pairs scored.
-`"Wanted"->n` keeps at most that many pairs per row, zero keeping every pair the walk scored.
+`"Wanted"->n` keeps at most that many pairs per left row, zero keeping every pair the walk scored.
 Any other metric fails as `config-mismatch`.
 
 Pass an ordered list of column keys to get a Wolfram `SparseArray`:
@@ -239,7 +239,7 @@ products . right
 ```
 
 Column 1 names key 42 & column 2 names key 41, including full-width UUID keys.
-Each stored product is a dot product against a quantized indexed row; unvisited entries are zero, so this approximates a dense product rather than multiplying arbitrary sparse inputs exactly.
+Each stored product is a dot product against a quantized indexed vector; unvisited entries are zero, so this approximates a dense product rather than multiplying arbitrary sparse inputs exactly.
 Column keys must be unique & cover every returned key; repeated keys within a product row are refused because they cannot identify distinct matrix columns.
 `"Wanted"` truncates traversal order, rather than selecting the largest products.
 The original three-argument form keeps the offsets & keys, which identify the computed entries even when a computed score is zero.

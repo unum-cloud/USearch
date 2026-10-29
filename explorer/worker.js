@@ -505,7 +505,7 @@ const handlers = {
 
   /**
    *  The entries each start key's entries link to, as one key tape: one cursor over every start yields the starts first,
-   *  in order and each with its links, so their rows are the first ones it writes.
+   *  in order and each with its links, so their entries are the first ones it writes.
    */
   cursor({ starts }) {
     const init = named("cursor_init");
@@ -517,18 +517,18 @@ const handlers = {
     const opened = outputs(init, "cursor");
     call(init, { index, outcome, starts_count: count, starts: place(starts), ...opened });
     const cursor = succeeded() ? landed(init, "cursor", opened.cursor) : 0;
-    for (let row = 0; cursor && row < count;) {
-      const wanted = Math.min(cursorBatch, count - row);
+    for (let entry = 0; cursor && entry < count;) {
+      const wanted = Math.min(cursorBatch, count - entry);
       const out = outputs(next, "keys", "links", "written");
       call(next, { index, outcome, arena, cursor, wanted, ...out });
       const written = succeeded() ? landed(next, "written", out.written) : 0;
       if (written === 0) break;
       const links = landed(next, "links", out.links);
-      const rowOffsets = copySizes(links.offsets, written + 1);
-      pulled.push(copyKeys(links.keys, keyBytes, rowOffsets[written] - rowOffsets[0]).subarray(0));
+      const linkOffsets = copySizes(links.offsets, written + 1);
+      pulled.push(copyKeys(links.keys, keyBytes, linkOffsets[written] - linkOffsets[0]).subarray(0));
       for (let local = 0; local < written; local++)
-        offsets[row + local + 1] = offsets[row] + rowOffsets[local + 1] - rowOffsets[0];
-      row += written;
+        offsets[entry + local + 1] = offsets[entry] + linkOffsets[local + 1] - linkOffsets[0];
+      entry += written;
     }
     if (cursor) library[`_${named("cursor_free")}`](cursor);
     return { offsets, keys: concatenated(pulled) };

@@ -1,0 +1,16 @@
+include(FindPackageHandleStandardArgs)
+set(${CMAKE_FIND_PACKAGE_NAME}_CONFIG ${CMAKE_CURRENT_LIST_FILE})
+find_package_handle_standard_args(@PROJECT_NAME@ CONFIG_MODE)
+
+# The archive links the threads it starts, through `Threads::Threads`.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+# The shared library, the archive and the header-only core install as separate components, so any set may be absent.
+if(NOT TARGET @PROJECT_NAME@::shared)
+    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake" OPTIONAL)
+    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@StaticTargets.cmake" OPTIONAL)
+endif()
+if(NOT TARGET @PROJECT_NAME@::header)
+    include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@HeaderTargets.cmake" OPTIONAL)
+endif()

@@ -9,7 +9,7 @@
  *  Shapes are eight template clouds of 24 points, each entry keeping 16 to 24 of them under a
  *  hundredth of jitter, so neighbors cluster by template while point counts vary per entry; the
  *  alignment metrics, which iterate over every pair of points, take fewer and smaller clouds. Each
- *  cell checks the verbs a caller reaches: the rows land under their keys across the shards and
+ *  cell checks the verbs a caller reaches: the shapes land under their keys across the shards and
  *  each counts once, a walk keeps most of the exact scan's top ten, a RAM index refines and absorbs
  *  while a GPU one refuses both, the index saves and reloads into every residency and as a view, an
  *  NVMe view answers and refuses every write, and a cleared index holds nothing. Stored poses round
@@ -33,7 +33,7 @@ namespace unum::usearch::test::abi {
 /** Shapes a cell builds, the queries held out past them, the donor's shapes, the points per
  *  template cloud, the fewest an entry keeps, and the graph degree, zero deriving it. */
 struct shapes_sizes_t {
-    std::size_t rows = 0, queries = 0, donor_rows = 0, points = 0, fewest_points = 0, connectivity = 0;
+    std::size_t shapes = 0, queries = 0, donor_shapes = 0, points = 0, fewest_points = 0, connectivity = 0;
 };
 
 /** The sizes of the point-set metrics' cells, and the smaller ones of the alignments, whose every
@@ -104,13 +104,13 @@ static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t co
                                    std::size_t& failures) {
     std::vector<float> poses;
     offsets.assign(1, 0);
-    for (std::size_t row = 0; row != count; ++row) {
+    for (std::size_t offset = 0; offset != count; ++offset) {
         usearch_outcome_t outcome {};
         usearch_tape_view_t shapes {};
         std::size_t written = 0;
         usearch_shapes_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
-        get.key = key_of_row(index.session->seed, row);
+        get.key = key_of_offset(index.session->seed, offset);
         get.shapes = &shapes, get.written = &written, get.arena = index.session->arena;
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_shapes_get(&get);
@@ -164,21 +164,21 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     geometry.connectivity = sizes.connectivity;
     handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
     if (!index) return 1;
-    shapes_tape_t const rows = generate_shapes(sizes.rows + sizes.queries, sizes, seed);
-    shapes_tape_t const donated = generate_shapes(sizes.donor_rows, sizes, ~seed);
-    usearch_tape_view_t const queries = shapes_verbs_t::slice(rows.view(), sizes.rows);
+    shapes_tape_t const shapes = generate_shapes(sizes.shapes + sizes.queries, sizes, seed);
+    shapes_tape_t const donated = generate_shapes(sizes.donor_shapes, sizes, ~seed);
+    usearch_tape_view_t const queries = shapes_verbs_t::slice(shapes.view(), sizes.shapes);
 
-    std::size_t failures = expect_built(cell, index, rows.view(), sizes.rows);
+    std::size_t failures = expect_built(cell, index, shapes.view(), sizes.shapes);
     if (failures) return failures;
     failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
     failures += expect_refined(index, usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-shapes-{:016x}", stream_key(seed, name));
     if (cell.residency == usearch_residency_ram_k) failures += expect_poses_round_trip(index, stem + "-poses");
-    failures += expect_persistence(cell, index, rows.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
+    failures += expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
                                    saved_bytes_t::differing_k,
-                                   shapes_score_band(rows, unit_roundoff_of(geometry.quantization)));
+                                   shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_absorbed(index, donated.view(), sizes.donor_rows, sizes.rows, usearch_status_unsupported_k);
+    failures += expect_absorbed(index, donated.view(), sizes.donor_shapes, sizes.shapes, usearch_status_unsupported_k);
     return failures + expect_cleared(index);
 }
 

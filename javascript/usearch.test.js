@@ -286,7 +286,7 @@ test("Batch operations", async (t) => {
     });
   });
 
-  await t.test("search over a batch fills one row per query", () => {
+  await t.test("search over a batch fills one list per query", () => {
     const index = DenseIndex.initRam({ dimensions: 3, metric: DenseMetric.Euclidean });
     index.reserve(2);
     index.insert([15n, 16n], rows(3, 10, 20, 30, 10, 25, 35));
@@ -630,14 +630,14 @@ test("A deferred absorb holds its donors until it is final", () => {
   executor.free();
 });
 
-test("Late interaction over multi-row entries", () => {
+test("Late interaction over multi-vector keys", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions: 4, valuesPerKey: 4 });
   index.reserve(4);
   index.insert([7n, 7n, 8n, 8n], rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1));
 
   const documents = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 2, new Arena());
 
-  assert.equal(documents.rows, 1, "two token rows make one query");
+  assert.equal(documents.queries, 1, "two token rows make one query");
   assert.deepEqual(documents.offsets, new BigUint64Array([0n, 2n]), "both keys scored");
   assert.equal(documents.required, 2, "both keys were scored");
   assert.equal(usearch.integerFromKey(usearch.keyAt(documents.keys, 0)), 7n);
@@ -650,7 +650,7 @@ test("Late interaction over multi-row entries", () => {
   });
 });
 
-test("Sparse products against the indexed rows", async (t) => {
+test("Sparse products against the indexed vectors", async (t) => {
   const populated = () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions: 4 });
     index.reserve(3);
@@ -661,7 +661,7 @@ test("Sparse products against the indexed rows", async (t) => {
   await t.test("every left row emits the pairs the walk scored", () => {
     const products = populated().multiply(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), new Arena());
 
-    assert.equal(products.rows, 2, "one emitted run per left row");
+    assert.equal(products.queries, 2, "one emitted run per left row");
     assert.equal(products.offsets.length, 3, "Arrow offsets close the last row");
     assert.equal(products.offsets[2], BigInt(products.scores.length), "the last offset closes every pair");
     assert(products.scores instanceof Float64Array, "products are doubles");
@@ -695,7 +695,7 @@ test("Sparse products against the indexed rows", async (t) => {
 test("Attention folds every key the walk scores", async (t) => {
   const dimensions = 4;
   const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions });
-  // Every key, value and query is one a bf16 holds exactly, so the stored rows are these.
+  // Every key, value and query is one a bf16 holds exactly, so the stored vectors are these.
   const keys = [
     new Float32Array([1, 0, 0, 0]),
     new Float32Array([0.5, 0.75, 0, 0]),
@@ -806,9 +806,9 @@ test("Cursors walk every entry once, and keep their index alive", () => {
   const arena = new Arena();
   const pull = () => cursor.next(2, arena);
   const seen = [];
-  for (let batch = pull(); batch.rows; batch = pull()) {
+  for (let batch = pull(); batch.entries; batch = pull()) {
     assert.equal(batch.links, undefined);
-    for (let position = 0; position < batch.rows; position++)
+    for (let position = 0; position < batch.entries; position++)
       seen.push(usearch.integerFromKey(usearch.keyAt(batch.keys, position)));
   }
   cursor.free();
@@ -816,7 +816,7 @@ test("Cursors walk every entry once, and keep their index alive", () => {
   assert.throws(() => cursor.next(2, arena), { code: Status.Uninitialized, message: "The walk was already released" });
 
   const keysAlone = opened().next(3, arena);
-  assert.deepEqual([keysAlone.rows, keysAlone.keys.length, keysAlone.links], [3, 3 * usearch.keyBytes, undefined]);
+  assert.deepEqual([keysAlone.entries, keysAlone.keys.length, keysAlone.links], [3, 3 * usearch.keyBytes, undefined]);
 
   seen.sort((first, second) => Number(first - second));
   assert.deepEqual(seen, [1n, 2n, 3n]);
@@ -968,7 +968,7 @@ test("Mini-float quantization types", async (t) => {
   }
 });
 
-test("A scan scores every row exactly, so each row finds itself first", () => {
+test("A scan scores every entry exactly, so each query finds itself first", () => {
   const index = DenseIndex.initRam({ dimensions: 4 });
   const stored = rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0);
   index.reserve(3);

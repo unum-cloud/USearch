@@ -6,10 +6,10 @@
  *      members of @c vram_nvidia_index.hpp reading the kit: the GPU twins of @c ram_metric.hpp and
  *      of @c ram_index.hpp's selector and @c admits.
  *
- *  A stored row is one @c earth_observation_t, and a lane scores a candidate alone: the squared
- *  chord from the three 64-bit products of centimetre differences, exact in integers as the CPU
- *  kit scores it, rounded once to the walk's distance. Nothing past the @c ampere floor is needed.
- *  A row prepares into no span at all, since its position is its query. Only the modality's NVIDIA
+ *  A stored entry is one @c earth_observation_t, and a lane scores a candidate alone: the squared
+ *  chord from the three 64-bit products of centimetre differences, exact in integers as the CPU kit
+ *  scores it, rounded once to the walk's distance. Nothing past the @c ampere floor is needed. An
+ *  entry prepares into no span at all, since its position is its query. Only the modality's NVIDIA
  *  unit compiles this file, so dispatch never names the kit.
  */
 #pragma once
@@ -95,7 +95,7 @@ struct vram_keep_octants_t {
             u32_t const position = base + lane;
             u32_t const cone = position < candidates_count
                                    ? octant_of(frame, query,
-                                               kit_::prepare(storage.row(candidate_ids[position]), nullptr, lane))
+                                               kit_::prepare(storage.entry(candidate_ids[position]), nullptr, lane))
                                    : cones_k;
             for (u32_t candidate_cone = 0; candidate_cone != cones_k; ++candidate_cone) {
                 typename warp_t::mask_t const in_cone = warp_t::ballot(cone == candidate_cone);
@@ -138,12 +138,12 @@ struct vram_keep_octants_t {
     }
 };
 
-/** Squared chords between stored observations, a lane to a candidate; rows keep their neighbors by
+/** Squared chords between stored observations, a lane to a candidate; nodes keep their neighbors by
  *  tangent-plane cone. */
 struct i32_ampere_geospatial_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
-    inline static constexpr u32_t lanes_per_row_k = 1;
+    inline static constexpr u32_t lanes_per_entry_k = 1;
 
     using warp_t = cuda_warp_t;
     using query_t = earth_fixed_t;
@@ -151,24 +151,24 @@ struct i32_ampere_geospatial_kit_t {
 
     static constexpr bool serves(std::size_t bytes) noexcept { return bytes <= sizeof(earth_observation_t); }
 
-    /** A position is its own query, so a row prepares into no span. */
+    /** A position is its own query, so an entry prepares into no span. */
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t) noexcept { return 0; }
 
-    /** The position at the front of the row, in one 16-byte load. */
-    static __device__ __forceinline__ query_t prepare(basic::vram_row_t row, byte_t*, u32_t) noexcept {
-        int4 const words = *reinterpret_cast<int4 const*>(row.data);
+    /** The position at the front of the entry, in one 16-byte load. */
+    static __device__ __forceinline__ query_t prepare(basic::vram_entry_t entry, byte_t*, u32_t) noexcept {
+        int4 const words = *reinterpret_cast<int4 const*>(entry.data);
         return {words.x, words.y, words.z};
     }
 
     /** No header bounds a chord. */
     static __device__ __forceinline__ distance_t lower_bound(nk_kernel_kind_t, query_t const&,
-                                                             basic::vram_row_t) noexcept {
+                                                             basic::vram_entry_t) noexcept {
         return 0;
     }
 
-    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query, basic::vram_row_t row,
-                                                       distance_t, u32_t lane) noexcept {
-        return static_cast<distance_t>(chord_squared(query, prepare(row, nullptr, lane)));
+    static __device__ __forceinline__ distance_t score(nk_kernel_kind_t, query_t const& query,
+                                                       basic::vram_entry_t entry, distance_t, u32_t lane) noexcept {
+        return static_cast<distance_t>(chord_squared(query, prepare(entry, nullptr, lane)));
     }
 };
 
@@ -190,9 +190,9 @@ std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::rung_se
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::lanes_per_row_(std::size_t) noexcept {
+u32_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::lanes_per_entry_(std::size_t) noexcept {
     using kit_t = typename geospatial_ladder<capability_>::kit_t;
-    return kit_t::lanes_per_row_k;
+    return kit_t::lanes_per_entry_k;
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>

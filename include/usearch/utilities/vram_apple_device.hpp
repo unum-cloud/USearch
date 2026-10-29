@@ -781,15 +781,15 @@ struct metal_executor_t {
  *  a heal's rounds and later calls allocate nothing. */
 struct metal_audit_t {
 
-    /** The reached set and the two frontiers, a byte per row each. */
+    /** The reached set and the two frontiers, a byte per node each. */
     growing_buffer<u8_t> reached {global_allocator};
     growing_buffer<u8_t> frontier {global_allocator};
     growing_buffer<u8_t> next_frontier {global_allocator};
 
-    /** The rows the last audit never reached. */
+    /** The nodes the last audit never reached. */
     growing_buffer<u32_t> islands {global_allocator};
 
-    /** The reached rows pointing at each row, counted before a reconnection takes any. */
+    /** The reached nodes pointing at each node, counted before a reconnection takes any. */
     growing_buffer<u32_t> in_links {global_allocator};
 
     /** Levels the last audit swept to convergence. */
@@ -883,7 +883,7 @@ struct metal_traversal_context {
 
     /** Where the last walk left its outputs in the staging, read back once the context lands. */
     struct landing_t {
-        std::size_t rows = 0, count = 0;
+        std::size_t queries = 0, count = 0;
         std::size_t first_offset = 0, second_offset = 0, third_offset = 0;
     };
 

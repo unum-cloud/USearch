@@ -377,11 +377,11 @@ pub const Residency = enum(c_int) {
     }
 };
 
-/// How a search reaches the indexed rows it scores. Mirrors `usearch_traversal_t`.
+/// How a search reaches the indexed entries it scores. Mirrors `usearch_traversal_t`.
 pub const Traversal = enum(c_int) {
-    /// Walk the graph, scoring the rows the expansion reaches - approximate, the default.
+    /// Walk the graph, scoring the entries the expansion reaches - approximate, the default.
     walk = 1,
-    /// Score every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    /// Score every entry published when the query's scan starts - exact, on RAM and NVMe handles.
     scan = 2,
 
     /// The canonical spelling, as `.scan` spells "scan". Calls `usearch_traversal_name`.
@@ -489,8 +489,8 @@ fn valuesPerRow(comptime Element: type, length: usize, columns: usize) Error!usi
     return values;
 }
 
-/// A ranked run a call wrote into its arena: rows of `columns` packed columns, at most the call's
-/// `wanted`, the first `counts[i]` of row `i` written. Mirrors `usearch_matches_view_t`.
+/// A ranked run a call wrote into its arena: one list of `columns` packed columns per query, at most
+/// the call's `wanted`, the first `counts[i]` of query `i` written. Mirrors `usearch_matches_view_t`.
 pub const usearch_matches_view_t = extern struct {
     keys: ?[*]const Key = null,
     scores: ?[*]const Distance = null,
@@ -498,7 +498,7 @@ pub const usearch_matches_view_t = extern struct {
     columns: usize = 0,
 };
 
-/// A ragged run of matches a call wrote into its arena, row `i` spanning `offsets[i]` up to
+/// A ragged run of matches a call wrote into its arena, query `i` spanning `offsets[i]` up to
 /// `offsets[i + 1]`. Mirrors `usearch_matches_tape_view_t`.
 pub const usearch_matches_tape_view_t = extern struct {
     keys: ?[*]const Key = null,
@@ -506,39 +506,39 @@ pub const usearch_matches_tape_view_t = extern struct {
     offsets: ?[*]const usize = null,
 };
 
-/// A ragged run of keys a call wrote into its arena, row `i` spanning `offsets[i]` up to
+/// A ragged run of keys a call wrote into its arena, entry `i` spanning `offsets[i]` up to
 /// `offsets[i + 1]`. Mirrors `usearch_keys_tape_view_t`.
 pub const usearch_keys_tape_view_t = extern struct {
     keys: ?[*]const Key = null,
     offsets: ?[*]const usize = null,
 };
 
-/// The matches of one row: nearest first for a search, largest first for a `maxsim`, and in
+/// The matches of one query: nearest first for a search, largest first for a `maxsim`, and in
 /// traversal order for a `multiply`. Binding-only.
-pub const MatchesRow = struct {
-    /// The keys written for the row.
+pub const QueryMatches = struct {
+    /// The keys written for the query.
     keys: []const Key,
     /// Positionally paired with `keys`: distances for a search, similarities for the linear-algebra verbs.
     scores: []const Distance,
 };
 
-/// The ranked rows a search or a stream pull wrote into an arena, one per query, each holding up
+/// The ranked matches a search or a stream pull wrote into an arena, one list per query, each holding up
 /// to the `wanted` the call asked for. Mirrors `usearch_matches_view_t`.
 ///
 /// It reads the arena, so every read is refused once that arena serves another call or is freed.
 pub const Matches = struct {
     stamp: Arena.Stamp,
     view: usearch_matches_view_t,
-    /// Query rows the call resolved.
+    /// Queries the call resolved.
     queries: usize,
 
-    /// The matches written for one query, refusing a `query` past `queries` with
+    /// The matches written for one query, refusing a `position` past `queries` with
     /// `Error.InvalidArgument`, a stale view with `Error.Uninitialized`, and device memory with `Error.Device`.
-    pub fn row(self: Matches, query: usize) Error!MatchesRow {
+    pub fn query(self: Matches, position: usize) Error!QueryMatches {
         try self.stamp.check();
-        if (query >= self.queries) return refuse(.invalid_argument);
-        const first = query * self.view.columns;
-        const written = self.view.counts.?[query];
+        if (position >= self.queries) return refuse(.invalid_argument);
+        const first = position * self.view.columns;
+        const written = self.view.counts.?[position];
         return .{ .keys = landed(Key, self.view.keys, first, written), .scores = landed(Distance, self.view.scores, first, written) };
     }
 

@@ -948,17 +948,17 @@ struct [[nodiscard]] shard_load_plan {
             typename index_t::load_plan_t const& plan = plans_[shard];
             std::size_t const part = shard - retired, first_row = plan.base, bound_row = first_row + parts_[part].nodes;
             for (typename index_t::load_plan_t::step_t const batch : plan.steps()) {
-                std::size_t const low = max_of<std::size_t>(batch.index_rows.first, first_row);
-                std::size_t const high = min_of<std::size_t>(batch.index_rows.bound, bound_row);
+                std::size_t const low = max_of<std::size_t>(batch.index_nodes.first, first_row);
+                std::size_t const high = min_of<std::size_t>(batch.index_nodes.bound, bound_row);
                 if (low >= high) continue;
                 step_t step;
                 step.shard = shard;
                 step.part = part;
                 step.source_range = {0, static_cast<node_id_t>(parts_[part].nodes)};
                 step.inner.position = batch.position;
-                step.inner.index_rows = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
-                step.inner.source_rows = {static_cast<node_id_t>(low - first_row),
-                                          static_cast<node_id_t>(high - first_row)};
+                step.inner.index_nodes = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
+                step.inner.source_nodes = {static_cast<node_id_t>(low - first_row),
+                                           static_cast<node_id_t>(high - first_row)};
                 if (!visit(step)) return;
             }
         }

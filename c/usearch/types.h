@@ -416,7 +416,7 @@ typedef struct usearch_tape_view_t {
  *      where @c count is the call's own.
  *
  *  Carries no query count of its own: the call already fixed it, and a second copy is a second
- *  thing to disagree. Row @c i holds @c counts[i] matches from @c keys[i · columns] and
+ *  thing to disagree. Query @c i holds @c counts[i] matches from @c keys[i · columns] and
  *  @c scores[i · columns] on, and the columns past them are unwritten.
  *
  *  What @c scores hold is each verb's own: a search writes distances nearest-first, whichever kind
@@ -431,7 +431,7 @@ typedef struct usearch_matches_view_t {
     /** First row of the scores, positionally paired with @c keys. */
     usearch_distance_t const* scores;
 
-    /** Matches written per row, one entry per row. */
+    /** Matches written per query, one entry per query. */
     size_t const* counts;
 
     /** Columns per row the call wrote, at most its @c wanted - the "k" in "kANN". */
@@ -439,18 +439,18 @@ typedef struct usearch_matches_view_t {
 } usearch_matches_view_t;
 
 /**
- *  @brief A ragged run of matches a call wrote into its arena, for verbs whose rows hold as many
- *      matches as their walks found: keys and scores end to end, and one more offset than rows.
+ *  @brief A ragged run of matches a call wrote into its arena, for verbs whose queries hold as many
+ *      matches as their walks found: keys and scores end to end, and one more offset than queries.
  *
- *  Row @c i spans @c offsets[i] up to @c offsets[i+1] in both arrays, so the last offset is the
+ *  Query @c i spans @c offsets[i] up to @c offsets[i+1] in both arrays, so the last offset is the
  *  total. Scores follow the same per-verb meaning as in @c usearch_matches_view_t.
  */
 typedef struct usearch_matches_tape_view_t {
 
-    /** Every row's keys, end to end. */
+    /** Every query's keys, end to end. */
     usearch_key_t const* keys;
 
-    /** Every row's scores, positionally paired with @c keys. */
+    /** Every query's scores, positionally paired with @c keys. */
     usearch_distance_t const* scores;
 
     /** The call's @c count + 1 non-decreasing offsets into @c keys and @c scores. */
@@ -458,14 +458,14 @@ typedef struct usearch_matches_tape_view_t {
 } usearch_matches_tape_view_t;
 
 /**
- *  @brief A ragged run of keys a call wrote into its arena, for verbs whose rows name as many keys
- *      as each entry links to: keys end to end, and one more offset than rows.
+ *  @brief A ragged run of keys a call wrote into its arena, for verbs whose entries name as many
+ *      keys as each one links to: keys end to end, and one more offset than entries.
  *
- *  Row @c i spans @c offsets[i] up to @c offsets[i+1], so the last offset is the total.
+ *  Entry @c i spans @c offsets[i] up to @c offsets[i+1], so the last offset is the total.
  */
 typedef struct usearch_keys_tape_view_t {
 
-    /** Every row's keys, end to end. */
+    /** Every entry's keys, end to end. */
     usearch_key_t const* keys;
 
     /** The call's @c written + 1 non-decreasing offsets into @c keys. */
@@ -643,16 +643,16 @@ typedef enum usearch_residency_t {
     usearch_residency_nvme_k = 3,
 } usearch_residency_t;
 
-/** How a search reaches the indexed rows it scores. */
+/** How a search reaches the indexed entries it scores. */
 typedef enum usearch_traversal_t {
 
     /** No traversal named, which derives the walk. */
     usearch_traversal_unknown_k = 0,
 
-    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    /** Walk the graph, scoring the entries the expansion reaches - approximate, the default. */
     usearch_traversal_walk_k = 1,
 
-    /** Score every row published when the query's scan starts - exact, the ground truth a walk
+    /** Score every entry published when the query's scan starts - exact, the ground truth a walk
      *  approximates. */
     usearch_traversal_scan_k = 2,
 } usearch_traversal_t;

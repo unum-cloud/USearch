@@ -54,7 +54,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/nvme_device.hpp"       // `nvme_executor`, `file_medium_t`, `io_request_t`
-#include "usearch/utilities/nvme_walks.hpp"        // `row_walker`, `nvme_begin_call`
+#include "usearch/utilities/nvme_walks.hpp"        // `query_walker`, `nvme_begin_call`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `sorted_buffer`, `arena_allocator`
 #include "usearch/utilities/ram_sorts.hpp"         // `network_sort`
 #include "usearch/utilities/ram_tables.hpp"        // `growing_hash_set`
@@ -129,7 +129,7 @@ struct nvme_index {
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename>
     friend struct nvme_indexes;
     template <typename, typename, typename>
-    friend class utilities::row_walker;
+    friend class utilities::query_walker;
     template <typename>
     friend struct nvme_compact_plan;
 
@@ -176,7 +176,7 @@ struct nvme_index {
         /** How many candidates each walk keeps; defaults to twice the connectivity. */
         small_size_t expansion_factor = 0;
 
-        /** How rows are reached; @c scan_k streams every part's value column, ignoring the
+        /** How entries are reached; @c scan_k streams every part's value column, ignoring the
          *  breadth. */
         traversal_t traversal = traversal_t::walk_k;
     };
@@ -484,7 +484,7 @@ struct nvme_index {
         u32_t shard = 0;
 
         /** The row slot this walk belongs to. */
-        u32_t row_slot = 0;
+        u32_t query_slot = 0;
 
         /** Where the walk stands. */
         nvme_walk_stage_t stage = nvme_walk_stage_t::finished_k;
@@ -501,7 +501,7 @@ struct nvme_index {
         nk_kernel_kind_t kernel = nk_kernel_unknown_k;
 
         /** Rows of the batch. */
-        std::size_t rows_count = 0;
+        std::size_t queries_count = 0;
 
         /** Each walk's candidate breadth. */
         std::size_t expansion_factor = 0;
@@ -514,7 +514,7 @@ struct nvme_index {
         std::size_t walk_flights = 0;
 
         /** Rows a thread keeps in flight. */
-        std::size_t rows_per_thread = 0;
+        std::size_t queries_per_thread = 0;
 
         /** Hops each walk keeps in flight: the queue depth its thread's rows leave idle, one for a
          *  full batch. */
@@ -561,47 +561,49 @@ struct nvme_index {
         return static_cast<std::size_t>(bytes);
     }
 
-    /** The shape of a walk of @p rows_count rows of @p row_type_ over every part in @p parts, each
-     *  walk @p expansion_factor wide and ranking by @p kernel, on @p threads engines @p queue_depth
-     *  reads deep, every row in flight staging @p staged_bytes of imported queries. */
-    template <typename row_type_>
+    /** The shape of a walk of @p queries_count queries of @p query_type_ over every part in
+     *  @p parts, each walk @p expansion_factor wide and ranking by @p kernel, on @p threads
+     *  engines @p queue_depth reads deep, every row in flight staging @p staged_bytes of imported
+     *  queries. */
+    template <typename query_type_>
     static walk_shape_t walk_shape_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
                                     nk_kernel_kind_t kernel, std::size_t queue_depth, std::size_t threads,
-                                    std::size_t rows_count, std::size_t expansion_factor,
+                                    std::size_t queries_count, std::size_t expansion_factor,
                                     std::size_t staged_bytes) noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const connectivity = nvme_widest_row(parts);
         walk_shape_t shape;
         shape.kernel = kernel;
-        shape.rows_count = rows_count;
+        shape.queries_count = queries_count;
         shape.expansion_factor = expansion_factor;
         shape.queue_sizes = nvme_queue_sizes(expansion_factor, connectivity);
-        shape.buffers_per_flight = row_type_::key_reads_k == nvme_key_reads_t::scored_k ? 2 : 1;
+        shape.buffers_per_flight = query_type_::key_reads_k == nvme_key_reads_t::scored_k ? 2 : 1;
         std::size_t const first_hop = max_of<std::size_t>(round_up_to_multiple<std::size_t>(connectivity, 4),
                                                           connectivity + 1);
         std::size_t const hop_depth = parts.size() * first_hop * shape.buffers_per_flight;
         // Rows fill the queue first, since a row costs no speculation; depth a short batch leaves
         // idle widens walks.
-        shape.rows_per_thread = min_of(max_of<std::size_t>(1, queue_depth / hop_depth),
-                                       max_of<std::size_t>(1, divide_round_up(rows_count, threads)));
-        shape.hops_per_walk = max_of<std::size_t>(1, queue_depth / (shape.rows_per_thread * hop_depth));
+        shape.queries_per_thread = min_of(max_of<std::size_t>(1, queue_depth / hop_depth),
+                                          max_of<std::size_t>(1, divide_round_up(queries_count, threads)));
+        shape.hops_per_walk = max_of<std::size_t>(1, queue_depth / (shape.queries_per_thread * hop_depth));
         shape.walk_flights = first_hop + (shape.hops_per_walk - 1) * (connectivity + 1);
         // Past the batch's end a walk inherits the flights of the row slots that went idle.
-        shape.hop_slots = shape.hops_per_walk + (shape.rows_per_thread - 1) * shape.walk_flights / (connectivity + 1);
-        std::size_t const rows = shape.rows_per_thread, walks = rows * parts.size();
+        shape.hop_slots = shape.hops_per_walk +
+                          (shape.queries_per_thread - 1) * shape.walk_flights / (connectivity + 1);
+        std::size_t const queries = shape.queries_per_thread, walks = queries * parts.size();
         std::size_t const flights = walks * shape.walk_flights;
         shape.buffers = flights * shape.buffers_per_flight;
-        // What `row_walker::reserve` carves, slice by slice, after padding to the first boundary.
+        // What `query_walker::reserve` carves, slice by slice, after padding to the first boundary.
         std::size_t const results_bytes = slice_t::reserved_bytes(
             results_array_t::memory_usage(shape.queue_sizes.results));
-        std::size_t const per_walk = results_bytes + (row_type_::admitting_k ? results_bytes : 0) +
+        std::size_t const per_walk = results_bytes + (query_type_::admitting_k ? results_bytes : 0) +
                                      slice_t::reserved_bytes(
                                          frontier_queue_t::memory_usage(shape.queue_sizes.frontier)) +
                                      slice_t::reserved_bytes(visited_set_t::memory_usage(shape.queue_sizes.visited));
         shape.scratch_bytes = walks * per_walk + slice_t::reserved_bytes(walks * sizeof(walk_t)) +
-                              slice_t::reserved_bytes(rows * sizeof(row_type_)) +
-                              rows * slice_t::reserved_bytes(staged_bytes) +
-                              slice_t::reserved_bytes(rows * sizeof(nvme_row_slot_t)) +
+                              slice_t::reserved_bytes(queries * sizeof(query_type_)) +
+                              queries * slice_t::reserved_bytes(staged_bytes) +
+                              slice_t::reserved_bytes(queries * sizeof(nvme_query_slot_t)) +
                               slice_t::reserved_bytes(flights * sizeof(nvme_flight<u32_t>)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
                               slice_t::reserved_bytes(walks * shape.hop_slots * sizeof(u32_t)) +
@@ -612,8 +614,8 @@ struct nvme_index {
     }
 
     /** Prepares the query of a primed @p row: the norms the call's kernel reads of it. */
-    template <typename row_type_>
-    static void prime_scoring_(walk_shape_t const& shape, row_type_& row) noexcept {
+    template <typename query_type_>
+    static void prime_scoring_(walk_shape_t const& shape, query_type_& row) noexcept {
         row.query_norms = norms_(shape.kernel, row.query);
     }
 
@@ -622,11 +624,11 @@ struct nvme_index {
      *  short tails replicate lane zero, and only real lanes reach the candidates or telemetry. */
     template <typename walker_type_>
     [[gnu::always_inline]] static void score_staged_(walker_type_& walker, walk_t& walk) noexcept {
-        using row_t = typename walker_type_::row_t;
+        using query_t = typename walker_type_::query_t;
         using key_t = typename walker_type_::key_t;
         std::size_t const fill = walk.staged.size();
-        constexpr bool keyed = row_t::key_reads_k == nvme_key_reads_t::scored_k;
-        row_t& row = walker.rows_[walk.row_slot];
+        constexpr bool keyed = query_t::key_reads_k == nvme_key_reads_t::scored_k;
+        query_t& row = walker.queries_[walk.query_slot];
         nvme_part_t const& part = walker.parts_[walk.shard];
         quad<node_id_t> ids;
         quad<vector_view_t> vectors;
@@ -651,7 +653,7 @@ struct nvme_index {
             scored_batch[lane] = scored_node_t {ids[lane], scores.distances[lane]};
         std::span<scored_node_t> const scored = std::span(scored_batch).first(fill);
         std::span<dot_result_t const> const dots = std::span<dot_result_t const>(scores.dots).first(fill);
-        if constexpr (row_t::admitting_k) walker.admit_scored_(walk, scored);
+        if constexpr (query_t::admitting_k) walker.admit_scored_(walk, scored);
         walk_demand_t const demand = row.fold_of_walk(walk).absorb(scored, dots);
         for (u32_t const flight : walk.staged) walker.release_flight_(flight);
         walk.staged.clear();
@@ -670,27 +672,29 @@ struct nvme_index {
         for (admission_t& admission : related) admission = admission_t::admit_k;
     }
 
-    /** The batch @ref row_walker::run_walks walks, inside a call of its own: @p rows_count rows
-     *  over every part in @p parts, each walk @p expansion_factor wide and ranking by @p kernel,
-     *  and each row staging @p staged_bytes of imported queries. */
-    template <typename row_type_>
-    static expected<search_result_t> walk_rows_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
-                                                nk_kernel_kind_t kernel, executor_t& executor, std::size_t rows_count,
-                                                std::size_t expansion_factor,
-                                                typename row_type_::inputs_t const& inputs, std::size_t staged_bytes,
-                                                std::span<std::size_t const> counts,
-                                                std::span<u64_t> latencies) noexcept {
+    /** The batch @ref query_walker::run_walks walks, inside a call of its own: @p queries_count
+     *  queries over every part in @p parts, each walk @p expansion_factor wide and ranking by
+     *  @p kernel, and each row staging @p staged_bytes of imported queries. */
+    template <typename query_type_>
+    static expected<search_result_t> walk_queries_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
+                                                   nk_kernel_kind_t kernel, executor_t& executor,
+                                                   std::size_t queries_count, std::size_t expansion_factor,
+                                                   typename query_type_::inputs_t const& inputs,
+                                                   std::size_t staged_bytes, std::span<std::size_t const> counts,
+                                                   std::span<u64_t> latencies) noexcept {
         if (parts.empty()) return {{}, status_t::uninitialized_k};
-        if (!rows_count) return {{}, status_t::success_k};
-        walk_shape_t const shape = walk_shape_<row_type_>(media, parts, kernel, executor.queue_depth(), executor.size(),
-                                                          rows_count, expansion_factor, staged_bytes);
+        if (!queries_count) return {{}, status_t::success_k};
+        walk_shape_t const shape = walk_shape_<query_type_>(media, parts, kernel, executor.queue_depth(),
+                                                            executor.size(), queries_count, expansion_factor,
+                                                            staged_bytes);
         auto [call, call_status] = nvme_begin_call(executor, media, shape.scratch_bytes, shape.buffers,
                                                    shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
-        if constexpr (row_type_::admitting_k)
+        if constexpr (query_type_::admitting_k)
             if (status_t const opened = open_predicate(*inputs.predicate, executor); failed(opened))
                 return {{}, opened};
-        return row_walker<nvme_index, row_type_>::run_walks(media, parts, executor, shape, inputs, counts, latencies);
+        return query_walker<nvme_index, query_type_>::run_walks(media, parts, executor, shape, inputs, counts,
+                                                                latencies);
     }
 
 #pragma endregion Walks
@@ -699,7 +703,7 @@ struct nvme_index {
 
     /** The rows of a batched search over this one part, ranked by node ID: no key resolves. */
     template <typename heads_type_>
-    struct node_search_row {
+    struct node_search_query {
         using key_t = node_id_t;
         using fold_t = dummy_fold_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
@@ -719,11 +723,11 @@ struct nvme_index {
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        node_search_row(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
+        node_search_query(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
 
-        void prime_row(std::size_t new_row) noexcept {
-            row = new_row;
+        void prime_query(std::size_t new_query_index) noexcept {
+            row = new_query_index;
             query = inputs.queries.row(row).as_vector();
             inputs.counts[row] = 0;
         }
@@ -746,7 +750,7 @@ struct nvme_index {
         std::size_t output_count() const noexcept { return 0; }
         nvme_locator<u32_t> output_locator(std::size_t) const noexcept { return {}; }
         void resolve_output_key(std::size_t, key_t const&) noexcept {}
-        status_t finish_row() noexcept { return status_t::success_k; }
+        status_t finish_query() noexcept { return status_t::success_k; }
     };
 
     /** The batched @ref search under @p heads, or as the kit scores under @c dummy_heads_t. */
@@ -761,11 +765,11 @@ struct nvme_index {
         if (status_t const refusal = rankings_refusal(queries_count, node_ids, distances); failed(refusal))
             return {{}, refusal};
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
-        using row_t = node_search_row<heads_type_>;
-        typename row_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
-        return walk_rows_<row_t>(std::span<medium_t const>(&medium_, 1), std::span<nvme_part_t const>(&part_, 1),
-                                 kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, 0, counts,
-                                 {});
+        using query_t = node_search_query<heads_type_>;
+        typename query_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
+        return walk_queries_<query_t>(std::span<medium_t const>(&medium_, 1), std::span<nvme_part_t const>(&part_, 1),
+                                      kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, 0,
+                                      counts, {});
     }
 
 #pragma endregion Rows

@@ -36,7 +36,7 @@
 
 #include <fmt/format.h>
 
-#include <forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index`
+#include <forkunion/forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index`
 
 #include "usearch/dense_index.h"
 
@@ -397,8 +397,8 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
 }
 
 /** Opens the vectors, takes this rank's share of the slice, creates the executor and the empty
- *  index on the residency asked for, and reserves the share's rows, stopping at the first
- *  failure. */
+ *  index on the residency asked for, and reserves room for the share's entries, stopping at the
+ *  first failure. */
 static bool dense_insert_setup(world_t const& world, dense_settings_t const& settings, std::string_view vectors,
                                usearch_dense_metric_t metric, dense_source_t& source, dense_engine_t& engine) {
     std::string const rank = rank_label(world);
@@ -550,7 +550,7 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
          &settings.max_refines},
         {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
          &settings.expansion_refine},
-        {"--batch", "count", "defaults to 65536: rows per insertion, two batches staged at once", &settings.batch},
+        {"--batch", "count", "defaults to 65536: entries per insertion, two batches staged at once", &settings.batch},
         {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads, ram only", &settings.threads},
     }};
     std::array<std::string_view, 1> positionals;
@@ -595,7 +595,7 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
         fmt::println(stderr, "rank 0: cannot write {}", settings.save);
         return EXIT_FAILURE;
     }
-    fmt::println("committed {} over {} parts of {} rows in {:.1f} s", settings.save, world.size,
+    fmt::println("committed {} over {} parts of {} entries in {:.1f} s", settings.save, world.size,
                  settings.rows.value ? settings.rows.value : source.rows - settings.first_vector.value,
                  dense_seconds_since(started));
     return EXIT_SUCCESS;
@@ -649,7 +649,7 @@ int dense_absorb(world_t& world, int argc, char const* const* argv) {
         };
         usearch_dense_absorb(&absorb);
         if (dense_failed(world, outcome, fmt::format("absorbing {}", donor))) return EXIT_FAILURE;
-        fmt::println("absorbed {}: {} rows in {:.1f} s, {} changed, {} of {} reachable", donor, description.size,
+        fmt::println("absorbed {}: {} entries in {:.1f} s, {} changed, {} of {} reachable", donor, description.size,
                      dense_seconds_since(started), changed, reachability.reachable, reachability.audited);
     }
     return dense_save(world, engine, engine.indexes[0], std::string(settings.save)) ? EXIT_SUCCESS : EXIT_FAILURE;

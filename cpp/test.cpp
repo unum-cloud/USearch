@@ -33,11 +33,11 @@ static void expect(bool must_be_true, char const* context) {
     std::exit(1);
 }
 
-/** The key spelling @p row as big-endian bytes, so keys made from rows order as the rows. */
-static usearch_key_t key_of(std::size_t row) {
+/** The key spelling @p offset as big-endian bytes, so keys made from offsets order as they do. */
+static usearch_key_t key_of(std::size_t offset) {
     usearch_key_t key {};
-    for (std::size_t byte = 0; byte != sizeof(row); ++byte)
-        key.bytes[sizeof(key.bytes) - 1 - byte] = static_cast<std::uint8_t>(row >> (byte * 8));
+    for (std::size_t byte = 0; byte != sizeof(offset); ++byte)
+        key.bytes[sizeof(key.bytes) - 1 - byte] = static_cast<std::uint8_t>(offset >> (byte * 8));
     return key;
 }
 
@@ -65,14 +65,14 @@ int main() {
                                                                         .connectivity = 16});
     expect_success(index, "creating an index");
 
-    expect_success(index.value.reserve({.capacity = rows}, executor.value), "reserving the rows");
+    expect_success(index.value.reserve({.capacity = rows}, executor.value), "reserving the entries");
     expect_success(
         index.value.insert({.count = rows, .keys = {keys.data(), sizeof(usearch_key_t)}, .vectors = all_rows},
                            executor.value),
         "inserting the rows");
     us::outcome<usearch_dense_index_description_t> const described = index.value.describe({}, executor.value);
     expect_success(described, "describing the index");
-    expect(described.value.size == rows, "An insertion is all-or-nothing, so every row must be published");
+    expect(described.value.size == rows, "An insertion is all-or-nothing, so every entry must be published");
 
     us::outcome<usearch_matches_view_t> const matches = index.value.search(
         {.count = rows, .queries = all_rows, .wanted = 1}, arena.value, executor.value);
@@ -107,7 +107,7 @@ int main() {
          .wanted = 1},
         arena.value, storage.value);
     expect_success(found, "searching the view");
-    expect(same_key(found.value.keys[0], keys[probe]), "The view must find a stored row at itself");
+    expect(same_key(found.value.keys[0], keys[probe]), "The view must find a stored entry at itself");
 
     us::outcome<us::dense_cursor_t> const cursor = index.value.cursor_init();
     expect_success(cursor, "opening a cursor");

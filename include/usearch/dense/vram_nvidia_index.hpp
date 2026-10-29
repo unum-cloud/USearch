@@ -260,7 +260,7 @@ struct vram_nvidia_kernels {
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const candidate_slots = core.candidate_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
-            core.walk_selection_rows_(expansion, candidate_slots),
+            core.walk_selection_nodes_(expansion, candidate_slots),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         // A scan walks no arena, and keeps its matches past the outputs on a fragment boundary; the
         // walks keep as many blocks resident as a search on the same rung, an attend no more.
@@ -312,7 +312,7 @@ struct vram_nvidia_kernels {
         /** Walks the device runs at once on the walk's rung, and the rows whose neighbors fill a
          *  walk's candidates: the two shares @ref walk_width splits. */
         u32_t concurrent_walks = 0;
-        u32_t filling_rows = 0;
+        u32_t filling_nodes = 0;
 
         /** Which frontier the walks keep. */
         frontier_kind_t frontier = frontier_kind_t::register_ladder_k;
@@ -362,7 +362,7 @@ struct vram_nvidia_kernels {
                                              : frontier_kind_t::register_ladder_k;
         u32_t const candidate_slots = core.candidate_slots_for_(expansion, minimum_slots);
         gpu_arena_shape_t const arena_shape = core.arena_shape_for(
-            core.walk_selection_rows_(expansion, candidate_slots), frontier);
+            core.walk_selection_nodes_(expansion, candidate_slots), frontier);
         // A scan walks nothing, so it neither sizes nor zeroes an arena; a search, an indexed
         // search and a multiply keep as many blocks resident on one rung.
         bool const walks = traversal == traversal_t::walk_k;
@@ -370,7 +370,7 @@ struct vram_nvidia_kernels {
         u32_t const resident_blocks = attend_k ? resident_blocks_(vram_dense_kernel_t::attend_k, rung_slots)
                                                : resident_blocks_(vram_kernel_t::search_k, rung_slots);
         u32_t const concurrent_walks = core.device_.multiprocessor_count * resident_blocks * vram_warps_per_block_k;
-        u32_t const filling = filling_rows<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
+        u32_t const filling = filling_nodes<u32_t>(expansion, static_cast<u32_t>(core.connectivity()));
         std::size_t const arena_warps = std::size_t {core.walk_blocks_(queries_count, resident_blocks)} *
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
@@ -396,7 +396,7 @@ struct vram_nvidia_kernels {
         // straight into the walk, which may then overlap its drain.
         if (cuda_fill_async(core.api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) !=
                 cuda_success_k ||
-            cuda_fill_async(core.api(), context.assigned_rows_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
+            cuda_fill_async(core.api(), context.assigned_nodes_.get(), 0, 2 * sizeof(u32_t), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
@@ -417,7 +417,7 @@ struct vram_nvidia_kernels {
         walk.epoch_base = epoch_base;
         walk.candidate_slots = candidate_slots;
         walk.concurrent_walks = concurrent_walks;
-        walk.filling_rows = filling;
+        walk.filling_nodes = filling;
         walk.frontier = frontier;
         walk.outputs = staging + rows_bytes + import_bytes + weights_bytes;
         if constexpr (indexer_k) {
@@ -895,7 +895,7 @@ struct vram_nvidia_kernels {
         static_assert(resident_blocks_(vram_kernel_t::back_link_k, 0) == resident_blocks_(vram_kernel_t::insert_k, 0));
         u32_t const blocks = core.device_.multiprocessor_count *
                              resident_blocks_(vram_kernel_t::insert_k, candidate_slots);
-        u32_t const back_link_rows = core.reselection_rows_();
+        u32_t const back_link_rows = core.reselection_nodes_();
         u32_t const back_link_scratch = build.arena_shape.scratch_bytes
                                             ? 0u
                                             : core.build_scratch_bytes_per_warp(back_link_rows);
@@ -913,16 +913,16 @@ struct vram_nvidia_kernels {
                 vram_admission_wave_end(wave_first, build.end_id, vram_dense_admission_share_log2_k));
             u32_t const offset = wave_first - build.first_id;
             u32_t const slot = wave % chained_waves_k;
-            u32_t* const counters = build.assigned_rows + (chained_k ? 3 * slot : 0);
+            u32_t* const counters = build.assigned_nodes + (chained_k ? 3 * slot : 0);
             arguments.build = build;
             arguments.build.staging = build.staging + std::size_t {offset} * core.row_bytes();
             arguments.build.first_id = wave_first;
             arguments.build.end_id = wave_end;
             arguments.build.epoch_base = build.epoch_base + offset;
-            arguments.build.assigned_rows = counters;
+            arguments.build.assigned_nodes = counters;
             if constexpr (chained_k) arguments.build.touched_count = counters + 2;
-            bool const counters_zeroed = chained_k ? slot != 0 || zeroed(build.assigned_rows, cuda_claim_counters_k)
-                                                   : zeroed(build.assigned_rows, 1) && zeroed(build.touched_count, 1);
+            bool const counters_zeroed = chained_k ? slot != 0 || zeroed(build.assigned_nodes, cuda_claim_counters_k)
+                                                   : zeroed(build.assigned_nodes, 1) && zeroed(build.touched_count, 1);
             status_t launched = counters_zeroed ? status_t::success_k : status_t::device_error_k;
             if (succeeded(launched))
                 launched = launch_(insert, blocks, vram_warps_per_block_k * build.scratch_bytes_per_warp, stream,
@@ -930,9 +930,9 @@ struct vram_nvidia_kernels {
             if (failed(launched)) return offset ? core.fail_(launched) : launched;
             // The wave's rows are queued now, so a failure past here can no longer be un-claimed.
             arguments.build.scratch_bytes_per_warp = back_link_scratch;
-            arguments.build.selection_rows = back_link_rows;
-            if constexpr (chained_k) arguments.build.assigned_rows = counters + 1;
-            else if (!zeroed(build.assigned_rows, 1)) return core.fail_(status_t::device_error_k);
+            arguments.build.selection_nodes = back_link_rows;
+            if constexpr (chained_k) arguments.build.assigned_nodes = counters + 1;
+            else if (!zeroed(build.assigned_nodes, 1)) return core.fail_(status_t::device_error_k);
             if (status_t const linked = launch_(back_link, blocks, vram_warps_per_block_k * back_link_scratch, stream,
                                                 arguments);
                 failed(linked))
@@ -945,12 +945,12 @@ struct vram_nvidia_kernels {
     /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
     status_t launch_refine_(core_t& core, refine_launch_t const& launch, traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
-        u32_t const selection_rows = core.walk_selection_rows_(launch.expansion, launch.candidate_slots);
+        u32_t const selection_nodes = core.walk_selection_nodes_(launch.expansion, launch.candidate_slots);
         arguments.refine = {core.storage(), //
                             launch.shadow_neighbors,
                             launch.nodes.bound,
-                            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_rows),
-                            selection_rows,
+                            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_nodes),
+                            selection_nodes,
                             launch.nodes.first,
                             launch.arena,
                             launch.arena_shape,
@@ -985,8 +985,8 @@ struct vram_nvidia_kernels {
             core.storage(),
             launch.shadow_neighbors,
             launch.nodes_count,
-            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(core.reselection_rows_()),
-            core.reselection_rows_(),
+            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(core.reselection_nodes_()),
+            core.reselection_nodes_(),
             0,
             launch.arena,
             launch.arena_shape,
@@ -1015,7 +1015,7 @@ struct vram_nvidia_kernels {
     status_t launch_fold_(core_t const& core, vram_fold_t fold, traversal_context_t& context) const noexcept {
         static_assert(resident_blocks_(vram_dense_kernel_t::fold_k, 0) <= resident_blocks_(vram_kernel_t::refine_k, 0),
                       "A fold keeps no more blocks resident than the builders its scratch is checked against");
-        u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_rows);
+        u32_t const scratch_bytes = core.build_scratch_bytes_per_warp(fold.selection_nodes);
         bool const shared = build_scratch_fits(core, scratch_bytes);
         u32_t const blocks = core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::fold_k, 0);
         fold.arena_shape = gpu_arena_shape(0, 0, shared ? 0u : scratch_bytes);
@@ -1024,10 +1024,10 @@ struct vram_nvidia_kernels {
                                           fold.arena_shape.slice_bytes<node_id_t>());
         if (!fold.arena && fold.arena_shape.scratch_bytes) return status_t::bad_alloc_k;
         fold.telemetry = context.telemetry_.get();
-        fold.assigned_rows = context.assigned_rows_.get();
+        fold.assigned_nodes = context.assigned_nodes_.get();
         if (cuda_fill_async(core.api(), fold.telemetry, 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 cuda_success_k ||
-            cuda_fill_async(core.api(), fold.assigned_rows, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
+            cuda_fill_async(core.api(), fold.assigned_nodes, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
         arguments.fold = fold;
@@ -1048,10 +1048,10 @@ struct vram_nvidia_kernels {
                 walk.arena_shape,
                 walk.epoch_base,
                 context.telemetry_.get(),
-                context.assigned_rows_.get(),
-                context.assigned_rows_.get() + 1,
+                context.assigned_nodes_.get(),
+                context.assigned_nodes_.get() + 1,
                 walk.concurrent_walks,
-                walk.filling_rows};
+                walk.filling_nodes};
     }
 
     /** The rung a walk runs on: its register ladder's width, or zero for the arena frontier. */
@@ -1325,8 +1325,8 @@ struct vram_nvidia_index {
         return core_.non_zero_expansion_factor(config);
     }
 
-    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
-        return core_.build_scratch_bytes_per_warp(selection_rows);
+    u32_t build_scratch_bytes_per_warp(u32_t selection_nodes) const noexcept {
+        return core_.build_scratch_bytes_per_warp(selection_nodes);
     }
 
     bool build_scratch_fits(u32_t scratch_bytes_per_warp) const noexcept {

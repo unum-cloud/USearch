@@ -424,7 +424,7 @@ struct metal_walk_t {
     device norms_t* candidate_norms;
 
     uint row_fragments, lanes_per_row, steps_per_row, connectivity, metric, row_fragments_magic;
-    uint tail_entries, expansion, selection_rows, walk_width;
+    uint tail_entries, expansion, selection_nodes, walk_width;
     bool has_norms;
     uint lane;
 
@@ -753,20 +753,20 @@ inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& fron
     walk.locked_drops += held != metal_sentinel_k;
 }
 
-/** Greedy diversity selection over all of the walk's @c selection_rows candidates, ascending, into @c selected_ids,
+/** Greedy diversity selection over all of the walk's @c selection_nodes candidates, ascending, into @c selected_ids,
  *  backfilled with the nearest rejected candidates as the CUDA selection does; answers the kept count. */
 template <typename frontier_>
 inline uint metal_select_diverse(thread metal_walk_t& walk, thread frontier_& frontier) {
     uint candidates = 0;
     auto stage = [&](uint rank, ulong entry) {
-        bool const live = rank < walk.selection_rows && entry != metal_sentinel_k;
+        bool const live = rank < walk.selection_nodes && entry != metal_sentinel_k;
         if (live) {
             walk.candidate_ids[rank] = metal_id_of(entry);
             walk.candidate_distances[rank] = metal_distance_of(entry);
         }
         candidates += popcount(warp_t::ballot(live));
     };
-    frontier.for_each_rank(walk.selection_rows, walk.lane, stage);
+    frontier.for_each_rank(walk.selection_nodes, walk.lane, stage);
     warp_t::sync();
     for (uint word = walk.lane; word < candidates * walk.row_fragments; word += warp_t::width_k) {
         uint const row = walk.row_of_word(word), fragment_index = word - row * walk.row_fragments;
@@ -1012,7 +1012,7 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
         return carved;
     };
     uint const fragment_bytes = arguments.row_fragments * metal_fragment_bytes_k;
-    uint const selection_rows = arguments.selection_rows;
+    uint const selection_nodes = arguments.selection_nodes;
     walk.vectors = vectors, walk.norms = norms, walk.neighbors = neighbors, walk.counters = counters;
     // The visited set, the spill tail and the scratch, as the CUDA slice lays them out; the scratch starts on a
     // fragment, which an odd tail would miss, and the host's rounding of the slice covers the step.
@@ -1024,15 +1024,15 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
     walk.dots = (device dot_t*)carve(metal_dots_span_bytes_k);
     // The query span while walking, then the candidate cache over it, and past the cache's rows each cached
     // candidate's spans, in the order `vram_selection_scratch` carves them.
-    walk.query = walk.cache = (device uint4*)carve(fragment_bytes * selection_rows);
-    walk.scored_entries = (device ulong*)carve(selection_rows * 8);
-    walk.selected_ids = (device uint*)carve(selection_rows * 4);
-    walk.candidate_ids = (device uint*)carve(selection_rows * 4);
-    walk.kept_positions = (device uint*)carve(selection_rows * 4);
-    walk.candidate_distances = (device float*)carve(selection_rows * 4);
-    walk.candidate_norms = (device norms_t*)carve(selection_rows * 8);
+    walk.query = walk.cache = (device uint4*)carve(fragment_bytes * selection_nodes);
+    walk.scored_entries = (device ulong*)carve(selection_nodes * 8);
+    walk.selected_ids = (device uint*)carve(selection_nodes * 4);
+    walk.candidate_ids = (device uint*)carve(selection_nodes * 4);
+    walk.kept_positions = (device uint*)carve(selection_nodes * 4);
+    walk.candidate_distances = (device float*)carve(selection_nodes * 4);
+    walk.candidate_norms = (device norms_t*)carve(selection_nodes * 8);
     walk.tail_entries = arguments.tail_entries, walk.expansion = arguments.expansion;
-    walk.selection_rows = selection_rows, walk.walk_width = 1;
+    walk.selection_nodes = selection_nodes, walk.walk_width = 1;
     walk.row_fragments = arguments.row_fragments, walk.lanes_per_row = arguments.lanes_per_row;
     walk.steps_per_row = arguments.steps_per_row, walk.connectivity = arguments.connectivity;
     walk.metric = arguments.metric, walk.row_fragments_magic = arguments.row_fragments_magic;
@@ -1144,7 +1144,7 @@ inline void metal_back_link(constant metal_arguments_t& arguments, device uint4*
         offset = warp_t::shuffle(offset, 0);
         if (offset >= touched) break;
         uint const node_id = links.touched_ids[offset];
-        metal_back_link_one(walk, node_id, links.heads, links.next, arguments.first_id, walk.selection_rows - 1);
+        metal_back_link_one(walk, node_id, links.heads, links.next, arguments.first_id, walk.selection_nodes - 1);
         if (lane == 0) links.heads[node_id] = metal_unknown_k;
     }
     metal_flush(walk);
@@ -1234,7 +1234,7 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
         uint live = lane == 0 ? atomic_fetch_add_explicit(counters + metal_live_k, 1u, memory_order_relaxed) + 1 : 0;
         live = warp_t::shuffle(live, 0);
         walk.walk_width = walk_width(arguments.concurrent_walks, live, arguments.queries_count - query,
-                                     arguments.filling_rows);
+                                     arguments.filling_nodes);
         walk.epoch = arguments.epoch_base + query + 1;
         walk.random = metal_lane_generator(query, lane);
         norms_t const query_norms = metal_stage_query(walk, metal_row(queries, query, walk.row_fragments));

@@ -134,7 +134,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
           members_(std::move(other.members_)), bins_(std::move(other.bins_)), folds_(std::move(other.folds_)),
           bin_tables_(std::move(other.bin_tables_)), fold_tables_(std::move(other.fold_tables_)),
           arenas_(std::move(other.arenas_)), walks_(std::move(other.walks_)),
-          sources_(std::exchange(other.sources_, {})), landed_(other.landed_), moved_rows_(other.moved_rows_),
+          sources_(std::exchange(other.sources_, {})), landed_(other.landed_), moved_entries_(other.moved_entries_),
           folded_(other.folded_), phase_(other.phase_) {}
     vram_nvidia_compact_plan& operator=(vram_nvidia_compact_plan&&) = delete;
     vram_nvidia_compact_plan(vram_nvidia_compact_plan const&) = delete;
@@ -199,7 +199,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         ram_indexes_t* const target = refining_.owner_;
         if (!target) return {result, status_t::uninitialized_k};
         result.source_shards = refining_.landings_.size();
-        result.moved_rows = moved_rows_;
+        result.moved_entries = moved_entries_;
         release_sources_();
         auto [graph, status] = refining_.finish(host_executor, traversals);
         result.graph = graph;
@@ -348,7 +348,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         std::size_t count = 0;
         for (vram_indexes_t const* source : sources) {
             count += source->shards_.size();
-            plan.moved_rows_ += source->size();
+            plan.moved_entries_ += source->size();
         }
         if (failed(refining.landings_.resize(count))) return {{}, status_t::bad_alloc_k};
         auto source_shard = [&](std::size_t from) noexcept -> vram_shard_t const& { return plan.shard_at_(from); };
@@ -467,7 +467,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                     std::size_t {index.device_specs().multiprocessor_count} *
                         vram_index_t::kernels_t::resident_blocks_(vram_dense_kernel_t::fold_k, 0) *
                         vram_warps_per_block_k *
-                        gpu_arena_shape(0, 0, index.build_scratch_bytes_per_warp(index.core().reselection_rows_()))
+                        gpu_arena_shape(0, 0, index.build_scratch_bytes_per_warp(index.core().reselection_nodes_()))
                             .template slice_bytes<node_id_t>() +
                     default_alignment_k;
                 typename device_executor_t::stream_t& stream = stream_at_(device_executor, members_[member]);
@@ -509,7 +509,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         fold.shard = static_cast<u32_t>(place);
         fold.row_bits = row_bits_(bin.count);
         fold.cross_count = cross_count_(bin.count, index.connectivity());
-        fold.selection_rows = index.core().reselection_rows_();
+        fold.selection_nodes = index.core().reselection_nodes_();
         fold.phase = phase;
         return fold;
     }
@@ -608,7 +608,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
             }
             phase_ = static_cast<phase_t>(static_cast<u8_t>(phase_) + 1);
             if (phase_ != phase_t::reselect_k &&
-                on_visited(folded_.reselected_nodes, moved_rows_) == continuation_t::cancel_k)
+                on_visited(folded_.reselected_nodes, moved_entries_) == continuation_t::cancel_k)
                 return status_t::cancelled_k;
         }
         return status_t::success_k;
@@ -730,11 +730,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                             nk::matrix_span<node_id_t>) noexcept -> status_t {
                 if (shard != into) return status_t::success_k;
                 typename ram_load_plan_t::step_t step = chunk;
-                step.index_rows = {max_of(chunk.index_rows.first, landing.first),
-                                   min_of(chunk.index_rows.bound, landing.bound)};
-                if (step.index_rows.first >= step.index_rows.bound) return status_t::success_k;
-                step.source_rows = {static_cast<node_id_t>(step.index_rows.first - landing.first),
-                                    static_cast<node_id_t>(step.index_rows.bound - landing.first)};
+                step.index_nodes = {max_of(chunk.index_nodes.first, landing.first),
+                                    min_of(chunk.index_nodes.bound, landing.bound)};
+                if (step.index_nodes.first >= step.index_nodes.bound) return status_t::success_k;
+                step.source_nodes = {static_cast<node_id_t>(step.index_nodes.first - landing.first),
+                                     static_cast<node_id_t>(step.index_nodes.bound - landing.first)};
                 if (status_t const loaded = plans[into].load(step, view, {0, rows}); failed(loaded)) return loaded;
                 auto part_of = [&](std::size_t member) noexcept -> vram_shard_t const& {
                     return source.shards_[members_[member] - first];
@@ -742,7 +742,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 // The rows ascend, so the member holding each only moves forward.
                 std::size_t member = bin.first;
                 node_id_t member_first = landing.first;
-                for (node_id_t row : step.index_rows) {
+                for (node_id_t row : step.index_nodes) {
                     while (row - member_first >= part_of(member).index->size())
                         member_first += static_cast<node_id_t>(part_of(member++).index->size());
                     target.shards_[into].keys[row] = part_of(member).keys.host[row - member_first];
@@ -833,7 +833,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     std::size_t landed_ = 0;
 
     /** Source rows, every one of which changes shard. */
-    std::size_t moved_rows_ = 0;
+    std::size_t moved_entries_ = 0;
 
     /** The fold's re-selections and merges, as a refine counts them. */
     refine_result_t folded_;

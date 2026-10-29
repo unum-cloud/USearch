@@ -21,11 +21,12 @@ Two features swap the implementation of the C interface the crate links, and nam
 - `stub` links a brute-force stand-in that answers the same verbs over the standard library alone, with exact search, seconds to build and no submodules, for testing a caller and never for shipping.
 
 A WASI build reads the SDK from `WASI_SDK_PATH` and needs `-C target-feature=+simd128`.
+`USEARCH_LIBRARY_DIR` names a directory already holding `libusearch_static.a`, such as the `lib/` of a prefix `cmake --install build_release --component static` filled, and skips the CMake build.
 
 ## Quickstart
 
 Every batch input is a NumKong matrix of a base pointer, a row count and a byte stride, so a memory-mapped dataset feeds the index with no reshape and no copy.
-An index owns rows, an `Executor` owns the threads or streams a call runs on, and an `Arena` holds what a call writes back.
+An index owns entries, an `Executor` owns the threads or streams a call runs on, and an `Arena` holds what a call writes back.
 
 ```rust
 use usearch::*;
@@ -134,11 +135,11 @@ It grows, fills and frees on that executor's first stream, so it serves only cal
 let mut arena = Arena::new_in(&executor)?;                           // Arena::new() is host pages for the calling thread
 for batch in &batches {
     let matches = index.on(&executor).search(batch, 10, &mut arena)?; // rewinds: the last batch's matches are gone
-    total += matches.row(0)?.distances.iter().sum::<f64>();
+    total += matches.query(0)?.distances.iter().sum::<f64>();
 }
 
 let (mut found, mut fetched) = (Arena::new()?, Arena::new()?);       // two live results, two arenas
-for &key in index.search(&query, 10, &mut found)?.row(0)?.keys {
+for &key in index.search(&query, 10, &mut found)?.query(0)?.keys {
     rerank(key, index.get::<f32>(key, &mut fetched)?.view()?);       // rewinds fetched, never found
 }
 
@@ -243,14 +244,14 @@ let restored = DenseIndex::load_ram_buffer(monolith.view()?)?;
 
 ## Dense Indexes
 
-A `DenseIndex` holds equidimensional dense rows, built from `DenseOptions`: `dimensions`, `metric`, the stored `quantization`, and the `connectivity` and `values_per_key` bounds, where zero derives.
+A `DenseIndex` holds equidimensional dense vectors, built from `DenseOptions`: `dimensions`, `metric`, the stored `quantization`, and the `connectivity` and `values_per_key` bounds, where zero derives.
 Every metric derives from a single inner-product kernel with pre-computed magnitudes; arbitrary metrics belong to the C++ baseline tier, forfeiting the SIMD kernel chains and the magnitude cache both.
 
 - `DenseMetric::Inner` - inner product.
 - `DenseMetric::Angular` - cosine distance, over pre-computed magnitudes.
 - `DenseMetric::Euclidean` - L2 distance.
-- `DenseMetric::Hamming` - bit-level, over `u1x8` rows alone.
-- `DenseMetric::Jaccard` - bit-level, over `u1x8` rows alone.
+- `DenseMetric::Hamming` - bit-level, over `u1x8` vectors alone.
+- `DenseMetric::Jaccard` - bit-level, over `u1x8` vectors alone.
 
 ### Rows & Scalars
 
@@ -300,18 +301,18 @@ let matches = index.on(&executor).search(&rows(&queries, 768)?, DenseSearchConfi
 println!("{} distances computed", stats.computed_distances);
 ```
 
-`row` pairs one query's keys with its distances, nearest first and trimmed to the cells the call wrote, and `rows` walks every query in order.
+`query` pairs one query's keys with its distances, nearest first and trimmed to the cells the call wrote, and `iter` walks every query in order.
 
 ```rust
-for row in matches.rows()? {
-    for (key, distance) in row.keys.iter().zip(row.distances) {
+for query in matches.iter()? {
+    for (key, distance) in query.keys.iter().zip(query.distances) {
         println!("{key} at {distance}");
 }
 }
 ```
 
 The breadth of the candidates rides the call rather than the handle, as `expansion_factor` on every config that walks the graph, so a recall sweep is a loop over `ef` values against one immutable index, with no mutation and no synchronization between points.
-`traversal: Traversal::Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses it with `Status::Unsupported`.
+`traversal: Traversal::Scan` scores every entry instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses it with `Status::Unsupported`.
 `DenseTraversalStats` reports the members visited, the distances computed and the starvation `restarts`, a graph-connectivity signal rather than a cost, overwritten by every call it is passed to.
 
 ### Filtered Search
@@ -352,29 +353,29 @@ index.on(&executor).refine(DenseRefineConfig {
 
 The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
 A panic inside it is read as a stop.
-Reports are denominated in whatever the verb consumes: rows for an insertion, queries for a search, donors for an absorb, shards for a checkpoint, and bytes for a buffer.
+Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, donors for an absorb, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
 What a stop leaves behind is each verb's own contract.
-An `insert` cannot be stopped: it claims every row before its first report, ignores a `Break`, and publishes the whole batch at once.
+An `insert` cannot be stopped: it claims every entry before its first report, ignores a `Break`, and publishes the whole batch at once.
 A stopped search reports `Status::Cancelled` and leaves no matches.
 A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under - re-selection claims no identity, so the graph stays correct and merely less improved.
 A stopped load creates no index, and a stopped `save_buffer` leaves no monolith.
 
 ### Retrieval and Streaming
 
-`get` lands every row stored under a key in an arena, converted to the scalar type you name, one row per entry in insertion order; an absent key yields no rows.
+`get` lands every vector stored under a key in an arena, converted to the scalar type you name, one row per entry in insertion order; an absent key yields no rows.
 
 ```rust
 let mut arena = Arena::new_in(&executor)?;
-let rows = index.on(&executor).get::<f32>(key, &mut arena)?;
-println!("{:?}", rows.view()?.shape());
-let rows = index.on(&executor).get::<f32>(key, &mut arena)?;       // rewinds it, so the rows above are gone
+let vectors = index.on(&executor).get::<f32>(key, &mut arena)?;
+println!("{:?}", vectors.view()?.shape());
+let vectors = index.on(&executor).get::<f32>(key, &mut arena)?;    // rewinds it, so the vectors above are gone
 ```
 
-A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
-Without start keys it yields every row as stored; with them, the starts' own rows first, then the rows those link to breadth-first, each once.
-`next_keys` walks the key column alone, and `next_links` copies the keys each entry links to beside it, both into an arena; the rows themselves come from `get`.
+A cursor walks the index contents, reading each shard's publication watermark as it enters that shard, so an entry once passed is never revisited.
+Without start keys it yields every entry as stored; with them, the starts' own entries first, then the entries those link to breadth-first, each once.
+`next_keys` walks the key column alone, and `next_links` copies the keys each entry links to beside it, both into an arena; the vectors themselves come from `get`.
 
 ```rust
 let mut arena = Arena::new_in(&executor)?;
@@ -387,7 +388,7 @@ loop {
 ```
 
 A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
-It walks exactly one query row, and each pull lands up to `wanted` more matches in an arena as the one row of `Matches`, empty once the walk is drained.
+It walks exactly one query row, and each pull lands up to `wanted` more matches in an arena as the one query of `Matches`, empty once the walk is drained.
 No residency implements the stream yet, so the engine answers `Status::Unsupported`.
 
 ```rust
@@ -395,9 +396,9 @@ let mut arena = Arena::new_in(&executor)?;
 let mut stream = index.on(&executor).search_stream(rows(&query, 768)?)?;
 'pulls: loop {
     let pulled = stream.next(64, &mut arena)?;
-    let row = pulled.row(0)?;
-    if row.keys.is_empty() { break; }
-    for (key, distance) in row.keys.iter().zip(row.distances) {
+    let found = pulled.query(0)?;
+    if found.keys.is_empty() { break; }
+    for (key, distance) in found.keys.iter().zip(found.distances) {
         if *distance > 0.3 { break 'pulls; }
         println!("{key} at {distance}");
 }
@@ -417,7 +418,7 @@ while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineCo
 
 ### Absorbing & Splitting
 
-`absorb` takes donor indexes, handed over by value, one after another, keeping their graphs rather than re-inserting their rows and linking each in by walks across the appended part.
+`absorb` takes donor indexes, handed over by value, one after another, keeping their graphs rather than re-inserting their entries and linking each in by walks across the appended part.
 Readers of a RAM index may keep searching throughout, while a VRAM one admits no overlapping search.
 
 ```rust
@@ -439,7 +440,7 @@ The run's Apache Arrow offsets land in the arena beside the keys and products.
 ```rust
 let mut arena = Arena::new_in(&executor)?;
 let products = index.on(&executor).multiply(&rows(&left, 768)?, 32, &mut arena)?;
-for row in products.rows()? {
+for row in products.iter()? {
     println!("{} pairs", row.keys.len());
 }
 ```
@@ -452,7 +453,7 @@ Each query lands its best documents, largest score first, in the same ragged `De
 
 ```rust
 let documents = index.on(&executor).maxsim(&rows(&tokens, 768)?, tokens_per_query, 10, &mut arena)?;
-for query in documents.rows()? {
+for query in documents.iter()? {
     println!("best {:?} of {} documents", query.keys.first(), query.keys.len());
 }
 ```

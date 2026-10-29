@@ -280,14 +280,14 @@ struct vram_apple_index {
      *  first @c reserve. */
     u32_t wave_lanes() const noexcept { return device_.wave_lanes; }
 
-    /** Bytes of one builder simdgroup's slice over @p selection_rows cached candidates: one
+    /** Bytes of one builder simdgroup's slice over @p selection_nodes cached candidates: one
      *  batch's scored nodes, IDs and dots, which CUDA keeps in shared memory, then the query span
      *  while walking, then the candidate cache, and per cached candidate its score, three ID
      *  spans, its distance and its norms. */
-    u32_t build_scratch_bytes_per_warp(u32_t selection_rows) const noexcept {
+    u32_t build_scratch_bytes_per_warp(u32_t selection_nodes) const noexcept {
         u32_t const candidate_bytes = static_cast<u32_t>(row_bytes() + gpu_scored_node_bytes<node_id_t> +
                                                          3 * sizeof(u32_t) + sizeof(f32_t) + sizeof(norms_t));
-        return metal_batch_spans_bytes_k + max_of(static_cast<u32_t>(row_bytes()), selection_rows * candidate_bytes);
+        return metal_batch_spans_bytes_k + max_of(static_cast<u32_t>(row_bytes()), selection_nodes * candidate_bytes);
     }
 
     /** Which frontier a simdgroup's arena slice serves: the register ladder needs only the exact
@@ -295,14 +295,14 @@ struct vram_apple_index {
     enum class frontier_kind_t : u32_t { register_ladder_k, wide_arena_k };
 
     /** One simdgroup's arena slice for @p walks walks sharing one visited set over
-     *  @p candidate_rows candidates each: the exact visited set over every ID they claim, plus the
+     *  @p candidate_nodes candidates each: the exact visited set over every ID they claim, plus the
      *  spill tail when @p frontier_kind outgrows registers, what their expansions stage. */
-    gpu_arena_shape_t arena_shape_for(u32_t candidate_rows, frontier_kind_t frontier_kind,
+    gpu_arena_shape_t arena_shape_for(u32_t candidate_nodes, frontier_kind_t frontier_kind,
                                       u32_t walks = 1) const noexcept {
         u32_t const connectivity = static_cast<u32_t>(this->connectivity()), lanes = wave_lanes();
-        u32_t const visits = walks * gpu_walk_visits(candidate_rows, connectivity, lanes);
+        u32_t const visits = walks * gpu_walk_visits(candidate_nodes, connectivity, lanes);
         u32_t const tail = frontier_kind == frontier_kind_t::wide_arena_k
-                               ? walks * gpu_walk_tail_entries(candidate_rows, connectivity, lanes)
+                               ? walks * gpu_walk_tail_entries(candidate_nodes, connectivity, lanes)
                                : 0;
         return gpu_arena_shape(visits, tail, 0);
     }
@@ -431,9 +431,9 @@ struct vram_apple_index {
             if (!counters_) return {0, status_t::bad_alloc_k};
             dimensions_ = config.dimensions;
             connectivity_ = static_cast<std::size_t>(config.connectivity);
-            ceiling_rows_ = min_of(config.ceiling, max_node_count_k);
+            ceiling_nodes_ = min_of(config.ceiling, max_node_count_k);
         }
-        status_t const grown = grow_rows_(config.capacity);
+        status_t const grown = grow_nodes_(config.capacity);
         return {capacity(), grown};
     }
 
@@ -673,8 +673,8 @@ struct vram_apple_index {
      *  A re-selecting phase walks every node of the planned range, once per round of walks across
      *  while the shard holds several parts, into a shadow matrix that replaces the walked rows once
      *  the device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit
-     *  and reconnection, run on the host over unified memory in @ref advance, restore whatever a
-     *  re-selection strands. @ref plan_refine sized every buffer, so no phase allocates. Every
+     *  and reconnection, run on the host over unified memory in @ref advance, reconnect the islands
+     *  a re-selection leaves. @ref plan_refine sized every buffer, so no phase allocates. Every
      *  phase takes the context the plan was opened on back from its caller. Holds the index's batch
      *  lock from plan to death, so demands an exclusive caller.
      */
@@ -919,8 +919,8 @@ struct vram_apple_index {
 
         struct step_t {
             std::size_t position = 0;
-            iota_view<node_id_t> index_rows;
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> index_nodes;
+            iota_view<node_id_t> source_nodes;
         };
 
         step_t operator[](std::size_t position) const noexcept {
@@ -929,8 +929,8 @@ struct vram_apple_index {
             std::size_t const first = position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(visible));
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = step.index_rows;
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = step.index_nodes;
             return step;
         }
         indexed_range<save_plan_t> steps() const noexcept {
@@ -950,12 +950,12 @@ struct vram_apple_index {
          */
         status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const rows = step.index_rows;
+            iota_view<node_id_t> const rows = step.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
             bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
@@ -1066,8 +1066,8 @@ struct vram_apple_index {
 
         struct step_t {
             std::size_t position = 0;
-            iota_view<node_id_t> index_rows;
-            iota_view<node_id_t> source_rows;
+            iota_view<node_id_t> index_nodes;
+            iota_view<node_id_t> source_nodes;
         };
 
         step_t operator[](std::size_t position) const noexcept {
@@ -1076,8 +1076,8 @@ struct vram_apple_index {
             std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(base) + rows);
             step.position = position;
-            step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            step.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
             return step;
         }
         indexed_range<load_plan_t> steps() const noexcept {
@@ -1096,18 +1096,18 @@ struct vram_apple_index {
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_rows;
+            iota_view<node_id_t> const range = step.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_rows.first;
+            std::size_t const first = step.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
             bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
+            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_nodes.first + source_range.first);
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
@@ -1141,14 +1141,14 @@ struct vram_apple_index {
          */
         status_t load(step_t const& step, vram_apple_index& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_rows;
-            if (range.empty() || range.size() != step.source_rows.size() || step.source_rows.bound > source.size() ||
+            iota_view<node_id_t> const range = step.index_nodes;
+            if (range.empty() || range.size() != step.source_nodes.size() || step.source_nodes.bound > source.size() ||
                 !same_geometry(source, *index_))
                 return status_t::config_mismatch_k;
-            node_id_t const shift = range.first - step.source_rows.first + source_range.first;
+            node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes(), connectivity = index_->connectivity();
-            std::size_t const into = range.first, from = step.source_rows.first, count = range.size();
+            std::size_t const into = range.first, from = step.source_nodes.first, count = range.size();
             std::shared_lock storage {source.storage_};
             std::memcpy(index_->vectors_matrix_.host + into * row_bytes, source.vectors_matrix_.host + from * row_bytes,
                         count * row_bytes);
@@ -1167,7 +1167,7 @@ struct vram_apple_index {
 
         /**
          *  Derives the norms no step carried on the device, lifts the hold, and publishes the
-         *  appended rows.
+         *  appended nodes.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
@@ -1224,8 +1224,8 @@ struct vram_apple_index {
             if (failed(claim_status)) return {{}, claim_status};
             base = first_id;
         }
-        else if (rows > ceiling_rows_ - base) return {{}, status_t::overflow_k};
-        if (status_t const grown = grow_rows_(base + rows); failed(grown)) {
+        else if (rows > ceiling_nodes_ - base) return {{}, status_t::overflow_k};
+        if (status_t const grown = grow_nodes_(base + rows); failed(grown)) {
             unclaim_(base, rows);
             return {{}, grown};
         }
@@ -1286,7 +1286,7 @@ struct vram_apple_index {
         // Growth relocates the storage, so it runs under the hold a reserve takes too.
         {
             std::unique_lock batch {batch_};
-            if (status_t const grown = grow_rows_(first_id + rows); failed(grown)) return {{}, grown};
+            if (status_t const grown = grow_nodes_(first_id + rows); failed(grown)) return {{}, grown};
         }
         // Past the staged rows, every wave's insert and back-link count into their own words,
         // zeroed here, then the row an import widens through, then the chains, every head unknown.
@@ -1315,7 +1315,7 @@ struct vram_apple_index {
             return {{}, sized};
         arguments.first_id = static_cast<u32_t>(first_id);
         arguments.end_id = static_cast<u32_t>(first_id + rows);
-        arguments.selection_rows = walk_selection_rows_(expansion, candidate_slots);
+        arguments.selection_nodes = walk_selection_nodes_(expansion, candidate_slots);
         arguments.expansion = expansion;
         reset_counters_(counters_);
 
@@ -1431,10 +1431,10 @@ struct vram_apple_index {
     /** Bytes of the f32 row an import widens f64 rows through before narrowing them at unit RMS. */
     std::size_t widened_bytes_() const noexcept { return dimensions() * sizeof(f32_t); }
 
-    /** Bytes of the back-link chains of @p rows rows that leave @p total_rows behind, in @p waves:
+    /** Bytes of the back-link chains of @p rows rows that leave @p total_nodes behind, in @p waves:
      *  a head per row, a next link per pick, the touched list as long, and each wave's count. */
-    std::size_t links_bytes_(std::size_t rows, std::size_t total_rows, std::size_t waves) const noexcept {
-        return (total_rows + 2 * rows * connectivity_ + waves) * sizeof(u32_t);
+    std::size_t links_bytes_(std::size_t rows, std::size_t total_nodes, std::size_t waves) const noexcept {
+        return (total_nodes + 2 * rows * connectivity_ + waves) * sizeof(u32_t);
     }
 
     /** Why @p rows cannot cross into the staging: a width other than the index's, or rows closer
@@ -1516,7 +1516,7 @@ struct vram_apple_index {
      *  shared memory. */
     gpu_arena_shape_t walk_arena_shape_(u32_t expansion, u32_t candidate_slots) const noexcept {
         gpu_arena_shape_t shape = arena_shape_for(
-            walk_selection_rows_(expansion, candidate_slots),
+            walk_selection_nodes_(expansion, candidate_slots),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k);
         shape.scratch_bytes = build_scratch_bytes_per_warp(0);
         return shape;
@@ -1531,19 +1531,19 @@ struct vram_apple_index {
     /** Candidates a walk's diversity selection caches: all of the walk's candidates, as the CPU's
      *  selection judges, @p candidate_slots ranks per lane on the register ladder, or the arena
      *  frontier's @p expansion past it. */
-    u32_t walk_selection_rows_(u32_t expansion, u32_t candidate_slots) const noexcept {
+    u32_t walk_selection_nodes_(u32_t expansion, u32_t candidate_slots) const noexcept {
         return candidate_slots ? candidate_slots * wave_lanes() : expansion;
     }
 
     /** Candidates a re-selection caches, a back-link round's: a row of the node's own neighbors, a
      *  row's worth of incoming newcomers, and the node's own row last. */
-    u32_t reselection_rows_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
+    u32_t reselection_nodes_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
 
     /** Bytes of one builder simdgroup's slice, its walk's or its re-selection's, whichever caches
      *  more: an insert and its back-link share one arena shape. */
     u32_t builder_scratch_bytes_per_warp_(u32_t expansion, u32_t candidate_slots) const noexcept {
         return build_scratch_bytes_per_warp(
-            max_of(walk_selection_rows_(expansion, candidate_slots), reselection_rows_()));
+            max_of(walk_selection_nodes_(expansion, candidate_slots), reselection_nodes_()));
     }
 
     /** One building simdgroup's arena slice for @p walks walks on the rung of @p candidate_slots,
@@ -1551,7 +1551,7 @@ struct vram_apple_index {
      *  always keeps, since threadgroup memory would bound the row width. */
     gpu_arena_shape_t build_arena_shape_(u32_t expansion, u32_t candidate_slots, u32_t walks) const noexcept {
         gpu_arena_shape_t shape = arena_shape_for(
-            walk_selection_rows_(expansion, candidate_slots),
+            walk_selection_nodes_(expansion, candidate_slots),
             candidate_slots ? frontier_kind_t::register_ladder_k : frontier_kind_t::wide_arena_k, walks);
         shape.scratch_bytes = builder_scratch_bytes_per_warp_(expansion, candidate_slots);
         return shape;
@@ -1618,7 +1618,7 @@ struct vram_apple_index {
             metal_launch_t back_link {context.api(), context.stream(),
                                       pipeline_(vram_kernel_t::back_link_k, 0).pipeline};
             if (!back_link) return status_t::device_error_k;
-            wave_arguments.selection_rows = reselection_rows_();
+            wave_arguments.selection_nodes = reselection_nodes_();
             bind_storage_(back_link, wave_arguments);
             back_link.bind(context.arena_, metal_arena_buffer_k);
             back_link.bind(context.staging_, metal_counters_buffer_k, rows_bytes + (2 * wave + 1) * counters_bytes_k);
@@ -1739,7 +1739,7 @@ struct vram_apple_index {
         auto const* const ids = reinterpret_cast<node_id_t const*>(context.staging_.host + landing.first_offset);
         auto const* const distances = reinterpret_cast<distance_t const*>(context.staging_.host +
                                                                           landing.second_offset);
-        for (std::size_t query = 0; query != landing.rows; ++query)
+        for (std::size_t query = 0; query != landing.queries; ++query)
             for (std::size_t rank = 0; rank != landing.count; ++rank) {
                 result_ids(query, rank) = ids[query * landing.count + rank];
                 if (wants_distances) result_distances(query, rank) = distances[query * landing.count + rank];
@@ -1805,7 +1805,7 @@ struct vram_apple_index {
         auto const* const dots = reinterpret_cast<dot_t const*>(staging + landing.second_offset);
         auto const* const scored = reinterpret_cast<u32_t const*>(staging + landing.third_offset);
         std::size_t total = 0;
-        for (std::size_t row = 0; row != landing.rows; ++row) {
+        for (std::size_t row = 0; row != landing.queries; ++row) {
             for (std::size_t pair = 0; pair != landing.count; ++pair) {
                 node_ids(row, pair) = ids[row * landing.count + pair];
                 products(row, pair) = dot_result_t::from_raw(dots[row * landing.count + pair]);
@@ -1862,7 +1862,7 @@ struct vram_apple_index {
         arguments.expansion = expansion;
         arguments.concurrent_walks = device_.multiprocessor_count *
                                      resident_blocks_(vram_kernel_t::search_k, candidate_slots) * metal_simdgroups_k;
-        arguments.filling_rows = filling_rows<u32_t>(expansion, static_cast<u32_t>(connectivity()));
+        arguments.filling_nodes = filling_nodes<u32_t>(expansion, static_cast<u32_t>(connectivity()));
         bool fresh = false;
         if (status_t const staged = context.ensure_(context.staging_, staging_bytes + widened_bytes_(), fresh);
             failed(staged))
@@ -1961,7 +1961,7 @@ struct vram_apple_index {
             failed(sized))
             return sized;
         arguments.first_id = nodes.first;
-        arguments.selection_rows = walk_selection_rows_(expansion, candidate_slots);
+        arguments.selection_nodes = walk_selection_nodes_(expansion, candidate_slots);
         arguments.expansion = expansion;
         arguments.end_id = nodes.bound;
         arguments.sampling_bound = static_cast<u32_t>(rows);
@@ -2138,7 +2138,7 @@ struct vram_apple_index {
     /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
      *  with no batch or load in flight, so its holder alone runs and publishes them. */
     expected<node_id_t> claim_(std::size_t rows) noexcept {
-        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_rows_);
+        auto const [first_id, claim_status] = claims_.claim(size(), rows, ceiling_nodes_);
         return {static_cast<node_id_t>(first_id), claim_status};
     }
 
@@ -2183,7 +2183,7 @@ struct vram_apple_index {
     /** Grows every matrix and column to hold @p rows, doubling, the fresh neighbor rows
      *  sentinel-filled; the caller holds the batch hold, and the copy waits for every walk sharing
      *  the storage. */
-    status_t grow_rows_(std::size_t rows) noexcept {
+    status_t grow_nodes_(std::size_t rows) noexcept {
         if (rows <= capacity_rows_) return status_t::success_k;
         std::size_t const grown = max_of(rows, capacity_rows_ * 2);
         std::size_t const neighbors_row_bytes = connectivity() * sizeof(u32_t);
@@ -2217,7 +2217,7 @@ struct vram_apple_index {
     std::size_t dimensions_ = 0, connectivity_ = 0, capacity_rows_ = 0;
 
     /** Rows the index may ever host, fixed by the first @c reserve. */
-    std::size_t ceiling_rows_ = max_node_count_k;
+    std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** The vectors matrix and norms column backend. */
     vectors_allocator_t vectors_allocator_;

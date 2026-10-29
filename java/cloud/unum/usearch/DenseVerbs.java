@@ -136,7 +136,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      *
      * <p>
      * The input scalar type is independent of the stored quantization; the library converts on
-     * ingest. A batch is all-or-nothing: a returning call published every row, a failing one
+     * ingest. A batch is all-or-nothing: a returning call published every entry, a failing one
      * published none. An accelerator fault severe enough to poison the device context is the sole
      * exception, reporting DEVICE and latching the index unusable rather than partially applied.
      * Calls {@code usearch_dense_insert}.
@@ -219,9 +219,10 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Late-interaction scoring of multi-row queries against multi-row entries: every query row takes
-     * its best match within a key, and those maxima sum to that key's score. A document is one key
-     * holding its token rows, so the wanted count is the "k" over keys rather than over rows.
+     * Late-interaction scoring of multi-row queries against multi-vector documents: every query
+     * row takes its best match within a key, and those maxima sum to that key's score. A document
+     * is one key holding its token rows, so the wanted count is the "k" over keys rather than over
+     * rows.
      *
      * <p>
      * Every query carries the same number of rows, so a padded token batch applies as is, and the
@@ -249,7 +250,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Approximate sparse product of a matrix against the indexed rows - the linear-algebra sibling
+     * Approximate sparse product of a matrix against the indexed vectors - the linear-algebra sibling
      * of {@link #search}, reporting every pair the traversal scored rather than only the nearest.
      * Pairs arrive in traversal order, and the pairs the walk never reaches are the low and negative
      * products. Runs on the inner-product kinds alone.
@@ -299,7 +300,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Absorbs every donor into this index, one after another, keeping their graphs rather than
      * re-inserting their vectors and linking each in across the appended part. Every donor refuses
      * every verb until the call is final; then each one absorbed stays closed, and one it did not
-     * absorb is a live index again, which the caller still owns, though its rows may already have
+     * absorb is a live index again, which the caller still owns, though its entries may already have
      * landed here. Calls {@code usearch_dense_absorb}.
      *
      * @throws USearchException READ_ONLY on a view, CONFIG_MISMATCH on a donor of another residency,
@@ -323,7 +324,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Writes the index as one monolith - every shard, rows in placement order - the same bytes
+     * Writes the index as one monolith - every shard, entries in placement order - the same bytes
      * {@link #save} writes to a {@code .safegraphs} path, into {@code arena}. Calls
      * {@code usearch_dense_save_buffer}.
      *
@@ -335,9 +336,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
 
     /**
      * Opens a walk over the current contents, pulled on this receiver's executor. Each shard's
-     * publication watermark is read as the walk enters it, so a row once passed is never revisited.
-     * Without {@code starts} it yields every row as stored; with them, the start keys' own rows first
-     * in order, then the rows those link to breadth-first, each once. Calls
+     * publication watermark is read as the walk enters it, so an entry once passed is never revisited.
+     * Without {@code starts} it yields every entry as stored; with them, the start keys' own entries
+     * first in order, then the entries those link to breadth-first, each once. Calls
      * {@code usearch_dense_cursor_init}.
      */
     public DenseCursor cursor(Key... starts) {

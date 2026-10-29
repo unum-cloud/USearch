@@ -276,7 +276,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *
      * @param dimensions the scalars per stored vector.
      * @param metric the distance kind the checkpoint scores with.
-     * @param quantization the scalar type its rows are stored and quantized into.
+     * @param quantization the scalar type its vectors are stored and quantized into.
      * @param connectivity the connections-per-node bound the graph was built with.
      */
     public record DenseMetadata(long dimensions, DenseMetric metric, Scalar quantization, long connectivity) {
@@ -619,7 +619,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * A walk, the default, or an exact scan of every row on RAM and NVMe handles; a VRAM handle
+         * A walk, the default, or an exact scan of every entry on RAM and NVMe handles; a VRAM handle
          * refuses a scan as UNSUPPORTED.
          */
         public DenseSearchConfig traversal(Traversal traversal) {
@@ -689,7 +689,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         public DenseMultiplyConfig() {}
 
         /**
-         * The bound on pairs kept per row, the first ones its walk scored; zero keeps all.
+         * The bound on pairs kept per left row, the first ones its walk scored; zero keeps all.
          *
          * @throws USearchException INVALID_ARGUMENT on a negative count.
          */
@@ -782,7 +782,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Rows a call wrote into its arena - the entries {@link DenseVerbs#get} found under a key, the
-     * outputs of {@link DenseVerbs#attend}, or the rows of a {@link DenseBatch} - at the width, pitch
+     * outputs of {@link DenseVerbs#attend}, or the vectors of a {@link DenseBatch} - at the width, pitch
      * and scalar the library reported. Valid until the arena's next call or its close.
      */
     public static final class DenseVectors {
@@ -876,7 +876,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             this.required = required;
         }
 
-        /** Lifts the {@code usearch_matches_tape_view_t} a call over {@code queries} rows wrote into its arena. */
+        /** Lifts the {@code usearch_matches_tape_view_t} a call over {@code queries} wrote into its arena. */
         static DenseProducts lift(Call call, MemorySegment view, int queries, long pairs, long required) {
             StructLayout tape = Library.MATCHES_TAPE_VIEW;
             return new DenseProducts(
@@ -894,7 +894,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * Pairs the walks scored across every row, or keys scored across every query, before the
+         * Pairs the walks scored across every left row, or keys scored across every query, before the
          * wanted bound cut any.
          */
         public long required() {
@@ -902,45 +902,46 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * How many pairs one left row holds.
+         * How many pairs one left row, or keys one query, holds.
          *
-         * @throws USearchException SHAPE_MISMATCH when the row is outside the batch, and DEVICE when
+         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch, and DEVICE when
          *     the arena holds device memory.
          */
-        public long count(int row) {
+        public long count(int query) {
             arena.host();
-            if (row < 0 || row >= queries) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the row is outside the batch");
+            if (query < 0 || query >= queries) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, row + 1) - offsets.getAtIndex(ValueLayout.JAVA_LONG, row);
+            return offsets.getAtIndex(ValueLayout.JAVA_LONG, query + 1)
+                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, query);
         }
 
         /**
-         * The key naming the indexed row of one pair.
+         * The key naming the indexed entry of one pair.
          *
-         * @throws USearchException SHAPE_MISMATCH when the row is outside the batch, or the rank past
+         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch, or the rank past
          *     its pairs.
          */
-        public Key key(int row, long rank) {
-            return Key.read(keys, pairOf(row, rank) * Key.BYTES);
+        public Key key(int query, long rank) {
+            return Key.read(keys, pairOf(query, rank) * Key.BYTES);
         }
 
         /**
          * The product of one pair.
          *
-         * @throws USearchException SHAPE_MISMATCH when the row is outside the batch, or the rank past
+         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch, or the rank past
          *     its pairs.
          */
-        public double score(int row, long rank) {
-            return scores.getAtIndex(ValueLayout.JAVA_DOUBLE, pairOf(row, rank));
+        public double score(int query, long rank) {
+            return scores.getAtIndex(ValueLayout.JAVA_DOUBLE, pairOf(query, rank));
         }
 
-        private long pairOf(int row, long rank) {
-            long pairs = count(row);
+        private long pairOf(int query, long rank) {
+            long pairs = count(query);
             if (rank < 0 || rank >= pairs) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the row holds " + pairs + " pairs");
+                throw new USearchException(Status.SHAPE_MISMATCH, "the query holds " + pairs + " pairs");
             }
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, row) + rank;
+            return offsets.getAtIndex(ValueLayout.JAVA_LONG, query) + rank;
         }
     }
 

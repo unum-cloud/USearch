@@ -2,7 +2,7 @@
 
 USearch indexes dense embeddings in a navigable graph and answers approximate nearest-neighbor
 queries over it, with SIMD kernels dispatched to the machine it runs on. This package binds the
-dense modality: the index, its row cursor, its search stream, and the three linear-algebra verbs
+dense modality: the index, its cursor, its search stream, and the three linear-algebra verbs
 that read products, attention, and late-interaction scores off the same walk.
 
 The engine is reached by `dlopen`, so a consumer builds with no linker flags at all:
@@ -23,7 +23,7 @@ def main() raises:
     var arena = Arena(executor)
     var query = [Float32(1), 0, 0]
     var matches = index.on(executor).search(RowsView.of(query, 3), 1, arena)  # on an executor
-    print(t"stored {index.describe().size}, nearest = {matches.row_keys(0)[0]}")
+    print(t"stored {index.describe().size}, nearest = {matches.query_keys(0)[0]}")
 ```
 
 The receiver chooses where a verb runs and how it completes, and the verb stays the same: a verb

@@ -25,7 +25,7 @@
  *  takes no @c predicate.
  *
  *  A viewed handle is read-only, refusing every mutating verb with @c usearch_status_read_only_k.
- *  An NVMe handle answers every read verb as a RAM handle does, its rows read through the
+ *  An NVMe handle answers every read verb as a RAM handle does, its entries read through the
  *  executor's engines, and saving answers @c usearch_status_unsupported_k, since a view already is
  *  its checkpoint.
  *
@@ -655,10 +655,10 @@ typedef struct usearch_sequence_refine_t {
  *  caller wanting to continue where a cancel stopped holds a @c usearch_sequence_refinement_t
  *  instead.
  *
- *  Re-selection alone can strand an entry no search reaches, so every call closes by re-linking
- *  them: unreachable entries re-select from scratch, and whatever the selection still drops is
- *  reconnected to a reachable one. A cancelled call skips the rest of the re-selection but still
- *  re-links, so it never leaves entries unreachable.
+ *  Re-selection alone can leave an island, an entry no search reaches, so every call closes by
+ *  re-linking them: unreachable entries re-select from scratch, and whatever the selection still
+ *  drops is reconnected to a reachable one. A cancelled call skips the rest of the re-selection but
+ *  still re-links, so it never leaves entries unreachable.
  *
  *  Searches may run throughout: re-selection rewrites one entry at a time and never removes one,
  *  so a concurrent walk sees either the old neighbors or the new ones. Insertions never overlap:
@@ -706,7 +706,7 @@ typedef struct usearch_sequence_search_t {
      *  zero derives, a scan ignores it. */
     size_t expansion_factor;
 
-    /** How rows are reached: a walk, the default, or an exact scan of every row, on RAM and
+    /** How entries are reached: a walk, the default, or an exact scan of every entry, on RAM and
      *  NVMe. */
     usearch_traversal_t traversal;
 
@@ -722,7 +722,7 @@ typedef struct usearch_sequence_search_t {
 
 /**
  *  @brief Performs k-Nearest Neighbors Search for a tape of queries, approximate by walking the
- *      graph or exact by scanning every row; one query is a tape of one.
+ *      graph or exact by scanning every entry; one query is a tape of one.
  *
  *  The native batch operation, parallelized internally. Never writes to the graph, so any number
  *  may overlap with concurrent insertions. @ref sequence_index_concurrency
@@ -957,9 +957,9 @@ typedef struct usearch_sequence_split_t {
  *  the smallest part. Each part then lands in its receiver all-or-nothing, its edges rebased, its
  *  edges into other parts dropped, and the entries that lost one placed first; @c index clears once
  *  every part landed. Each receiver closes by refining the entries that lost an edge and re-linking
- *  what that strands, as @c usearch_sequence_refine does. Insertions into @c index or a receiver
- *  arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may search either
- *  until the call is final.
+ *  the islands that leaves, as @c usearch_sequence_refine does. Insertions into @c index or a
+ *  receiver arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may
+ *  search either until the call is final.
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_sequence_refine: a cancel skips the rest of the re-selection, still re-links, and
@@ -1112,7 +1112,7 @@ typedef struct usearch_sequence_refinement_finish_t {
 } usearch_sequence_refinement_finish_t;
 
 /**
- *  @brief Skips whatever re-selection a stopped refinement left, re-links what it strands as
+ *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
  *      @c usearch_sequence_refine does, reports, reopens the index, and frees the handle. A
  *      refinement whose donors have not all landed re-links nothing and reports zeros.
  *
@@ -1146,7 +1146,7 @@ typedef struct usearch_sequence_cursor_init_t {
  *
  *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
  *  own entries first, in the order given, then the entries those link to, breadth-first, each
- *  entry once, so a caller wanting only the starts' immediate links reads the rows of the first
+ *  entry once, so a caller wanting only the starts' immediate links reads the links of the first
  *  pulled entries. A key the index lacks starts nothing.
  *
  *  @par Statuses:
@@ -1176,8 +1176,8 @@ typedef struct usearch_sequence_cursor_next_t {
     usearch_keys_view_t* keys;
 
     /** The @b optional output for each entry's links, the keys of the entries it links to in the
-     *  graph, row @c i spanning @c offsets[i] up to @c offsets[i+1], inside @c arena; @c NULL skips
-     *  them. */
+     *  graph, entry @c i spanning @c offsets[i] up to @c offsets[i+1], inside @c arena; @c NULL
+     *  skips them. */
     usearch_keys_tape_view_t* links;
 
     /** Output for the entries written; zero when the snapshot is exhausted. */
@@ -1233,7 +1233,7 @@ typedef struct usearch_sequence_sample_t {
     /** Output for the identities drawn, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** Output for each draw's nearest earlier draws - their keys and distances, row @c i spanning
+    /** Output for each draw's nearest earlier draws - their keys and distances, draw @c i spanning
      *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
     usearch_matches_tape_view_t* links;
 
