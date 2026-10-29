@@ -360,12 +360,13 @@ struct [[nodiscard]] nvme_compact_plan {
     using workspace_arena_t = growing_arena<workspace_upstream_t>;
     using workspace_allocator_t = arena_allocator<byte_t, workspace_upstream_t>;
 
-    /** The RAM index a block build or a whole-part refine places inside the workspace. */
-    using ram_index_t =
-        ram_index<typename indexes_t::quads_kit_t, typename indexes_t::tiles_kit_t,
-                  typename indexes_t::elementwise_kit_t, typename indexes_t::rmscast_kit_t,
-                  typename indexes_t::visits_kit_t, wait_t, indexes_t::template atomic_ref, dummy_cache_hints_t,
-                  workspace_allocator_t, workspace_allocator_t, arena_allocator<byte_t, forkunion_allocator_t>>;
+    /** The RAM index a block build or a whole-part refine places inside the workspace, each node
+     *  keyed by its row in the block. */
+    using ram_index_t = ram_index<typename indexes_t::quads_kit_t, typename indexes_t::tiles_kit_t,
+                                  typename indexes_t::elementwise_kit_t, typename indexes_t::rmscast_kit_t,
+                                  typename indexes_t::visits_kit_t, wait_t, indexes_t::template atomic_ref,
+                                  dummy_cache_hints_t, workspace_allocator_t, workspace_allocator_t,
+                                  arena_allocator<byte_t, forkunion_allocator_t>, node_id_t>;
     using traversal_context_t = typename ram_index_t::traversal_context_t;
     using traversals_t = growing_buffer<traversal_context_t, scratch_allocator_t>;
 
@@ -568,12 +569,11 @@ struct [[nodiscard]] nvme_compact_plan {
         node_id_t* neighbors = nullptr;
     };
 
-    /** A block build's value rows, its two ID maps, its neighbors on the way out, and its RAM
-     *  index. */
+    /** A block build's value rows, the node each row landed as, its neighbors on the way out, and
+     *  its RAM index, which keys each node by its row. */
     struct build_slices_t {
         byte_t* values = nullptr;
         node_id_t* nodes = nullptr;
-        node_id_t* rows = nullptr;
         node_id_t* staging = nullptr;
         ram_index_t* index = nullptr;
     };
@@ -915,18 +915,29 @@ struct [[nodiscard]] nvme_compact_plan {
     }
 
     /** Bytes the columns of a RAM index of @p rows rows take off the arena it is built on: a slice
-     *  per column of every chunk the rows reach, and the audit its heal runs on the same
-     *  allocator. */
+     *  per column of every chunk the rows reach, the key map's control bytes and slots over them,
+     *  and the audit its heal runs on the same allocator. */
     std::size_t ram_bytes_(std::size_t rows) const noexcept {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
+        using slots_schedule_t = typename ram_index_t::keyed_t::nodes_map_t::slots_schedule_t;
         typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
         std::size_t const values_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t);
         std::size_t bytes = workspace_allocator_t::reserved_bytes(ram_index_t::audit_memory_usage(rows));
-        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
+        std::size_t const chunks = schedule_t::chunks_for(rows);
+        for (std::size_t chunk = 0; chunk != chunks; ++chunk) {
             std::size_t const chunk_rows = schedule_t::nodes_in(chunk);
             bytes += workspace_allocator_t::reserved_bytes(chunk_rows * values_bytes) +
                      workspace_allocator_t::reserved_bytes(chunk_rows * norms_bytes_()) +
-                     workspace_allocator_t::reserved_bytes(chunk_rows * neighbors_row_bytes_());
+                     workspace_allocator_t::reserved_bytes(chunk_rows * neighbors_row_bytes_()) +
+                     workspace_allocator_t::reserved_bytes(chunk_rows * sizeof(node_id_t));
+        }
+        // The map holds every covered row and probes twice as many slots, each a key beside its
+        // node.
+        for (std::size_t chunk = 0, map_chunks = slots_schedule_t::chunks_for(2 * schedule_t::nodes_before(chunks));
+             chunk != map_chunks; ++chunk) {
+            std::size_t const slots = slots_schedule_t::nodes_in(chunk);
+            bytes += workspace_allocator_t::reserved_bytes(slots) +
+                     workspace_allocator_t::reserved_bytes(slots * 2 * sizeof(node_id_t));
         }
         return bytes;
     }
@@ -975,8 +986,7 @@ struct [[nodiscard]] nvme_compact_plan {
      *  slices. */
     build_slices_t build_slices_(std::size_t rows, carver_t& carver) const noexcept {
         build_slices_t const slices {carve_<byte_t>(carver, rows * value_row_bytes_()), carve_<node_id_t>(carver, rows),
-                                     carve_<node_id_t>(carver, rows), carve_<node_id_t>(carver, rows * connectivity_()),
-                                     carve_<ram_index_t>(carver, 1)};
+                                     carve_<node_id_t>(carver, rows * connectivity_()), carve_<ram_index_t>(carver, 1)};
         carver.bytes += ram_bytes_(rows);
         return slices;
     }
@@ -1409,15 +1419,13 @@ struct [[nodiscard]] nvme_compact_plan {
         std::size_t const count = step.nodes.size(), first = step.nodes.first;
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
-        auto const [values, nodes, rows, staging, index_bytes] = build_slices_(count, carver);
+        auto const [values, nodes, staging, index_bytes] = build_slices_(count, carver);
         if (carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
-        ram_index_ptr_t const index_ptr {
-            new (index_bytes) ram_index_t(kernel_(), workspace_allocator_t(arena), workspace_allocator_t(arena))};
+        typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
+        ram_index_ptr_t const index_ptr {new (index_bytes) ram_index_t(
+            kernel_(), geometry, workspace_allocator_t(arena), workspace_allocator_t(arena))};
         ram_index_t& index = *index_ptr;
-        if (status_t const reserved =
-                index.reserve({count, static_cast<connectivity_t>(connectivity_()), dimensions_()}).status;
-            failed(reserved))
-            return reserved;
+        if (status_t const reserved = index.reserve({count}).status; failed(reserved)) return reserved;
 
         // One call holds the executor for the block's scan, its inserts, its heal and its writes.
         typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_())};
@@ -1438,9 +1446,11 @@ struct [[nodiscard]] nvme_compact_plan {
         auto insert = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             vectors_view_t const inserted_row {reinterpret_cast<scalar_t const*>(values + row * value_row_bytes_()),
                                                std::size_t {1}, dimensions_()};
+            node_id_t const block_row = static_cast<node_id_t>(row);
             refuse(index
-                       .insert(inserted_row, typename ram_index_t::node_ids_span_t {nodes + row, std::size_t {1}},
-                               traversals[thread], config)
+                       .insert(typename ram_index_t::keys_view_t {&block_row, std::size_t {1}}, inserted_row,
+                               typename ram_index_t::node_ids_span_t {nodes + row, std::size_t {1}}, traversals[thread],
+                               config)
                        .status);
         };
         if (status_t const fanned = executor.for_tasks(count, insert); failed(fanned)) return fanned;
@@ -1465,10 +1475,10 @@ struct [[nodiscard]] nvme_compact_plan {
         result_.compaction.graph.changed_nodes += healed.changed_nodes;
         result_.compaction.graph.islands_found += healed.islands_found;
         result_.compaction.graph.islands_reconnected += healed.islands_reconnected;
-        for (std::size_t row = 0; row != count; ++row) rows[nodes[row]] = static_cast<node_id_t>(row);
+        typename ram_index_t::keyed_t const& keys = index.keys();
         return write_ram_rows_(
             index, target, first, count, staging, count, executor, [&](std::size_t row) noexcept { return nodes[row]; },
-            [&](node_id_t node) noexcept { return static_cast<node_id_t>(first + rows[node]); });
+            [&](node_id_t node) noexcept { return static_cast<node_id_t>(first + keys[node]); });
     }
 
     /** Refines target part @p part whole in a RAM index inside the workspace: its value and
@@ -1493,13 +1503,11 @@ struct [[nodiscard]] nvme_compact_plan {
         carver_t carver {&arena};
         refine_slices_t const slices = refine_slices_(nodes, staged, carver);
         if (carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
-        ram_index_ptr_t const index_ptr {
-            new (slices.index) ram_index_t(kernel_(), workspace_allocator_t(arena), workspace_allocator_t(arena))};
+        typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
+        ram_index_ptr_t const index_ptr {new (slices.index) ram_index_t(
+            kernel_(), geometry, workspace_allocator_t(arena), workspace_allocator_t(arena))};
         ram_index_t& index = *index_ptr;
-        if (status_t const reserved =
-                index.reserve({nodes, static_cast<connectivity_t>(connectivity_()), dimensions_()}).status;
-            failed(reserved))
-            return reserved;
+        if (status_t const reserved = index.reserve({nodes}).status; failed(reserved)) return reserved;
         // One call holds the executor for the load, the refine and the writes; it reads no medium.
         typename ram_index_t::insert_config_t const sizing {static_cast<u32_t>(expansion_factor_())};
         auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {},
@@ -1521,7 +1529,8 @@ struct [[nodiscard]] nvme_compact_plan {
             if (status_t const fanned = executor.for_tasks(
                     steps.size(),
                     [&](std::size_t position, std::size_t, std::size_t) noexcept {
-                        refuse(load.load(steps[position], columns, source_range));
+                        refuse(load.load(steps[position], columns, source_range,
+                                         [](node_id_t row) noexcept { return row; }));
                     });
                 failed(fanned))
                 return fanned;

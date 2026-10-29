@@ -10,18 +10,22 @@
  *  through `insert_plan_t::insert` and adding it to the plan's `landed` tally; a refused fan-out
  *  lands both positions on the planner instead. A peer batch inserts two rows as `insert` does.
  *
- *  - The searcher reads every row below the watermark it acquired wired and whole.
+ *  - The reader, as a search, reads every row below the watermark it acquired wired and whole.
+ *  - The reader, as a count, finds exactly the rows below the watermark it acquired, each one whole.
  *
+ *  @budget 2048
  *  @verify pass sc,rc11,far
- *  @verify fail rc11 landed_order=order_relaxed: relaxed, the searcher acquires the watermark and
+ *  @verify fail rc11 landed_order=order_relaxed: relaxed, the search acquires the watermark and
  *      reads a row unwritten
  *  @verify fail sc finish_waits_landed=false: taking the turn at once, it publishes a row no stepper
  *      wrote yet
+ *  @verify fail sc keys_in_turn=false: filed past the release, the count acquires the watermark
+ *      past a row whose key is not filed yet, and counts one short
  *  @verify stuck sc caller_lands_refused=false: dropped, `finish` waits on a tally nobody moves, and
  *      every later turn waits on it
  */
 #define thread_count 5
-#define location_count 11
+#define location_count 15
 #define history_depth 3
 #include <basic_ram_index_batches/protocol.pml>
 
@@ -48,7 +52,7 @@ proctype planner(byte t) {
         :: else
         fi
     fi;
-    finish(t, first, tally, seen)
+    finish(t, first, other, tally, seen)
 }
 
 // one thread of the fan-out, which lands its position once dispatched; it takes nothing from the
@@ -66,6 +70,12 @@ proctype stepper(byte t; byte position) {
 
 proctype inserter(byte t) { insert_batch(t) }
 
-proctype searcher(byte t) { search(t) }
+// a search or a count, on one thread, since `far` lands the posted adds of five threads at most
+proctype reader(byte t) {
+    if
+    :: search(t)
+    :: find_each(t)
+    fi
+}
 
-init { atomic { run planner(0); run stepper(1, 0); run stepper(2, 1); run inserter(3); run searcher(4) } }
+init { atomic { run planner(0); run stepper(1, 0); run stepper(2, 1); run inserter(3); run reader(4) } }

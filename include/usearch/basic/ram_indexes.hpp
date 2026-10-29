@@ -45,13 +45,6 @@ namespace unum::usearch::basic {
 template <typename indexes_type_>
 struct ram_indexes_cursor;
 
-/** Keys live in the basic records, so the plural stores none and resolves them per shard. */
-struct record_keys_t {
-    status_t cover(std::size_t) const noexcept { return status_t::success_k; }
-    std::size_t memory_usage() const noexcept { return 0; }
-    friend record_keys_t& host_keys(record_keys_t& keys) noexcept { return keys; }
-};
-
 /**
  *  @brief Basic RAM shards viewed as one: insertions routed over the shard generations, searches
  *      merged across them, lookups fanned out.
@@ -91,7 +84,7 @@ struct ram_indexes {
     using atomic_ref = typename index_t::template atomic_ref<word_type_>;
 
     /** The shards and the rotation that routes new entries; the keys stay in their records. */
-    using shards_t = shard_set<index_t, record_keys_t, key_t, std::hash<key_t>, index_t::template atomic_ref, wait_t>;
+    using shards_t = shard_set<index_t, index_t::template atomic_ref, wait_t>;
     using shard_t = typename shards_t::shard_t;
     using batch_split_t = typename shards_t::batch_split_t;
 
@@ -144,7 +137,7 @@ struct ram_indexes {
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept {
         std::unique_ptr<index_t> shard = build_(allocator_t {memory_domain});
         if (!shard) return status_t::bad_alloc_k;
-        return shards_.emplace(std::move(shard), record_keys_t {});
+        return shards_.emplace(std::move(shard));
     }
 
     /**
@@ -153,7 +146,7 @@ struct ram_indexes {
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed yet.
-     *  - @c overflow_k A shard's share passes its node IDs or its key multimap's seats.
+     *  - @c overflow_k A shard's share passes its node IDs.
      */
     expected<std::size_t> reserve(std::size_t capacity) noexcept { return shards_.reserve({capacity}); }
 
@@ -233,11 +226,9 @@ struct ram_indexes {
 
     /** What a checkpoint does on these shards' memory domains, for @ref save_shards and
      *  @c load_shards: every shard's own plans on the calling thread, its keys in its records,
-     *  which those plans write and read, so no key column or locator lands beside them, and a
-     *  load's parts past the placed shards on shard generations built like them. */
+     *  which those plans write and read, and a load's parts past the placed shards on shard
+     *  generations built like them. */
     struct checkpoint_residency_t {
-        using seats_t = typename shards_t::locators_map_t::seats_t;
-
         ram_indexes* owner = nullptr;
 
         /**
@@ -279,8 +270,7 @@ struct ram_indexes {
          *  - @c config_mismatch_k The shard already publishes nodes.
          *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
          *    zero to its element column's length, or a neighbor ID names no node.
-         *  - @c overflow_k The nodes pass the shard's node IDs or key multimap seats, or a node's
-         *    capacity wraps.
+         *  - @c overflow_k The nodes pass the shard's node IDs, or a node's capacity wraps.
          */
         static expected<typename index_t::load_plan_t> open_shard_load(
             shards_t& shards, std::size_t shard, typename index_t::columns_view_t columns) noexcept {
@@ -291,19 +281,10 @@ struct ram_indexes {
          *  Covers @p entries in shard @p shard under the set's shard bound.
          *
          *  @par Statuses:
-         *  - @c overflow_k @p entries passes the shard's node IDs or its key multimap's seats.
+         *  - @c overflow_k @p entries passes the shard's node IDs.
          */
         static expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t entries) noexcept {
             return shards[shard].index->reserve({entries, shards.shard_capacity()});
-        }
-
-        /** The shard's own save plan writes its records' keys, so nothing lands here. */
-        static void save_keys(shards_t&, std::size_t, std::span<key_t>) noexcept {}
-
-        /** The shard's own load plan lands the keys in its records, so no seat is claimed. */
-        static expected<seats_t> claim_seats(shards_t&, std::size_t) noexcept { return {{}, status_t::success_k}; }
-        static status_t land_keys(shards_t&, std::size_t, std::size_t, std::span<key_t const>, seats_t) noexcept {
-            return status_t::success_k;
         }
 
         /**
@@ -662,24 +643,16 @@ struct ram_indexes {
         return scan(query, metric, unrelated_t {}, predicate, context, watermarks, keys, distances);
     }
 
-    /** Entries under @p key across every live shard, read between destructive windows. */
-    std::size_t count(key_t const& key) const noexcept {
-        return shards_.read_until_settled([&]() noexcept {
-            std::size_t total = 0;
-            for (shard_t const& one : shards_) total += one.index->count(key);
-            return total;
-        });
-    }
+    /** Entries under @p key across every live shard, read between destructive windows and between
+     *  commits, so a batch spanning shards counts whole or not at all. */
+    std::size_t count(key_t const& key) const noexcept { return shards_.count(key); }
 
     /** Invokes @p callback as <tt>callback(shard, node_id)</tt> for every published entry under
      *  @p key in every live shard; an ID a clear retired meanwhile is refused by every accessor of
      *  its shard. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
-        for (shard_t const& one : shards_) {
-            index_t const& shard = *one.index;
-            shard.find_each(key, [&](node_id_t node_id) noexcept { callback(shard, node_id); });
-        }
+        shards_.find_each(key, callback);
     }
 
 #pragma endregion Search and Lookups
@@ -1131,7 +1104,7 @@ struct ram_indexes {
     shard_t build_shard_(shard_t const& like) const noexcept {
         std::unique_ptr<index_t> index = build_(like.index->get_allocator());
         if (index && failed(index->reserve({0, shards_.shard_capacity()}).status)) index.reset();
-        return shard_t {std::move(index), record_keys_t {}};
+        return shard_t {std::move(index)};
     }
 
     /** The shards and their routing, the commit word every snapshot reads by and the epoch every

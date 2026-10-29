@@ -29,7 +29,6 @@
  */
 #pragma once
 
-#include <bit>          // `std::bit_ceil` - the key staging's halves
 #include <memory>       // `std::unique_ptr` - an index holds atomics and never moves
 #include <mutex>        // `std::unique_lock` - the windows' hold on the gate
 #include <shared_mutex> // `std::shared_lock` - the mutators' hold on the gate
@@ -59,8 +58,9 @@ struct vram_nvidia_compact_plan;
  *  @brief The sharded index: same-geometry GPU-resident shards viewed as one.
  *
  *  It owns its shards outright, so a destructor, a consuming merge and @ref clear are expressible.
- *  Each shard's keys live twice: on the host, where the merges resolve them, and on its device,
- *  where a walk resolves its nodes and the on-device merge reads them.
+ *  Each shard owns its keys, twice: on the host, where the merges resolve them and every lookup
+ *  probes them, and on its device, where a walk resolves its nodes and the on-device merge reads
+ *  them. A key lookup probes every shard; no map spans them.
  *
  *  @tparam wait_type_ What a reader spanning the shards waits through while a commit is in flight.
  */
@@ -77,64 +77,19 @@ struct vram_nvidia_indexes {
     friend struct vram_nvidia_compact_plan;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t = vram_nvidia_index<vector_dtype_, kernels_type_, cache_hints_type_>;
+    using index_t =
+        vram_nvidia_index<vector_dtype_, kernels_type_, cache_hints_type_, cuda_virtual_memory_allocator<byte_t>,
+                          cuda_virtual_memory_allocator<byte_t>, cuda_arena_allocator_t, key_type_, key_hash_type_>;
 
-    /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
-     *  key vocabulary begins here. */
+    /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = key_type_;
 
-    /** Every shard's host key column, where the merges resolve its nodes. */
-    using keys_column_t = shard_keys_column<index_t, key_t, fu::standard_atomic_ref>;
-
-    /** One shard's page-locked ring between its two key columns: two halves of keys, each refilled
-     *  only once the copy out of it landed. Sized as plans cover rows and freed with the shard. */
-    struct key_staging_t {
-        growing_buffer<key_t, cuda_pinned_allocator_t> keys;
-
-        /** Marks the last copy out of each half. */
-        cuda_event_t crossed[2];
-
-        /** Pins through @p api and births both events on the current device. */
-        explicit key_staging_t(cuda_api_t const& api) noexcept
-            : keys {cuda_pinned_allocator_t {api}}, crossed {cuda_event_t {api}, cuda_event_t {api}} {}
-
-        /** Halves filled so far, alternating between the two. */
-        std::size_t chunks = 0;
-    };
-
-    /** One shard's keys, held with the shard so a shard generation opens them beside it and no
-     *  search reads a base that moves: the host column, its device twin, and the staging between
-     *  them. */
-    struct device_shard_keys_t {
-
-        /** The keys on the host, where the merges resolve them. */
-        keys_column_t host;
-
-        /** The same keys on the shard's device, so a walk resolves its nodes to keys; reserved for
-         *  every ID a shard can hold, since address space is free and the base never moves under a
-         *  walk, and mapped as it grows. */
-        cuda_virtual_memory_allocator<key_t> device;
-
-        /** The ring the host column crosses into the device twin through, its events born on the
-         *  shard's device. */
-        key_staging_t staging;
-
-        /** Bytes the host column and the device twin's mapped rows occupy. */
-        std::size_t memory_usage() const noexcept { return host.memory_usage() + device.committed_bytes(); }
-
-        /** The host column, which the shared set and checkpoint code reach. */
-        friend keys_column_t& host_keys(device_shard_keys_t& keys) noexcept { return keys.host; }
-        friend keys_column_t const& host_keys(device_shard_keys_t const& keys) noexcept { return keys.host; }
-    };
-
-    /** The shards, the keys of their rows, the rotation that routes new rows, and the commit word a
-     *  reader spanning the shards snapshots by. */
-    using shards_t =
-        shard_set<index_t, device_shard_keys_t, key_t, key_hash_type_, fu::standard_atomic_ref, wait_type_>;
+    /** The shards, the rotation that routes new rows, and the commit word a reader spanning the
+     *  shards snapshots by. */
+    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_>;
 
     /** One batched read's fan-out over every shard's device. */
     using fanout_t = utilities::vram_shard_fanout<shards_t, cuda_vendor_t, typename index_t::distance_t>;
-    using key_locator_t = typename shards_t::key_locator_t;
     using shard_t = typename shards_t::shard_t;
     using shard_generation_t = typename shards_t::shard_generation_t;
 
@@ -151,6 +106,7 @@ struct vram_nvidia_indexes {
     using search_config_t = typename index_t::search_config_t;
     using insert_config_t = typename index_t::insert_config_t;
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
+    using geometry_t = typename index_t::geometry_t;
     using insert_result_t = typename index_t::insert_result_t;
     using search_result_t = typename index_t::search_result_t;
     using refine_config_t = typename index_t::refine_config_t;
@@ -173,13 +129,14 @@ struct vram_nvidia_indexes {
 
 #pragma region Placement
 
-    /** Every index names the metric its shards score by and the host allocator its shard table, key
-     *  columns, locator map and checkpoint catalogs sit on; nothing is placed by default. */
+    /** Every index names the metric its shards score by, the geometry every shard keeps, and the
+     *  host allocator its shard table, its shards' keys and checkpoint catalogs sit on; nothing is
+     *  placed by default. */
     vram_nvidia_indexes() = delete;
-    explicit vram_nvidia_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
-        : shards_(allocator), kernel_(kernel) {}
+    explicit vram_nvidia_indexes(nk_kernel_kind_t kernel, geometry_t geometry, forkunion_allocator_t allocator) noexcept
+        : shards_(allocator), kernel_(kernel), geometry_(geometry) {}
     vram_nvidia_indexes(vram_nvidia_indexes&& other) noexcept
-        : shards_(other.shards_.allocator()), kernel_(other.kernel_) {
+        : shards_(other.shards_.allocator()), kernel_(other.kernel_), geometry_(other.geometry_) {
         swap(other);
     }
     vram_nvidia_indexes& operator=(vram_nvidia_indexes&& other) noexcept { return swap(other), *this; }
@@ -193,6 +150,7 @@ struct vram_nvidia_indexes {
     void swap(vram_nvidia_indexes& other) noexcept {
         shards_.swap(other.shards_);
         std::swap(kernel_, other.kernel_);
+        std::swap(geometry_, other.geometry_);
     }
 
     /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
@@ -218,28 +176,21 @@ struct vram_nvidia_indexes {
     }
 
     /**
-     *  Appends one shard the caller already built, consuming it, with its host key column, a device
-     *  twin and the staging between them on its device, where the staging's events are born.
+     *  Appends one shard the caller already built, consuming it, with its keys inside it.
      *  @ref reserve closes the shard set.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p shard is null, walks by another kernel, has a frozen geometry
-     *    differing from the shards already here, or is already reserved; or the set is reserved,
-     *    retired shards, or has a shard generation in flight.
+     *  - @c config_mismatch_k The @p shard is null, walks by another kernel or keeps another
+     *    geometry, or is already reserved; or the set is reserved, retired shards, or has a shard
+     *    generation in flight.
      */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard || shard->kernel() != kernel_ ||
-            (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity())))
+        if (!shard || shard->kernel() != kernel_ || !(shard->geometry() == geometry_))
             return status_t::config_mismatch_k;
         int const device = shard->device_specs().ordinal;
         cuda_api_t const& api = shard->api();
         if (cuda_set_device(api, device) != cuda_success_k) return status_t::device_error_k;
-        if (status_t const placed = shards_.emplace(
-                std::move(shard),
-                device_shard_keys_t {keys_column_t {shards_.allocator()},
-                                     cuda_virtual_memory_allocator<key_t> {api, device}, key_staging_t {api}});
-            failed(placed))
-            return placed;
+        if (status_t const placed = shards_.emplace(std::move(shard)); failed(placed)) return placed;
         // Every shard is still unreserved, so each maps its slabs for every device placed so far.
         std::bitset<gpu_devices_capacity_k> const devices = devices_();
         for (shard_t& one : shards_) one.index->share_with_(devices);
@@ -282,11 +233,12 @@ struct vram_nvidia_indexes {
     /** The read-only shard at @p shard. */
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
 
-    /** The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
-    std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0].index->dimensions(); }
+    /** The geometry every shard keeps, fixed at construction - @ref emplace refused any other. */
+    geometry_t geometry() const noexcept { return geometry_; }
+    std::size_t dimensions() const noexcept { return geometry_.dimensions; }
 
-    /** Connections per node, frozen with the geometry. */
-    std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
+    /** Connections per node, fixed with the geometry. */
+    std::size_t connectivity() const noexcept { return geometry_.connectivity; }
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
      *  counts whole or not at all. */
@@ -303,32 +255,24 @@ struct vram_nvidia_indexes {
         return status_t::success_k;
     }
 
-    /** Bytes the index occupies - every shard's storage, its host and device key columns, and the
-     *  shared locator map; traversal scratch is the executor's. */
+    /** Bytes the index occupies - every shard's storage and its host and device keys; traversal
+     *  scratch is the executor's. */
     std::size_t memory_usage() const noexcept { return sizeof(vram_nvidia_indexes) + shards_.memory_usage(); }
 
     /**
-     *  Grows every shard ahead of @p config.capacity rows, split evenly over them, and both key
-     *  columns of each with it - a hint, since all of them grow on demand; the first call freezes
-     *  the geometry.
+     *  Grows every shard ahead of @p config.capacity rows, split evenly over them, its keys with
+     *  it - a hint, since all of them grow on demand.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed.
      *  - @c unknown_kind_k A shard's kits cannot score its metric.
-     *  - @c config_mismatch_k A shard's neighbors live on another device, its dimensions are zero,
-     *    its connectivity is not a power of two, its geometry differs from the frozen one, or no
-     *    walk fits it.
-     *  - @c overflow_k A shard's share passes its ID space, its reserved range or its host key
-     *    column.
+     *  - @c config_mismatch_k A shard's neighbors live on another device, the dimensions are zero,
+     *    the connectivity is not a power of two, @p config names another geometry, or no walk fits
+     *    it.
+     *  - @c contended_k A shard has a batch or load in flight.
+     *  - @c overflow_k A shard's share passes its ID space or its reserved range.
      */
-    expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        auto const [reserved, status] = shards_.reserve(config);
-        if (failed(status)) return {reserved, status};
-        for (std::size_t shard = 0; shard != shards_.size(); ++shard)
-            if (status_t const covered = cover_device_keys_(shard, shards_[shard].index->capacity()); failed(covered))
-                return {reserved, covered};
-        return {reserved, status_t::success_k};
-    }
+    expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return shards_.reserve(config); }
 
 #pragma endregion Measures and Reservation
 
@@ -338,16 +282,16 @@ struct vram_nvidia_indexes {
      *  @brief One batch in flight across the device shards.
      *
      *  The executor and every shard's claim over the rows it takes are held for the plan's whole
-     *  life, one context per shard opened for the whole batch, every shard's storage and key
-     *  columns grown to the rows it takes, and the locator seats claimed, so a step fails only on
-     *  its devices.
+     *  life, one context per shard opened for the whole batch, and every shard's storage and keys
+     *  grown to the rows it takes, so a step fails only on its devices.
      *
      *  Row @c t of the batch lands on shard @c (rotation+t) mod S. Steps run one after another on
      *  one host thread, each writing its rows' keys and launching the rows as deferred inserts;
-     *  @ref finish settles them and turns every shard's watermark inside one commit, so a reader
-     *  spanning the shards sees the batch whole or not at all. A failed launch or drain publishes
-     *  nothing, and neither does a plan dying unfinished: every shard holding launched rows keeps
-     *  the failure, so its rows stay invisible and later mutations are refused.
+     *  @ref finish settles them, files every shard's keys into its map, and turns every shard's
+     *  watermark inside one commit, so a reader spanning the shards sees the batch whole or not at
+     *  all. A failed launch or drain publishes nothing, and neither does a plan dying unfinished:
+     *  every shard holding launched rows keeps the failure, so its rows stay invisible and later
+     *  mutations are refused.
      */
     struct [[nodiscard]] insert_plan_t {
 
@@ -356,8 +300,8 @@ struct vram_nvidia_indexes {
         /** An empty plan over @p allocator; only @ref plan_insert ever fills it. */
         explicit insert_plan_t(forkunion_allocator_t allocator) noexcept : traversals_(allocator), shares_(allocator) {}
         insert_plan_t(insert_plan_t&& other) noexcept
-            : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), seats_(other.seats_),
-              config_(other.config_), batch_split_(other.batch_split_), result_(other.result_), status_(other.status_),
+            : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), config_(other.config_),
+              batch_split_(other.batch_split_), result_(other.result_), status_(other.status_),
               streams_(std::move(other.streams_)), owner_(std::exchange(other.owner_, nullptr)) {}
         insert_plan_t& operator=(insert_plan_t&&) = delete;
         insert_plan_t(insert_plan_t const&) = delete;
@@ -452,6 +396,13 @@ struct vram_nvidia_indexes {
                 return {result, abandon_(status)};
             }
 
+            // Each shard's claim makes its holder the one writer of its map, and the keys file
+            // ahead of the commit, so the bracket stays as short as the watermark stores.
+            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
+                if (share_t const& share = shares_[shard]; share.launched)
+                    owner.shards_[batch_split_.open_shard_generation.first + shard].index->publish_keys_(
+                        {share.first_id, static_cast<node_id_t>(share.first_id + share.launched)});
+
             // Every shard's claim admits this batch alone, so no turn waits inside the commit.
             owner.shards_.begin_commit();
             for (std::size_t shard = 0; shard != shares_.size(); ++shard)
@@ -462,14 +413,6 @@ struct vram_nvidia_indexes {
                         failed(published) && succeeded(status))
                         status = published;
             owner.shards_.end_commit();
-
-            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
-                for (std::size_t row = 0; row != shares_[shard].launched; ++row) {
-                    std::size_t const placed = batch_split_.open_shard_generation.first + shard;
-                    node_id_t const node = static_cast<node_id_t>(shares_[shard].first_id + row);
-                    owner.shards_.locators().insert(seats_, owner.shards_[placed].keys.host[node],
-                                                    key_locator_t {static_cast<u32_t>(placed), node});
-                }
             owner_ = nullptr;
             result.new_size = owner.size();
             return {result, status};
@@ -490,8 +433,8 @@ struct vram_nvidia_indexes {
             std::size_t launched = 0;
         };
 
-        /** Writes the keys of the step's rows the plan's shard @p shard takes, from @p first on in
-         *  strides of the shard generation's width, then launches those rows there. */
+        /** Launches the step's rows the plan's shard @p shard takes, from @p first on in strides of
+         *  the shard generation's width, under their keys. */
         status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const width = batch_split_.open_shard_generation.width, count = rows.rows;
             std::size_t const taking = shards_t::entries_from(count, first, width);
@@ -504,15 +447,8 @@ struct vram_nvidia_indexes {
             traversal_context_t& traversal = traversals_[placed];
             if (status_t const entered = fanout_t::enter(owner_->shards_, placed); failed(entered)) return entered;
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
-            for (std::size_t taken = 0; taken != taking; ++taken)
-                one.keys.host[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * width];
-            // On the launch's own stream, so the device keys land before the rows they name
-            // publish.
-            if (status_t const uploaded = owner_->upload_keys_(placed, {first_node, first_node + taking},
-                                                               traversal.stream());
-                failed(uploaded))
-                return uploaded;
             expected<insert_result_t> const inserted = one.index->submit_insert_(
+                keys[nk::range(first, count, width)],
                 {rows.row(first), taking, rows.columns, rows.stride * width, rows.dtype}, first_node, {}, traversal,
                 config_);
             if (!inserted) return inserted.status;
@@ -566,9 +502,6 @@ struct vram_nvidia_indexes {
         /** One part per shard from the open shard generation's first, in placement order. */
         growing_buffer<share_t, forkunion_allocator_t> shares_;
 
-        /** The locator seats every row's key takes in @c finish. */
-        typename shards_t::locators_map_t::seats_t seats_ {};
-
         /** The per-shard insertion configuration, applied uniformly. */
         insert_config_t config_ {};
 
@@ -594,8 +527,8 @@ struct vram_nvidia_indexes {
 
     /**
      *  @brief Opens a batch of @p rows: takes the executor, opens one context per shard, claims
-     *      every shard's rows from its watermark, grows every shard's storage and key columns to
-     *      them, and claims the locator seats.
+     *      every shard's rows from its watermark, and grows every shard's storage and keys to
+     *      them.
      *
      *  A batch crossing the bound tops the open shard generation up and opens as many fresh shard
      *  generations as its other rows fill, each shard built with its keys on the device its
@@ -614,8 +547,8 @@ struct vram_nvidia_indexes {
      *    refuses to grow, as its @c reserve says, or @ref status keeps it.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seats pass the locator chunks, a shard's rows pass its ceiling, its
-     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c overflow_k A shard's rows pass its ceiling or its reserved range, or @ref status keeps
+     *    it.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
      *    status says.
      */
@@ -644,13 +577,6 @@ struct vram_nvidia_indexes {
         plan.batch_split_ = batch_split;
         shard_generation_t const open = batch_split.open_shard_generation;
 
-        if (status_t const readied = fanout_t::reserve_traversals(
-                shards_, plan.traversals_, executor, min_of(divide_round_up(rows, open.width), window_rows_k), config);
-            failed(readied))
-            return {{}, readied};
-        auto [seats, seat_status] = shards_.locators().claim(rows);
-        if (failed(seat_status)) return {{}, seat_status};
-        plan.seats_ = seats;
         std::size_t const shards = batch_split.shards_spanned();
         if (failed(plan.shares_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -676,14 +602,15 @@ struct vram_nvidia_indexes {
             std::size_t const claimed_entries = plan.shares_[shard].first_id + plan.shares_[shard].rows;
             if (!plan.shares_[shard].rows) continue;
             if (status_t const entered = fanout_t::enter(shards_, placed); failed(entered)) return {{}, entered};
-            reserve_capacity_t const grown {claimed_entries, static_cast<connectivity_t>(connectivity()), dimensions()};
-            if (status_t const reserved = shards_[placed].index->reserve(grown).status; failed(reserved))
-                return {{}, reserved};
-            if (status_t const covered = shards_[placed].keys.host.cover(claimed_entries); failed(covered))
-                return {{}, covered};
-            if (status_t const covered = cover_device_keys_(placed, claimed_entries); failed(covered))
-                return {{}, covered};
+            // The claim makes the plan the shard's one grower, binding it on its first growth.
+            if (status_t const grown = shards_[placed].index->map_nodes_(claimed_entries); failed(grown))
+                return {{}, grown};
         }
+        // Every shard is bound now, so the contexts size for what its walks hold.
+        if (status_t const readied = fanout_t::reserve_traversals(
+                shards_, plan.traversals_, executor, min_of(divide_round_up(rows, open.width), window_rows_k), config);
+            failed(readied))
+            return {{}, readied};
         return {std::move(plan), status_t::success_k};
     }
 
@@ -712,8 +639,8 @@ struct vram_nvidia_indexes {
      *    @ref status keeps it.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seats pass the locator chunks, a shard's rows pass its ceiling, its
-     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c overflow_k A shard's rows pass its ceiling or its reserved range, or @ref status keeps
+     *    it.
      *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or @ref status
      *    keeps it.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status keeps
@@ -743,8 +670,8 @@ struct vram_nvidia_indexes {
      *    @ref status keeps it.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seat passes the locator chunks, a shard's rows pass its ceiling, its
-     *    reserved range or its key columns, or @ref status keeps it.
+     *  - @c overflow_k A shard's rows pass its ceiling or its reserved range, or @ref status keeps
+     *    it.
      *  - @c unsupported_k or @c cancelled_k The index keeps it, as @ref status says.
      */
     expected<insert_result_t> insert(key_t const& key, vector_view_t new_vector, executor_t& executor,
@@ -813,8 +740,8 @@ struct vram_nvidia_indexes {
          *    donor's nodes never land, or @ref status keeps it.
          *  - @c contended_k Another call holds the @p executor or a donor's gate, or a shard has a
          *    batch or load in flight.
-         *  - @c overflow_k The landed rows pass a shard's ceiling, reserved range, key columns or
-         *    the locator chunks, or @ref status keeps it.
+         *  - @c overflow_k The landed rows pass a shard's ceiling or reserved range, or @ref status
+         *    keeps it.
          *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
          */
         template <typename progress_type_ = dummy_progress_t>
@@ -1048,12 +975,12 @@ struct vram_nvidia_indexes {
      *      device on ties, with its edges rebased and its keys beside it, as a part of its own;
      *      when none has room, a shard generation opens on the same devices.
      *
-     *  Each donor lands through one plan that does every fallible thing first: the donor's gate, a
-     *  load claiming all the rows each receiving shard takes, the key slots and the locator seats.
-     *  Every donor's committed storage maps for this index's devices at planning, so a donor shard
-     *  then crosses device to device, one column at a time on the receiving shard's stream, its
-     *  keys beside them; every part lands before any shard publishes, and only then do the keys
-     *  resolve. The donor then forgets its rows in place inside its window, keeping its shards and
+     *  Each donor lands through one plan that does every fallible thing first: the donor's gate,
+     *  and a load claiming all the rows each receiving shard takes. Every donor's committed storage
+     *  maps for this index's devices at planning, so a donor shard then crosses device to device,
+     *  one column at a time on the receiving shard's stream, its keys beside them; every part lands
+     *  before any shard publishes, and each shard's load files its keys just before its watermark
+     *  turns. The donor then forgets its rows in place inside its window, keeping its shards and
      *  their storage, its slot nulls, it stays closed and sealed, consumed, and its shards land
      *  among the receiving shards' parts in the plan, so at most one donor's nodes are ever held
      *  twice.
@@ -1065,8 +992,7 @@ struct vram_nvidia_indexes {
      *  on any of them refuses the plan with @c contended_k, and an insertion into any of them
      *  arriving meanwhile is refused. Searches of this index may not overlap the plan's
      *  re-selection, whose merge rewrites neighbors in place; searches of a donor run throughout,
-     *  retrying once around the window that empties it. An index never reserved takes the first
-     *  donor's geometry.
+     *  retrying once around the window that empties it.
      *
      *  @param[in,out] donors The indexes giving their rows up, each nulled once consumed; the slots
      *      must outlive the landings.
@@ -1095,17 +1021,17 @@ struct vram_nvidia_indexes {
         std::size_t const shards = shards_.size();
         if (!shards) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        vram_nvidia_indexes const* shaped = capacity() ? this : nullptr;
         for (vram_nvidia_indexes* donor : donors) {
-            if (!donor || donor == this || donor->kernel() != kernel()) return {{}, status_t::config_mismatch_k};
+            if (!donor || donor == this || donor->kernel() != kernel() || !(donor->geometry() == geometry()))
+                return {{}, status_t::config_mismatch_k};
             if (status_t const kept = donor->status(); failed(kept)) return {{}, kept};
             if (status_t const paired = fanout_t::pairs_with(donor->shards_, executor); failed(paired))
                 return {{}, paired};
-            if (!donor->capacity()) continue;
-            if (!shaped) shaped = donor;
-            else if (donor->dimensions() != shaped->dimensions() || donor->connectivity() != shaped->connectivity())
-                return {{}, status_t::config_mismatch_k};
         }
+        // The walks size for the first index whose shards grew, this one or a donor.
+        vram_nvidia_indexes const* shaped = this;
+        for (vram_nvidia_indexes const* donor : donors)
+            if (!shaped->capacity()) shaped = donor;
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
         if (status_t const closed = close_gated_(); failed(closed)) return {{}, closed};
         refine_plan_t plan {shards_.allocator()};
@@ -1132,14 +1058,7 @@ struct vram_nvidia_indexes {
                 return donors[donor]->shards_[from];
             };
             auto device_of = [](shard_t const& shard) noexcept { return shard.index->device_specs().ordinal; };
-            // Only a donor with rows needs a shard generation, so the geometry to take exists.
             auto open = [&]() noexcept {
-                vram_nvidia_indexes const& like = shaped ? *shaped : *this;
-                if (!capacity())
-                    if (status_t const reserved =
-                            reserve({0, static_cast<connectivity_t>(like.connectivity()), like.dimensions()}).status;
-                        failed(reserved))
-                        return reserved;
                 // This index is sealed, so the shard generation opens closed like the rest, past
                 // the seal.
                 return shards_.open_shard_generation_past_seal_(
@@ -1158,8 +1077,7 @@ struct vram_nvidia_indexes {
         // The landings may have opened a shard generation, whose shards take part like the others.
         std::size_t const landed_shards = donors.empty() ? shards : plan.part_offsets_.size() - 1;
         if (failed(plan.shard_plans_.reserve_exactly(landed_shards))) return {{}, status_t::bad_alloc_k};
-        if (status_t const opened = open_walks_(plan, executor, shaped ? *shaped : *this, landed_shards,
-                                                donors.empty() ? 1u : 2u);
+        if (status_t const opened = open_walks_(plan, executor, *shaped, landed_shards, donors.empty() ? 1u : 2u);
             failed(opened))
             return {{}, opened};
         if (donors.empty())
@@ -1185,8 +1103,7 @@ struct vram_nvidia_indexes {
      *  - @c unsupported_k A donor shard past @ref shard_capacity, or this index or a donor keeps
      *    it.
      *  - @c overflow_k A fresh shard generation still has no room for a donor shard, the landed
-     *    rows pass a shard's ceiling, reserved range or key columns or the locator chunks, or
-     *    this index or a donor keeps it.
+     *    rows pass a shard's ceiling or reserved range, or this index or a donor keeps it.
      *  - @c unsupported_layout_k This index or a donor keeps it, as its @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
@@ -1215,8 +1132,7 @@ struct vram_nvidia_indexes {
      *  - @c unsupported_k A shard of @p donor past @ref shard_capacity, or this index or
      *    @p donor keeps it.
      *  - @c overflow_k A fresh shard generation still has no room for a shard of @p donor, the
-     *    landed rows pass a shard's ceiling, reserved range or key columns or the locator
-     *    chunks, or this index or @p donor keeps it.
+     *    landed rows pass a shard's ceiling or reserved range, or this index or @p donor keeps it.
      *  - @c unsupported_layout_k This index or @p donor keeps it, as its @ref status says.
      */
     expected<refine_result_t> absorb(vram_nvidia_indexes& donor, executor_t& executor,
@@ -1576,11 +1492,12 @@ struct vram_nvidia_indexes {
                     nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
                                                                                        nk::slice);
                     std::span<u32_t> const scored_counts = shard_counts(shard);
+                    typename index_t::keyed_t const& shard_keys = shards_[shard].index->keys();
                     for (std::size_t row = 0; row != taking; ++row) {
                         std::size_t const kept = min_of(counts[first + row], wanted);
                         std::size_t const scored = scored_counts[row];
                         for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
-                            keys(first + row, kept + pair) = shards_[shard].keys.host[shard_ids(row, pair)];
+                            keys(first + row, kept + pair) = shard_keys[shard_ids(row, pair)];
                             products(first + row, kept + pair) = shard_products(row, pair);
                         }
                         counts[first + row] += scored;
@@ -1756,7 +1673,7 @@ struct vram_nvidia_indexes {
                 traversal_context_t* first_traversal = nullptr;
                 auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal,
                                         std::size_t visible) noexcept {
-                    shard_lookup_t const lookup {shards_[shard].keys.device.base(), value_lookup};
+                    shard_lookup_t const lookup {shards_[shard].index->device_keys_(), value_lookup};
                     expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
                         window_queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards,
                         shard ? 0 : shards_[0].index->exported_bytes_(window_outputs), visible);
@@ -1809,12 +1726,12 @@ struct vram_nvidia_indexes {
 #pragma region Checkpoints
 
     /** What a device checkpoint does beyond the shared plans: it holds the executor's streams for
-     *  the plan's whole life, every shard opens its own plan on its device's stream, a load's keys
-     *  follow to the device twins, and a save closes the claim words, since device storage cannot
+     *  the plan's whole life, every shard opens its own plan on its device's stream, a shard's own
+     *  load plan uploads its keys, and a save closes the claim words, since device storage cannot
      *  be settlement-probed. */
     struct checkpoint_residency_t {
 
-        /** The index whose device keys a load fills, and whose shard generations it opens. */
+        /** The index whose shards a load fills, and whose shard generations it opens. */
         vram_nvidia_indexes* owner = nullptr;
 
         /** The streams every shard plan queues on. */
@@ -1862,19 +1779,6 @@ struct vram_nvidia_indexes {
             return {std::move(plan), pinned};
         }
 
-        /**
-         *  Covers @p rows in shard @p shard 's device key column and uploads them from its host
-         *  column on the stream of @p plan.
-         *
-         *  @par Statuses:
-         *  - @c overflow_k The rows pass the device key column's range.
-         */
-        status_t land_keys(shards_t& shards, std::size_t shard, iota_view<std::size_t> rows,
-                           typename index_t::load_plan_t const& plan) noexcept {
-            if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return entered;
-            if (status_t const covered = owner->cover_device_keys_(shard, rows.bound); failed(covered)) return covered;
-            return owner->upload_keys_(shard, rows, plan.stream);
-        }
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
 
         /**
@@ -1996,7 +1900,7 @@ struct vram_nvidia_indexes {
      *  - @c malformed_k The checkpoint lists no part, a part or its header does not parse, or its
      *    connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *  - @c overflow_k A part passes a shard's bound or a key column, or
      *    @ref status keeps it.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
      *    status says.
@@ -2022,7 +1926,7 @@ struct vram_nvidia_indexes {
      *  - @c malformed_k The manifest lists no part, a part or its header does not parse, or its
      *    connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *  - @c overflow_k A part passes a shard's bound or a key column, or
      *    @ref status keeps it.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
      *    status says.
@@ -2115,7 +2019,7 @@ struct vram_nvidia_indexes {
      *  - @c malformed_k The checkpoint lists no part, a part, its header or its key column does
      *    not parse, or its connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *  - @c overflow_k A part passes a shard's bound or a key column, or
      *    @ref status keeps it.
      *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
@@ -2152,7 +2056,7 @@ struct vram_nvidia_indexes {
      *  - @c malformed_k The manifest lists no part, a part, its header or its key column does not
      *    parse, or its connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map, or
+     *  - @c overflow_k A part passes a shard's bound or a key column, or
      *    @ref status keeps it.
      *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
@@ -2196,13 +2100,12 @@ struct vram_nvidia_indexes {
 
 #pragma region Lookups
 
-    /** Entries stored under @p key; a concurrent insertion can only make it under-report. Exact
-     *  without an epoch: a compaction swaps each locator whole, and a clear empties the map inside
-     *  its window. */
-    std::size_t count(key_t const& key) const noexcept { return shards_.locators().count(key); }
+    /** Entries stored under @p key across every shard, exact: the epoch covers the windows and the
+     *  commit sequence covers batches spanning shards, so a batch counts whole or not at all. */
+    std::size_t count(key_t const& key) const noexcept { return shards_.count(key); }
 
-    /** Whether at least one entry is stored under @p key. */
-    bool contains(key_t const& key) const noexcept { return shards_.locators().contains(key); }
+    /** Whether at least one entry is stored under @p key, under the same reads as @ref count. */
+    bool contains(key_t const& key) const noexcept { return shards_.contains(key); }
 
     /**
      *  @brief Copies up to @p wanted rows stored under @p key into @p vectors and reports the
@@ -2229,7 +2132,7 @@ struct vram_nvidia_indexes {
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
      *
-     *  The executor is unused, since the locator map lives on the host; it rides in the
+     *  The executor is unused, since every shard's key map lives on the host; it rides in the
      *  signature so a caller drives every residency alike.
      *
      *  @par Statuses:
@@ -2292,8 +2195,10 @@ struct vram_nvidia_indexes {
         return shards_.read_retrying_once([&]() noexcept {
             for (std::size_t position = 0; position != keys.size(); ++position) {
                 std::size_t const first = position * wanted;
-                entries[position] = queue_rows_(keys[position], vectors(nk::range(first, first + wanted), nk::slice),
-                                                wanted, executor);
+                entries[position] = shards_.read_committed([&]() noexcept {
+                    return queue_rows_(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted,
+                                       executor);
+                });
             }
             return executor.wait();
         });
@@ -2314,12 +2219,13 @@ struct vram_nvidia_indexes {
     /** One unreserved shard placed on @p device; null when the allocation fails. */
     std::unique_ptr<index_t> build_(cuda_api_t const& api, int device) const noexcept {
         typename index_t::vectors_allocator_t const allocator {api, device};
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel(), allocator, allocator));
+        return std::unique_ptr<index_t>(new (std::nothrow)
+                                            index_t(kernel(), geometry_, allocator, allocator, shards_.allocator()));
     }
 
-    /** Forgets every published shard's rows in place, each keeping its storage, then every key's
-     *  locators, keeping the shard generations past the first as idle shards: what a clear and an
-     *  emptied donor become, inside their own window with every shard closed. */
+    /** Forgets every published shard's rows and keys in place, each keeping its storage, keeping
+     *  the shard generations past the first as idle shards: what a clear and an emptied donor
+     *  become, inside their own window with every shard closed. */
     void clear_() noexcept {
         for (shard_t& one : shards_) one.index->forget_();
         shards_.forget_entries();
@@ -2333,69 +2239,18 @@ struct vram_nvidia_indexes {
         return held ? shards_.close() : status_t::contended_k;
     }
 
-    /** One shard of a new shard generation and its keys, on the device @p like sits on, current
-     *  while the staging's events are born, mapped for every device placed and reserved in the
-     *  frozen geometry under the bound; a null index when the device, the allocation or the
-     *  reservation fails. */
+    /** One shard of a new shard generation, on the device @p like sits on, current while its
+     *  events are born, mapped for every device placed and bound under the bound; a null index
+     *  when the device, the allocation or the binding fails. */
     shard_t build_shard_(shard_t const& like) const noexcept {
         int const device = like.index->device_specs().ordinal;
         cuda_api_t const& api = like.index->api();
         std::unique_ptr<index_t> index = cuda_set_device(api, device) == cuda_success_k ? build_(api, device) : nullptr;
         if (index) index->share_with_(devices_());
-        reserve_capacity_t const geometry {0, static_cast<connectivity_t>(connectivity()), dimensions(),
-                                           shards_.shard_capacity()};
-        if (index && failed(index->reserve(geometry).status)) index.reset();
-        return shard_t {std::move(index),
-                        device_shard_keys_t {keys_column_t {shards_.allocator()},
-                                             cuda_virtual_memory_allocator<key_t> {api, device}, key_staging_t {api}}};
-    }
-
-    /** Covers rows below @p rows in shard @p shard 's device key column, reserving it at its first
-     *  cover, and widens the staging between the two columns to a power of two of rows, up to a
-     *  window per half. */
-    status_t cover_device_keys_(std::size_t shard, std::size_t rows) noexcept {
-        cuda_virtual_memory_allocator<key_t>& device_keys = shards_[shard].keys.device;
-        if (!device_keys.reserved_bytes())
-            if (status_t const reserved = device_keys.reserve_range(index_t::max_node_count_k * sizeof(key_t));
-                failed(reserved))
-                return reserved;
-        key_staging_t& staging = shards_[shard].keys.staging;
-        std::size_t const half_keys = min_of(window_rows_k, std::bit_ceil(rows));
-        if (rows && staging.keys.size() < 2 * half_keys) {
-            // Pinning needs a current context, and the copies out of the old halves must land.
-            if (failed(fanout_t::enter(shards_, shard)) || failed(staging.crossed[0].wait()) ||
-                failed(staging.crossed[1].wait()))
-                return status_t::device_error_k;
-            staging.keys.reset();
-            if (failed(staging.keys.resize_uninitialized(2 * half_keys))) return status_t::bad_alloc_k;
-        }
-        return device_keys.commit(rows * sizeof(key_t));
-    }
-
-    /** Copies @p rows of shard @p shard 's host key column into its device twin on @p stream,
-     *  through the shard's staging half by half, since a pageable source would copy synchronously;
-     *  the host refills a half only once the copy out of it landed. */
-    status_t upload_keys_(std::size_t shard, iota_view<std::size_t> rows, cuda_stream_handle_t stream) noexcept {
-        key_staging_t& staging = shards_[shard].keys.staging;
-        std::size_t const half_keys = staging.keys.size() / 2;
-        if (rows.empty()) return status_t::success_k;
-        if (!half_keys) return status_t::uninitialized_k;
-        key_t* const device_keys = shards_[shard].keys.device.base();
-        for (std::size_t first = rows.first; first < rows.bound; first += half_keys) {
-            std::size_t const bound = min_of(first + half_keys, rows.bound);
-            std::size_t const half = staging.chunks++ % 2;
-            key_t* staged = staging.keys.data() + half * half_keys;
-            if (staging.chunks > 2 && failed(staging.crossed[half].wait())) return status_t::device_error_k;
-            shards_[shard].keys.host.for_each_span({first, bound}, [&](std::span<key_t> run) noexcept {
-                for (key_t const& key : run) *staged++ = key;
-            });
-            if (cuda_copy_async(shards_[shard].keys.device.api(), device_keys + first,
-                                staging.keys.data() + half * half_keys, (bound - first) * sizeof(key_t),
-                                stream) != cuda_success_k ||
-                failed(staging.crossed[half].record(stream)))
-                return status_t::device_error_k;
-        }
-        return status_t::success_k;
+        reserve_capacity_t bounded {};
+        bounded.ceiling = shards_.shard_capacity();
+        if (index && failed(index->reserve(bounded).status)) index.reset();
+        return shard_t {std::move(index)};
     }
 
     /** Opens one run on its stream and one walk context over each of the first @p shards shards,
@@ -2431,18 +2286,11 @@ struct vram_nvidia_indexes {
         // The donor empties once its rows land, so its gate comes before anything a refusal undoes.
         unique_lock_t const emptying {donor.gate_, std::try_to_lock};
         if (!emptying) return status_t::contended_k;
-        if (!capacity())
-            if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
-                                                   donor.dimensions()})
-                                              .status;
-                failed(reserved))
-                return reserved;
 
         // Every shard claims all its rows first, so a failure before publication releases them all.
         std::size_t const donors = landings.size();
         growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {shards_.allocator()};
         if (failed(plans.reserve_exactly(shards))) return status_t::bad_alloc_k;
-        std::size_t landing = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
             for (std::size_t from = 0; from != donors; ++from)
@@ -2452,19 +2300,11 @@ struct vram_nvidia_indexes {
                 rows, executor.stream(fanout_t::stream_of(shards_, executor, into)));
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
-            if (status_t const covered = shards_[into].keys.host.cover(plans[into].base + rows); failed(covered))
-                return covered;
-            if (status_t const covered = cover_device_keys_(into, plans[into].base + rows); failed(covered))
-                return covered;
-            landing += rows;
         }
-        auto [seats, seat_status] = shards_.locators().claim(landing);
-        if (failed(seat_status)) return seat_status;
 
         // A refused copy still waits for those queued before it, whose rows go to the next claim.
         status_t queued = status_t::success_k;
         for (std::size_t into = 0; into != shards && succeeded(queued); ++into) {
-            shard_t& one = shards_[into];
             typename index_t::load_plan_t& plan = plans[into];
             node_id_t base = plan.base;
             for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
@@ -2475,19 +2315,16 @@ struct vram_nvidia_indexes {
                 typename index_t::load_plan_t::step_t step;
                 step.index_nodes = {base, base + part_rows};
                 step.source_nodes = {0, part_rows};
-                for (node_id_t row : step.source_nodes) one.keys.host[base + row] = part.keys.host[row];
-                queued = land_part_(into, plan, step, donor, from);
+                queued = plan.load(step, *part.index, step.source_nodes);
                 base += part_rows;
             }
         }
         if (status_t const drained = executor.wait(); failed(queued) || failed(drained))
             return failed(queued) ? queued : drained;
-        for (typename index_t::load_plan_t& plan : plans)
+        for (typename index_t::load_plan_t& plan : plans) {
+            plan.publish_keys();
             if (status_t const published = plan.finish(); failed(published)) return published;
-        for (std::size_t into = 0; into != shards; ++into)
-            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                shards_.locators().insert(seats, shards_[into].keys.host[row],
-                                          key_locator_t {static_cast<u32_t>(into), row});
+        }
 
         // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
         shards_.record_parts(donor.shards_, landings, plans, refining.part_bases_.data(),
@@ -2498,39 +2335,24 @@ struct vram_nvidia_indexes {
         return status_t::success_k;
     }
 
-    /** Queues donor shard @p from 's columns by @p step of shard @p into 's load @p plan, then its
-     *  device keys, all on the plan's stream: another device's keys may not map here, so they cross
-     *  from the host column. */
-    status_t land_part_(std::size_t into, typename index_t::load_plan_t& plan,
-                        typename index_t::load_plan_t::step_t const& step, vram_nvidia_indexes const& donor,
-                        std::size_t from) noexcept {
-        index_t const& part = *donor.shards_[from].index;
-        if (status_t const queued = plan.load(step, part, step.source_nodes); failed(queued)) return queued;
-        node_id_t const base = step.index_nodes.first, rows = step.source_nodes.bound;
-        if (part.device_specs().ordinal != shards_[into].index->device_specs().ordinal)
-            return upload_keys_(into, {base, base + rows}, plan.stream);
-        return cuda_copy_async(shards_[into].keys.device.api(), shards_[into].keys.device.base() + base,
-                               donor.shards_[from].keys.device.base(), rows * sizeof(key_t),
-                               plan.stream) == cuda_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
-    }
-
     /** Queues the copies of up to @p wanted rows stored under @p key into @p vectors, each on the
      *  stream of @p executor on its shard's device, skipping a shard it drives no stream for, and
-     *  answers the true total; the caller drains once for every row it queued. */
+     *  answers the true total, every shard's own map probed under the caller's epoch and commit
+     *  sequence; the caller drains once for every row it queued. */
     std::size_t queue_rows_(key_t const& key, vectors_span_t vectors, std::size_t wanted,
                             executor_t& executor) const noexcept {
         std::size_t total = 0;
-        shards_.locators().find_each(key, [&](key_locator_t locator) noexcept {
-            index_t const& shard = *shards_[locator.shard].index;
-            std::size_t const stream = fanout_t::stream_of(shards_, executor, locator.shard);
-            if (total < wanted && total < vectors.extent(0) && stream != executor.size() &&
-                succeeded(fanout_t::enter(shards_, locator.shard))) [[maybe_unused]]
-                status_t const queued = shard.vector(locator.node, vectors.row(total).as_vector(),
-                                                     executor.stream(stream).handle);
-            ++total;
-        });
+        for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
+            index_t const& one = *shards_[shard].index;
+            std::size_t const stream = fanout_t::stream_of(shards_, executor, shard);
+            one.find_each(key, [&](node_id_t node) noexcept {
+                if (total < wanted && total < vectors.extent(0) && stream != executor.size() &&
+                    succeeded(fanout_t::enter(shards_, shard))) [[maybe_unused]]
+                    status_t const queued = one.vector(node, vectors.row(total).as_vector(),
+                                                       executor.stream(stream).handle);
+                ++total;
+            });
+        }
         return total;
     }
 
@@ -2679,7 +2501,7 @@ struct vram_nvidia_indexes {
             if (!found) return found.status;
             byte_t* const block = landing + walked_bytes;
             if (status_t const resolved = shards_[shard].index->launch_resolve_matches_(
-                    ids, walked_distances, width, reinterpret_cast<byte_t const*>(shards_[shard].keys.device.base()),
+                    ids, walked_distances, width, reinterpret_cast<byte_t const*>(shards_[shard].index->device_keys_()),
                     shards == 1 ? merged : ranking_of(block), static_cast<u32_t>(queries_count), traversal.stream());
                 failed(resolved) || blocks != 1)
                 return resolved;
@@ -2727,6 +2549,9 @@ struct vram_nvidia_indexes {
 
     /** The metric every shard this index builds or accepts scores by. */
     nk_kernel_kind_t kernel_;
+
+    /** The dimensions and connectivity every shard keeps, fixed at construction. */
+    geometry_t geometry_ {};
 
     /** Shared by every mutator for one call, alone by every destructive window; never swapped. */
     alignas(default_alignment_k) shared_mutex_t gate_;

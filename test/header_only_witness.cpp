@@ -169,14 +169,13 @@ int main() {
     if (visited.insert(std::array<dense::node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
 
     chunked_multimap<u64_t, u32_t> multimap {global_allocator};
-    auto [seats, seat_status] = multimap.claim(2);
-    if (failed(seat_status)) return 1;
-    multimap.insert(seats, 7, 42);
-    multimap.insert(seats, 7, 43);
-    if (multimap.count(7) != 2 || !multimap.contains(7)) return 1;
-    if (failed(multimap.reserve(4096)) || multimap.count(7) != 2) return 1; // Growing keeps entries.
+    if (failed(multimap.reserve(2))) return 1;
+    multimap.insert(7, 0);
+    multimap.insert(7, 1);
+    if (multimap.count(7, 2) != 2 || !multimap.contains(7, 2) || multimap.contains(7, 0)) return 1;
+    if (failed(multimap.reserve(4096)) || multimap.count(7, 2) != 2) return 1; // Growing keeps entries.
     multimap.clear();
-    if (multimap.contains(7)) return 1;
+    if (multimap.contains(7, 2)) return 1;
 
     fu::preferred_cache_hints_t const hints;
     hints(&random_generator, fu::prefetch_line_t {});

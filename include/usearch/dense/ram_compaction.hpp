@@ -30,13 +30,13 @@ namespace unum::usearch::dense {
  *  IDs and the rest land after it as parts, so no shard's rows exist twice; otherwise every row
  *  moves and the sources end empty.
  *
- *  The target and every other source close here, each under its own gate, so the packing never
- *  goes stale: the target stays closed while the plan lives and each source until it lands, and
+ *  The target and every other source close here, each under its own gate, so the packing never goes
+ *  stale: the target stays closed while the plan lives and each source until it lands, and
  *  insertions into any of them answer @c contended_k meanwhile. Searches and key lookups of every
- *  index run throughout, retrying once around the windows that move rows: in place, every moved
- *  row's one locator swaps to its landing inside the window that forgets its old shard. Emptied
- *  shards stay as idle slots on their placement for the target's next shard generation, and the
- *  source slots must outlive the plan.
+ *  index run throughout, retrying once around the windows that move rows: in place, every moved row
+ *  and its key land in their new shard, and their old shard forgets them, inside one window, so a
+ *  count sees each moved entry exactly once. Emptied shards stay as idle slots on their placement
+ *  for the target's next shard generation, and the source slots must outlive the plan.
  *
  *  @par Statuses:
  *  - @c config_mismatch_k A null or repeated source, another metric or geometry.
@@ -61,11 +61,9 @@ expected<ram_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_* 
  *    step meeting rows outside its plan.
  *  - @c contended_k A call or plan holds the target or a source, a source stopped emptying,
  *    another call holds @p executor, or its pool runs another dispatch.
- *  - @c unknown_kind_k An empty target reserving for the sources' geometry cannot finalize the
- *    kernel.
  *  - @c unsupported_k A source shard is past the capacity.
- *  - @c overflow_k No shard takes a landing, a landing passes a shard's rows, key column or the
- *    locator map, or a queue capacity wraps.
+ *  - @c overflow_k No shard takes a landing, a landing passes a shard's rows, or a queue capacity
+ *    wraps.
  */
 template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
 expected<compact_result_t> compact(std::span<indexes_type_* const> sources, indexes_type_& target,
@@ -120,8 +118,7 @@ struct [[nodiscard]] ram_compact_plan {
      *    step meets rows outside its plan.
      *  - @c contended_k Another call holds @p executor, its pool runs another dispatch, or a
      *    source stopped emptying under the landing.
-     *  - @c overflow_k A landing passes a shard's rows, its key column or the locator map, or a
-     *    queue capacity wraps when rounded.
+     *  - @c overflow_k A landing passes a shard's rows, or a queue capacity wraps when rounded.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t run(executor_t& executor, std::span<traversal_context_t> traversals,
@@ -171,16 +168,17 @@ struct [[nodiscard]] ram_compact_plan {
 
     explicit ram_compact_plan(forkunion_allocator_t allocator) noexcept : refining_(allocator) {}
 
-    /** Validates @p sources against @p target, closes the target and every other source, each
-     *  under its own gate, counts their rows and checks their geometry once no batch can land, and
-     *  packs every source shard into the target under the tighter of @p config.shard_capacity and
-     *  the target's own bound. */
+    /** Validates @p sources and their geometry against @p target, closes the target and every other
+     *  source, each under its own gate, counts their rows once no batch can land, and packs every
+     *  source shard into the target under the tighter of @p config.shard_capacity and the target's
+     *  own bound. */
     static expected<ram_compact_plan> open_(std::span<indexes_t* const> sources, indexes_t& target,
                                             executor_t const& executor, compact_config_t const& config) noexcept {
         if (sources.empty() || !target.shards_count() || !executor.size()) return {{}, status_t::uninitialized_k};
         for (std::size_t position = 0; position != sources.size(); ++position) {
             indexes_t const* source = sources[position];
-            if (!source || source->kernel() != target.kernel()) return {{}, status_t::config_mismatch_k};
+            if (!source || source->kernel() != target.kernel() || source->geometry() != target.geometry())
+                return {{}, status_t::config_mismatch_k};
             for (std::size_t earlier = 0; earlier != position; ++earlier)
                 if (sources[earlier] == source) return {{}, status_t::config_mismatch_k};
         }
@@ -206,14 +204,10 @@ struct [[nodiscard]] ram_compact_plan {
 
         // Closed, no batch lands, so the rows counted here are the rows that move; a refusal from
         // here reopens everything as the plan dies.
-        indexes_t const* shaped = target.capacity() ? &target : nullptr;
         std::size_t resident_shards = 0, moved_entries = 0;
         for (indexes_t const* source : sources) {
             if (source == &target) resident_shards = target.shards_count();
             moved_entries += source->size();
-            if (!source->capacity()) continue;
-            if (!shaped) shaped = source;
-            else if (!same_geometry(*source, *shaped)) return {{}, status_t::config_mismatch_k};
         }
         plan.resident_shards_ = resident_shards;
         if (status_t const packed = target.plan_landings_(sources, capacity, rank_first_fit, refining); failed(packed))

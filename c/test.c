@@ -241,6 +241,20 @@ void test_init(size_t const collection_size, size_t const dimensions) {
     expect_eq(description.metadata.dimensions, dimensions, "Dimensions must read back as configured");
     expect_eq(description.metadata.connectivity, 16, "Connectivity must read back as configured");
 
+    // A geometry no graph can take is refused at init, before any shard grows.
+    size_t const refused_geometries[][2] = {{0, 16}, {dimensions, 24}};
+    for (size_t geometry = 0; geometry != 2; ++geometry) {
+        usearch_dense_index_t malformed = NULL;
+        usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &malformed,
+                                                            .outcome = &outcome,
+                                                            .metric = usearch_dense_metric_angular_k,
+                                                            .quantization = usearch_scalar_bf16_k,
+                                                            .dimensions = refused_geometries[geometry][0],
+                                                            .connectivity = refused_geometries[geometry][1]});
+        expect_eq(outcome.status, usearch_status_config_mismatch_k, "A malformed geometry is refused at init");
+        expect(malformed == NULL, "A refused initialization returns no handle");
+    }
+
 #if USEARCH_DENSE_DTYPES < 11
     // The ladder's next rung is the first storage dtype this build leaves out, so it answers
     // unsupported, never an unknown kind.
@@ -261,6 +275,96 @@ void test_init(size_t const collection_size, size_t const dimensions) {
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Index Initialization - PASSED\n");
+}
+
+/** Describes, counts, gets and searches @p index before any insert grew it, each answering nothing
+ *  with success; the matches of a device arena land where plain C cannot read them. */
+void expect_empty_reads(usearch_dense_index_t const index, usearch_executor_t const executor, size_t const dimensions,
+                        bool const host_matches) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, 0, "An empty index describes no entries");
+
+    size_t entries = 1;
+    usearch_dense_count(&(usearch_dense_count_t) {.index = index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(0),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 0, "An empty index counts no entries");
+
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_rows_view_t vectors = {0};
+    size_t written = 1;
+    usearch_dense_get(&(usearch_dense_get_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .key = key_of(0),
+                                              .vectors = &vectors,
+                                              .written = &written,
+                                              .arena = arena,
+                                              .outputs_scalar = usearch_scalar_f32_k});
+    expect(!outcome.message, outcome.message);
+    expect(written == 0 && !vectors.data, "An empty index gets no rows");
+
+    float* const query = create_vectors(1, dimensions);
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(
+        &(usearch_dense_search_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = 1,
+                                   .queries = {query, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                   .matches = &matches,
+                                   .arena = arena,
+                                   .wanted = 4});
+    expect(!outcome.message, outcome.message);
+    expect(matches.counts != NULL, "An empty search still lands its counts");
+    if (host_matches) expect_eq(matches.counts[0], 0, "An empty index finds no matches");
+    free(query);
+    usearch_arena_free(arena);
+}
+
+/** An index fresh from init, in RAM and on the first GPU when one is listed, answers every read
+ *  with nothing and success. */
+void test_empty_reads(size_t const dimensions) {
+    printf("Test: Empty Reads... %zu dimensions\n", dimensions);
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    expect_empty_reads(index, executor, dimensions, true);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+
+    usearch_outcome_t outcome = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    int32_t const devices[1] = {0};
+    usearch_vram_options_t const vram = {.devices = devices, .devices_count = 1};
+    usearch_dense_index_t device_index = NULL;
+    if (devices_count)
+        usearch_dense_init_vram(&(usearch_dense_init_vram_t) {.index = &device_index,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_dense_metric_angular_k,
+                                                              .quantization = usearch_scalar_bf16_k,
+                                                              .dimensions = dimensions,
+                                                              .vram = vram});
+    expect(device_index || !devices_count || outcome.status == usearch_status_device_k, outcome.message);
+    if (device_index) {
+        usearch_executor_t device_executor = NULL;
+        usearch_executor_for_vram(
+            &(usearch_executor_for_vram_t) {.executor = &device_executor, .outcome = &outcome, .vram = vram});
+        expect(!outcome.message, outcome.message);
+        expect_empty_reads(device_index, device_executor, dimensions, false);
+        usearch_executor_free(device_executor);
+        usearch_dense_free(device_index);
+    }
+    printf("Test: Empty Reads - PASSED\n");
 }
 
 /** Inserts a batch and queries every row back, which an exact self-search must answer with the
@@ -4123,6 +4227,7 @@ int main(int argc, char* argv[]) {
             if (selected("add_and_search"))
                 test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
+    if (selected("empty_reads")) test_empty_reads(dimension_counts[0]);
     if (selected("add_progress")) test_add_progress();
     if (selected("absorb")) test_absorb(dimension_counts[0]);
     if (selected("compact")) test_compact(dimension_counts[0]);

@@ -2,15 +2,16 @@
  *  @file include/usearch/utilities/ram_shards.hpp
  *  @author Ash Vardanian
  *  @date July 23, 2026
- *  @brief Shards viewed as one: the component every plural tower owns, holding the shards, the keys
- *      of their entries, the rotation that routes new entries, and the commit word a reader
- *      spanning the shards snapshots by.
+ *  @brief Shards viewed as one: the component every plural tower owns, holding the shards, the
+ *      rotation that routes new entries, and the commit word a reader spanning the shards
+ *      snapshots by.
  *
  *  A tower keeps its own verbs and its own residency's logic, and reaches its shards through this
- *  set: placement and reservation, the key locators, the claim words closed and reopened in shard
- *  order, the snapshot of every shard's watermark at one instant no commit straddles, and the
- *  epoch its readers bracket themselves with against the tower's destructive windows. The tower
- *  builds and reserves every shard and checks its shape, so the set never reads one.
+ *  set: placement and reservation, the key reads spanning every shard, the claim words closed and
+ *  reopened in shard order, the snapshot of every shard's watermark at one instant no commit
+ *  straddles, and the epoch its readers bracket themselves with against the tower's destructive
+ *  windows. The tower builds and reserves every shard and checks its shape, so the set never reads
+ *  one.
  */
 #pragma once
 
@@ -25,31 +26,9 @@
 #include <utility>     // `std::move`, `std::swap`, `std::exchange`
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_buffers.hpp" // `chunked_column` - the shards' key columns
-#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - the shard table's placement
-#include "usearch/utilities/ram_tables.hpp"  // `chunked_multimap` - the locator map
+#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator` - the shard table's placement
 
 namespace unum::usearch::utilities {
-
-/** Keys of one shard's entries, indexed by that shard's own node IDs; host-resident, growing in the
- *  chunks the CPU shards grow in. A tower's per-shard key storage holds one. */
-template <typename index_type_, typename key_type_, template <typename> class atomic_ref_template_>
-using shard_keys_column = chunked_column<key_type_, chunk_schedule<10, 20>, index_type_::max_node_count_k,
-                                         forkunion_allocator_t, atomic_ref_template_>;
-
-/** The host key column of a shard whose key storage is that column alone. */
-template <typename key_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
-          template <typename> class atomic_ref_template_>
-chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_>& host_keys(
-    chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_>& keys) noexcept {
-    return keys;
-}
-template <typename key_type_, typename schedule_type_, std::size_t max_nodes_, typename allocator_type_,
-          template <typename> class atomic_ref_template_>
-chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_> const& host_keys(
-    chunked_column<key_type_, schedule_type_, max_nodes_, allocator_type_, atomic_ref_template_> const& keys) noexcept {
-    return keys;
-}
 
 /** Where one source shard's entries land: shard @c from of the sources' concatenated shard lists,
  *  into shard @c into of the target.
@@ -86,8 +65,7 @@ inline std::size_t rank_fewest_entries(std::size_t entries, placement_match_t ma
 }
 
 /**
- *  @brief Shards viewed as one, the keys of their entries, and the words that keep a reader
- *      spanning them consistent.
+ *  @brief Shards viewed as one, and the words that keep a reader spanning them consistent.
  *
  *  It owns its shards outright, so a tower's destructor, consuming merge and clear are expressible.
  *  Shards arrive one at a time through @ref emplace, so a tower grows as its placements are engaged
@@ -100,63 +78,41 @@ inline std::size_t rank_fewest_entries(std::size_t entries, placement_match_t ma
  *  generation opens with.
  *
  *  @tparam index_type_ The shard type.
- *  @tparam shard_keys_type_ One shard's key storage, the tower's own: a @ref shard_keys_column
- *      alone, or one beside the device twins it feeds; @ref host_keys reaches its host column.
- *  @tparam key_type_ The caller-visible identity, opaque to every shard.
- *  @tparam key_hash_type_ The locator map's hash of a key.
  *  @tparam atomic_ref_template_ The atomic reference owning the plain synchronization words.
  *  @tparam wait_type_ What a snapshot waits through while a commit is in flight.
  */
-template <typename index_type_, typename shard_keys_type_, typename key_type_, typename key_hash_type_,
-          template <typename> class atomic_ref_template_, typename wait_type_>
+template <typename index_type_, template <typename> class atomic_ref_template_, typename wait_type_>
 struct shard_set {
 
     /** The shard type, built and shaped by the tower. */
     using index_t = index_type_;
 
-    /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
-     *  key vocabulary begins here. */
-    using key_t = key_type_;
+    /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
+    using key_t = typename index_t::key_t;
 
-    /** Where one entry lives: the shard, and its shard-local ID - a tower's only address for an
-     *  entry. Eight bytes on an eight-byte boundary, so a locator slot is sixteen with its key and
-     *  one atomic store swaps it whole. */
-    struct alignas(sizeof(u64_t)) key_locator_t {
-
-        /** The shard holding the entry, positional in placement order. */
-        u32_t shard = 0;
-
-        /** The entry's ID inside that shard's own space. */
-        node_id_t node = 0;
-
-        bool operator==(key_locator_t const&) const noexcept = default;
-    };
-    static_assert(sizeof(key_locator_t) == 8);
     static_assert(std::is_same_v<typename index_t::node_id_t, node_id_t>,
-                  "A locator names a node in 32 bits, so plural shards hold u32 nodes");
+                  "A shard node names a node in 32 bits, so plural shards hold u32 nodes");
+
+    /** Where one entry lives, as a reader names it: the shard, positional in placement order, and
+     *  the entry's ID inside that shard's own space. */
+    struct alignas(sizeof(u64_t)) shard_node_t {
+        u32_t shard = 0;
+        node_id_t node = 0;
+    };
+    static_assert(sizeof(shard_node_t) == 8);
 
     /** The atomic reference owning the plain synchronization words - the shards' and the set's
      *  own routing tally alike. */
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    /** Key to every entry stored under it; insert-only, wait-free for readers, growing in
-     *  chunks. */
-    using locators_map_t =
-        chunked_multimap<key_t, key_locator_t, key_hash_type_, forkunion_allocator_t, atomic_ref_template_>;
-
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
 
-    /** One shard: the graph, and the keys of its entries. Placement is not repeated: the shard
-     *  carries its own. */
+    /** One shard: the graph, which owns its keys and carries its own placement. */
     struct shard_t {
 
         /** The graph, growing on demand; an index holds atomics and never moves. */
         std::unique_ptr<index_t> index;
-
-        /** The key of each of this shard's entries, indexed by node ID in its host column; every
-         *  claimer covers the entries it may write before writing them. */
-        shard_keys_type_ keys;
     };
 
     /** One shard generation: one new shard per placement, opened when the current shards reach
@@ -239,9 +195,8 @@ struct shard_set {
         bool operator==(shard_iterator const& other) const noexcept { return shard == other.shard; }
     };
 
-    /** An empty set of shards, its shard table, locator map and checkpoint catalogs on
-     *  @p allocator. */
-    explicit shard_set(forkunion_allocator_t allocator) noexcept : locators_of_key_(allocator), allocator_(allocator) {}
+    /** An empty set of shards, its shard table and checkpoint catalogs on @p allocator. */
+    explicit shard_set(forkunion_allocator_t allocator) noexcept : allocator_(allocator) {}
     shard_set(shard_set&& other) noexcept : shard_set(other.allocator_) { swap(other); }
     shard_set& operator=(shard_set&& other) noexcept { return swap(other), *this; }
     shard_set(shard_set const&) = delete;
@@ -262,7 +217,6 @@ struct shard_set {
         std::swap(built_shards_, other.built_shards_);
         std::swap(retired_shards_, other.retired_shards_);
         std::swap(shard_generation_width_, other.shard_generation_width_);
-        std::swap(locators_of_key_, other.locators_of_key_);
         std::swap(allocator_, other.allocator_);
         std::swap(shard_capacity_, other.shard_capacity_);
         std::size_t const routed_here = routed();
@@ -323,8 +277,8 @@ struct shard_set {
     indexes_range<index_t> live_indexes() noexcept { return {this, retired_shards(), size()}; }
     indexes_range<index_t const> live_indexes() const noexcept { return {this, retired_shards(), size()}; }
 
-    /** The host allocator behind the shard table, the locator map and every checkpoint catalog;
-     *  the shards carry their own. */
+    /** The host allocator behind the shard table and every checkpoint catalog; the shards carry
+     *  their own. */
     forkunion_allocator_t allocator() const noexcept { return allocator_; }
 
     /** Entries the shards past the retired ones host without growing again; they grow past it on
@@ -335,13 +289,11 @@ struct shard_set {
         return total;
     }
 
-    /** Bytes every shard's storage, its key storage and the shared locator map occupy, idle and
-     *  retired shards included. */
+    /** Bytes every shard's storage occupies, idle and retired shards included. */
     std::size_t memory_usage() const noexcept {
-        std::size_t bytes = locators_of_key_.memory_usage();
+        std::size_t bytes = 0;
         std::size_t const built = atomic_ref<std::size_t const>(built_shards_).load(std::memory_order_acquire);
-        for (std::size_t shard = 0; shard != built; ++shard)
-            bytes += at_(shard).index->memory_usage() + at_(shard).keys.memory_usage();
+        for (std::size_t shard = 0; shard != built; ++shard) bytes += at_(shard).index->memory_usage();
         return bytes;
     }
 
@@ -355,22 +307,20 @@ struct shard_set {
     /** Entries one shard may hold. */
     std::size_t shard_capacity() const noexcept { return shard_capacity_; }
 
-    /** Appends one shard the caller already built beside its empty key storage @p keys; refuses a
-     *  null one and one already reserved, the tower having checked its shape. Several shards may
-     *  share a placement, each a slice of the graph rather than a copy. @ref reserve closes the
-     *  set.
+    /** Appends one shard the caller already built; refuses a null one and one already reserved, the
+     *  tower having checked its shape. Several shards may share a placement, each a slice of the
+     *  graph rather than a copy. @ref reserve closes the set.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p shard is null or already reserved.
      *  - @c config_mismatch_k The set is reserved, retired shards, or has a shard generation in
      *    flight.
      */
-    status_t emplace(std::unique_ptr<index_t>&& shard, shard_keys_type_&& keys) noexcept {
+    status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
         if (!shard || shard->capacity()) return status_t::config_mismatch_k;
         if (capacity() || retired_shards() || built_shards_ != size()) return status_t::config_mismatch_k;
         std::size_t const shards = size();
-        if (status_t const placed = construct_(shards, shard_t {std::move(shard), std::move(keys)}); failed(placed))
-            return placed;
+        if (status_t const placed = construct_(shards, shard_t {std::move(shard)}); failed(placed)) return placed;
         atomic_ref<std::size_t>(built_shards_).store(shards + 1, std::memory_order_release);
         atomic_ref<std::size_t>(shards_count_).store(shards + 1, std::memory_order_release);
         shard_generation_width_ = shards + 1;
@@ -378,19 +328,17 @@ struct shard_set {
     }
 
     /**
-     *  @brief Grows every shard past the retired ones and its key column ahead of
-     *      @p config.capacity entries, split evenly over them - a hint, since the shards, their key
-     *      columns and the locator map all grow on demand; the first call freezes the geometry.
+     *  @brief Grows every shard past the retired ones ahead of @p config.capacity entries, split
+     *      evenly over them - a hint, since the shards grow on demand.
      *
      *  Callable alongside insertions and searches on the host residency: nothing it grows ever
-     *  moves. The locator map grows as entries claim their keys, so a set nobody looks keys up in
-     *  never allocates one.
+     *  moves.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed.
      *  - @c unknown_kind_k A dense shard's kits cannot score its metric.
-     *  - @c config_mismatch_k A shard's geometry is malformed or differs from the one it froze, or
-     *    on NVIDIA its neighbors live on another device.
+     *  - @c config_mismatch_k A shard's geometry is malformed, or on NVIDIA its neighbors live on
+     *    another device.
      *  - @c overflow_k A shard's share passes its ID space, its ceiling, its chunk directory or its
      *    key column.
      *  - @c unsupported_k On Apple, a pipeline is narrower than the kernels need.
@@ -400,12 +348,9 @@ struct shard_set {
         reserve_capacity_t per_shard = config;
         per_shard.capacity = min_of(divide_round_up(config.capacity, size() - retired_shards()), shard_capacity_);
         per_shard.ceiling = shard_capacity_;
-        for (shard_t& one : *this) {
-            auto const [shard_capacity, status] = one.index->reserve(per_shard);
-            if (failed(status)) return {capacity(), status};
-            if (status_t const covered = host_keys(one.keys).cover(shard_capacity); failed(covered))
-                return {capacity(), covered};
-        }
+        for (shard_t& one : *this)
+            if (status_t const reserved = one.index->reserve(per_shard).status; failed(reserved))
+                return {capacity(), reserved};
         return {capacity(), status_t::success_k};
     }
 
@@ -531,21 +476,57 @@ struct shard_set {
 
 #pragma region Keys and Routing
 
-    /** Every key's entries. Duplicates coexist as separate slots, which is what several values
-     *  under one key means, and costs one slot per entry rather than per key. */
-    locators_map_t& locators() noexcept { return locators_of_key_; }
-    locators_map_t const& locators() const noexcept { return locators_of_key_; }
+    /** Entries under @p key across every shard, exact: read until settled, so a batch spanning
+     *  shards counts whole or not at all. */
+    std::size_t count(typename index_t::key_t const& key) const noexcept {
+        return read_until_settled([&]() noexcept {
+            std::size_t total = 0;
+            for (shard_t const& one : *this) total += one.index->count(key);
+            return total;
+        });
+    }
 
-    /** Drops every key's locators, keeps every shard generation past the first as idle shards for
-     *  the next @c open_shard_generation_ to reuse, and restarts the routing; inside the tower's
-     *  window, once every shard forgot its entries in place, so a reader still holding one reads
-     *  retained memory and retries on the epoch. Idle shards keep their capacity and stay closed. A
-     *  set that retires its shards never forgets them. */
+    /** Whether any shard holds an entry under @p key, read as @ref count reads, stopping at the
+     *  first. */
+    bool contains(typename index_t::key_t const& key) const noexcept {
+        return read_until_settled([&]() noexcept {
+            for (shard_t const& one : *this)
+                if (one.index->contains(key)) return true;
+            return false;
+        });
+    }
+
+    /** Invokes @p callback as <tt>callback(index, node)</tt> for every entry under @p key in every
+     *  shard, each below the watermark its shard acquires. Never retried, so the callback hears
+     *  every entry once; a caller needing a consistent view across shards reads a snapshot. */
+    template <typename callback_type_>
+    void find_each(typename index_t::key_t const& key, callback_type_&& callback) const noexcept {
+        for (shard_t const& one : *this) {
+            index_t const& index = *one.index;
+            index.find_each(key, [&](node_id_t node) noexcept { callback(index, node); });
+        }
+    }
+
+    /** Invokes @p callback as <tt>callback(index, node)</tt> for every entry under @p key below the
+     *  snapshot @p visible, one watermark per shard from the first. */
+    template <typename callback_type_>
+    void find_each(typename index_t::key_t const& key, std::span<node_id_t const> visible,
+                   callback_type_&& callback) const noexcept {
+        for (std::size_t shard = 0; shard != visible.size(); ++shard) {
+            index_t const& index = *at_(shard).index;
+            index.keys().find_each(key, visible[shard], [&](node_id_t node) noexcept { callback(index, node); });
+        }
+    }
+
+    /** Keeps every shard generation past the first as idle shards for the next
+     *  @c open_shard_generation_ to reuse, and restarts the routing; inside the tower's window,
+     *  once every shard forgot its entries in place, so a reader still holding one reads retained
+     *  memory and retries on the epoch. Idle shards keep their capacity and stay closed. A set that
+     *  retires its shards never forgets them. */
     void forget_entries() noexcept {
         atomic_ref<std::size_t> const count {shards_count_};
         std::size_t const seen = count.load(std::memory_order_relaxed);
         count.store((seen & sealed_k) | min_of(seen & ~sealed_k, shard_generation_width_), std::memory_order_release);
-        locators_of_key_.clear();
         reset_routing(0);
     }
 
@@ -555,14 +536,13 @@ struct shard_set {
      *      watermark drops to zero, stays closed for good, and frees only when the set dies.
      *
      *  The count of published shards stays, so a reader that entered a retired shard keeps walking
-     *  memory nothing frees until its epoch fails, and no shard generation ever refills one. Drops
-     *  every key's locators and restarts the routing. Each shard answers <tt>retire_()</tt>.
+     *  memory nothing frees until its epoch fails, and no shard generation ever refills one.
+     *  Restarts the routing. Each shard answers <tt>retire_()</tt>.
      */
     void retire_older_shard_generations_() noexcept {
         std::size_t const first = open_shard_generation().first;
         for (std::size_t shard = retired_shards(); shard != first; ++shard) at_(shard).index->retire_();
         atomic_ref<std::size_t>(retired_shards_).store(first, std::memory_order_release);
-        locators_of_key_.clear();
         reset_routing(0);
     }
 
@@ -741,14 +721,7 @@ struct shard_set {
      *  - @c shape_mismatch_k A non-empty @p watermarks holds other than one slot per shard.
      */
     expected<std::size_t> snapshot(std::span<node_id_t> watermarks) const noexcept {
-        atomic_ref<u64_t const> const sequence {commit_sequence_};
-        while (true) {
-            u64_t const before = sequence.load(std::memory_order_acquire);
-            // A set low half is a commit between its shards' stores.
-            if (static_cast<u32_t>(before)) {
-                wait_type_ {}(&commit_sequence_, before, 0u);
-                continue;
-            }
+        return read_committed([&]() noexcept -> expected<std::size_t> {
             // Read past the sequence, so a commit it saw counts every shard generation it landed
             // in.
             std::size_t const shards = size();
@@ -759,8 +732,25 @@ struct shard_set {
                 if (!watermarks.empty()) watermarks[shard] = static_cast<node_id_t>(visible);
                 total += visible;
             }
-            // The watermarks' acquires keep this re-read after them.
-            if (sequence.load(std::memory_order_relaxed) == before) return {total, status_t::success_k};
+            return {total, status_t::success_k};
+        });
+    }
+
+    /** Runs the reader @p read at one instant no commit spanning shards publishes through, again
+     *  while one landed under it, so it sees every batch whole or not at all; @p read loads through
+     *  acquires, which keep the sequence re-read after them. */
+    template <typename read_type_>
+    std::invoke_result_t<read_type_&> read_committed(read_type_&& read) const noexcept {
+        atomic_ref<u64_t const> const sequence {commit_sequence_};
+        while (true) {
+            u64_t const before = sequence.load(std::memory_order_acquire);
+            // A set low half is a commit between its shards' stores.
+            if (static_cast<u32_t>(before)) {
+                wait_type_ {}(&commit_sequence_, before, 0u);
+                continue;
+            }
+            std::invoke_result_t<read_type_&> result = read();
+            if (sequence.load(std::memory_order_relaxed) == before) return result;
         }
     }
 
@@ -809,14 +799,15 @@ struct shard_set {
         else return {{}, status_t::contended_k};
     }
 
-    /** Runs the reader @p read until no destructive window overlapped it, for an answer with no
-     *  room for @c contended_k; each retry waits out a window still open through the waiter, and
-     *  every window ends without waiting on a reader. */
+    /** Runs the reader @p read until neither a destructive window nor a commit spanning
+     *  shards overlapped it, for an exact answer with no room for @c contended_k; each
+     *  retry waits out a window or a commit still in flight through the waiter, and
+     *  neither ever waits on a reader. */
     template <typename read_type_>
     std::invoke_result_t<read_type_&> read_until_settled(read_type_&& read) const noexcept {
         while (true) {
             u64_t const epoch = read_epoch();
-            std::invoke_result_t<read_type_&> result = read();
+            std::invoke_result_t<read_type_&> result = read_committed(read);
             if (still_valid(epoch)) return result;
         }
     }
@@ -896,10 +887,8 @@ struct shard_set {
         return status_t::success_k;
     }
 
-    /** The owned shards, graph and keys together, in chunks that double and never move, so a search
-     *  reading shard @c s while a shard generation opens keeps its address; at most as many chunks
-     *  as a count has bits. A shard's key column grows only ahead of the entries a search can read,
-     *  since a search reads it while entries are still landing. */
+    /** The owned shards, in chunks that double and never move, so a search reading shard @c s while
+     *  a shard generation opens keeps its address; at most as many chunks as a count has bits. */
     std::array<shard_t*, std::numeric_limits<std::size_t>::digits> shard_chunks_ {};
 
     /** Shards published, read with acquire by @ref size; a shard generation's shards exist before
@@ -918,10 +907,7 @@ struct shard_set {
     /** Placements of the first shard generation, which every later one repeats. */
     std::size_t shard_generation_width_ = 0;
 
-    /** Every key's entries, as @ref locators exposes them. */
-    locators_map_t locators_of_key_;
-
-    /** The host allocator behind the shard table, the locator map and every checkpoint catalog. */
+    /** The host allocator behind the shard table and every checkpoint catalog. */
     forkunion_allocator_t allocator_;
 
     /** Entries routed so far - the next batch's rotation base. */

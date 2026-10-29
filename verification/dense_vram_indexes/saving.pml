@@ -12,13 +12,14 @@
  *
  *  - The copy holds the batch on both shards or on neither.
  *  - Every key it copies is its claimer's.
+ *  - Once both are done, no row of a failed batch is filed.
  *
  *  @verify pass sc,rc11
  *  @verify fail sc save_closes=false: without the closure, it copies the first shard after the
  *      batch's turn there and the second before it, a checkpoint holding half a batch
  */
 #define thread_count 2
-#define location_count 7
+#define location_count 11
 #define history_depth 3
 #define mutators 1
 #include <dense_vram_indexes/protocol.pml>
@@ -55,7 +56,11 @@ proctype saver(byte t) {
     :: else
     fi;
 contended:
-    skip
+    done++
 }
 
-init { atomic { run mutator(0); run saver(1) } }
+init {
+    atomic { run mutator(0); run saver(1) };
+    (done == 2);
+    audit_keys()
+}

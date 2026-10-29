@@ -399,7 +399,8 @@ struct hip_virtual_memory_allocator {
         using other = hip_virtual_memory_allocator<other_>;
     };
 
-    /** Preferred physical slab, rounded to the runtime's granularity at reservation. */
+    /** Largest physical slab, rounded to the runtime's granularity at reservation; smaller ones
+     *  double up to it, so a sparse shard maps one granularity, not one full slab per column. */
     inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
     byte_t* base_ = nullptr;
@@ -408,6 +409,7 @@ struct hip_virtual_memory_allocator {
     /** Bytes mapped so far - the one grower advances it with a release, and any thread may read it
      *  through @c committed_bytes with an acquire; @c mutable for the reference. */
     std::size_t mapped_bytes_ = 0;
+    std::size_t granularity_ = 0;
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
@@ -430,8 +432,8 @@ struct hip_virtual_memory_allocator {
     hip_virtual_memory_allocator(hip_virtual_memory_allocator&& other) noexcept
         : base_(std::exchange(other.base_, nullptr)),
           virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
-          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_),
-          peers_(other.peers_), api_(other.api_) {}
+          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), granularity_(other.granularity_),
+          slab_bytes_(other.slab_bytes_), device_(other.device_), peers_(other.peers_), api_(other.api_) {}
     template <typename other_>
     hip_virtual_memory_allocator(hip_virtual_memory_allocator<other_> const& other) noexcept
         : device_(other.device_), peers_(other.peers_), api_(other.api_) {}
@@ -445,11 +447,10 @@ struct hip_virtual_memory_allocator {
      *  generous. */
     status_t reserve_range(std::size_t virtual_address_bytes) noexcept {
         hip_allocation_properties_t const properties = allocation_properties_(device_);
-        std::size_t granularity = 0;
         if (!api_ || !*api_ ||
-            api_->memory_granularity(&granularity, &properties, hip_granularity_minimum_k) != hip_success_k)
+            api_->memory_granularity(&granularity_, &properties, hip_granularity_minimum_k) != hip_success_k)
             return status_t::device_error_k;
-        slab_bytes_ = max_of(granularity, preferred_slab_bytes_k / granularity * granularity);
+        slab_bytes_ = max_of(granularity_, preferred_slab_bytes_k / granularity_ * granularity_);
         virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         void* base = nullptr;
         if (api_->memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hip_success_k)
@@ -482,17 +483,20 @@ struct hip_virtual_memory_allocator {
         if (granted == peers_) return status_t::success_k;
         hip_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(granted, access);
-        for (std::size_t offset = 0; offset != mapped_bytes_; offset += slab_bytes_)
-            if (api_->memory_set_access(base_ + offset, slab_bytes_, access, readers) != hip_success_k)
+        for (std::size_t offset = 0, slab = 0; offset != mapped_bytes_; offset += slab) {
+            slab = min_of(slab_bytes_, max_of(granularity_, offset));
+            if (api_->memory_set_access(base_ + offset, slab, access, readers) != hip_success_k)
                 return status_t::device_error_k;
+        }
         peers_ = granted;
         return status_t::success_k;
     }
 
     /**
      *  Maps and zeroes physical slabs until at least @p bytes are usable, for the owner and every
-     *  peer; never unmaps early. Each handle is released right after mapping, since the mapping
-     *  alone keeps the memory alive.
+     *  peer; never unmaps early. Each slab is as large as everything mapped before it, from the
+     *  granularity up to the preferred slab, so a shard's footprint tracks its rows. Each handle is
+     *  released right after mapping, since the mapping alone keeps the memory alive.
      *
      *  @par Statuses:
      *  - @c overflow_k The @p bytes pass the reserved range.
@@ -507,16 +511,17 @@ struct hip_virtual_memory_allocator {
         std::size_t const readers = access_of_(peers_, access);
         while (mapped_bytes_ < bytes) {
             hip_allocation_handle_t handle = nullptr;
-            if (runtime.memory_create(&handle, slab_bytes_, &properties, 0) != hip_success_k)
+            std::size_t const slab_bytes = min_of(slab_bytes_, max_of(granularity_, mapped_bytes_));
+            if (runtime.memory_create(&handle, slab_bytes, &properties, 0) != hip_success_k)
                 return status_t::bad_alloc_k;
             byte_t* const slab = base_ + mapped_bytes_;
-            bool const mapped = runtime.memory_map(slab, slab_bytes_, 0, handle, 0) == hip_success_k &&
-                                runtime.memory_set_access(slab, slab_bytes_, access, readers) == hip_success_k;
+            bool const mapped = runtime.memory_map(slab, slab_bytes, 0, handle, 0) == hip_success_k &&
+                                runtime.memory_set_access(slab, slab_bytes, access, readers) == hip_success_k;
             runtime.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
-            if (runtime.fill(slab, 0, slab_bytes_) != hip_success_k) return status_t::device_error_k;
+            if (runtime.fill(slab, 0, slab_bytes) != hip_success_k) return status_t::device_error_k;
             fu::standard_atomic_ref<std::size_t>(mapped_bytes_)
-                .store(mapped_bytes_ + slab_bytes_, std::memory_order_release);
+                .store(mapped_bytes_ + slab_bytes, std::memory_order_release);
         }
         return status_t::success_k;
     }

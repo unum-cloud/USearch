@@ -8,13 +8,15 @@
  *  `last_visible_id_` watermark advanced in dispensed order, and the readers that rest on the
  *  watermark: a traversal, a cursor, and a concurrent save with its settlement probe, beside a
  *  refinement that relocks published rows. The dispenser closes for a load or a refinement. A row
- *  is slot zero, which locks and publishes it, and one tail slot.
+ *  is slot zero, which locks and publishes it, and one tail slot. A keyed insert also publishes its
+ *  row's key into `keyed_nodes`' map: two slots, and the constant terminator at position 2.
  */
 #include <weak_memory.pml>
 #include <watermark_turn.pml>
 
-// The words, by the index member each stands for; the key column, the load plan's tally and row 0's
-// second tail slot come last.
+// The words, by the index member each stands for; the key column, the load plan's tally, row 0's
+// second tail slot, then the map's control bytes and slots come last. A slot is the key beside its
+// node, one plain write.
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define last_allocated_id 2
@@ -23,7 +25,10 @@
 #define key(id) (7 + (id))
 #define covered 9
 #define second_tail 10
+#define slot_state(position) (11 + (position))
+#define slot(position) (13 + (position))
 #define rows 2
+#define terminator 2
 
 // The values rows and keys carry: the sentinel is the all-ones ID in silicon, and a slot names an ID.
 #define sentinel 0
@@ -32,6 +37,10 @@
 #define named(id) (30 + (id))
 #define refined(id) (40 + (id))
 #define id_of(word) ((word) % 10)
+
+// The map's control bytes: the chain's end, and the probe tag the one key every row carries publishes.
+#define empty 0
+#define key_tag 50
 
 // The closed dispenser: the all-ones ID in silicon, past every count here.
 #define closed_id 15
@@ -80,6 +89,17 @@
 #define refine_closes true
 #endif
 
+// The keys' publication into the map: `inside_turn` between the turn's wait and the watermark's
+// release, so the turn holder is the map's one writer, or `after_turn` past the release.
+#define inside_turn 0
+#define after_turn 1
+#ifndef publish
+#define publish inside_turn
+#endif
+#if publish != inside_turn && publish != after_turn
+#error "publish is inside_turn or after_turn"
+#endif
+
 bool editing[rows];      // the rows under their locks
 byte published_at[rows]; // the history index of each row's publication
 byte dispensed_at[rows]; // the history index of each ID's dispense, which its hosting chunk precedes
@@ -123,8 +143,48 @@ inline unlock(t, id, first) {
     }
 }
 
-// the rest of `insert` once its ID is dispensed
-inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark) {
+// `keyed_nodes::publish` of one row, through `chunked_multimap::insert` at seat = node: relaxed peeks
+// until an empty slot, the slot plain, then the tag with the release
+inline publish_keys(t, id, chain, seen) {
+    chain = 0;
+    do
+    :: assert(chain < terminator);
+        load(t, slot_state(chain), order_relaxed, seen);
+        if
+        :: seen == empty -> break
+        :: else -> chain++
+        fi
+    od;
+    load(t, key(id), order_relaxed, seen);
+    store(t, slot(chain), order_relaxed, seen);
+    store(t, slot_state(chain), order_release, key_tag)
+}
+
+// `keyed_nodes::find_each` below the watermark acquired: every published slot of the chain acquired,
+// its slot read plain, and the nodes at or above the watermark dropped
+inline find_keys(t, watermark, chain, seen, found) {
+    load(t, last_visible_id, order_acquire, watermark);
+    chain = 0;
+    do
+    :: chain == terminator -> break
+    :: else ->
+        load(t, slot_state(chain), order_acquire, seen);
+        if
+        :: seen == empty -> break
+        :: else
+        fi;
+        load(t, slot(chain), order_relaxed, seen);
+        assert(seen == named(id_of(seen))); // the slot the tag published carries its key and node
+        if
+        :: id_of(seen) < watermark -> found++
+        :: else
+        fi;
+        chain++
+    od
+}
+
+// the rest of `insert` once its ID is dispensed; a keyed insert publishes the key into the map
+inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark, chain, keyed) {
     if
     :: named_rows && key_before_turn -> store(t, key(id), order_relaxed, named(id))
     :: else
@@ -155,16 +215,27 @@ inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark) {
         unlock(t, 0, edited(id))
     :: else
     fi;
-    take_turn(t, last_visible_id, id, id + 1, watermark_order, watermark);
+    await_turn(t, last_visible_id, id, watermark);
+    if
+    :: keyed && publish == inside_turn -> publish_keys(t, id, chain, seen)
+    :: else
+    fi;
+    end_turn(t, last_visible_id, watermark_order, id + 1);
     if
     :: named_rows && !key_before_turn -> store(t, key(id), order_relaxed, named(id))
+    :: else
+    fi;
+    if
+    :: keyed && publish == after_turn -> publish_keys(t, id, chain, seen)
     :: else
     fi
 }
 
 // `insert` of one row: identity, the key in `on_assigned`, the walk, the publication, the back-link,
-// the turn; a closed dispenser refuses it before anything is written
-inline insert(t) {
+// the turn, and inside it the key into the map when @p keyed; a closed dispenser refuses it before
+// anything is written
+inline insert_keyed(t, keyed) {
+    byte chain;
     int id, first_invisible, seen, displaced, watermark;
     // identity, one ID per node, chaining the hosting chunk's growth through the dispenser: the
     // bounded add of `dispense_`, refused only by a closed dispenser
@@ -179,10 +250,13 @@ inline insert(t) {
         fi
     };
     if
-    :: id != closed_id -> insert_dispensed(t, id, first_invisible, seen, displaced, watermark)
+    :: id != closed_id -> insert_dispensed(t, id, first_invisible, seen, displaced, watermark, chain, keyed)
     :: else
     fi
 }
+
+// `insert` of a scenario that reads no key from the map
+inline insert(t) { insert_keyed(t, false) }
 
 // a search: the watermark acquired, and every row below it read as published
 inline search(t, watermark) {

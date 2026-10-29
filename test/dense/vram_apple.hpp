@@ -53,10 +53,11 @@ struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     /** The stream the cell's contexts ride, on the device its indexes sit on. */
     metal_executor_t::stream_t const& stream;
 
-    /** Builds the cell's index over @p ledger, on the stream's device. */
-    std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger) const noexcept {
+    /** Builds the cell's index of @p geometry over @p ledger, on the stream's device. */
+    std::unique_ptr<index_t> operator()(allocation_ledger_t& ledger,
+                                        typename index_t::geometry_t geometry) const noexcept {
         counting_metal_allocator_t const allocator {ledger, stream.handle};
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, geometry, allocator, allocator));
     }
 
     /** A fresh traversal context submitting to the stream. */

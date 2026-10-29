@@ -65,19 +65,15 @@ template <                                        //
 struct vram_apple_indexes {
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t = vram_apple_index<vector_dtype_, capability_>;
+    using index_t = vram_apple_index<vector_dtype_, capability_, metal_shared_allocator_t, metal_shared_allocator_t,
+                                     metal_shared_allocator_t, key_type_, key_hash_type_>;
 
-    /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
-     *  key vocabulary begins here. */
+    /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = key_type_;
 
-    /** Every shard's keys: one host column, which walks read in place over unified memory. */
-    using keys_column_t = shard_keys_column<index_t, key_t, fu::standard_atomic_ref>;
-
-    /** The shards, the keys of their rows, the rotation that routes new rows, and the commit word a
-     *  reader spanning the shards snapshots by. */
-    using shards_t = shard_set<index_t, keys_column_t, key_t, key_hash_type_, fu::standard_atomic_ref, wait_type_>;
-    using key_locator_t = typename shards_t::key_locator_t;
+    /** The shards, the rotation that routes new rows, and the commit word a reader spanning the
+     *  shards snapshots by. */
+    using shards_t = shard_set<index_t, fu::standard_atomic_ref, wait_type_>;
     using shard_t = typename shards_t::shard_t;
 
     /** The streams and their scratch every bulk verb runs on, paired positionally with the
@@ -93,6 +89,7 @@ struct vram_apple_indexes {
     using search_config_t = typename index_t::search_config_t;
     using insert_config_t = typename index_t::insert_config_t;
     using reserve_capacity_t = typename index_t::reserve_capacity_t;
+    using geometry_t = typename index_t::geometry_t;
     using insert_result_t = typename index_t::insert_result_t;
     using search_result_t = typename index_t::search_result_t;
     using refine_config_t = typename index_t::refine_config_t;
@@ -115,13 +112,14 @@ struct vram_apple_indexes {
 
 #pragma region Placement
 
-    /** Every index names the metric its shards score by and the host allocator its shard table, key
-     *  columns, locator map and checkpoint catalogs sit on; nothing is placed by default. */
+    /** Every index names the metric its shards score by, the geometry every shard keeps, and the
+     *  host allocator its shard table, its shards' keys and checkpoint catalogs sit on; nothing is
+     *  placed by default. */
     vram_apple_indexes() = delete;
-    explicit vram_apple_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
-        : shards_(allocator), kernel_(kernel) {}
+    explicit vram_apple_indexes(nk_kernel_kind_t kernel, geometry_t geometry, forkunion_allocator_t allocator) noexcept
+        : shards_(allocator), kernel_(kernel), geometry_(geometry) {}
     vram_apple_indexes(vram_apple_indexes&& other) noexcept
-        : shards_(std::move(other.shards_)), kernel_(other.kernel_) {}
+        : shards_(std::move(other.shards_)), kernel_(other.kernel_), geometry_(other.geometry_) {}
     vram_apple_indexes& operator=(vram_apple_indexes&& other) noexcept { return swap(other), *this; }
     vram_apple_indexes(vram_apple_indexes const&) = delete;
     vram_apple_indexes& operator=(vram_apple_indexes const&) = delete;
@@ -133,6 +131,7 @@ struct vram_apple_indexes {
     void swap(vram_apple_indexes& other) noexcept {
         shards_.swap(other.shards_);
         std::swap(kernel_, other.kernel_);
+        std::swap(geometry_, other.geometry_);
     }
 
     /** Bounds every shard at @p rows, clamped to the ID space; zero means the ID space. Past it, an
@@ -158,18 +157,18 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  Appends one shard the caller already built, consuming it, with its key column on the host.
+     *  Appends one shard the caller already built, consuming it, with its keys inside it.
      *  @ref reserve closes the shard set.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p shard is null, walks by another kernel, has a frozen geometry
-     *    differing from the shards already here, or is already reserved; or the set is reserved,
-     *    retired shards, or has a shard generation in flight.
+     *  - @c config_mismatch_k The @p shard is null, walks by another kernel or keeps another
+     *    geometry, or is already reserved; or the set is reserved, retired shards, or has a shard
+     *    generation in flight.
      */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard || shard->kernel() != kernel_ || (!shards_.empty() && !same_geometry(*shard, *shards_[0].index)))
+        if (!shard || shard->kernel() != kernel_ || !(shard->geometry() == geometry_))
             return status_t::config_mismatch_k;
-        return shards_.emplace(std::move(shard), keys_column_t {shards_.allocator()});
+        return shards_.emplace(std::move(shard));
     }
 
     /**
@@ -208,11 +207,12 @@ struct vram_apple_indexes {
     /** The read-only shard at @p shard. */
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
 
-    /** The frozen geometry, taken from the first shard - @ref emplace refused any that differ. */
-    std::size_t dimensions() const noexcept { return shards_.empty() ? 0 : shards_[0].index->dimensions(); }
+    /** The geometry every shard keeps, fixed at construction - @ref emplace refused any other. */
+    geometry_t geometry() const noexcept { return geometry_; }
+    std::size_t dimensions() const noexcept { return geometry_.dimensions; }
 
-    /** Connections per node, frozen with the geometry. */
-    std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
+    /** Connections per node, fixed with the geometry. */
+    std::size_t connectivity() const noexcept { return geometry_.connectivity; }
 
     /** Entries across every shard: the watermarks of one consistent snapshot, summed, so a batch
      *  counts whole or not at all. */
@@ -229,21 +229,20 @@ struct vram_apple_indexes {
         return status_t::success_k;
     }
 
-    /** Bytes the index occupies - every shard's storage, its key column, and the shared locator
-     *  map; traversal scratch is the executor's. */
+    /** Bytes the index occupies - every shard's storage and keys; traversal scratch is the
+     *  executor's. */
     std::size_t memory_usage() const noexcept { return sizeof(vram_apple_indexes) + shards_.memory_usage(); }
 
     /**
-     *  Grows every shard ahead of @p config.capacity rows, split evenly over them - a hint, since
-     *  the shards, their key columns and the locator map all grow on demand; the first call freezes
-     *  the geometry.
+     *  Grows every shard ahead of @p config.capacity rows, split evenly over them, its keys with
+     *  it - a hint, since all of them grow on demand.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed.
      *  - @c unknown_kind_k A shard's kits cannot score its metric.
-     *  - @c config_mismatch_k A shard's dimensions are zero, its connectivity is not a power of
-     *    two, its geometry differs from the frozen one, or its neighbors live on another device.
-     *  - @c overflow_k A shard's share passes its ID space or its key column.
+     *  - @c config_mismatch_k The dimensions are zero, the connectivity is not a power of two,
+     *    @p config names another geometry, or a shard's neighbors live on another device.
+     *  - @c overflow_k A shard's share passes its ID space.
      *  - @c device_error_k A shard's device is not listed.
      *  - @c unsupported_k A shard's pipelines are narrower than the kernels need, or its device's
      *    registry lists no core count.
@@ -258,9 +257,8 @@ struct vram_apple_indexes {
      *  @brief One batch in flight across the device shards.
      *
      *  The executor and every shard's claim over the rows it takes are held for the plan's whole
-     *  life, one context per shard opened for the whole batch, every shard's storage and key column
-     *  grown to the rows it takes, and the locator seats claimed, so a step fails only on its
-     *  devices.
+     *  life, one context per shard opened for the whole batch, and every shard's storage and keys
+     *  grown to the rows it takes, so a step fails only on its devices.
      *
      *  Row @c t of the batch lands on shard @c (rotation+t) mod S. Steps run one after another on
      *  one host thread, each writing its rows' keys and launching the rows, every launch landing
@@ -276,10 +274,9 @@ struct vram_apple_indexes {
         /** An empty plan over @p allocator; only @ref plan_insert ever fills it. */
         explicit insert_plan_t(forkunion_allocator_t allocator) noexcept : traversals_(allocator), shares_(allocator) {}
         insert_plan_t(insert_plan_t&& other) noexcept
-            : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), seats_(other.seats_),
-              config_(other.config_), rows_(other.rows_), rotation_(other.rotation_), result_(other.result_),
-              status_(other.status_), streams_(std::move(other.streams_)),
-              owner_(std::exchange(other.owner_, nullptr)) {}
+            : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), config_(other.config_),
+              rows_(other.rows_), rotation_(other.rotation_), result_(other.result_), status_(other.status_),
+              streams_(std::move(other.streams_)), owner_(std::exchange(other.owner_, nullptr)) {}
         insert_plan_t& operator=(insert_plan_t&&) = delete;
         insert_plan_t(insert_plan_t const&) = delete;
         insert_plan_t& operator=(insert_plan_t const&) = delete;
@@ -355,6 +352,13 @@ struct vram_apple_indexes {
                 return {result, abandon_(status)};
             }
 
+            // Each shard's claim makes its holder the one writer of its map, and the keys file
+            // ahead of the commit, so the bracket stays as short as the watermark stores.
+            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
+                if (share_t const& share = shares_[shard]; share.launched)
+                    owner.shards_[shard].index->publish_keys_(
+                        {share.first_id, static_cast<node_id_t>(share.first_id + share.launched)});
+
             // Every shard's claim admits this batch alone, so no turn waits inside the commit.
             owner.shards_.begin_commit();
             for (std::size_t shard = 0; shard != shares_.size(); ++shard)
@@ -363,13 +367,6 @@ struct vram_apple_indexes {
                         failed(published) && succeeded(status))
                         status = published;
             owner.shards_.end_commit();
-
-            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
-                for (std::size_t row = 0; row != shares_[shard].launched; ++row) {
-                    node_id_t const node = static_cast<node_id_t>(shares_[shard].first_id + row);
-                    owner.shards_.locators().insert(seats_, owner.shards_[shard].keys[node],
-                                                    key_locator_t {static_cast<u32_t>(shard), node});
-                }
             owner_ = nullptr;
             result.new_size = owner.size();
             return {result, status};
@@ -390,8 +387,8 @@ struct vram_apple_indexes {
             std::size_t launched = 0;
         };
 
-        /** Writes the keys of the step's rows shard @p shard takes, from @p first on in strides of
-         *  the shard count, then launches those rows there. */
+        /** Launches the step's rows shard @p shard takes, from @p first on in strides of the shard
+         *  count, under their keys. */
         status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const shards = shares_.size(), count = rows.rows;
             std::size_t const taking = shards_t::entries_from(count, first, shards);
@@ -401,9 +398,8 @@ struct vram_apple_indexes {
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             shard_t& one = owner_->shards_[shard];
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
-            for (std::size_t taken = 0; taken != taking; ++taken)
-                one.keys[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * shards];
             expected<insert_result_t> const inserted = one.index->submit_insert_(
+                keys[nk::range(first, count, shards)],
                 {rows.row(first), taking, rows.columns, rows.stride * shards, rows.dtype}, first_node, {},
                 traversals_[shard], config_);
             if (!inserted) return inserted.status;
@@ -439,9 +435,6 @@ struct vram_apple_indexes {
         /** One part per shard, in placement order. */
         growing_buffer<share_t, forkunion_allocator_t> shares_;
 
-        /** The locator seats every row's key takes in @c finish. */
-        typename shards_t::locators_map_t::seats_t seats_ {};
-
         /** The per-shard insertion configuration, applied uniformly. */
         insert_config_t config_ {};
 
@@ -470,7 +463,7 @@ struct vram_apple_indexes {
     /**
      *  @brief Opens a batch of @p rows: takes the executor, opens one context per shard, claims
      *      every shard's rows from its watermark, grows every shard's storage and key column to
-     *      them, and claims the locator seats.
+     *      them,.
      *
      *  A shard with a batch, load, refine, absorb or save in flight refuses its claim, and the
      *  whole plan with @c contended_k. Every shard must fit its build launch before any row is
@@ -488,8 +481,8 @@ struct vram_apple_indexes {
      *    or @ref status keeps it.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seats pass the locator chunks, or a shard's rows pass its ceiling, its
-     *    ID space or its key column.
+     *  - @c overflow_k A shard's rows pass its ceiling, its
+     *    ID space.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
@@ -510,13 +503,6 @@ struct vram_apple_indexes {
         plan.streams_ = std::move(claim);
 
         std::size_t const shards = shards_.size();
-        if (status_t const readied = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(readied))
-            return {{}, readied};
-        for (shard_t const& one : shards_)
-            if (!one.index->build_scratch_fits()) return {{}, status_t::config_mismatch_k};
-        auto [seats, seat_status] = shards_.locators().claim(rows);
-        if (failed(seat_status)) return {{}, seat_status};
-        plan.seats_ = seats;
         // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
         plan.rotation_ = shards_.route(rows) % shards;
         if (failed(plan.shares_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
@@ -542,12 +528,16 @@ struct vram_apple_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             std::size_t const claimed_entries = plan.shares_[shard].first_id + plan.shares_[shard].rows;
             if (!plan.shares_[shard].rows) continue;
-            reserve_capacity_t const grown {claimed_entries, static_cast<connectivity_t>(connectivity()), dimensions()};
+            reserve_capacity_t grown {};
+            grown.capacity = claimed_entries;
             if (status_t const reserved = shards_[shard].index->reserve(grown).status; failed(reserved))
                 return {{}, reserved};
-            if (status_t const covered = shards_[shard].keys.cover(claimed_entries); failed(covered))
-                return {{}, covered};
         }
+        // Every shard grew, binding its pipelines, so the contexts size for what its walks hold.
+        if (status_t const readied = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(readied))
+            return {{}, readied};
+        for (shard_t const& one : shards_)
+            if (!one.index->build_scratch_fits()) return {{}, status_t::config_mismatch_k};
         return {std::move(plan), status_t::success_k};
     }
 
@@ -574,8 +564,8 @@ struct vram_apple_indexes {
      *  - @c uninitialized_k The index has no shards.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seats pass the locator chunks, or a shard's rows pass its ceiling, its
-     *    ID space or its key column.
+     *  - @c overflow_k A shard's rows pass its ceiling, its
+     *    ID space.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status keeps
      *    it.
      *  - @c cancelled_k The index keeps it, as @ref status says.
@@ -603,8 +593,7 @@ struct vram_apple_indexes {
      *  - @c uninitialized_k The index has no shards.
      *  - @c contended_k The index is sealed, another call holds the @p executor, or a shard has a
      *    batch or load in flight or its claim word closed.
-     *  - @c overflow_k The seat passes the locator chunks, or a shard's rows pass its ceiling, its
-     *    ID space or its key column.
+     *  - @c overflow_k A shard's rows pass its ceiling or its ID space.
      *  - @c cancelled_k The index keeps it, as @ref status says.
      */
     expected<insert_result_t> insert(key_t const& key, vector_view_t new_vector, executor_t& executor,
@@ -672,8 +661,7 @@ struct vram_apple_indexes {
          *    donor's nodes never land, or @ref status keeps it.
          *  - @c contended_k Another call holds the @p executor or a donor's gate, or a shard has a
          *    batch or load in flight.
-         *  - @c overflow_k The landed rows pass a shard's ceiling or key column, or the locator
-         *    chunks.
+         *  - @c overflow_k The landed rows pass a shard's ceiling or key column.
          *  - @c unsupported_k A shard's device lacks what the kernels need, as its @c reserve says.
          *  - @c unsupported_layout_k The index keeps it, as @ref status says.
          */
@@ -894,12 +882,12 @@ struct vram_apple_indexes {
      *      device on ties, with its edges rebased and its keys beside it, as a part of its own.
      *
      *  Each donor lands through one plan that does every fallible thing first: the donor's gate, a
-     *  load claiming all the rows each receiving shard takes, the key slots and the locator seats.
-     *  A donor shard then crosses as one host copy per column, its keys beside them; every part
-     *  lands before any shard publishes, and only then do the keys resolve. The donor then forgets
-     *  its rows in place inside its window, keeping its shards and their storage, its slot nulls,
-     *  it stays closed and sealed, consumed, and its shards land among the receiving shards' parts
-     *  in the plan, so at most one donor's nodes are ever held twice.
+     *  load claiming all the rows each receiving shard takes. A donor shard then crosses as one
+     *  host copy per column, its keys beside them; every part lands before any shard publishes, and
+     *  each shard's load files its keys just before its watermark turns. The donor then forgets its
+     *  rows in place inside its window, keeping its shards and their storage, its slot nulls, it
+     *  stays closed and sealed, consumed, and its shards land among the receiving shards' parts in
+     *  the plan, so at most one donor's nodes are ever held twice.
      *
      *  Once the last donor landed, the plan's re-selection walks every shard across the parts the
      *  landings appended, round by round; a cancel pauses only that walk. This index and every
@@ -936,17 +924,11 @@ struct vram_apple_indexes {
         if (!shards) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         for (vram_apple_indexes* donor : donors) {
-            if (!donor || donor == this || donor->kernel() != kernel()) return {{}, status_t::config_mismatch_k};
+            if (!donor || donor == this || donor->kernel() != kernel() || !(donor->geometry() == geometry()))
+                return {{}, status_t::config_mismatch_k};
             if (status_t const kept = donor->status(); failed(kept)) return {{}, kept};
             if (status_t const paired = fanout_t::pairs_with(donor->shards_, executor); failed(paired))
                 return {{}, paired};
-        }
-        vram_apple_indexes const* shaped = capacity() ? this : nullptr;
-        for (vram_apple_indexes* donor : donors) {
-            if (!donor->capacity()) continue;
-            if (!shaped) shaped = donor;
-            else if (donor->dimensions() != shaped->dimensions() || donor->connectivity() != shaped->connectivity())
-                return {{}, status_t::config_mismatch_k};
         }
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return {{}, paired};
         if (status_t const closed = close_gated_(); failed(closed)) return {{}, closed};
@@ -1005,7 +987,7 @@ struct vram_apple_indexes {
      *  - @c unsupported_k A donor shard past @ref shard_capacity, or a shard's device lacks what
      *    the kernels need, as its @c reserve says.
      *  - @c overflow_k A donor shard no shard has room for, or the landed rows pass a shard's
-     *    ceiling or key column or the locator chunks.
+     *    ceiling.
      *  - @c unsupported_layout_k This index or a donor keeps it, as its @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
@@ -1032,7 +1014,7 @@ struct vram_apple_indexes {
      *  - @c unsupported_k A shard of @p donor past @ref shard_capacity, or a shard's device lacks
      *    what the kernels need, as its @c reserve says.
      *  - @c overflow_k A shard of @p donor no shard has room for, or the landed rows pass a
-     *    shard's ceiling or key column or the locator chunks.
+     *    shard's ceiling.
      *  - @c unsupported_layout_k This index or @p donor keeps it, as its @ref status says.
      */
     expected<refine_result_t> absorb(vram_apple_indexes& donor, executor_t& executor,
@@ -1347,13 +1329,14 @@ struct vram_apple_indexes {
                     nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
                                                                                        nk::slice);
                     std::span<u32_t> const scored_counts = shard_counts(shard);
+                    typename index_t::keyed_t const& shard_keys = shards_[shard].index->keys();
                     [[maybe_unused]] std::size_t const landed = shards_[shard].index->land_multiply_(
                         traversal, shard_ids, shard_products, scored_counts);
                     for (std::size_t row = 0; row != taking; ++row) {
                         std::size_t const kept = min_of(counts[first + row], wanted);
                         std::size_t const scored = scored_counts[row];
                         for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
-                            keys(first + row, kept + pair) = shards_[shard].keys[shard_ids(row, pair)];
+                            keys(first + row, kept + pair) = shard_keys[shard_ids(row, pair)];
                             products(first + row, kept + pair) = shard_products(row, pair);
                         }
                         counts[first + row] += scored;
@@ -1536,10 +1519,6 @@ struct vram_apple_indexes {
                                                                        std::size_t rows) noexcept {
             return shards[shard].index->plan_load(rows);
         }
-        static status_t land_keys(shards_t&, std::size_t, iota_view<std::size_t>,
-                                  typename index_t::load_plan_t const&) noexcept {
-            return status_t::success_k;
-        }
         static void end_save(shards_t& shards) noexcept { shards.reopen(); }
     };
 
@@ -1637,8 +1616,8 @@ struct vram_apple_indexes {
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
      *  - @c unsupported_k A shard reserving for the checkpoint finds its device lacking what the
      *    kernels need.
-     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound, a key
-     *    column or the locator map.
+     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound or a key
+     *    column.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     expected<load_plan_t> plan_load(std::string_view path, load_config_t const& config, executor_t& executor) noexcept {
@@ -1663,8 +1642,8 @@ struct vram_apple_indexes {
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
      *  - @c unsupported_k A shard reserving for the checkpoint finds its device lacking what the
      *    kernels need.
-     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound, a key
-     *    column or the locator map.
+     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound or a key
+     *    column.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     expected<load_plan_t> plan_load(bytes_view_t buffer, load_config_t const& config, executor_t& executor) noexcept {
@@ -1754,8 +1733,8 @@ struct vram_apple_indexes {
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
      *  - @c unsupported_k A shard reserving for the checkpoint finds its device lacking what the
      *    kernels need.
-     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound, a key
-     *    column or the locator map.
+     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound or a key
+     *    column.
      *  - @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
@@ -1792,8 +1771,8 @@ struct vram_apple_indexes {
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
      *  - @c unsupported_k A shard reserving for the checkpoint finds its device lacking what the
      *    kernels need.
-     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound, a key
-     *    column or the locator map.
+     *  - @c overflow_k The parts outnumber the shards, or a part passes a shard's bound or a key
+     *    column.
      *  - @c unsupported_layout_k The index keeps it, as @ref status says.
      */
     template <typename progress_type_ = dummy_progress_t>
@@ -1836,13 +1815,12 @@ struct vram_apple_indexes {
 
 #pragma region Lookups
 
-    /** Entries stored under @p key; a concurrent insertion can only make it under-report. Exact
-     *  without an epoch: a compaction swaps each locator whole, and a clear empties the map inside
-     *  its window. */
-    std::size_t count(key_t const& key) const noexcept { return shards_.locators().count(key); }
+    /** Entries stored under @p key across every shard, exact: the epoch covers the windows and the
+     *  commit sequence covers batches spanning shards, so a batch counts whole or not at all. */
+    std::size_t count(key_t const& key) const noexcept { return shards_.count(key); }
 
-    /** Whether at least one entry is stored under @p key. */
-    bool contains(key_t const& key) const noexcept { return shards_.locators().contains(key); }
+    /** Whether at least one entry is stored under @p key, under the same reads as @ref count. */
+    bool contains(key_t const& key) const noexcept { return shards_.contains(key); }
 
     /**
      *  @brief Copies up to @p wanted rows stored under @p key into @p vectors and reports the
@@ -1853,7 +1831,7 @@ struct vram_apple_indexes {
      *  unified memory, so the executor rides in the signature unused, as in the batched @ref count.
      */
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted, executor_t&) const noexcept {
-        return settled_([&]() noexcept { return get_(key, vectors, wanted); });
+        return shards_.read_until_settled([&]() noexcept { return get_(key, vectors, wanted); });
     }
 
     /**
@@ -1862,7 +1840,7 @@ struct vram_apple_indexes {
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
      *
-     *  The executor is unused, since the locator map lives on the host; it rides in the
+     *  The executor is unused, since every shard's key map lives on the host; it rides in the
      *  signature so a caller drives every residency alike.
      *
      *  @par Statuses:
@@ -1910,7 +1888,9 @@ struct vram_apple_indexes {
         return bracketed_([&]() noexcept {
             for (std::size_t position = 0; position != keys.size(); ++position) {
                 std::size_t const first = position * wanted;
-                entries[position] = get_(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+                entries[position] = shards_.read_committed([&]() noexcept {
+                    return get_(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+                });
             }
             return status_t::success_k;
         });
@@ -2081,9 +2061,9 @@ struct vram_apple_indexes {
                     // An absent match must never index a key column.
                     for (; live != landed_ids.size() && landed_ids[live] != node_id_unknown_k; ++live)
                         frame_[live] = scored_node_t {landed_ids[live], landed_distances[live]};
-                    counts[query] = merge_search_results(std::span<scored_node_t const> {frame_.data(), live},
-                                                         shards_[shard].keys, to_span(keys.row(query).as_vector()),
-                                                         to_span(distances.row(query).as_vector()), counts[query]);
+                    counts[query] = merge_search_results(
+                        std::span<scored_node_t const> {frame_.data(), live}, shards_[shard].index->keys(),
+                        to_span(keys.row(query).as_vector()), to_span(distances.row(query).as_vector()), counts[query]);
                 }
             };
             for (std::size_t& count : counts) count = 0;
@@ -2120,23 +2100,25 @@ struct vram_apple_indexes {
     /** One unreserved shard placed on the device of @p stream; null when the allocation fails. */
     std::unique_ptr<index_t> build_(metal_stream_t const& stream) const noexcept {
         metal_shared_allocator_t const allocator {stream};
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel(), allocator, allocator));
+        return std::unique_ptr<index_t>(new (std::nothrow)
+                                            index_t(kernel(), geometry_, allocator, allocator, shards_.allocator()));
     }
 
-    /** Up to @p wanted rows under @p key read in place from unified memory into @p vectors, and the
-     *  true total, under the caller's epoch: the body of both @ref get forms. */
+    /** Up to @p wanted rows under @p key read in place from unified memory into @p vectors, and
+     *  the true total, under the caller's epoch and commit sequence: the body of both @ref get
+     *  forms. */
     std::size_t get_(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
         std::size_t total = 0;
-        shards_.locators().find_each(key, [&](key_locator_t locator) noexcept {
-            if (total < wanted && total < vectors.extent(0)) [[maybe_unused]]
-                status_t const copied = shards_[locator.shard].index->vector(locator.node,
-                                                                             vectors.row(total).as_vector());
-            ++total;
-        });
+        for (shard_t const& one : shards_)
+            one.index->find_each(key, [&](node_id_t node) noexcept {
+                if (total < wanted && total < vectors.extent(0)) [[maybe_unused]]
+                    status_t const copied = one.index->vector(node, vectors.row(total).as_vector());
+                ++total;
+            });
         return total;
     }
 
-    /** Forgets every shard's rows in place, each keeping its storage, then every key's locators:
+    /** Forgets every shard's rows and keys in place, each keeping its storage:
      *  what a clear and an emptied donor become, inside their own window with every shard closed.
      *  */
     void clear_() noexcept {
@@ -2167,17 +2149,6 @@ struct vram_apple_indexes {
         else return {{}, status_t::contended_k};
     }
 
-    /** Runs the single-key lookup @p read until no destructive window overlapped it, since its
-     *  answer has no room for @c contended_k; every window ends without waiting on a reader. */
-    template <typename read_type_>
-    std::invoke_result_t<read_type_&> settled_(read_type_&& read) const noexcept {
-        while (true) {
-            u64_t const epoch = shards_.read_epoch();
-            std::invoke_result_t<read_type_&> result = read();
-            if (shards_.still_valid(epoch)) return result;
-        }
-    }
-
     /** Lands every row of @p donor where @p landings, one per donor shard, put it and consumes it,
      *  under both indexes' closed claim words and the executor's hold @p refining keeps: the
      *  donor's gate and every other fallible step first, then one host copy per column, one drain,
@@ -2190,18 +2161,11 @@ struct vram_apple_indexes {
         // The donor empties once its rows land, so its gate comes before anything a refusal undoes.
         unique_lock_t const emptying {donor.gate_, std::try_to_lock};
         if (!emptying) return status_t::contended_k;
-        if (!capacity())
-            if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
-                                                   donor.dimensions()})
-                                              .status;
-                failed(reserved))
-                return reserved;
 
         // Every shard claims all its rows first, so a failure before publication releases them all.
         std::size_t const donors = landings.size();
         growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {shards_.allocator()};
         if (failed(plans.reserve_exactly(shards))) return status_t::bad_alloc_k;
-        std::size_t landing = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
             for (std::size_t from = 0; from != donors; ++from)
@@ -2209,17 +2173,11 @@ struct vram_apple_indexes {
             auto [plan, status] = shards_[into].index->plan_load(rows);
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
-            if (status_t const covered = shards_[into].keys.cover(plans[into].base + rows); failed(covered))
-                return covered;
-            landing += rows;
         }
-        auto [seats, seat_status] = shards_.locators().claim(landing);
-        if (failed(seat_status)) return seat_status;
 
         // A refused copy still waits for those queued before it, whose rows go to the next claim.
         status_t queued = status_t::success_k;
         for (std::size_t into = 0; into != shards && succeeded(queued); ++into) {
-            shard_t& one = shards_[into];
             typename index_t::load_plan_t& plan = plans[into];
             node_id_t base = plan.base;
             for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
@@ -2230,19 +2188,16 @@ struct vram_apple_indexes {
                 typename index_t::load_plan_t::step_t step;
                 step.index_nodes = {base, base + part_rows};
                 step.source_nodes = {0, part_rows};
-                for (node_id_t row : step.source_nodes) one.keys[base + row] = part.keys[row];
                 queued = plan.load(step, *part.index, step.source_nodes);
                 base += part_rows;
             }
         }
         if (status_t const drained = executor.wait(); failed(queued) || failed(drained))
             return failed(queued) ? queued : drained;
-        for (typename index_t::load_plan_t& plan : plans)
+        for (typename index_t::load_plan_t& plan : plans) {
+            plan.publish_keys();
             if (status_t const published = plan.finish(); failed(published)) return published;
-        for (std::size_t into = 0; into != shards; ++into)
-            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                shards_.locators().insert(seats, shards_[into].keys[row],
-                                          key_locator_t {static_cast<u32_t>(into), row});
+        }
 
         // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
         shards_.record_parts(donor.shards_, landings, plans, refining.part_bases_.data(),
@@ -2331,6 +2286,9 @@ struct vram_apple_indexes {
 
     /** The metric every shard this index builds or accepts scores by. */
     nk_kernel_kind_t kernel_;
+
+    /** The dimensions and connectivity every shard keeps, fixed at construction. */
+    geometry_t geometry_ {};
 
     /** Shared by every mutator for one call, alone by every destructive window; never swapped. */
     alignas(default_alignment_k) shared_mutex_t gate_;

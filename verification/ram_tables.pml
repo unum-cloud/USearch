@@ -4,17 +4,20 @@
  *  @date September 11, 2026
  *  @brief `chunked_multimap`'s probes: three inserters and a prober over one published chunk.
  *
- *  The insert-only linear-probe multimap from `include/usearch/utilities/ram_tables.hpp`, whose
- *  slot states advance `empty` → `building` → the key's probe tag once, whose entries each take a
- *  seat and cover its chunk before any slot is touched, and whose readers walk the control bytes
- *  with acquire loads, wait-free. `ram_tables_growth.pml` covers the chunks a claim publishes. One
- *  published chunk of two seats, two slots and the constant terminator at position 2.
+ *  The insert-only linear-probe multimap from `include/usearch/utilities/ram_tables.hpp`. A claimed
+ *  insert takes a seat, covers its chunk and claims an empty slot `empty` → `building` → its key's
+ *  probe tag; a seated insert at seat = node is its chunk's one writer, so it peeks for an empty slot
+ *  and publishes the tag with no claim. Readers walk the control bytes with acquire loads,
+ *  wait-free. One published chunk of two seats, two slots and the constant terminator at position 2.
  *
  *  - Bound: no inserter probes past the terminator, and no insert lands past the published seats.
  *  - Visibility: the value a prober reads beside a matching key is that key's value.
  *  - Completeness, under `sc`: a key published before the prober started is found.
  *
  *  @verify pass sc,rc11,far
+ *  @verify pass sc,rc11,far seating=node
+ *  @verify fail sc seating=node writers=2: two seated writers in one chunk both peek the same empty
+ *      slot, and the prober reads one key beside the other's value
  *  @verify fail rc11 publish_order=order_relaxed: without it, the prober reads the new key beside the
  *      slot's initial value
  *  @verify fail rc11 probe_order=order_relaxed: without it, the prober reads the new key beside the
@@ -45,6 +48,8 @@
 #define key_a 1
 #define key_b 2
 #define key_carried(t) ((t) == 2 -> key_b : key_a)
+#define key_seated(entry) ((entry) == 0 -> key_a : key_b)
+#define entries 2
 #define value_for(k) (10 + (k))
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
@@ -58,13 +63,34 @@
 #define cover_refusal true
 #endif
 
+// The inserts: `claimed` takes a seat and claims its slot, `node` writes at seat = node as the chunk's
+// one writer, which the turn holder is; `writers` seated inserters split the two keys between them.
+#define claimed 0
+#define node 1
+#ifndef seating
+#define seating claimed
+#endif
+#if seating != claimed && seating != node
+#error "seating is claimed or node"
+#endif
+#ifndef writers
+#define writers 1
+#endif
+#if writers < 1 || writers > 2
+#error "writers is 1 or 2"
+#endif
+
 bool probing;                // the prober has read its first state
 bool published_before_probe; // key A was published before the prober read its first state
 
 proctype inserter(byte t) {
-    byte chain;
+    byte chain, entry;
     int observed, expected, seen;
     bool succeeded;
+    if
+    :: seating == node -> entry = t; goto seated
+    :: else
+    fi;
     // the seat, then its cover, which the directory's last chunk refuses past: `chunked_multimap::claim`
     read_modify_write(t, claimed_seats, order_relaxed, observed, observed + 1);
     if
@@ -94,6 +120,32 @@ claimed_slot:
         store(t, state(chain), publish_order, tag);
         if :: key_carried(t) == key_a && !probing -> published_before_probe = true :: else fi
     };
+    goto refused;
+seated:
+    // the seated insert, each writer's entries in turn: `insert(seat, key, value)`, whose chunk the
+    // grower covered before the seat's node was dispensed
+    if
+    :: t >= writers || entry >= entries -> goto refused
+    :: else
+    fi;
+    chain = 0;
+peek:
+    // relaxed peeks until an empty slot, which no other writer of this chunk can take meanwhile
+    assert(chain < terminator);
+    load(t, state(chain), order_relaxed, seen);
+    if
+    :: seen != empty -> chain++; goto peek
+    :: else
+    fi;
+    // the slot plain, then the tag with the release
+    store(t, key(chain), order_relaxed, key_seated(entry));
+    store(t, value(chain), order_relaxed, value_for(key_seated(entry)));
+    atomic {
+        store(t, state(chain), publish_order, tag);
+        if :: key_seated(entry) == key_a && !probing -> published_before_probe = true :: else fi
+    };
+    entry = entry + writers;
+    goto seated;
 refused:
     skip
 }

@@ -1111,20 +1111,6 @@ inline constexpr dense_home_t home_of = std::is_same_v<executor_type_, forkunion
                                         : std::is_same_v<executor_type_, hip_executor_t>  ? dense_home_t::vram_amd_k
                                                                                           : dense_home_t::vram_apple_k;
 
-/** The class whose unit carries cubins for an NVIDIA device of compute capability @p arch: any
- *  generation without a class of its own runs the Ampere unit, natively on 8.x and through its PTX
- *  past that, and one older than Ampere runs none. */
-constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
-    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
-    switch (arch / 100) {
-    case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
-    case 9: return gpu_class_t::nvidia_hopper_k;
-    case 10: return gpu_class_t::nvidia_blackwell_k;
-    case 12: return gpu_class_t::nvidia_blackwellrtx_k;
-    default: return gpu_class_t::nvidia_ampere_k;
-    }
-}
-
 /** The class whose kernels run on an AMD GPU of @c gfx version @p major. @p minor: 9.4 is MI300's
  *  @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251; any other
  *  has no code object to load. */
@@ -1149,8 +1135,7 @@ constexpr gpu_class_t apple_class_of(u32_t family) noexcept {
 constexpr gpu_class_t gpu_class_of(gpu_device_t const& device) noexcept {
     switch (device.vendor) {
     case gpu_vendor_t::nvidia_k:
-        return nvidia_class_of(
-            static_cast<cuda_arch_t>(device.architecture_major * 100 + device.architecture_minor * 10));
+        return nvidia_class_of(cuda_arch_of(device.architecture_major, device.architecture_minor));
     case gpu_vendor_t::amd_k: return amd_class_of(device.architecture_major, device.architecture_minor);
     case gpu_vendor_t::apple_k: return apple_class_of(device.architecture_major);
     default: return gpu_class_t::unknown_k;

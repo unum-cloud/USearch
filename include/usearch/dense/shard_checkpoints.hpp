@@ -15,9 +15,11 @@
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part lands on, placed or
  *    opened;
  *  - <tt>open_shard_load(shards, shard, rows)</tt>, one shard's own load at its watermark;
- *  - <tt>land_keys(shards, shard, rows, load_plan)</tt>, once a load's keys reached the host
- *    column;
  *  - <tt>end_save(shards)</tt>, once a save finished or died.
+ *
+ *  Every shard keeps its own keys: a save reads them through the shard's <tt>keys()</tt>, and a
+ *  load lands them with each step's rows through its shard plan's <tt>load</tt>, files them
+ *  through <tt>publish_keys</tt>, one writer per shard, and publishes them with the rows.
  *
  *  Checkpoints are written positionally with every header last, so a failed save reads as absent.
  */
@@ -36,7 +38,6 @@
 #include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes` - the checkpoints' bytes
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' catalogs
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the plans' placement
-#include "usearch/utilities/ram_shards.hpp"        // `host_keys` - a shard's host key column
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths, manifests & catalogs
 #include "usearch/dense/types.hpp"
 
@@ -194,7 +195,7 @@ expected<safegraphs_header_t> shard_monolith_header(shards_type_ const& shards, 
  *  The row counts are read now, so a buffer sized here fits a save no row lands before.
  *
  *  @par Statuses:
- *  - @c uninitialized_k No shard is placed, or none froze its geometry.
+ *  - @c uninitialized_k No shard is placed.
  *  - @c config_mismatch_k @p config does not validate.
  */
 template <typename shards_type_>
@@ -288,8 +289,7 @@ struct [[nodiscard]] shard_save_plan {
      *  refused opening ends the save there.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed or froze its geometry, or on VRAM a shard was never
-     *    reserved.
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
      *  - @c unknown_kind_k The stored scalar has no interchange dtype.
      *  - @c config_mismatch_k @p config does not validate, a shard's columns cannot hold its rows,
      *    or on VRAM the save is not certified exclusive.
@@ -314,8 +314,7 @@ struct [[nodiscard]] shard_save_plan {
      *  @c overflow_k.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed or froze its geometry, or on VRAM a shard was never
-     *    reserved.
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
      *  - @c unknown_kind_k The stored scalar has no interchange dtype.
      *  - @c config_mismatch_k @p config does not validate, a shard's columns cannot hold its rows,
      *    or on VRAM the save is not certified exclusive.
@@ -408,8 +407,8 @@ struct [[nodiscard]] shard_save_plan {
             bytes_span_t const key_rows = header.rows_of(target, header.key, 0, nodes);
             std::size_t written = 0;
             status_t wrote = status_t::success_k;
-            host_keys((*shards_)[retired + part].keys)
-                .for_each_span({0, nodes}, [&](std::span<key_t const> run) noexcept {
+            (*shards_)[retired + part].index->keys().column().for_each_span(
+                {0, nodes}, [&](std::span<key_t const> run) noexcept {
                     if (succeeded(wrote))
                         wrote = copy_bytes(key_rows.subspan(written, run.size_bytes()),
                                            bytes_of(run.data(), run.size()));
@@ -611,7 +610,6 @@ template <typename shards_type_, typename residency_type_>
 struct [[nodiscard]] shard_load_plan {
     using index_t = typename shards_type_::index_t;
     using key_t = typename shards_type_::key_t;
-    using key_locator_t = typename shards_type_::key_locator_t;
 
     /** One step of one shard: where it lands, which part it reads, and that part's own ID space
      *  alongside the shard plan's step. */
@@ -637,7 +635,7 @@ struct [[nodiscard]] shard_load_plan {
         : mappings_(allocator), parts_(allocator), extra_columns_(allocator), plans_(allocator) {}
     shard_load_plan(shard_load_plan&& other) noexcept
         : mappings_(std::move(other.mappings_)), parts_(std::move(other.parts_)),
-          extra_columns_(std::move(other.extra_columns_)), seats_(other.seats_), plans_(std::move(other.plans_)),
+          extra_columns_(std::move(other.extra_columns_)), plans_(std::move(other.plans_)),
           residency_(std::move(other.residency_)), shards_(std::exchange(other.shards_, nullptr)) {}
     shard_load_plan& operator=(shard_load_plan&&) = delete;
     shard_load_plan(shard_load_plan const&) = delete;
@@ -660,7 +658,7 @@ struct [[nodiscard]] shard_load_plan {
      *  death reopens them.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed, or on VRAM a shard was never reserved.
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
      *  - @c contended_k A call holds the gate, a batch or plan holds a shard's claims, or on RAM a
      *    dispensed batch has yet to publish.
      *  - @c config_mismatch_k The shards hold entries, or the checkpoint's geometry, dtypes or
@@ -669,7 +667,7 @@ struct [[nodiscard]] shard_load_plan {
      *  - @c malformed_k The checkpoint lists no part, a part or its header does not parse, or its
      *    connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map.
+     *  - @c overflow_k A part passes a shard's bound.
      */
     static expected<shard_load_plan> open(shards_type_& shards, residency_type_ residency, std::string_view path,
                                           load_config_t const& config) noexcept {
@@ -689,7 +687,7 @@ struct [[nodiscard]] shard_load_plan {
      *  the buffer and the parts it lists.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed, or on VRAM a shard was never reserved.
+     *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
      *  - @c contended_k A call holds the gate, a batch or plan holds a shard's claims, or on RAM a
      *    dispensed batch has yet to publish.
      *  - @c config_mismatch_k The shards hold entries, or the checkpoint's geometry, dtypes or
@@ -697,7 +695,7 @@ struct [[nodiscard]] shard_load_plan {
      *  - @c malformed_k The manifest lists no part, a part or its header does not parse, or its
      *    connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
-     *  - @c overflow_k A part passes a shard's bound, a key column or the locator map.
+     *  - @c overflow_k A part passes a shard's bound.
      */
     static expected<shard_load_plan> open(shards_type_& shards, residency_type_ residency, bytes_view_t buffer,
                                           load_config_t const& config) noexcept {
@@ -752,8 +750,8 @@ struct [[nodiscard]] shard_load_plan {
     }
 
     /**
-     *  Lands step @p step: its part's own columns, under that part's ID space, through the shard's
-     *  own plan.
+     *  Lands step @p step: its part's own columns, under that part's ID space, and its rows' keys,
+     *  widened to the shards' key type, through the shard's own plan.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent, or on NVIDIA or AMD its bounce was never
@@ -769,43 +767,34 @@ struct [[nodiscard]] shard_load_plan {
             part.header.data_of(part.monolith, part.header.value),
             part.header.data_of(part.monolith, part.header.neighbors),
             norms_column_of(part.header, part.monolith, shard_norms_dtype(*shards_))};
-        return plans_[step.shard].load(step.inner, columns, step.source_range);
+        std::size_t const stored_bytes = part.header.key.row_bytes();
+        bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key, 0, part.nodes);
+        return plans_[step.shard].load(step.inner, columns, step.source_range, [&](node_id_t row) noexcept {
+            return safegraphs_widened_key<key_t>(part_keys.data() + row * stored_bytes, part.header.key.dtype);
+        });
     }
 
     /**
-     *  @brief Publishes the restored graph: every shard's keys land at its base and enter the
-     *      locator map, then every shard plan publishes - the order an insert keeps, so a search
-     *      never reaches a published row without its key.
+     *  @brief Publishes the restored graph: every shard files the keys its steps landed, its map's
+     *      one writer, then publishes them with its rows - the order an insert keeps, so a lookup
+     *      finds a key exactly when a search reaches its row.
      *
      *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k reports
      *      @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
-     *  - @c malformed_k A part's key column disagrees with its rows.
      *  - @c config_mismatch_k A shard's steps never landed all its rows.
-     *  - @c overflow_k On NVIDIA or AMD, a device key column cannot cover the rows.
+     *  - @c device_error_k On NVIDIA or AMD, a shard's keys never reached the device.
      *  - @c unsupported_k or @c unsupported_layout_k On NVIDIA or AMD, a shard keeps this earlier
      *    refusal.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t finish(progress_type_&& on_loaded = {}) noexcept {
         if (!shards_) return status_t::uninitialized_k;
-        std::size_t const retired = shards_->retired_shards();
         for (std::size_t shard = 0; shard != plans_.size(); ++shard) {
-            std::size_t const first = plans_[shard].base;
-            if (shard >= retired && shard - retired < parts_.size()) {
-                safegraphs_catalog_part_t const& part = parts_[shard - retired];
-                std::size_t const rows = part.nodes, stored_bytes = part.header.key.row_bytes();
-                bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key, 0, rows);
-                if (part_keys.size() != rows * stored_bytes) return status_t::malformed_k;
-                auto const key_of = [&](std::size_t row) noexcept {
-                    return safegraphs_widened_key<key_t>(part_keys.data() + row * stored_bytes, part.header.key.dtype);
-                };
-                if (status_t const landed = land_rows_(shard, {first, first + rows}, key_of); failed(landed))
-                    return landed;
-            }
             // Every plan finishes, an empty one included, since finishing releases the claim.
+            plans_[shard].publish_keys();
             if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
         }
         for (std::size_t shard = 0; shard != plans_.size(); ++shard)
@@ -827,28 +816,8 @@ struct [[nodiscard]] shard_load_plan {
         return shards.entries() ? status_t::config_mismatch_k : status_t::success_k;
     }
 
-    /** Lands the keys of @p rows, appended to shard @p shard, row @c r taking @p key_of (r):
-     *  written to the host column, handed to the residency, and only then entered into the
-     *  locator map, so a failed landing leaves no key resolving to rows a later insert reuses. */
-    template <typename key_of_type_>
-    status_t land_rows_(std::size_t shard, iota_view<std::size_t> rows, key_of_type_& key_of) noexcept {
-        shards_type_& shards = *shards_;
-        typename shards_type_::shard_t& one = shards[shard];
-        auto& keys = host_keys(one.keys);
-        std::size_t written = 0;
-        keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
-            for (key_t& key : run) key = key_of(written++);
-        });
-        if (status_t const landed = residency_.land_keys(shards, shard, rows, plans_[shard]); failed(landed))
-            return landed;
-        for (std::size_t row = rows.first; row != rows.bound; ++row)
-            shards.locators().insert(seats_, keys[row],
-                                     key_locator_t {static_cast<u32_t>(shard), static_cast<node_id_t>(row)});
-        return status_t::success_k;
-    }
-
     /** Whether @p part can land on the shards: three regular columns of their own dtypes, its keys
-     *  no wider than theirs, the metric it names agreeing with theirs, the geometry @p first froze,
+     *  no wider than theirs, the metric it names agreeing with theirs, the geometry @p first holds,
      *  and every column describing the same rows. */
     status_t vetted_part_(safegraphs_catalog_part_t const& part, safegraphs_header_t const& first) const noexcept {
         safegraphs_header_t const& header = part.header;
@@ -861,7 +830,8 @@ struct [[nodiscard]] shard_load_plan {
             header.neighbors.shape != first.neighbors.shape)
             return status_t::config_mismatch_k;
         if (header.key.nodes() != part.nodes || header.value.nodes() != part.nodes ||
-            header.neighbors.nodes() != part.nodes)
+            header.neighbors.nodes() != part.nodes ||
+            header.rows_of(part.monolith, header.key, 0, part.nodes).size() != part.nodes * header.key.row_bytes())
             return status_t::malformed_k;
         return status_t::success_k;
     }
@@ -869,7 +839,7 @@ struct [[nodiscard]] shard_load_plan {
     /**
      *  @brief Vets the plan's parts, opens the shard each one lands on through the residency,
      *      reserves every shard for its own part's rows or its share of @p config 's, and opens one
-     *      load plan per shard over them, covering their keys and claiming their locator seats.
+     *      load plan per shard over them.
      *
      *  Part @c p lands on live shard @c p whole, so the flat steps are the intersections of its
      *  rows with the chunks or batches of that shard's plan. A part past the shard bound answers
@@ -892,18 +862,14 @@ struct [[nodiscard]] shard_load_plan {
             total += part.nodes;
         }
 
-        // The frozen geometry, when there is one, must match the parts'.
-        if (shards.capacity() &&
-            (dimensions != shards[0].index->dimensions() || connectivity != shards[0].index->connectivity()))
+        // The shards keep the geometry they were built with, which must match the parts'.
+        if (dimensions != shards[0].index->dimensions() || connectivity != shards[0].index->connectivity())
             return status_t::config_mismatch_k;
         if (!shards.capacity() && !total && !config.capacity) return status_t::success_k;
 
-        // The geometry freezes on the shards present, the shards the parts open past them are built
-        // like the rest, and each shard grows ahead of its own part's rows or its share of the
-        // config's, under the bound.
+        // The shards the parts open past the present ones are built like the rest, and each shard
+        // grows ahead of its own part's rows or its share of the config's, under the bound.
         typename index_t::reserve_capacity_t per_shard {};
-        per_shard.connectivity = connectivity;
-        per_shard.dimensions = dimensions;
         per_shard.ceiling = bound;
         for (std::size_t shard = 0; shard != shards.size(); ++shard)
             if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
@@ -918,8 +884,6 @@ struct [[nodiscard]] shard_load_plan {
             if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
                 return reserved;
         }
-        if (status_t const indexed = shards.locators().reserve(max_of(total, config.capacity)); failed(indexed))
-            return indexed;
 
         if (failed(plans_.reserve_exactly(shards_count))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards_count; ++shard) {
@@ -928,13 +892,7 @@ struct [[nodiscard]] shard_load_plan {
             auto [inner, status] = residency_.open_shard_load(shards, shard, rows);
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
-            if (status_t const covered = host_keys(shards[shard].keys).cover(plans_[shard].base + plans_[shard].rows);
-                failed(covered))
-                return covered;
         }
-        auto [seats, seat_status] = shards.locators().claim(rows());
-        if (failed(seat_status)) return seat_status;
-        seats_ = seats;
         return status_t::success_k;
     }
 
@@ -972,10 +930,6 @@ struct [[nodiscard]] shard_load_plan {
 
     /** Every part's producer columns, which the parts' headers view. */
     growing_buffer<safegraphs_named_column_t, forkunion_allocator_t> extra_columns_;
-
-    /** The locator seats every landed key takes, claimed at opening, so @c finish never
-     *  allocates. */
-    typename shards_type_::locators_map_t::seats_t seats_ {};
 
     /** One plan per shard, in placement order. */
     growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans_;

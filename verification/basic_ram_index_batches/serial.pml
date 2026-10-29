@@ -8,10 +8,10 @@
  *  `basic::ram_index::insert` from `include/usearch/basic/ram_index.hpp`. Two inserters bring two
  *  rows each. One add dispenses an inserter's range, then each row walks, writes its value and
  *  neighbors plain, and sets its `wired_k` bit with a release; one turn from the range's first ID
- *  to its end publishes both rows, and the keys land after it.
+ *  to its end files both keys and then publishes both rows.
  *
  *  - The searcher acquires the watermark and reads every row below it wired and whole.
- *  - Under `sc` it also finds no key naming a row at or above the watermark.
+ *  - The finder counts exactly the rows below the watermark it acquired, each one whole.
  *
  *  @verify pass sc,rc11
  *  @verify fail sc,rc11 range_turn=false: a turn per row lets the searcher see half a batch
@@ -21,11 +21,11 @@
  *      unwritten
  *  @verify fail rc11 admit_order=order_relaxed: relaxed, the walk reads the bit set and the row
  *      unwritten
- *  @verify fail sc keys_after_turn=false: before it, a lookup names a row the watermark does not
- *      cover
+ *  @verify fail sc,rc11 keys_in_turn=false: filed past the release, the finder acquires the watermark
+ *      past a row whose key is not filed yet, and counts one short
  */
-#define thread_count 3
-#define location_count 10
+#define thread_count 4
+#define location_count 15
 #define history_depth 5
 #include <basic_ram_index_batches/protocol.pml>
 
@@ -33,4 +33,6 @@ proctype inserter(byte t) { insert_batch(t) }
 
 proctype searcher(byte t) { search(t) }
 
-init { atomic { run inserter(0); run inserter(1); run searcher(2) } }
+proctype finder(byte t) { find_each(t) }
+
+init { atomic { run inserter(0); run inserter(1); run searcher(2); run finder(3) } }

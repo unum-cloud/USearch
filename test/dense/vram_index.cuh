@@ -45,22 +45,24 @@ inline constexpr bool vram_compiled = (vendor_ == gpu_vendor_t::nvidia_k && USEA
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
+    using key_t = typename index_type_::key_t;
     allocation_ledger_t ledger;
     std::size_t failures = 0;
     {
-        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        std::size_t const dimensions = 8 * 2048 / scalar_t::bits_per_dimension();
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger, {dimensions, connectivity_16_k});
         index_type_& index = *index_ptr;
         typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
-        std::size_t const dimensions = 8 * 2048 / scalar_t::bits_per_dimension();
         auto const vectors = make_sketched_vectors<scalar_t>(dense_growth_nodes_k, dimensions,
                                                              stream_key(seed, "wide"));
-        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
-                           status_t::success_k);
+        std::vector<key_t> keys(dense_growth_nodes_k);
+        for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = dense_key<key_t>(1 + row);
+        failures += expect(index.reserve({dense_growth_nodes_k}).status == status_t::success_k);
         // Apple keeps every builder's scratch in the arena, so only shared-memory devices can miss,
         // even caching no more than a full neighbor list and the node's own.
         if constexpr (requires { index.device_specs().shared_memory_per_block_bytes; })
             failures += expect(!index.build_scratch_fits(index.build_scratch_bytes_per_warp(connectivity_16_k + 1)));
-        failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
+        failures += expect(index.insert(to_span(keys), vectors.view(), {}, context).status == status_t::success_k);
         failures += expect_eq(index.size(), dense_growth_nodes_k);
         auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0 &&
@@ -76,25 +78,44 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
 
 /** Builds and refines the growth set at an expansion past the widest register candidates of 32
  *  lanes, so both walk the arena frontier's rung: no tail entry drops, the walks still find the
- *  entries, and the ledger must balance. */
+ *  entries, and the ledger must balance. Nothing reserves, so two batches grow the index on demand,
+ *  the first binding the device, and every key counts exactly once, its first node its own. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
+    using key_t = typename index_type_::key_t;
     allocation_ledger_t ledger;
     std::size_t failures = 0;
     {
-        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger, {dimensions, connectivity_16_k});
         index_type_& index = *index_ptr;
         typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
-        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
         auto const vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dimensions, stream_key(seed, "broad"));
-        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
-                           status_t::success_k);
+        std::vector<key_t> keys(dense_growth_nodes_k);
+        for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = dense_key<key_t>(1 + row);
         typename index_type_::insert_config_t broad_insert;
         broad_insert.expansion_factor = 1024;
-        auto const [inserted, inserted_status] = index.insert(vectors.view(), {}, context, broad_insert);
+        std::size_t const half = dense_growth_nodes_k / 2;
+        failures += expect_eq(
+            index.insert({keys.data(), half}, vectors(nk::range(0, half), nk::slice), {}, context, broad_insert).status,
+            status_t::success_k);
+        auto const [inserted, inserted_status] = index.insert({keys.data() + half, keys.size() - half},
+                                                              vectors(nk::range(half, keys.size()), nk::slice), {},
+                                                              context, broad_insert);
         failures += expect(inserted_status == status_t::success_k && inserted.tail_compactions == 0 &&
                            inserted.tail_dropped == 0);
+        failures += expect_eq(index.size(), dense_growth_nodes_k);
+        std::size_t miscounted = 0, mislabeled = 0;
+        for (std::size_t row = 0; row != keys.size(); ++row) {
+            miscounted += index.count(keys[row]) != 1;
+            mislabeled += index.key_of(static_cast<node_id_t>(row)).value != keys[row];
+        }
+        failures += expect_eq(miscounted, 0u);
+        failures += expect_eq(mislabeled, 0u);
+        failures += expect(!index.contains(dense_key<key_t>(0)));
+        failures += expect_eq(index.key_of(static_cast<node_id_t>(dense_growth_nodes_k)).status,
+                              status_t::config_mismatch_k);
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         typename index_type_::refine_config_t broad_refine;

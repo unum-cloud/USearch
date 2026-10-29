@@ -16,11 +16,12 @@
 
 #include <bit>         // `std::bit_width` - a refine's rounds, `std::has_single_bit` - the connectivity
 #include <bitset>      // `std::bitset` - the devices a plural shares the storage with
+#include <functional>  // `std::hash` - the default hash of a key
 #include <limits>      // `std::numeric_limits` - the unit-RMS import's epsilon
 #include <memory>      // `std::unique_ptr` - an audit's landing
 #include <span>        // `std::span` - the parts' bases, the counts of a graph product
 #include <type_traits> // `std::is_same_v`
-#include <utility>     // `std::exchange` - a moved-from plan forgets its index
+#include <utility>     // `std::exchange` - a moved-from plan forgets its index, `std::forward`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
 #include <forkunion/types.hpp>   // `fu::standard_yield_t` - the watermark's turn
@@ -32,6 +33,8 @@
 #include <numkong/vector.hpp>
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator_t` - the host key column's placement
+#include "usearch/utilities/ram_tables.hpp"  // `keyed_nodes` - every node's key and every key's nodes
 #include "usearch/utilities/vram_device.hpp" // `vram_kernel_t` - the kernels the core launches and sizes grids for
 #include "usearch/utilities/vram_walks.hpp"  // `gpu_arena_shape_t`, `gpu_candidate_slots`, `vram_bitset_t`
 #include "usearch/dense/types.hpp"
@@ -419,12 +422,17 @@ struct vram_refine_passes_t {
  *
  *  Speaks the RAM-resident dense index's verbs, with two divergences: a batch's IDs are one
  *  contiguous range, and its rows publish unordered on the device, turning visible to searches a
- *  whole batch at a time. The first successful @c reserve freezes the geometry and the
- *  virtual-address ceiling; physical slabs map on demand, and fresh neighbors are sentinel-filled
- *  before any ID covering them can be assigned. The storage grows only under the one claim the
- *  claim word admits at a time, and the claim word, the filled extent, the watermark and the kept
- *  status are the only mutable host state; the published-row count is device memory no host
- *  thread dereferences.
+ *  whole batch at a time. The geometry is fixed at construction, and the first growth, a
+ *  @c reserve or a claim, binds the device and the virtual-address ceiling; physical slabs map on
+ *  demand, and fresh neighbors are sentinel-filled before any ID covering them can be assigned.
+ *  The storage grows only under the one claim the claim word admits at a time, and the claim word,
+ *  the filled extent, the watermark and the kept status are the only mutable host state; the
+ *  published-row count is device memory no host thread dereferences.
+ *
+ *  Every node's key lives twice: in a host @c keyed_nodes, which also files every key's nodes, and
+ *  on the device, where a walk resolves its nodes to keys. The claim holder writes both columns
+ *  ahead of its launch and files the keys after its drain, so the map has one writer and a reader
+ *  filtering by the watermark it acquired finds a key exactly when its node is visible.
  *
  *  @tparam vendor_type_ The vendor's runtime types and calls, @c cuda_vendor_t or @c hip_vendor_t.
  *  @tparam kernels_type_ The vendor's kernels, held as a member: they load and launch the kernels,
@@ -435,15 +443,20 @@ struct vram_refine_passes_t {
  *  @tparam vectors_allocator_type_ The vectors matrix and norms column backend, on the device.
  *  @tparam neighbors_allocator_type_ The neighbors matrix backend, on the same device.
  *  @tparam traversals_allocator_type_ The traversal contexts' scratch backend.
+ *  @tparam key_type_ The caller-visible identity of every node.
+ *  @tparam key_hash_type_ The hash the key map files keys by.
  */
-template <                               //
-    typename vendor_type_,               //
-    typename kernels_type_,              //
-    nk_dtype_t vector_dtype_,            //
-    typename cache_hints_type_,          //
-    typename vectors_allocator_type_,    //
-    typename neighbors_allocator_type_,  //
-    typename traversals_allocator_type_> //
+template <                                         //
+    typename vendor_type_,                         //
+    typename kernels_type_,                        //
+    nk_dtype_t vector_dtype_,                      //
+    typename cache_hints_type_,                    //
+    typename vectors_allocator_type_,              //
+    typename neighbors_allocator_type_,            //
+    typename traversals_allocator_type_,           //
+    typename key_type_ = uuid_t,                   //
+    typename key_hash_type_ = std::hash<key_type_> //
+    >
 struct vram_shard_core {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -504,29 +517,35 @@ struct vram_shard_core {
                                                      vector_dtype_ == nk_e5m2_k || vector_dtype_ == nk_e2m3_k ||
                                                      vector_dtype_ == nk_e3m2_k;
 
-    /** The once-frozen geometry word: dimensions in the high half, connectivity in the low, zero
-     *  meaning not yet reserved. */
-    using packed_geometry_id_t = u64_t;
-    inline static constexpr packed_geometry_id_t pack_geometry(std::size_t dimensions,
-                                                               std::size_t connectivity) noexcept {
-        return (static_cast<packed_geometry_id_t>(dimensions) << 32u) | static_cast<packed_geometry_id_t>(connectivity);
-    }
-    inline static constexpr u32_t geometry_dimensions(packed_geometry_id_t geometry) noexcept {
-        return static_cast<u32_t>(geometry >> 32u);
-    }
-    inline static constexpr u32_t geometry_connectivity(packed_geometry_id_t geometry) noexcept {
-        return static_cast<u32_t>(geometry);
-    }
+    /** The caller-visible identity of every node. */
+    using key_t = key_type_;
 
-    /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
-     *  one allocator per storage concern, each carrying its device placement; the index pins itself
-     *  to the vectors allocator's device and demands the neighbors allocator agree. */
-    explicit vram_shard_core(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
-                             neighbors_allocator_t const& neighbors_allocator = {}) noexcept
-        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_matrix_(vectors_allocator),
-          norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator),
+    /** The keys of a batch, one per row. */
+    using keys_view_t = nk::vector_view<key_t>;
+
+    /** Every node's key on the host, and every key's nodes, growing in the RAM residency's
+     *  chunks. */
+    using keyed_t = keyed_nodes<key_t, node_id_t, chunk_schedule<10, 20>, max_node_count_k, forkunion_allocator_t,
+                                fu::standard_atomic_ref, key_hash_type_>;
+
+    /** The dimensions and connectivity every row keeps, fixed at construction. */
+    using geometry_t = dense::geometry_t;
+
+    /** The @p kernel every walk scores by and the @p geometry every row keeps, both checked at the
+     *  first growth, and one allocator per storage concern, each carrying its placement; the index
+     *  pins itself to the vectors allocator's device, demands the neighbors allocator agree, and
+     *  keeps its host key column and key map on @p keys_allocator. */
+    explicit vram_shard_core(nk_kernel_kind_t kernel, geometry_t geometry,
+                             vectors_allocator_t const& vectors_allocator = {},
+                             neighbors_allocator_t const& neighbors_allocator = {},
+                             forkunion_allocator_t const& keys_allocator = {}) noexcept
+        : device_ {vectors_allocator.device()}, kernel_ {kernel}, geometry_ {geometry},
+          vectors_matrix_(vectors_allocator), norms_column_(vectors_allocator), keys_column_(vectors_allocator),
+          neighbors_matrix_(neighbors_allocator),
           grown_((static_cast<void>(vendor_t::select(vectors_allocator.api(), vectors_allocator.device())),
-                  event_t {vectors_allocator.api()})) {}
+                  event_t {vectors_allocator.api()})),
+          keyed_(keys_allocator), keys_staging_(typename vendor_t::pinned_allocator_t {vectors_allocator.api()}),
+          keys_crossed_ {event_t {vectors_allocator.api()}, event_t {vectors_allocator.api()}} {}
     vram_shard_core(vram_shard_core const&) = delete;
     vram_shard_core& operator=(vram_shard_core const&) = delete;
 
@@ -555,18 +574,16 @@ struct vram_shard_core {
         std::size_t const vector_rows = vectors_matrix_.committed_bytes() / vector_row_bytes;
         std::size_t const by_vectors = vector_rows ? vector_rows - 1 : 0;
         std::size_t const by_neighbors = neighbors_matrix_.committed_bytes() / neighbors_row_bytes;
-        if (kernel_ == nk_kernel_dot_k) return min_of(by_vectors, by_neighbors);
-        std::size_t const by_norms = norms_column_.committed_bytes() / sizeof(norms_t);
-        return min_of(by_vectors, min_of(by_norms, by_neighbors));
+        std::size_t const by_keys = keys_column_.committed_bytes() / sizeof(key_t);
+        std::size_t const by_rows = min_of(by_vectors, min_of(by_keys, by_neighbors));
+        if (kernel_ == nk_kernel_dot_k) return by_rows;
+        return min_of(by_rows, norms_column_.committed_bytes() / sizeof(norms_t));
     }
-    std::size_t connectivity() const noexcept {
-        return geometry_connectivity(
-            fu::standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
-    }
-    std::size_t dimensions() const noexcept {
-        return geometry_dimensions(
-            fu::standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
-    }
+
+    /** The dimensions & connectivity fixed at construction. */
+    geometry_t geometry() const noexcept { return geometry_; }
+    std::size_t connectivity() const noexcept { return geometry_.connectivity; }
+    std::size_t dimensions() const noexcept { return geometry_.dimensions; }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
@@ -575,7 +592,7 @@ struct vram_shard_core {
                                        : static_cast<small_size_t>(default_expansion_factor(connectivity()));
     }
 
-    /** The pinned device's identity and limits, queried once at the first @c reserve. */
+    /** The pinned device's identity and limits, queried once at the first growth. */
     device_specs_t const& device_specs() const noexcept { return device_; }
 
     /** The driver table every call on the pinned device goes through, the one its storage
@@ -608,7 +625,7 @@ struct vram_shard_core {
         return divide_round_up<std::size_t>(dimensions() * scalar_t::bits_per_dimension(), 8u);
     }
 
-    /** Fragments per vector row, derived from the frozen geometry like every row measure. */
+    /** Fragments per vector row, derived from the geometry like every row measure. */
     u32_t row_fragments() const noexcept {
         return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), fragment_bytes_k);
     }
@@ -666,11 +683,41 @@ struct vram_shard_core {
     };
 
     /** Bytes this index occupies - the committed device storage, the published-row count among
-     *  it, and the host struct; traversal scratch belongs to executors and contexts. */
+     *  it, the host keys and key map, the key staging, and the host struct; traversal scratch
+     *  belongs to executors and contexts. */
     std::size_t memory_usage() const noexcept {
         return sizeof(vram_shard_core) + vectors_matrix_.committed_bytes() + norms_column_.committed_bytes() +
-               neighbors_matrix_.committed_bytes();
+               keys_column_.committed_bytes() + neighbors_matrix_.committed_bytes() + keyed_.memory_usage() +
+               keys_staging_.size() * sizeof(key_t);
     }
+
+    /** Every node's key on the host, and every key's nodes; readers pass the watermark they
+     *  acquired. */
+    keyed_t const& keys() const noexcept { return keyed_; }
+
+    /**
+     *  The key of the visible @p node.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p node is not visible.
+     */
+    expected<key_t> key_of(node_id_t node) const noexcept {
+        if (node >= size()) return {{}, status_t::config_mismatch_k};
+        return {keyed_[node], status_t::success_k};
+    }
+
+    /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
+     *  watermark - wait-free. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        keyed_.find_each(key, static_cast<node_id_t>(size()), callback);
+    }
+
+    /** The visible nodes stored under @p key, as of one acquire of the watermark. */
+    std::size_t count(key_t const& key) const noexcept { return keyed_.count(key, static_cast<node_id_t>(size())); }
+
+    /** Whether any visible node is stored under @p key, as of one acquire of the watermark. */
+    bool contains(key_t const& key) const noexcept { return keyed_.contains(key, static_cast<node_id_t>(size())); }
 
     /**
      *  Queues the copy of the stored row of @p node into @p destination with the fragment padding
@@ -711,84 +758,41 @@ struct vram_shard_core {
         return gpu_arena_shape(visits, tail, 0);
     }
 
-    /** Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
+    /** Requested capacity for a @c reserve() call. */
     struct reserve_capacity_t {
         std::size_t capacity = 0;
-        connectivity_t connectivity = connectivity_32_k;
-        std::size_t dimensions = 0;
 
-        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
-         *  every claim answers @c overflow_k. */
+        /** Rows the index may ever host, clamped to the ID space; bound with the device by the
+         *  first growth, past it every claim answers @c overflow_k. */
         std::size_t ceiling = max_node_count_k;
+
+        /** A request for @p entries; the ceiling is set by name only, so no positional field lands
+         *  on it. */
+        reserve_capacity_t(std::size_t entries = 0) noexcept : capacity(entries) {}
     };
 
     /**
      *  Ensures the index can host at least @p config.capacity entries and answers the capacity now
-     *  in effect; the first successful call freezes the geometry and the virtual-address ceiling,
-     *  later ones only map slabs.
+     *  in effect - a hint, since every claim grows the storage it needs. Holds the claim word for
+     *  the call, or runs under the word its caller closed; the first growth binds the device and
+     *  the virtual-address ceiling, later ones only map slabs.
      *
      *  @par Statuses:
      *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
      *  - @c config_mismatch_k The neighbors live on another device, the dimensions are zero, the
-     *    connectivity is not a power of two, the geometry differs from the frozen one, or no walk
-     *    fits the geometry.
+     *    connectivity is not a power of two, or no walk fits the geometry.
+     *  - @c contended_k A batch or load is in flight.
      *  - @c overflow_k The capacity passes the ID space or the reserved range.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        // The kits' epilogues fall through to the last metric of each family, so no other kind may
-        // reach them.
-        bool const scored = vector_dtype_ == nk_u1_k
-                                ? kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_hamming_k ||
-                                      kernel_ == nk_kernel_jaccard_k
-                                : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
-                                      kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
-        if (!scored) return {0, status_t::unknown_kind_k};
-        if (neighbors_matrix_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-        if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
-            return {0, status_t::config_mismatch_k};
-        // The first success freezes both axes at once; later calls must agree with what they
-        // observe.
-        packed_geometry_id_t const requested = pack_geometry(config.dimensions,
-                                                             static_cast<std::size_t>(config.connectivity));
-        packed_geometry_id_t observed = 0;
-        if (!fu::standard_atomic_ref<packed_geometry_id_t>(geometry_).compare_exchange_strong(
-                observed, requested, std::memory_order_acq_rel, std::memory_order_acquire) &&
-            observed != requested)
-            return {capacity(), status_t::config_mismatch_k};
-        connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
-        if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
-            // The device must be current before any mapping, since the storage lives on it.
-            if (failed(vendor_t::select(api(), device_.ordinal))) return {0, status_t::device_error_k};
-            auto const [specs, status] = device_specs_t::query(api(), device_.ordinal);
-            if (failed(status)) return {0, status};
-            device_ = specs;
-            // Geometry no walk can fit is refused here; a builder whose scratch shared memory
-            // cannot fit keeps it in its arena slice.
-            if (!kernels_.walk_scratch_fits(*this)) return {0, status_t::config_mismatch_k};
-            if (status_t const loaded = kernels_.load_kernels_(*this); failed(loaded)) return {0, loaded};
-            // Device storage maps at most the device's memory, which bounds the ceiling independent
-            // of the first requested capacity; the reservation itself is the ceiling, no cached row
-            // count shadows it.
-            bool const normed = kernel_ != nk_kernel_dot_k;
-            std::size_t const bytes_per_row = row_bytes() + (normed ? sizeof(norms_t) : 0) +
-                                              connectivity * sizeof(u32_t);
-            // Device storage budgets against VRAM; managed storage oversubscribes it and budgets
-            // against host memory through their own backend, which keeps the topology symbols out
-            // of device instantiations.
-            std::size_t budget_bytes = device_.vram_bytes;
-            if constexpr (vectors_allocator_t::address_space_k == vendor_t::address_space_t::managed_k)
-                budget_bytes = vectors_allocator_t::budget_bytes();
-            std::size_t const ceiling_rows = min_of(min_of(config.ceiling, max_node_count_k),
-                                                    max_of<std::size_t>(config.capacity, budget_bytes / bytes_per_row));
-            // One more vectors row ahead of row zero holds the published-row count.
-            if (vectors_matrix_.reserve_range((ceiling_rows + 1) * row_bytes()) != status_t::success_k ||
-                (normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_t::success_k) ||
-                neighbors_matrix_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t)) != status_t::success_k)
-                return {0, status_t::bad_alloc_k};
-            ceiling_nodes_ = ceiling_rows;
-        }
-        status_t const mapped = map_nodes_(config.capacity);
+        // A closed word is the caller's, who grows around its window; an open one is closed here,
+        // so the growth has one writer.
+        bool const closing = !claims_.closed();
+        if (closing)
+            if (status_t const closed = close_(); failed(closed)) return {capacity(), closed};
+        status_t const mapped = map_nodes_(config.capacity, config.ceiling);
+        if (closing) reopen_();
         return {capacity(), mapped};
     }
 
@@ -820,8 +824,8 @@ struct vram_shard_core {
     };
 
     /** The bytes an executor's run must hold before a context carved over it can insert @p rows
-     *  rows, one aligned term per carve the verb makes; zero before @c reserve freezes the
-     *  geometry. */
+     *  rows, one aligned term per carve the verb makes; zero before the first growth binds the
+     *  device. */
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
         if (!dimensions() || !device_.multiprocessor_count) return 0;
         auto aligned = [](std::size_t bytes) noexcept {
@@ -889,43 +893,49 @@ struct vram_shard_core {
         }
     };
 
-    /** Inserts @p new_rows under the contiguous ID range @b [first_id,first_id+rows) claimed from
-     *  the watermark, every transfer and the launch riding the context's stream, then drains that
-     *  stream, turns the watermark over the range, and reports telemetry. One batch or load holds
-     *  the claim word at a time.
+    /** Inserts @p new_rows under @p keys and the contiguous ID range @b [first_id,first_id+rows)
+     *  claimed from the watermark, growing the storage on demand: the keys land in the host column
+     *  and on the device ahead of the launch, every transfer and the launch riding the context's
+     *  stream, then the stream drains, the keys file into the map, the watermark turns over the
+     *  range, and the telemetry is reported. One batch or load holds the claim word at a time.
      *
      *  @par Statuses:
      *  - @c cancelled_k The index keeps it, as @ref status says.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @ref status keeps it.
      *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
-     *  - @c uninitialized_k The index was never reserved, or @ref status keeps it.
-     *  - @c config_mismatch_k The rows are not as wide as the index, @p assigned_ids are not one
-     *    per row, @p context rides another device or cannot walk, or @ref status keeps it.
+     *  - @c uninitialized_k The @ref status keeps it.
+     *  - @c config_mismatch_k The @p keys are not one per row, the rows are not as wide as the
+     *    index, @p assigned_ids are not one per row, @p context rides another device or cannot
+     *    walk, or @ref status keeps it.
      *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or @ref status
      *    keeps it.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status keeps
      *    it.
      */
-    expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
-                                     insert_config_t config = {}) noexcept {
+    expected<insert_result_t> insert(keys_view_t keys, rows_view_t new_rows, node_ids_span_t assigned_ids,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
         // Zeroed per call rather than per launch, so the launches of a sharded plan on one context
         // add up.
         if (context && context.device() == device_.ordinal &&
             failed(
                 vendor_t::fill(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream())))
             return {{}, status_t::device_error_k};
-        if (!new_rows.rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
+        std::size_t const rows = new_rows.rows;
+        if (keys.size() != rows) return {{}, status_t::config_mismatch_k};
+        if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        auto const [first_id, claim_status] = claim_(new_rows.rows);
+        if (!context || context.device() != device_.ordinal) return {{}, status_t::config_mismatch_k};
+        auto const [first_id, claim_status] = claim_(rows);
         if (failed(claim_status)) return {{}, claim_status};
-        expected<insert_result_t> inserted = submit_insert_(new_rows, first_id, assigned_ids, context, config);
+        expected<insert_result_t> inserted = submit_insert_(keys, new_rows, first_id, assigned_ids, context, config);
         if (!inserted) {
-            unclaim_(first_id, new_rows.rows);
+            unclaim_(first_id, rows);
             return inserted;
         }
         if (status_t const drained = context.wait(); failed(drained))
             return {{inserted.value.new_size, inserted.value.first_id}, fail_(drained)};
-        if (status_t const published = publish_(inserted.value.first_id, new_rows.rows); failed(published))
+        publish_keys_({first_id, static_cast<node_id_t>(first_id + rows)});
+        if (status_t const published = publish_(inserted.value.first_id, rows); failed(published))
             return {{inserted.value.new_size, inserted.value.first_id}, published};
         vram_telemetry_block_t const spent = context.spent();
         inserted.value.visited_members = spent.hops;
@@ -994,7 +1004,7 @@ struct vram_shard_core {
      *    device or cannot walk.
      *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query
      *    rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
@@ -1017,7 +1027,7 @@ struct vram_shard_core {
      *    the stored one.
      *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query or
      *    head rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
@@ -1040,7 +1050,7 @@ struct vram_shard_core {
      *  - @c unsupported_k A scan is asked of the vendor that has none.
      *  - @c config_mismatch_k The query is not as wide as the index, or @p context rides another
      *    device or cannot walk.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
@@ -1086,7 +1096,7 @@ struct vram_shard_core {
      *    one.
      *  - @c unsupported_layout_k An output's rows stride closer than its width, or rows sit closer
      *    than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
@@ -1138,7 +1148,7 @@ struct vram_shard_core {
      *  - @c unsupported_layout_k Output or query rows sit closer than one packed row apart.
      *  - @c shape_mismatch_k The @p head_count is zero or does not divide the rows, or a walk met
      *    a node with no value row.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
@@ -1411,7 +1421,7 @@ struct vram_shard_core {
      *  @param[in] part_bases The ascending first rows of the parts; need not outlive the plan.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
@@ -1462,7 +1472,7 @@ struct vram_shard_core {
      *  One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @ref status keeps it.
+     *  - @c uninitialized_k The index never grew, or @ref status keeps it.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk, or @ref status
      *    keeps it.
      *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
@@ -1859,7 +1869,7 @@ struct vram_shard_core {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
      *    short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     typename executor_t::stream_t const& stream) const noexcept {
@@ -1885,7 +1895,7 @@ struct vram_shard_core {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
      *    short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   typename executor_t::stream_t const& stream) const noexcept {
@@ -1930,7 +1940,7 @@ struct vram_shard_core {
         /** Rows the plan appends. */
         std::size_t rows = 0;
 
-        /** Rows whose vectors and neighbors landed, tallied through @c std::atomic_ref. */
+        /** Rows whose vectors, neighbors and keys landed, tallied through @c std::atomic_ref. */
         std::size_t covered = 0;
 
         /** Rows whose norms landed from the columns, tallied through @c std::atomic_ref; @c finish
@@ -2020,7 +2030,8 @@ struct vram_shard_core {
         }
 
         /**
-         *  @brief Copies step @p step 's rows out of @p columns through the bounce.
+         *  @brief Copies step @p step 's rows out of @p columns through the bounce, and their keys
+         *      into the host key column.
          *
          *  The vectors go into the fragment-padded matrix rows, whose fresh tails arrive zeroed,
          *  and their norms where the columns carry them, then the neighbors with every ID inside
@@ -2031,13 +2042,16 @@ struct vram_shard_core {
          *  @param[in] step The step to fill; its source nodes address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
          *  @param[in] source_range The ID space those rows speak.
+         *  @param[in] key_of Row @c r of the step's source nodes takes the key <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent, or its bounce was never pinned.
          *  - @c config_mismatch_k The step is empty, @p columns cannot hold its rows, or the
          *    rebased IDs pass the plan.
          */
-        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
+        template <typename key_of_type_>
+        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range,
+                      key_of_type_&& key_of) noexcept {
             if (!index_ || bounce.empty()) return status_t::uninitialized_k;
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
                 return status_t::device_error_k;
@@ -2098,10 +2112,21 @@ struct vram_shard_core {
                     failed(crossed_[half].record(stream)))
                     return index_->fail_(status_t::device_error_k);
             }
+            for (node_id_t node = range.first; node != range.bound; ++node)
+                index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             if (normed)
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
             fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
+        }
+
+        /** Files every appended row under the key its step landed, which @ref finish then uploads
+         *  and makes visible - the one writer of the key map, once every step landed and before the
+         *  finish; with a step missing it files nothing. */
+        void publish_keys() noexcept {
+            if (!index_ || fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
+                return;
+            index_->publish_keys_({base, static_cast<node_id_t>(base + rows)});
         }
 
         /**
@@ -2112,8 +2137,8 @@ struct vram_shard_core {
          *  Both matrices keep fragment-padded rows of one geometry, so every column moves as one
          *  copy on the plan's stream, from another device's storage as well once its plural mapped
          *  it for this one; storage this device cannot reach is refused. The neighbors then rebase
-         *  on the plan's stream. Nothing waits, so @p source_shard must stay quiescent until the
-         *  caller drains that stream.
+         *  on the plan's stream, and the source's keys land in the host key column. Nothing waits,
+         *  so @p source_shard must stay quiescent until the caller drains that stream.
          *
          *  @param[in] step The step to fill; its source nodes address @p source_shard.
          *  @param[in] source_shard The shard the rows come from, read through its core.
@@ -2154,6 +2179,9 @@ struct vram_shard_core {
                 return index_->fail_(status_t::device_error_k);
             if (failed(index_->launch_rebase_links_(range, source_range, shift, stream)))
                 return index_->fail_(status_t::device_error_k);
+            for (std::size_t row = 0; row != count; ++row)
+                index_->keyed_.assign(static_cast<node_id_t>(into + row),
+                                      source.keyed_[static_cast<node_id_t>(from + row)]);
             if (normed) fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
             fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
             return status_t::success_k;
@@ -2161,8 +2189,9 @@ struct vram_shard_core {
 
         /** Publishes the appended nodes once every batch's vectors and neighbors landed: the norms
          *  derive on the device unless the metric is dot or every batch carried them, the row count
-         *  lands, the claim lifts, and the watermark turns over the rows once every earlier batch
-         *  has. A success spends the plan, so a second call answers @c uninitialized_k instead of
+         *  lands beside the keys, uploaded on the plan's stream, the claim lifts, and the watermark
+         *  turns over the rows once every earlier batch has, carrying the keys @ref publish_keys
+         *  filed. A success spends the plan, so a second call answers @c uninitialized_k instead of
          *  publishing twice, and so does a turn refused by a failure an earlier batch kept; any
          *  other refusal leaves it whole, so the missing steps can still land.
          *
@@ -2179,6 +2208,8 @@ struct vram_shard_core {
             if (fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
+                if (failed(index_->upload_keys_({base, base + rows}, stream)))
+                    return index_->fail_(status_t::device_error_k);
                 // One launch derives every row, so a load mixing carried and missing norms
                 // re-derives the carried.
                 if (index_->stores_norms() &&
@@ -2223,14 +2254,13 @@ struct vram_shard_core {
      *  @param[in] stream The stream every copy and the norms kernel queue on.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @ref status keeps it.
+     *  - @c uninitialized_k The index never grew, or @ref status keeps it.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @ref status keeps it.
      *  - @c contended_k A batch or load is in flight.
      *  - @c cancelled_k, @c config_mismatch_k, @c unsupported_k or @c unsupported_layout_k
      *    The index keeps it, as @ref status says.
      */
     expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (failed(vendor_t::select(api(), device_.ordinal))) return {{}, status_t::device_error_k};
         if (!rows) return {load_plan_t {*this, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
@@ -2254,18 +2284,17 @@ struct vram_shard_core {
      *  caller with no streams to fan the steps out over.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @ref status keeps it.
-     *  - @c config_mismatch_k The @p columns are shorter than @p rows, refused before a row is
-     *    claimed, or @ref status keeps it.
+     *  - @c uninitialized_k The index never grew, or @ref status keeps it.
+     *  - @c config_mismatch_k The @p columns or @p keys are shorter than @p rows, refused before a
+     *    row is claimed, or @ref status keeps it.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @ref status keeps it.
      *  - @c contended_k A batch or load is in flight.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref
      *    status says.
      */
-    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
+    status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows, iota_view<node_id_t> source_range,
                   typename executor_t::stream_t const& stream) noexcept {
-        if (!vectors_matrix_.reserved_bytes()) return status_t::uninitialized_k;
-        if (columns.vectors.size() < rows * packed_row_bytes() ||
+        if (keys.size() < rows || columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return status_t::config_mismatch_k;
@@ -2273,7 +2302,11 @@ struct vram_shard_core {
         if (failed(status)) return status;
         if (status_t const pinned = plan.pin_bounce(); failed(pinned)) return pinned;
         for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step, columns, source_range); failed(loaded)) return loaded;
+            if (status_t const loaded = plan.load(step, columns, source_range,
+                                                  [&](node_id_t row) noexcept { return keys[row]; });
+                failed(loaded))
+                return loaded;
+        plan.publish_keys();
         return plan.finish();
     }
 
@@ -2281,24 +2314,32 @@ struct vram_shard_core {
 
 #pragma region Insertion
 
-    /** The submission half of @c insert: stages, grows and launches @p new_rows at @p first_id, and
+    /** The submission half of @c insert: grows, lands @p keys in the host column and uploads them,
+     *  then stages and launches @p new_rows at @p first_id, all on the context's stream, and
      *  returns with their IDs, the rows invisible until the caller drains and publishes them. The
      *  caller holds the claim over them, and gives it back on a refusal, since nothing launched.
      *  Back-to-back submissions on one context are serialized by its stream and add into its
      *  telemetry, which the caller zeroes; across devices they overlap freely. */
-    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
-                                             traversal_context_t& context, insert_config_t config) noexcept {
+    expected<insert_result_t> submit_insert_(keys_view_t keys, rows_view_t new_rows, node_id_t first_id,
+                                             node_ids_span_t assigned_ids, traversal_context_t& context,
+                                             insert_config_t config) noexcept {
         std::size_t const rows = new_rows.rows;
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         stream_handle_t const stream = context.stream();
+        // The first growth binds the device every size below reads. The claim admits no other
+        // grower, and a rejected grid publishes nothing, so the caller un-claims it exactly.
+        std::size_t const total_nodes = first_id + rows, picks = rows * connectivity();
+        if (status_t const grown = grow_nodes_(total_nodes, stream); failed(grown)) return {{}, grown};
+        // The keys ride the launch's stream ahead of the rows they name.
+        for (std::size_t row = 0; row != rows; ++row) keyed_.assign(first_id + static_cast<node_id_t>(row), keys[row]);
+        if (status_t const uploaded = upload_keys_({first_id, total_nodes}, stream); failed(uploaded))
+            return {{}, uploaded};
         std::size_t const import_bytes = import_bytes_(rows, new_rows.dtype);
         // Past the rows and their import window: the chain heads over every row, then the batch's
         // pick links, the touched nodes and their count.
-        std::size_t const total_nodes = first_id + rows, picks = rows * connectivity();
         std::size_t const links_offset = round_up_to_multiple<std::size_t>(rows * row_bytes() + import_bytes, 16);
         std::size_t const links_bytes = (total_nodes + 2 * picks + 1) * sizeof(u32_t);
         byte_t* const staging = context.ensure_staging(links_offset + links_bytes);
@@ -2325,9 +2366,6 @@ struct vram_shard_core {
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
         if (!arena) return {{}, status_t::bad_alloc_k};
 
-        // The claim admits no other grower, and a rejected grid publishes nothing, so the caller
-        // un-claims it exactly.
-        if (status_t const grown = grow_nodes_(total_nodes, stream); failed(grown)) return {{}, grown};
         // Monotone, so an un-claim below only forfeits epoch space.
         auto const [epoch_base, epochs_status] = context.take_epochs(rows, arena_bytes_before);
         if (failed(epochs_status)) return {{}, epochs_status};
@@ -2681,13 +2719,48 @@ struct vram_shard_core {
     void reopen_() noexcept { claims_.reopen(size()); }
 
     /** Forgets every row under the closed claim word: the watermark drops to zero, a kept failure
-     *  with it, and the next claim sentinel-fills every mapped row again and zeroes the published
-     *  count, so IDs restart from zero on the storage already mapped, which nothing frees. A walk
-     *  still reaching the index reads that retained storage, and its caller's epoch discards it. */
+     *  with it, the key map empties, and the next claim sentinel-fills every mapped row again and
+     *  zeroes the published count, so IDs restart from zero on the storage already mapped, which
+     *  nothing frees. A walk still reaching the index reads that retained storage, and its caller's
+     *  epoch discards it. */
     void forget_() noexcept {
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
         fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        keyed_.forget();
         filled_rows_ = 0;
+    }
+
+    /** Files every drained row of @p range under its key ahead of its watermark: the claim
+     *  holder, or the closer of the word, is the map's one writer. Plain stores and one release
+     *  byte per row, no read-modify-write. */
+    void publish_keys_(iota_view<node_id_t> range) noexcept { keyed_.publish(range); }
+
+    /** The keys on the device, indexed by node, as a walk resolves them. */
+    key_t* device_keys_() const noexcept { return reinterpret_cast<key_t*>(keys_column_.base()); }
+
+    /** Copies @p rows of the host key column into the device keys on @p stream, through the
+     *  staging half by half, since a pageable source would copy synchronously; the host refills a
+     *  half only once the copy out of it landed. Callers hold the claim over the rows, or the
+     *  closed claim word. */
+    status_t upload_keys_(iota_view<std::size_t> rows, stream_handle_t stream) noexcept {
+        std::size_t const half_keys = keys_staging_.size() / 2;
+        if (rows.empty()) return status_t::success_k;
+        if (!half_keys) return status_t::uninitialized_k;
+        for (std::size_t first = rows.first; first < rows.bound; first += half_keys) {
+            std::size_t const bound = min_of(first + half_keys, rows.bound);
+            std::size_t const half = staged_halves_++ % 2;
+            key_t* const staged = keys_staging_.data() + half * half_keys;
+            if (staged_halves_ > 2 && failed(keys_crossed_[half].wait())) return status_t::device_error_k;
+            std::size_t written = 0;
+            keyed_.column().for_each_span({first, bound}, [&](std::span<key_t const> run) noexcept {
+                for (key_t const& key : run) staged[written++] = key;
+            });
+            if (failed(
+                    vendor_t::copy(api(), device_keys_() + first, staged, (bound - first) * sizeof(key_t), stream)) ||
+                failed(keys_crossed_[half].record(stream)))
+                return status_t::device_error_k;
+        }
+        return status_t::success_k;
     }
 
     /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before
@@ -2715,9 +2788,81 @@ struct vram_shard_core {
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
     node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.base()); }
 
-    /** Maps every matrix and column up to @p rows - host work alone, so it rides no stream, and
-     *  leaves the fresh neighbor rows for @ref grow_nodes_ to fill. */
-    status_t map_nodes_(std::size_t rows) noexcept {
+    /**
+     *  Binds the index at its first growth, ahead of @p rows rows: checks the metric and the
+     *  geometry, selects the device and queries its specs, loads the kernels, and reserves every
+     *  device column up to the ceiling, @p ceiling clamped to what the device's memory holds.
+     *  Later calls answer success untouched. Callers hold the claim or the closed claim word.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
+     *  - @c config_mismatch_k The neighbors live on another device, the dimensions are zero, the
+     *    connectivity is not a power of two, or no walk fits the geometry.
+     */
+    status_t bind_(std::size_t rows, std::size_t ceiling) noexcept {
+        if (vectors_matrix_.reserved_bytes()) return status_t::success_k;
+        // The kits' epilogues fall through to the last metric of each family, so no other kind may
+        // reach them.
+        bool const scored = vector_dtype_ == nk_u1_k
+                                ? kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_hamming_k ||
+                                      kernel_ == nk_kernel_jaccard_k
+                                : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
+                                      kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
+        if (!scored) return status_t::unknown_kind_k;
+        if (neighbors_matrix_.device() != device_.ordinal) return status_t::config_mismatch_k;
+        if (!dimensions() || !std::has_single_bit(static_cast<u32_t>(connectivity())))
+            return status_t::config_mismatch_k;
+        // The device must be current before any mapping, since the storage lives on it.
+        if (failed(vendor_t::select(api(), device_.ordinal))) return status_t::device_error_k;
+        auto const [specs, status] = device_specs_t::query(api(), device_.ordinal);
+        if (failed(status)) return status;
+        device_ = specs;
+        // Geometry no walk can fit is refused here; a builder whose scratch shared memory cannot
+        // fit keeps it in its arena slice.
+        if (!kernels_.walk_scratch_fits(*this)) return status_t::config_mismatch_k;
+        if (status_t const loaded = kernels_.load_kernels_(*this); failed(loaded)) return loaded;
+        // Device storage maps at most the device's memory, which bounds the ceiling independent of
+        // the first growth; the reservation itself is the ceiling, no cached row count shadows it.
+        bool const normed = kernel_ != nk_kernel_dot_k;
+        std::size_t const bytes_per_row = row_bytes() + (normed ? sizeof(norms_t) : 0) + sizeof(key_t) +
+                                          connectivity() * sizeof(u32_t);
+        // Device storage budgets against VRAM; managed storage oversubscribes it and budgets
+        // against host memory through their own backend, which keeps the topology symbols out of
+        // device instantiations.
+        std::size_t budget_bytes = device_.vram_bytes;
+        if constexpr (vectors_allocator_t::address_space_k == vendor_t::address_space_t::managed_k)
+            budget_bytes = vectors_allocator_t::budget_bytes();
+        std::size_t const ceiling_rows = min_of(min_of(ceiling, max_node_count_k),
+                                                max_of<std::size_t>(rows, budget_bytes / bytes_per_row));
+        // The vectors matrix reserves last, as its range is what marks the index bound; one more
+        // vectors row ahead of row zero holds the published-row count.
+        if ((normed && norms_column_.reserve_range(ceiling_rows * sizeof(norms_t)) != status_t::success_k) ||
+            keys_column_.reserve_range(ceiling_rows * sizeof(key_t)) != status_t::success_k ||
+            neighbors_matrix_.reserve_range(ceiling_rows * connectivity() * sizeof(u32_t)) != status_t::success_k ||
+            vectors_matrix_.reserve_range((ceiling_rows + 1) * row_bytes()) != status_t::success_k)
+            return status_t::bad_alloc_k;
+        ceiling_nodes_ = ceiling_rows;
+        return status_t::success_k;
+    }
+
+    /** Binds the index at its first growth under @p ceiling, then maps every matrix and column up
+     *  to @p rows, covers the host keys, and widens the key staging to a power of two of rows, up
+     *  to a slab per half - host work alone, so it rides no stream, and leaves the fresh neighbor
+     *  rows for @ref grow_nodes_ to fill. Callers hold the claim or the closed claim word. */
+    status_t map_nodes_(std::size_t rows, std::size_t ceiling = max_node_count_k) noexcept {
+        if (status_t const bound = bind_(rows, ceiling); failed(bound)) return bound;
+        if (rows > ceiling_nodes_) return status_t::overflow_k;
+        if (status_t const covered = keyed_.cover(rows); failed(covered)) return covered;
+        std::size_t const half_keys = min_of(power_of_two<std::size_t>(batch_rows_log2_k),
+                                             std::bit_ceil(max_of<std::size_t>(rows, 1)));
+        if (keys_staging_.size() < 2 * half_keys) {
+            // Pinning needs a current device, and the copies out of the old halves must land.
+            if (failed(vendor_t::select(api(), device_.ordinal)) || failed(keys_crossed_[0].wait()) ||
+                failed(keys_crossed_[1].wait()))
+                return status_t::device_error_k;
+            keys_staging_.reset();
+            if (failed(keys_staging_.resize_uninitialized(2 * half_keys))) return status_t::bad_alloc_k;
+        }
         if (rows <= capacity()) return status_t::success_k;
         if (status_t status = vectors_matrix_.commit((rows + 1) * row_bytes()); status != status_t::success_k)
             return status;
@@ -2725,6 +2870,7 @@ struct vram_shard_core {
                                                          : norms_column_.commit(rows * sizeof(norms_t));
             status != status_t::success_k)
             return status;
+        if (status_t status = keys_column_.commit(rows * sizeof(key_t)); status != status_t::success_k) return status;
         return neighbors_matrix_.commit(rows * connectivity() * sizeof(u32_t));
     }
 
@@ -2893,20 +3039,20 @@ struct vram_shard_core {
     using neighbors_matrix_allocator_t = typename neighbors_allocator_t::template rebind<byte_t>::other;
 
     /** Hardware identity: the ordinal comes from the vectors allocator at construction, the
-     *  remaining specs fill at the first @c reserve. */
+     *  remaining specs fill at the first growth. */
     device_specs_t device_;
 
     /** The metric every walk scores by; under dot, the one metric that reads no norms, the norms
      *  column stays empty. */
     nk_kernel_kind_t kernel_;
 
-    /** The frozen geometry word: dimensions high, connectivity low, zero when unreserved. */
-    packed_geometry_id_t geometry_ = 0;
+    /** The dimensions and connectivity, fixed at construction. */
+    geometry_t geometry_;
 
-    /** The vectors matrix, its first row the published-row count, and the norms column; each
-     *  allocator is its storage, owning the base and the committed extent, so capacities are
-     *  derived, never cached. */
-    vectors_matrix_allocator_t vectors_matrix_, norms_column_;
+    /** The vectors matrix, its first row the published-row count, the norms column and the keys
+     *  column; each allocator is its storage, owning the base and the committed extent, so
+     *  capacities are derived, never cached. */
+    vectors_matrix_allocator_t vectors_matrix_, norms_column_, keys_column_;
 
     /** The neighbors matrix, on the same terms. */
     neighbors_matrix_allocator_t neighbors_matrix_;
@@ -2919,12 +3065,27 @@ struct vram_shard_core {
      *  alone; a reservation maps past it and the next claim fills the rest. */
     std::size_t filled_rows_ = 0;
 
-    /** Rows the reserved ranges span, the most any claim reaches; fixed by the first @c reserve. */
+    /** Rows the reserved ranges span, the most any claim reaches; fixed by the first growth. */
     std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** Marks the last sentinel fill, or the copies of a load that died over filled rows, which
      *  every grow's stream follows; recorded and followed by the claim's holder alone. */
     event_t grown_;
+
+    /** Every node's key on the host and every key's nodes: assigned by the claim's holder ahead of
+     *  its launch, and filed by it after its drain, before the watermark turns. */
+    keyed_t keyed_;
+
+    /** The page-locked ring the host keys cross into the device keys through: two halves, each
+     *  refilled only once the copy out of it landed, grown with the storage. */
+    growing_buffer<key_t, typename vendor_t::pinned_allocator_t> keys_staging_;
+
+    /** Marks the last copy out of each staging half, born on the index's device. */
+    event_t keys_crossed_[2];
+
+    /** Halves the uploads filled so far, alternating between the two; the claim's holder alone
+     *  advances it. */
+    std::size_t staged_halves_ = 0;
 
     /** Rows strictly below it are published and visible: turned once per batch, in claim order,
      *  after its drain. */
@@ -2933,7 +3094,7 @@ struct vram_shard_core {
     /** The first post-claim device failure: IDs past it may be unpublished or unfilled. */
     status_t status_ = status_t::success_k;
 
-    /** The vendor's kernels, loaded at the first @c reserve. */
+    /** The vendor's kernels, loaded at the first growth. */
     kernels_type_ kernels_;
 
     /** Demotes a filled bounce half toward the last-level cache, where the copy engine reads it. */

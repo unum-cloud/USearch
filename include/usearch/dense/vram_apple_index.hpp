@@ -22,12 +22,14 @@
 #include <cstdio>  // `std::snprintf` - the source's prelude
 #include <cstring> // `std::memcpy`, `std::memset`
 
+#include <functional> // `std::hash` - the default hash of a key
+
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`, `std::has_single_bit`
 #include <mutex>        // `std::unique_lock` - the growth hold
 #include <shared_mutex> // `std::shared_mutex` - walks share the storage, growth takes it alone
 #include <span>         // `std::span`
-#include <utility>      // `std::exchange`
+#include <utility>      // `std::exchange`, `std::forward`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
 #include <forkunion/types.hpp>   // `fu::standard_yield_t` - the watermark's turn
@@ -38,6 +40,8 @@
 #include <numkong/vector.hpp>
 
 #include "usearch/utilities/types.hpp"
+#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator_t` - the key column's placement
+#include "usearch/utilities/ram_tables.hpp" // `keyed_nodes` - every node's key and every key's nodes
 #include "usearch/utilities/vram_apple_device.hpp"
 #include "usearch/utilities/vram_device.hpp" // `vram_kernel_symbol_t` - a kernel's name
 #include "usearch/utilities/vram_walks.hpp"  // `gpu_arena_shape`, `gpu_walk_visits`, `gpu_candidate_slots`
@@ -175,16 +179,21 @@ enum class metal_output_t : bool { distances_k, products_k };
  *  @brief Vector Search index for the unified memory of one Apple GPU.
  *
  *  Speaks @c vram_nvidia_index 's verbs: a batch's IDs are one contiguous range turning visible a
- *  whole batch at a time, and the first successful @c reserve freezes the geometry. Attention is
- *  refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and walks past
- *  the widest register rung take the arena frontier, as on NVIDIA and AMD.
+ *  whole batch at a time, the geometry is fixed at construction, and the first growth builds the
+ *  pipelines. Every node's key lives in a host @c keyed_nodes the claim holder writes and files
+ *  before the watermark turns, as the storage is shared memory the walks read in place. Attention
+ *  is refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and walks
+ *  past the widest register rung take the arena frontier, as on NVIDIA and AMD.
  */
 template <                                                          //
     nk_dtype_t vector_dtype_ = nk_i8_k,                             //
     nk_capability_t capability_ = nk_cap_metal_k,                   //
     typename vectors_allocator_type_ = metal_shared_allocator_t,    //
     typename neighbors_allocator_type_ = metal_shared_allocator_t,  //
-    typename traversals_allocator_type_ = metal_shared_allocator_t> //
+    typename traversals_allocator_type_ = metal_shared_allocator_t, //
+    typename key_type_ = uuid_t,                                    //
+    typename key_hash_type_ = std::hash<key_type_>                  //
+    >
 struct vram_apple_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -224,13 +233,29 @@ struct vram_apple_index {
      *  GPU, and every Apple silicon host has NEON. */
     inline static constexpr nk_capability_t import_capability_k = nk_cap_serial_k | nk_cap_neon_k;
 
-    /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
-     *  one allocator per storage concern; the index pins itself to the vectors allocator's device
-     *  and demands the neighbors allocator agree. */
-    explicit vram_apple_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
-                              neighbors_allocator_t const& neighbors_allocator = {}) noexcept
-        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_allocator_ {vectors_allocator},
-          neighbors_allocator_ {neighbors_allocator} {}
+    /** The caller-visible identity of every node. */
+    using key_t = key_type_;
+
+    /** The keys of a batch, one per row. */
+    using keys_view_t = nk::vector_view<key_t>;
+
+    /** Every node's key and every key's nodes, growing in the RAM residency's chunks. */
+    using keyed_t = keyed_nodes<key_t, node_id_t, chunk_schedule<10, 20>, max_node_count_k, forkunion_allocator_t,
+                                fu::standard_atomic_ref, key_hash_type_>;
+
+    /** The dimensions and connectivity every row keeps, fixed at construction. */
+    using geometry_t = dense::geometry_t;
+
+    /** The @p kernel every walk scores by and the @p geometry every row keeps, both checked at the
+     *  first growth, and one allocator per storage concern; the index pins itself to the vectors
+     *  allocator's device, demands the neighbors allocator agree, and keeps its keys and key map on
+     *  @p keys_allocator. */
+    explicit vram_apple_index(nk_kernel_kind_t kernel, geometry_t geometry,
+                              vectors_allocator_t const& vectors_allocator = {},
+                              neighbors_allocator_t const& neighbors_allocator = {},
+                              forkunion_allocator_t const& keys_allocator = {}) noexcept
+        : device_ {vectors_allocator.device()}, kernel_ {kernel}, geometry_ {geometry},
+          vectors_allocator_ {vectors_allocator}, neighbors_allocator_ {neighbors_allocator}, keyed_ {keys_allocator} {}
     vram_apple_index(vram_apple_index const&) = delete;
     vram_apple_index& operator=(vram_apple_index const&) = delete;
     ~vram_apple_index() noexcept {
@@ -253,8 +278,38 @@ struct vram_apple_index {
 
     /** Rows the storage holds without growing. */
     std::size_t capacity() const noexcept { return capacity_rows_; }
-    std::size_t connectivity() const noexcept { return connectivity_; }
-    std::size_t dimensions() const noexcept { return dimensions_; }
+    std::size_t connectivity() const noexcept { return geometry_.connectivity; }
+    std::size_t dimensions() const noexcept { return geometry_.dimensions; }
+
+    /** The dimensions & connectivity fixed at construction. */
+    geometry_t geometry() const noexcept { return geometry_; }
+
+    /** Every node's key, and every key's nodes; readers pass the watermark they acquired. */
+    keyed_t const& keys() const noexcept { return keyed_; }
+
+    /**
+     *  The key of the visible @p node.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p node is not visible.
+     */
+    expected<key_t> key_of(node_id_t node) const noexcept {
+        if (node >= size()) return {{}, status_t::config_mismatch_k};
+        return {keyed_[node], status_t::success_k};
+    }
+
+    /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
+     *  watermark - wait-free. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        keyed_.find_each(key, static_cast<node_id_t>(size()), callback);
+    }
+
+    /** The visible nodes stored under @p key, as of one acquire of the watermark. */
+    std::size_t count(key_t const& key) const noexcept { return keyed_.count(key, static_cast<node_id_t>(size())); }
+
+    /** Whether any visible node is stored under @p key, as of one acquire of the watermark. */
+    bool contains(key_t const& key) const noexcept { return keyed_.contains(key, static_cast<node_id_t>(size())); }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
@@ -379,60 +434,37 @@ struct vram_apple_index {
 
 #pragma region Reservation
 
-    /** Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
+    /** Requested capacity for a @c reserve() call. */
     struct reserve_capacity_t {
         std::size_t capacity = 0;
-        connectivity_t connectivity = connectivity_32_k;
-        std::size_t dimensions = 0;
 
-        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
-         *  every claim answers @c overflow_k. */
+        /** Rows the index may ever host, clamped to the ID space; fixed by the first growth a
+         *  @c reserve makes, past it every claim answers @c overflow_k. */
         std::size_t ceiling = max_node_count_k;
+
+        /** A request for @p entries; the ceiling is set by name only, so no positional field lands
+         *  on it. */
+        reserve_capacity_t(std::size_t entries = 0) noexcept : capacity(entries) {}
     };
 
     /**
-     *  Ensures the index can host at least @p config.capacity entries; the first success freezes
-     *  the geometry.
+     *  Ensures the index can host at least @p config.capacity entries - a hint, since every claim
+     *  grows the storage it needs; the first growth builds the pipelines.
      *
      *  @par Statuses:
      *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
-     *  - @c config_mismatch_k The dimensions are zero, the connectivity is not a power of two, the
-     *    geometry differs from the frozen one, or the neighbors live on another device.
+     *  - @c config_mismatch_k The dimensions are zero, the connectivity is not a power of two, or
+     *    the neighbors live on another device.
      *  - @c overflow_k The capacity passes the ID space.
      *  - @c device_error_k The device is not listed.
      *  - @c unsupported_k A pipeline's simdgroups or threadgroups are narrower than the kernels
      *    need, or the device's registry lists no core count.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        bool const scored = vector_dtype_ == nk_u1_k
-                                ? kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_hamming_k ||
-                                      kernel_ == nk_kernel_jaccard_k
-                                : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
-                                      kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
-        if (!scored) return {0, status_t::unknown_kind_k};
-        if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
-            return {0, status_t::config_mismatch_k};
-        std::unique_lock batch {batch_};
-        if (dimensions_ &&
-            (dimensions_ != config.dimensions || connectivity_ != static_cast<std::size_t>(config.connectivity)))
-            return {capacity(), status_t::config_mismatch_k};
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
-        if (!dimensions_) {
-            if (neighbors_allocator_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-            metal_context_t* const context = vectors_allocator_.context();
-            if (!context) return {0, status_t::device_error_k};
-            // The pipelines report the simdgroup width the specification carries, so they build
-            // first.
-            if (status_t const loaded = load_pipelines_(); failed(loaded)) return {0, loaded};
-            auto const [specs, status] = metal_device_specs_t::query(*context, device_.ordinal);
-            if (failed(status)) return {0, status};
-            device_ = specs;
-            counters_ = metal_allocate(*context, counters_bytes_k);
-            if (!counters_) return {0, status_t::bad_alloc_k};
-            dimensions_ = config.dimensions;
-            connectivity_ = static_cast<std::size_t>(config.connectivity);
-            ceiling_nodes_ = min_of(config.ceiling, max_node_count_k);
-        }
+        std::unique_lock batch {batch_};
+        if (!counters_) ceiling_nodes_ = min_of(config.ceiling, max_node_count_k);
+        if (status_t const bound = bind_(); failed(bound)) return {capacity(), bound};
         status_t const grown = grow_nodes_(config.capacity);
         return {capacity(), grown};
     }
@@ -448,9 +480,9 @@ struct vram_apple_index {
 
     /** The bytes a context grows to before it can insert @p rows rows: its counters, one arena
      *  slice per simdgroup in flight, and the staged rows beside the row an import widens through
-     *  and the back-link chains; zero before @c reserve freezes the geometry. */
+     *  and the back-link chains; zero before the first growth. */
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
-        if (!dimensions_ || !device_.multiprocessor_count) return 0;
+        if (!geometry_.dimensions || !device_.multiprocessor_count) return 0;
         u32_t const expansion = static_cast<u32_t>(vram_insert_expansion(config.expansion_factor));
         u32_t const candidate_slots = candidate_slots_for_(expansion, 0);
         gpu_arena_shape_t const arena_shape = build_arena_shape_(expansion, candidate_slots, 1);
@@ -476,31 +508,34 @@ struct vram_apple_index {
     };
 
     /**
-     *  Inserts @p new_rows under the contiguous IDs claimed from the watermark, waits for the
-     *  device, publishes them, and reports telemetry. One batch or load holds the claim word at a
-     *  time, so another one in flight, or a closed word, answers @c contended_k.
+     *  Inserts @p new_rows under @p keys and the contiguous IDs claimed from the watermark, growing
+     *  the storage on demand, waits for the device, files the keys, publishes the rows, and reports
+     *  telemetry. One batch or load holds the claim word at a time, so another one in flight, or a
+     *  closed word, answers @c contended_k.
      *
      *  @par Statuses:
      *  - @c cancelled_k The index keeps it, as @c status says.
-     *  - @c config_mismatch_k The rows are not as wide as the index, @p assigned_ids are not one
-     *    per row, @p context rides another device or cannot walk, or @c status keeps it.
+     *  - @c config_mismatch_k The @p keys are not one per row, the rows are not as wide as the
+     *    index, @p assigned_ids are not one per row, @p context rides another device or cannot
+     *    walk, or @c status keeps it.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @c status keeps it.
      *  - @c overflow_k The rows pass the ceiling.
      *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
-     *  - @c uninitialized_k The index was never reserved.
      */
-    expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
-                                     insert_config_t config = {}) noexcept {
+    expected<insert_result_t> insert(keys_view_t keys, rows_view_t new_rows, node_ids_span_t assigned_ids,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
+        if (keys.size() != new_rows.rows) return {{}, status_t::config_mismatch_k};
         if (!new_rows.rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         auto const [first_id, claim_status] = claim_(new_rows.rows);
         if (failed(claim_status)) return {{}, claim_status};
-        expected<insert_result_t> inserted = submit_insert_(new_rows, first_id, assigned_ids, context, config);
+        expected<insert_result_t> inserted = submit_insert_(keys, new_rows, first_id, assigned_ids, context, config);
         if (!inserted) {
             // A refusal that kept no failure launched nothing.
             if (succeeded(status())) unclaim_(first_id, new_rows.rows);
             return inserted;
         }
+        publish_keys_({first_id, static_cast<node_id_t>(first_id + new_rows.rows)});
         if (status_t const published = publish_(inserted.value.first_id, new_rows.rows); failed(published))
             return {{inserted.value.new_size, inserted.value.first_id}, published};
         return inserted;
@@ -533,7 +568,7 @@ struct vram_apple_index {
      *  landing @c config.count columns per row: its counters, one arena slice per simdgroup in
      *  flight, and the staged rows beside their outputs. */
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
-        if (!dimensions_ || !device_.multiprocessor_count) return 0;
+        if (!geometry_.dimensions || !device_.multiprocessor_count) return 0;
         // Search widens the candidates to cover its count while multiply walks the bare factor, so
         // the wider one sizes.
         u32_t const expansion = max_of<u32_t>(gpu_walk_breadth(config.expansion_factor, config.count),
@@ -566,7 +601,7 @@ struct vram_apple_index {
      *    device or cannot walk.
      *  - @c unsupported_k A scan is asked, which this vendor has none of.
      *  - @c unsupported_layout_k Query rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
@@ -585,7 +620,7 @@ struct vram_apple_index {
      *    or cannot walk.
      *  - @c unsupported_k A scan is asked, which this vendor has none of.
      *  - @c unsupported_layout_k Query rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
@@ -632,7 +667,7 @@ struct vram_apple_index {
      *    @p counts disagree with the rows, the rows are not as wide as the index, or @p context
      *    rides another device or cannot walk.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
@@ -832,7 +867,7 @@ struct vram_apple_index {
         while (parts != part_bases.size() && part_bases[parts] < rows) ++parts;
         if (parts < 2) parts = 0;
         if (rows) {
-            if (!dimensions_) return {std::move(plan), status_t::uninitialized_k};
+            if (!counters_) return {std::move(plan), status_t::uninitialized_k};
             if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
             bool fresh = false;
             if (status_t const staged = context.ensure_(context.staging_, staging_bytes_(parts), fresh); failed(staged))
@@ -1003,11 +1038,11 @@ struct vram_apple_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, since the storage cannot
      *    be probed for settlement, or @p columns are too short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization) noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
+        if (!counters_) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
@@ -1022,7 +1057,7 @@ struct vram_apple_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
      *    short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     status_t save(columns_t columns, synchronization_t synchronization,
                   nk::matrix_span<node_id_t> scratch = {}) noexcept {
@@ -1087,14 +1122,17 @@ struct vram_apple_index {
 
         /**
          *  Copies the step's rows out of @p columns into the storage: vectors padded, norms where
-         *  carried, neighbors rebased from @p source_range onto the appended range and compacted.
+         *  carried, neighbors rebased from @p source_range onto the appended range and compacted,
+         *  and row @c r of the step's source nodes keyed <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The step is empty, @p columns cannot hold its rows, or the
          *    rebased IDs pass the plan.
          */
-        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
+        template <typename key_of_type_>
+        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range,
+                      key_of_type_&& key_of) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
@@ -1126,14 +1164,25 @@ struct vram_apple_index {
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            for (node_id_t node = range.first; node != range.bound; ++node)
+                index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
+        /** Files every appended row under the key its step landed, which @ref finish then makes
+         *  visible - the one writer of the key map, once every step landed and before the finish;
+         *  with a step missing it files nothing. */
+        void publish_keys() noexcept {
+            if (!index_ || fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
+                return;
+            index_->publish_keys_({base, static_cast<node_id_t>(base + rows)});
+        }
+
         /** Copies the step's rows out of @p source 's own storage rather than columns, as an absorb
          *  drives it: both keep padded rows of one geometry in shared buffers, so every column
-         *  moves whole on the host, and the neighbors rebase from @p source_range onto the appended
-         *  range and compact. The source takes no rows until the copy returns.
+         *  moves whole on the host with its keys, and the neighbors rebase from @p source_range
+         *  onto the appended range and compact. The source takes no rows until the copy returns.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
@@ -1161,13 +1210,16 @@ struct vram_apple_index {
             std::memcpy(landed.data(), source.neighbor_rows_() + from * connectivity, landed.size_bytes());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            for (std::size_t row = 0; row != count; ++row)
+                index_->keyed_.assign(static_cast<node_id_t>(into + row),
+                                      source.keyed_[static_cast<node_id_t>(from + row)]);
             fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
         /**
          *  Derives the norms no step carried on the device, lifts the hold, and publishes the
-         *  appended nodes.
+         *  appended nodes with the keys @ref publish_keys filed.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
@@ -1203,18 +1255,18 @@ struct vram_apple_index {
      *  flight refuses it.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      *  - @c contended_k Another batch or load is in flight.
      *  - @c overflow_k The rows pass the ceiling.
      *  - @c cancelled_k, @c config_mismatch_k or @c unsupported_layout_k The index keeps it, as
      *    @c status says.
      */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows) return {load_plan_t {*this, {}, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         std::unique_lock batch {batch_, std::try_to_lock};
         if (!batch.owns_lock()) return {{}, status_t::contended_k};
+        if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
         // claimed like a batch's, so no batch lands beside it.
         bool const claiming = !claims_.closed();
@@ -1237,23 +1289,27 @@ struct vram_apple_index {
      *  before a row is claimed.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p columns are shorter than @p rows or carry norms the index
      *    does not store, or @c status keeps it.
      *  - @c contended_k Another batch or load is in flight.
      *  - @c overflow_k The rows pass the ceiling.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @c status says.
      */
-    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
-        if (!dimensions_) return status_t::uninitialized_k;
-        if (columns.vectors.size() < rows * packed_row_bytes() ||
+    status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows,
+                  iota_view<node_id_t> source_range) noexcept {
+        if (keys.size() < rows || columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
             return status_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step, columns, source_range); failed(loaded)) return loaded;
+            if (status_t const loaded = plan.load(step, columns, source_range,
+                                                  [&](node_id_t row) noexcept { return keys[row]; });
+                failed(loaded))
+                return loaded;
+        plan.publish_keys();
         return plan.finish();
     }
 
@@ -1263,31 +1319,35 @@ struct vram_apple_index {
      *  snapshot. */
     template <typename, nk_dtype_t, nk_capability_t, typename, typename>
     friend struct vram_apple_indexes;
-    template <typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
   private:
 
 #pragma region Batches
 
-    /** The device half of @c insert: stages and runs @p new_rows at @p first_id, and returns with
-     *  their IDs, the rows invisible until the caller publishes them - which the sharded twin does
-     *  for every step at once. The caller holds the claim over them; a refusal before the launch
-     *  keeps no failure, one after it keeps the failure. */
-    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
-                                             traversal_context_t& context, insert_config_t config) noexcept {
+    /** The device half of @c insert: lands @p keys, stages and runs @p new_rows at @p first_id, and
+     *  returns with their IDs, the rows invisible until the caller publishes them - which the
+     *  sharded twin does for every step at once. The caller holds the claim over them; a refusal
+     *  before the launch keeps no failure, one after it keeps the failure. */
+    expected<insert_result_t> submit_insert_(keys_view_t keys, rows_view_t new_rows, node_id_t first_id,
+                                             node_ids_span_t assigned_ids, traversal_context_t& context,
+                                             insert_config_t config) noexcept {
         std::size_t const rows = new_rows.rows;
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
 
-        // Growth relocates the storage, so it runs under the hold a reserve takes too.
+        // Growth relocates the storage, so it runs under the hold a reserve takes too, and the
+        // first one builds the pipelines every size below reads.
         {
             std::unique_lock batch {batch_};
+            if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
             if (status_t const grown = grow_nodes_(first_id + rows); failed(grown)) return {{}, grown};
         }
+        // The growth covered the keys, and the claim makes this thread the map's one writer.
+        for (std::size_t row = 0; row != rows; ++row) keyed_.assign(first_id + static_cast<node_id_t>(row), keys[row]);
         // Past the staged rows, every wave's insert and back-link count into their own words,
         // zeroed here, then the row an import widens through, then the chains, every head unknown.
         std::size_t const rows_bytes = rows * row_bytes();
@@ -1434,7 +1494,7 @@ struct vram_apple_index {
     /** Bytes of the back-link chains of @p rows rows that leave @p total_nodes behind, in @p waves:
      *  a head per row, a next link per pick, the touched list as long, and each wave's count. */
     std::size_t links_bytes_(std::size_t rows, std::size_t total_nodes, std::size_t waves) const noexcept {
-        return (total_nodes + 2 * rows * connectivity_ + waves) * sizeof(u32_t);
+        return (total_nodes + 2 * rows * geometry_.connectivity + waves) * sizeof(u32_t);
     }
 
     /** Why @p rows cannot cross into the staging: a width other than the index's, or rows closer
@@ -1589,8 +1649,8 @@ struct vram_apple_index {
         std::size_t const rows = arguments.end_id - arguments.first_id;
         std::size_t const rows_bytes = rows * row_bytes();
         std::size_t const next_offset = links_offset + std::size_t {arguments.end_id} * sizeof(u32_t);
-        std::size_t const touched_offset = next_offset + rows * connectivity_ * sizeof(u32_t);
-        std::size_t const counts_offset = touched_offset + rows * connectivity_ * sizeof(u32_t);
+        std::size_t const touched_offset = next_offset + rows * geometry_.connectivity * sizeof(u32_t);
+        std::size_t const counts_offset = touched_offset + rows * geometry_.connectivity * sizeof(u32_t);
         auto const bind_links = [&](metal_launch_t& launch, std::size_t wave) noexcept {
             launch.bind(context.staging_, metal_link_heads_buffer_k, links_offset);
             launch.bind(context.staging_, metal_link_next_buffer_k, next_offset);
@@ -1850,7 +1910,7 @@ struct vram_apple_index {
     expected<metal_arguments_t> stage_walk_(rows_view_t queries, traversal_context_t& context, u32_t expansion,
                                             u32_t candidate_slots, std::size_t staging_bytes,
                                             std::size_t visible) noexcept {
-        if (!dimensions_) return {{}, status_t::uninitialized_k};
+        if (!geometry_.dimensions) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rows_refusal_(queries); failed(refusal)) return {{}, refusal};
         metal_arguments_t arguments = arguments_();
@@ -2157,14 +2217,21 @@ struct vram_apple_index {
     /** Forgets every row under the closed claim word: the published neighbor rows refill with the
      *  sentinel once the walks sharing the storage drained, and the watermark drops to zero, a kept
      *  failure with it, so IDs restart from zero on the storage already grown, which nothing frees.
-     *  */
+     *  The key map empties with them. */
     void forget_() noexcept {
         std::unique_lock storage {storage_};
         if (std::size_t const rows = size())
             std::memset(neighbors_matrix_.host, 0xFF, rows * connectivity() * sizeof(u32_t));
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
         fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
+        keyed_.forget();
     }
+
+    /** Stores @p key as the key of @p node, which the caller's claim or closed word covers. */
+
+    /** Files every row of @p range under its key ahead of its watermark: the claim holder, or the
+     *  closer of the word, is the map's one writer. */
+    void publish_keys_(iota_view<node_id_t> range) noexcept { keyed_.publish(range); }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */
     node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.host); }
@@ -2180,10 +2247,45 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
+    /**
+     *  Binds the index at its first growth: checks the metric and the geometry, builds the
+     *  pipelines, queries the device and allocates the counters; later calls answer success
+     *  untouched. The caller holds the batch hold.
+     *
+     *  @par Statuses:
+     *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
+     *  - @c config_mismatch_k The dimensions are zero, the connectivity is not a power of two, or
+     *    the neighbors live on another device.
+     *  - @c device_error_k The device is not listed.
+     */
+    status_t bind_() noexcept {
+        if (counters_) return status_t::success_k;
+        bool const scored = vector_dtype_ == nk_u1_k
+                                ? kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_hamming_k ||
+                                      kernel_ == nk_kernel_jaccard_k
+                                : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
+                                      kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
+        if (!scored) return status_t::unknown_kind_k;
+        if (!geometry_.dimensions || !std::has_single_bit(static_cast<u32_t>(geometry_.connectivity)))
+            return status_t::config_mismatch_k;
+        if (neighbors_allocator_.device() != device_.ordinal) return status_t::config_mismatch_k;
+        metal_context_t* const context = vectors_allocator_.context();
+        if (!context) return status_t::device_error_k;
+        // The pipelines report the simdgroup width the specification carries, so they build first.
+        if (status_t const loaded = load_pipelines_(); failed(loaded)) return loaded;
+        auto const [specs, status] = metal_device_specs_t::query(*context, device_.ordinal);
+        if (failed(status)) return status;
+        device_ = specs;
+        counters_ = metal_allocate(*context, counters_bytes_k);
+        return counters_ ? status_t::success_k : status_t::bad_alloc_k;
+    }
+
     /** Grows every matrix and column to hold @p rows, doubling, the fresh neighbor rows
      *  sentinel-filled; the caller holds the batch hold, and the copy waits for every walk sharing
      *  the storage. */
     status_t grow_nodes_(std::size_t rows) noexcept {
+        if (rows > ceiling_nodes_) return status_t::overflow_k;
+        if (status_t const covered = keyed_.cover(rows); failed(covered)) return covered;
         if (rows <= capacity_rows_) return status_t::success_k;
         std::size_t const grown = max_of(rows, capacity_rows_ * 2);
         std::size_t const neighbors_row_bytes = connectivity() * sizeof(u32_t);
@@ -2214,9 +2316,10 @@ struct vram_apple_index {
 
     metal_device_specs_t device_;
     nk_kernel_kind_t kernel_;
-    std::size_t dimensions_ = 0, connectivity_ = 0, capacity_rows_ = 0;
+    geometry_t geometry_;
+    std::size_t capacity_rows_ = 0;
 
-    /** Rows the index may ever host, fixed by the first @c reserve. */
+    /** Rows the index may ever host, fixed by the first growth a @c reserve makes. */
     std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** The vectors matrix and norms column backend. */
@@ -2253,6 +2356,10 @@ struct vram_apple_index {
     claim_word_t claims_;
     std::size_t last_visible_id_ = 0;
     status_t status_ = status_t::success_k;
+
+    /** Every node's key and every key's nodes: assigned and filed by the claim's holder once its
+     *  rows ran, before the watermark turns. */
+    keyed_t keyed_;
 
 #pragma endregion State
 };

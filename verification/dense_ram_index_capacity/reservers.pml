@@ -24,7 +24,7 @@
  *      directory and reads it stale
  */
 #define thread_count 2
-#define location_count 4
+#define location_count 7
 #define history_depth 11
 #include <dense_ram_index_capacity/protocol.pml>
 
@@ -38,6 +38,7 @@ byte claims;   // claims the reservers made between them
 proctype reserver(byte t) {
     int claimed_rows, total, deficit, desired, observed, first;
     int whole, old_remaining, reverted, seen_chunks, added, unclaimed;
+    byte column;
     bool succeeded;
     // the geometry, frozen by whichever exchange lands first; a loser reads the frozen one back
     if

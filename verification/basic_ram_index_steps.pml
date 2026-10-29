@@ -6,8 +6,9 @@
  *
  *  `load_plan_t` from `include/usearch/basic/ram_index.hpp`. Two steps each store their key and add
  *  their count to `covered` with a release; the finisher, holding the unique side through
- *  `basic_gate.pml`, acquires the tally, reads both keys, stores the claim and identity counters
- *  relaxed and the watermark with a release, and unlocks.
+ *  `basic_gate.pml`, acquires the tally, reads both keys and files them in the key map as its one
+ *  writer, stores the claim and identity counters relaxed and the watermark with a release, and
+ *  unlocks.
  *
  *  - A watermark a reader acquired at 2 must show the dispenser at 2 and node 1's key.
  *

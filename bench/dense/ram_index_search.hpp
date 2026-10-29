@@ -124,18 +124,18 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty() //
                                              ? fu_memory_domain_id_t {-1}
                                              : bench.settings.memory_domains.front();
-    bench.index = std::make_unique<index_t>(bench.kernel, allocator_t {domain}, allocator_t {domain},
-                                            machine_cache_line_bytes());
+    // The CLI geometry is fixed here, and a checkpoint then has to agree with it.
+    bench.index = std::make_unique<index_t>(bench.kernel, typename index_t::geometry_t {dimensions, connectivity},
+                                            allocator_t {domain}, allocator_t {domain}, machine_cache_line_bytes());
     streamed.id_to_row.resize(rows);
 
-    // Reserving first freezes the CLI geometry a checkpoint then has to agree with.
-    auto const [capacity, status] = bench.index->reserve({rows, connectivity, dimensions});
+    auto const [capacity, status] = bench.index->reserve({rows});
     if (failed(status)) {
         fmt::println("Failed to reserve {} × {}d", rows, dimensions);
         return false;
     }
 
-    // The keys are the ID → row map, the recall bookkeeping the index itself never stores.
+    // The checkpoint's keys rebuild the ID → row map the recall bookkeeping reads.
     if (!bench.settings.load_name.empty() &&
         !load_checkpoint(bench.settings, *bench.index, std::span {streamed.id_to_row}))
         return false;
@@ -193,9 +193,10 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
 
     node_id_t local_id = 0;
+    typename index_t::key_t const key = uuid_of(bench.settings.first_vector.value + row);
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
-    auto const [result, status] = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread],
-                                                      config);
+    auto const [result, status] = bench.index->insert({&key, std::size_t {1}}, one_row, {&local_id, std::size_t {1}},
+                                                      *bench.traversals[thread], config);
     if (failed(status)) {
         standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
         return;

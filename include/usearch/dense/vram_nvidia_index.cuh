@@ -80,11 +80,11 @@ constexpr u32_t cuda_gather_window_bytes() noexcept {
 }
 
 template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
-          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
 bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
-                         neighbors_allocator_type_,
-                         traversals_allocator_type_>::walk_scratch_fits(core_t const& core,
-                                                                        std::size_t fold_bytes) const noexcept {
+                         neighbors_allocator_type_, traversals_allocator_type_, key_type_,
+                         key_hash_type_>::walk_scratch_fits(core_t const& core, std::size_t fold_bytes) const noexcept {
     using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
     using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     using warp_t = typename schedule_t::warp_t;
@@ -98,10 +98,11 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vector
 }
 
 template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
-          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
 cuda_rows_map_t
 vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_, neighbors_allocator_type_,
-                    traversals_allocator_type_>::rows_map_(core_t& core) noexcept {
+                    traversals_allocator_type_, key_type_, key_hash_type_>::rows_map_(core_t& core) noexcept {
     using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     constexpr u32_t window_bytes = cuda_gather_window_bytes<schedule_t, capability_k, vector_dtype_>();
     if constexpr (window_bytes == 0) return {};
@@ -126,11 +127,12 @@ vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_all
 }
 
 template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
-          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
 bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
-                         neighbors_allocator_type_,
-                         traversals_allocator_type_>::build_scratch_fits(core_t const& core,
-                                                                         u32_t scratch_bytes_per_warp) const noexcept {
+                         neighbors_allocator_type_, traversals_allocator_type_, key_type_,
+                         key_hash_type_>::build_scratch_fits(core_t const& core,
+                                                             u32_t scratch_bytes_per_warp) const noexcept {
     using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
     using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
     std::size_t const statics = std::size_t {vram_warps_per_block_k} *
@@ -150,8 +152,8 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vector
 /** Post-drain structural audit of the neighbors matrix: every entry published, every ID in range,
  *  self-loop rows childless, no duplicate neighbors within a row. One warp scans one row, a
  *  warp-width of slots at a time; each bad row bumps @p violations once. */
-static __global__ void cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
-                                             u64_t* violations) {
+[[maybe_unused]] static __global__ void cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_count,
+                                                              u32_t connectivity, u64_t* violations) {
     constexpr u32_t width_k = cuda_warp_t::width_k;
     vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
     for (u32_t row = warp.index; row < rows_count; row += warp.count) {

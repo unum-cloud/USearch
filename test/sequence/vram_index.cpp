@@ -233,6 +233,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
+    std::vector<us::utilities::uuid_t> keys(count);
+    for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
@@ -241,7 +243,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
             status_t::success_k);
         typename vram_index_t::traversal_context_t context {
             cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
-        auto const [inserted, status] = vram_index.insert({tape_bytes, batch_offsets}, context, insert_config);
+        auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
+                                                          {tape_bytes, batch_offsets}, context, insert_config);
         failures += expect_eq(status, status_t::success_k);
         failures += expect_eq(inserted.first_id, first);
         failures += expect_eq(inserted.new_size, bound);
@@ -279,6 +282,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
             }
             failures += expect_near(distance, static_cast<f32_t>(exact[query][id]));
             failures += expect(found.empty() || found.back() <= exact[query][id]);
+            failures += expect(vram_index.key_of(id).value == keys[id]);
             found.push_back(exact[query][id]);
         }
         failures += expect_eq(found.size(), wanted_k);
@@ -306,7 +310,8 @@ struct sequence_vram_shards_t {
 
 /** Two shards on one device bounded at 1000 entries take 5000 sequences in one batch, which opens
  *  two more generations of two: every key counts once across the six shards, and the merged recall
- *  at ten reaches one unbounded shard's, give or take a twentieth. */
+ *  at ten reaches one unbounded shard's, give or take a twentieth. That shard reserves no capacity,
+ *  so its keys cover as its nodes map, and each counts once in it too. */
 static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
     using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid_t, sequence_vram_shards_t>;
@@ -364,15 +369,16 @@ static std::size_t check_sequence_vram_plural(u64_t seed, cuda_executor_t& execu
     }
 
     index_t single {cuda_virtual_memory_allocator<byte_t> {executor.api(), executor.device(0)}};
-    failures += expect_eq(single.reserve({entries_k, connectivity_32_k, offsets[entries_k]}).status,
-                          status_t::success_k);
+    failures += expect_eq(single.reserve({0, connectivity_32_k, 0}).status, status_t::success_k);
     typename index_t::insert_config_t const insert_config {expansion_k};
     failures += expect_eq(executor.reserve(max_of(single.traversal_memory_usage(sequences, insert_config),
                                                   single.traversal_memory_usage(queries, search_config))),
                           status_t::success_k);
     typename index_t::traversal_context_t context {
         cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
-    failures += expect_eq(single.insert(sequences, context, insert_config).status, status_t::success_k);
+    failures += expect_eq(single.insert(keys, sequences, context, insert_config).status, status_t::success_k);
+    for (us::utilities::uuid_t const& key : keys) miscounted += single.count(key) != 1;
+    failures += expect_eq(miscounted, std::size_t {0});
     std::vector<u32_t> ids(queries_k * wanted_k);
     failures += expect_eq(single
                               .search(queries, {ids.data(), {queries_k, wanted_k}},

@@ -2158,8 +2158,7 @@ struct shared_mutex {
 /** Shards viewed as one, defined in <tt>usearch/utilities/ram_shards.hpp</tt>; declared here, so a
  *  shard type including nothing past this header can still befriend the set that closes its
  *  claims. */
-template <typename index_type_, typename shard_keys_type_, typename key_type_, typename key_hash_type_,
-          template <typename> class atomic_ref_template_, typename wait_type_>
+template <typename index_type_, template <typename> class atomic_ref_template_, typename wait_type_>
 struct shard_set;
 
 } // namespace unum::usearch::utilities

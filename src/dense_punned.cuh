@@ -124,7 +124,8 @@ struct dense_verbs {
     /** The GPU class a device variant's kernels compile for; unknown on the host and storage. */
     gpu_class_t gpu_class;
 
-    void* (*create)(nk_kernel_kind_t kernel, forkunion_allocator_t tables) noexcept;
+    void* (*create)(nk_kernel_kind_t kernel, std::size_t dimensions, connectivity_t connectivity,
+                    forkunion_allocator_t tables) noexcept;
     void (*destroy)(void* index) noexcept;
     void (*bound_shards)(void* index, std::size_t nodes) noexcept;
 
@@ -144,8 +145,7 @@ struct dense_verbs {
     std::size_t (*memory_usage)(void const* index) noexcept;
     expected<std::size_t> (*storage_requirements)(void const* index) noexcept;
 
-    status_t (*reserve)(void* index, std::size_t capacity, connectivity_t connectivity,
-                        std::size_t dimensions) noexcept;
+    status_t (*reserve)(void* index, std::size_t capacity) noexcept;
     status_t (*clear)(void* index) noexcept;
     walked_t (*insert)(void* index, keys_view_t keys, rows_view_t rows, progress_ticks_t& ticks, executor_t& executor,
                        u32_t expansion_factor) noexcept;

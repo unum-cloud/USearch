@@ -18,6 +18,7 @@
 
 #include <bit>              // `std::bit_ceil`, `std::bit_width`, `std::has_single_bit`
 #include <concepts>         // `std::same_as` - the plural takes 32-bit shards
+#include <functional>       // `std::hash` - the key map's default hash
 #include <initializer_list> // the two walks of every wave
 #include <limits>           // `std::numeric_limits` - the node-ID type's sentinel
 #include <memory>           // `std::unique_ptr` - an audit's landing
@@ -31,6 +32,8 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - a bounce and its host offsets
+#include "usearch/utilities/ram_device.hpp"         // `forkunion_allocator_t` - the host keys' placement
+#include "usearch/utilities/ram_tables.hpp"         // `keyed_nodes` - every node's key and every key's nodes
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_t` - the kernels a rung names
 #include "usearch/utilities/vram_nvidia_device.hpp" // `cuda_traversal_context` & the rungs
 #include "usearch/utilities/vram_walks.hpp"         // `gpu_arena_shape_t`, `gpu_candidate_slots`, `vram_bitset_t`
@@ -39,7 +42,7 @@
 namespace unum::usearch::basic {
 using namespace unum::usearch::utilities;
 
-template <typename index_type_, typename, typename, typename, typename, typename>
+template <typename index_type_, typename, typename, typename, typename>
     requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
 struct vram_nvidia_indexes;
 
@@ -240,9 +243,10 @@ struct cuda_graph_fatbin_t {
  *  the kits' codec. Plans close the claim word, or claim their nodes, for their whole lives.
  *
  *  A modality's face owns one as a member and forwards its verbs, so no modality derives from it.
- *  It stands alone as the RAM index does, under either node-ID width and any key the caller keeps
- *  beside it; only the plural the compiled library builds narrows it to 32-bit IDs, whose nodes a
- *  shard table locates in 8 bytes.
+ *  It stands alone as the RAM index does, under either node-ID width and any hashable key, which it
+ *  keeps on the host beside every node and files under the key map while it holds the claim word,
+ *  just before the watermark moves; only the plural the compiled library builds narrows it to
+ *  32-bit IDs, whose nodes a shard table locates in 8 bytes.
  *
  *  @tparam node_id_type_ The node IDs of the neighbors matrix, the walks and the matches, @c u32_t
  *      or @c u64_t; the all-ones ID is the sentinel. The shared kernels cover @c u32_t alone, so
@@ -254,27 +258,42 @@ struct cuda_graph_fatbin_t {
  *      and the @c parameters_ its kits read on the device; its codec, @c saved_bytes_ and
  *      @c save_value_ turning a stored node into the bytes the RAM codec saves, and
  *      @c stored_bytes_ and @c load_value_ back.
+ *  @tparam key_type_ The caller-visible identity of every node, trivially copyable.
+ *  @tparam key_hash_type_ The key map's hash of a key.
  */
-template <typename node_id_type_, typename kits_type_>
+template <typename node_id_type_, typename kits_type_, typename key_type_ = uuid_t,
+          typename key_hash_type_ = std::hash<key_type_>>
 struct vram_ragged_graph {
     using traversal_context_t = cuda_traversal_context<cuda_arena_allocator_t>;
     using node_id_t = node_id_type_;
+    using key_t = key_type_;
     using distance_t = distance_t;
     using small_size_t = u32_t;
 
     /** The node-ID space, less the sentinel. */
     inline static constexpr std::size_t max_node_count_k = std::size_t {std::numeric_limits<node_id_t>::max()} - 1u;
 
+    /** The nodes the host keys span: the node-ID space, no further than the address space holds
+     *  keys. */
+    inline static constexpr std::size_t max_keyed_node_count_k = min_of<std::size_t>(
+        max_node_count_k, (std::size_t {1} << address_bits_k) / sizeof(key_t));
+
+    /** Every node's key on the host, and every key's nodes. */
+    using keyed_t = keyed_nodes<key_t, node_id_t, chunk_schedule_spanning<max_keyed_node_count_k>,
+                                max_keyed_node_count_k, forkunion_allocator_t, fu::standard_atomic_ref, key_hash_type_>;
+
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
 
     /** Pins the index to the storage allocator's device, its kits scoring under @p kernel where
-     *  they cover several metrics; the first @c reserve freezes the rest. */
-    explicit vram_ragged_graph(nk_kernel_kind_t kernel,
-                               cuda_virtual_memory_allocator<byte_t> const& allocator = {}) noexcept
+     *  they cover several metrics, and keeps its host keys and key map on @p keys_allocator; the
+     *  first @c reserve freezes the rest. */
+    explicit vram_ragged_graph(nk_kernel_kind_t kernel, cuda_virtual_memory_allocator<byte_t> const& allocator = {},
+                               forkunion_allocator_t const& keys_allocator = {}) noexcept
         : device_ {allocator.device()}, kernel_ {kernel}, values_tape_(allocator), offsets_column_(allocator),
           neighbors_matrix_(allocator),
-          grown_((cuda_set_device(allocator.api(), allocator.device()), cuda_event_t {allocator.api()})) {}
+          grown_((cuda_set_device(allocator.api(), allocator.device()), cuda_event_t {allocator.api()})),
+          keyed_(keys_allocator) {}
     vram_ragged_graph(vram_ragged_graph const&) = delete;
     vram_ragged_graph& operator=(vram_ragged_graph const&) = delete;
 
@@ -311,11 +330,11 @@ struct vram_ragged_graph {
         return committed > tape_margin_k ? committed - tape_margin_k : 0;
     }
 
-    /** Bytes this index occupies on the device and the host; traversal scratch is the
-     *  executor's. */
+    /** Bytes this index occupies on the device and the host, its keys and key map among them;
+     *  traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept {
         return sizeof(vram_ragged_graph) + values_tape_.committed_bytes() + offsets_column_.committed_bytes() +
-               neighbors_matrix_.committed_bytes();
+               neighbors_matrix_.committed_bytes() + keyed_.memory_usage();
     }
 
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
@@ -339,6 +358,34 @@ struct vram_ragged_graph {
 
     /** The modality's kits, which a face configures before the first @c reserve freezes them. */
     kits_type_& kits() noexcept { return kits_; }
+
+    /** Every node's key on the host, and every key's nodes; readers pass the watermark they
+     *  acquired. */
+    keyed_t const& keys() const noexcept { return keyed_; }
+
+    /**
+     *  The key of the visible @p node.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p node is not visible.
+     */
+    expected<key_t> key_of(node_id_t node) const noexcept {
+        if (static_cast<std::size_t>(node) >= size()) return {{}, status_t::config_mismatch_k};
+        return {keyed_[node], status_t::success_k};
+    }
+
+    /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
+     *  watermark - wait-free. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        keyed_.find_each(key, static_cast<node_id_t>(size()), callback);
+    }
+
+    /** The visible nodes stored under @p key, as of one acquire of the watermark. */
+    std::size_t count(key_t const& key) const noexcept { return keyed_.count(key, static_cast<node_id_t>(size())); }
+
+    /** Whether any visible node is stored under @p key, as of one acquire of the watermark. */
+    bool contains(key_t const& key) const noexcept { return keyed_.contains(key, static_cast<node_id_t>(size())); }
 
 #pragma endregion Measures
 
@@ -456,8 +503,8 @@ struct vram_ragged_graph {
 
     /**
      *  @brief One batch's nodes claimed ahead of their launch, as the IDs
-     *      @b [first_id,first_id+nodes), so a caller lands whatever it keys by them before they
-     *      turn visible.
+     *      @b [first_id,first_id+nodes), so a caller lands whatever else it keeps by them before
+     *      they turn visible.
      *
      *  The claim holds until the drain, since a wave's merges rewrite nodes another batch's walks
      *  would read. A plan that dies before @ref insert gives its nodes back, and @ref insert spends
@@ -482,22 +529,26 @@ struct vram_ragged_graph {
         }
 
         /**
-         *  Launches the claimed nodes of @p tape, one node a claimed ID, as the one-shot
-         *  @ref vram_ragged_graph::insert describes.
+         *  Launches the claimed nodes of @p tape under @p keys, one node a claimed ID, as the
+         *  one-shot @ref vram_ragged_graph::insert describes.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent, or the index was never reserved.
-         *  - @c config_mismatch_k The @p tape holds other than the claimed nodes, or @p context
-         *    rides another device or cannot walk.
+         *  - @c config_mismatch_k The @p keys or @p tape hold other than the claimed nodes, or
+         *    @p context rides another device or cannot walk.
          *  - @c unsupported_k A value past every rung of the face's kits.
-         *  - @c overflow_k The nodes pass the reserved range, or their values the reserved tape.
+         *  - @c overflow_k The nodes pass the reserved range or the host keys, or their values the
+         *    reserved tape.
          */
-        expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
-                                         insert_config_t config = {}) noexcept {
+        expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape,
+                                         traversal_context_t& context, insert_config_t config = {}) noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             vram_ragged_graph& index = *index_;
-            expected<insert_result_t> const launched = index.launch_(*this, tape, context, config);
-            if (succeeded(launched.status)) index.publish_(launched.value.new_size);
+            expected<insert_result_t> const launched = index.launch_(*this, keys, tape, context, config);
+            if (succeeded(launched.status)) {
+                index.publish_keys_({launched.value.first_id, static_cast<node_id_t>(launched.value.new_size)});
+                index.publish_(launched.value.new_size);
+            }
             return launched;
         }
 
@@ -533,26 +584,28 @@ struct vram_ragged_graph {
     }
 
     /**
-     *  Inserts the nodes of @p tape as the contiguous IDs @b [first_id,first_id+nodes), in
-     *  admission waves riding the context's stream, then drains it and turns the watermark over
-     *  the range: @ref plan_insert, then its plan's @c insert. Another batch in flight answers
-     *  @c contended_k.
+     *  Inserts the nodes of @p tape under @p keys as the contiguous IDs
+     *  @b [first_id,first_id+nodes), in admission waves riding the context's stream, then drains
+     *  it, files the keys and turns the watermark over the range: @ref plan_insert, then its plan's
+     *  @c insert. Another batch in flight answers @c contended_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index was never reserved.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c config_mismatch_k The @p keys are not one per node, or the @p context rides another
+     *    device or cannot walk.
      *  - @c unsupported_k A value past every rung of the face's kits.
-     *  - @c overflow_k The nodes pass the ceiling or the reserved range, or their values the
-     *    reserved tape.
+     *  - @c overflow_k The nodes pass the ceiling, the reserved range or the host keys, or their
+     *    values the reserved tape.
      *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
      */
-    expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
-                                     insert_config_t config = {}) noexcept {
+    expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
         std::size_t const entries = tape.size();
+        if (keys.size() != entries) return {{}, status_t::config_mismatch_k};
         if (!entries) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         auto [plan, plan_status] = plan_insert(entries);
         if (failed(plan_status)) return {{}, plan_status};
-        return plan.insert(tape, context, config);
+        return plan.insert(keys, tape, context, config);
     }
 
     /** Nodes claimed by batches, visible or not: where the next claim starts, and what a modality
@@ -578,19 +631,26 @@ struct vram_ragged_graph {
 
     /** A plural walks its shards below one snapshot of their watermarks, and publishes a batch on
      *  every shard inside one commit. */
-    template <typename index_type_, typename, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename>
         requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct vram_nvidia_indexes;
 
-    /** Launches and drains the nodes @p plan claimed, spending it unless the arguments mismatch,
-     *  and leaves them for @c publish_ to turn visible; the claim word holds until then. */
-    expected<insert_result_t> launch_(insert_plan_t& plan, tape_view<byte_t const> tape, traversal_context_t& context,
-                                      insert_config_t config) noexcept {
+    /** Assigns @p keys and launches and drains the nodes @p plan claimed, spending it unless the
+     *  arguments mismatch, and leaves them for @c publish_keys_ and @c publish_ to turn visible;
+     *  the claim word holds until then. */
+    expected<insert_result_t> launch_(insert_plan_t& plan, std::span<key_t const> keys, tape_view<byte_t const> tape,
+                                      traversal_context_t& context, insert_config_t config) noexcept {
         if (plan.index_ != this) return {{}, status_t::uninitialized_k};
-        if (tape.offsets.size() != plan.entries + 1) return {{}, status_t::config_mismatch_k};
+        if (tape.offsets.size() != plan.entries + 1 || keys.size() != plan.entries)
+            return {{}, status_t::config_mismatch_k};
         plan.index_ = nullptr;
-        return launch_claimed_(plan.first_id, tape, context, config);
+        return launch_claimed_(plan.first_id, keys, tape, context, config);
     }
+
+    /** Files every drained node of @p range under its key ahead of its watermark: the claim holder,
+     *  or the closer of the word, is the map's one writer. Plain stores and one release byte per
+     *  node, no read-modify-write. */
+    void publish_keys_(iota_view<node_id_t> range) noexcept { keyed_.publish(range); }
 
     /** Turns every node below @p nodes visible, the end of a batch @c launch_ drained, which also
      *  frees the claim word for the next batch. */
@@ -598,10 +658,19 @@ struct vram_ragged_graph {
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(nodes, std::memory_order_release);
     }
 
-    /** Launches the nodes claimed from @p first_id, as @ref insert describes, without publishing
-     *  them; every refusal before the launch gives the claim back. */
-    expected<insert_result_t> launch_claimed_(node_id_t first_id, tape_view<byte_t const> tape,
-                                              traversal_context_t& context, insert_config_t config) noexcept {
+    /** Empties a graph whose nodes moved out under its closed claim word: the tape's extent, the
+     *  fills and the key map restart, and the watermark drops to zero. Nothing may search it. */
+    void forget_() noexcept {
+        tape_bytes_ = 0, longest_value_ = 0, span_bytes_ = 0, filled_nodes_ = 0;
+        fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
+        keyed_.forget();
+    }
+
+    /** Launches the nodes claimed from @p first_id under @p keys, as @ref insert describes, without
+     *  publishing them; every refusal before the launch gives the claim back. */
+    expected<insert_result_t> launch_claimed_(node_id_t first_id, std::span<key_t const> keys,
+                                              tape_view<byte_t const> tape, traversal_context_t& context,
+                                              insert_config_t config) noexcept {
         std::size_t const entries = tape.size();
         auto const refuse = [&](status_t failure) noexcept -> expected<insert_result_t> {
             unclaim_(first_id, entries);
@@ -631,6 +700,8 @@ struct vram_ragged_graph {
         if (status_t const grown = grow_nodes_(total_nodes, stream); failed(grown)) return refuse(grown);
         if (status_t const mapped = values_tape_.commit(tape_bytes_ + batch_bytes + tape_margin_k); failed(mapped))
             return refuse(mapped);
+        for (std::size_t offset = 0; offset != entries; ++offset)
+            keyed_.assign(static_cast<node_id_t>(first_id + offset), keys[offset]);
         if (cuda_copy_async(api(), values_tape_.base() + tape_bytes_, tape.elements + tape.offsets[0], batch_bytes,
                             stream) != cuda_success_k ||
             cuda_copy_async(api(), staging, tape.offsets.data(), (entries + 1) * sizeof(u64_t), stream) !=
@@ -1113,7 +1184,7 @@ struct vram_ragged_graph {
 
         /** Where every node of a split's source goes, by its source ID: its part times
          *  @ref part_capacity, plus its node in that part's receiver; empty until the partition
-         *  landed, and for a refine or an absorb. The caller moves the keys by it. */
+         *  landed, and for a refine or an absorb. The keys move by it once the scatter landed. */
         std::span<u32_t const> slots() const noexcept {
             if (!split_.part_capacity || phase_ == phase_t::partition_k || phase_ == phase_t::seams_k ||
                 failed(status_))
@@ -1194,21 +1265,27 @@ struct vram_ragged_graph {
             }
         }
 
-        /** Publishes every receiver's nodes at once, its tape's extent and longest value its part's
+        /** Moves every source key to its slot and publishes every receiver's nodes at once, its
+         *  keys filed under the closed claim words, its tape's extent and longest value its part's
          *  and its spans the source's, then empties the source and reopens its claim word at
          *  zero. */
         void publish_parts_() noexcept {
             vram_ragged_graph& source = *std::exchange(split_.source, nullptr);
+            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.landing.data());
+            for (std::size_t node = 0; node != split_.entries; ++node)
+                split_.receivers[slots[node] / split_.part_capacity]->keyed_.assign(
+                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
+                    source.keyed_[static_cast<node_id_t>(node)]);
             for (std::size_t index = 0; index != split_.receivers.size(); ++index) {
                 split_part_t const& part = split_.parts[index];
                 vram_ragged_graph& receiver = *split_.receivers[index];
                 receiver.tape_bytes_ = part.bytes, receiver.longest_value_ = part.longest;
                 receiver.span_bytes_ = source.span_bytes_;
+                receiver.publish_keys_({0, static_cast<node_id_t>(part.entries)});
                 fu::standard_atomic_ref<std::size_t>(receiver.last_visible_id_)
                     .store(part.entries, std::memory_order_release);
             }
-            source.tape_bytes_ = 0, source.longest_value_ = 0, source.span_bytes_ = 0, source.filled_nodes_ = 0;
-            fu::standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
+            source.forget_();
             source.reopen_();
         }
 
@@ -1323,12 +1400,12 @@ struct vram_ragged_graph {
      *      every node and healing.
      *
      *  Every allocation and every landing happens here, behind one wait: each donor's values copy
-     *  past this tape, its offsets shift by this tape's bytes on the host, and its neighbor rows
-     *  copy and rebase onto the IDs past the watermark on the device. The watermark turns over the
-     *  landed nodes before the plan returns, and the claim word stays closed until the plan dies,
-     *  so searches see the landed parts at once and walk across them as the re-selection links
-     *  them. Donors must share this index's device, connectivity and metric, and nothing may search
-     *  them meanwhile.
+     *  past this tape, its offsets shift by this tape's bytes on the host, its neighbor rows copy
+     *  and rebase onto the IDs past the watermark on the device, and its keys move on the host.
+     *  The landed keys file and the watermark turns over them before the plan returns, and the
+     *  claim word stays closed until the plan dies, so searches see the landed parts at once and
+     *  walk across them as the re-selection links them. Donors must share this index's device,
+     *  connectivity and metric, and nothing may search them meanwhile.
      *
      *  @param[in,out] donors The indexes giving their nodes up, each emptied once landed.
      *  @param[in] graph The member of each donor holding its graph.
@@ -1423,13 +1500,17 @@ struct vram_ragged_graph {
             reopen_donors();
             return {std::move(plan), landed};
         }
+        // The closed claim words make this call every map's one writer.
+        into = base;
         for (owner_type_* const donor : donors) {
             vram_ragged_graph& source = donor->*graph;
-            source.tape_bytes_ = 0, source.longest_value_ = 0, source.span_bytes_ = 0, source.filled_nodes_ = 0;
-            fu::standard_atomic_ref<std::size_t>(source.last_visible_id_).store(0, std::memory_order_release);
+            for (std::size_t node = 0, count = source.size(); node != count; ++node)
+                keyed_.assign(static_cast<node_id_t>(into++), source.keyed_[static_cast<node_id_t>(node)]);
+            source.forget_();
         }
         reopen_donors();
         tape_bytes_ = tape_bytes, longest_value_ = longest, span_bytes_ = span_bytes;
+        publish_keys_({static_cast<node_id_t>(base), static_cast<node_id_t>(entries)});
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(entries, std::memory_order_release);
         return {std::move(plan), status_t::success_k};
     }
@@ -1452,7 +1533,7 @@ struct vram_ragged_graph {
      *  at zero. Each receiver then re-selects its seams, audits and heals as @ref plan_refine does,
      *  and the tallies sum over the receivers.
      *
-     *  The keys are the caller's, moved by the plan's @c slots once its partition landed.
+     *  The keys move with the nodes, by the plan's @c slots, at the barrier after the scatter.
      *  Receivers must share this index's device and metric, and either its connectivity or none
      *  yet, which planning then reserves; every claim word stays closed for the plan's life, and
      *  nothing may search this index meanwhile.
@@ -1602,7 +1683,7 @@ struct vram_ragged_graph {
      *  time, landing each half on the host while the next one copies off the device, and the last
      *  one lands with the next call or in @c finish. The claim word stays closed from planning to
      *  @c finish or the plan's death, so batches answer @c contended_k meanwhile, while searches
-     *  run throughout. The keys are the caller's, and no call writes them.
+     *  run throughout. The keys cross from the host at planning.
      */
     struct [[nodiscard]] save_plan_t {
 
@@ -1818,8 +1899,8 @@ struct vram_ragged_graph {
      *      stream: closes the claim word, lands the device's value starts, pins the bounce, sizes
      *      every node and writes both prefix sums.
      *
-     *  The key column's length names the node count, and the caller lands the keys itself. A column
-     *  shorter than its count answers @c overflow_k, and a longer key or sums column
+     *  The key column's length names the node count, and planning fills it from the host keys. A
+     *  column shorter than its count answers @c overflow_k, and a longer key or sums column
      *  @c config_mismatch_k, so no call ever writes past them.
      *
      *  @param[out] columns Where the nodes land, sized from @ref columns_extents.
@@ -1831,8 +1912,7 @@ struct vram_ragged_graph {
      *  - @c overflow_k A column is shorter than its count.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    template <typename key_type_>
-    expected<save_plan_t> plan_save(columns<key_type_, node_id_t, byte_t, u64_t> columns,
+    expected<save_plan_t> plan_save(columns<key_t, node_id_t, byte_t, u64_t> columns,
                                     traversal_context_t& context) noexcept {
         auto [plan, status] = open_save_(context);
         if (failed(status)) return {std::move(plan), status};
@@ -1847,6 +1927,10 @@ struct vram_ragged_graph {
             return {std::move(plan), status_t::overflow_k};
         plan.neighbor_offsets_ = columns.neighbor_offsets, plan.neighbor_ids_ = columns.neighbor_ids;
         plan.value_offsets_ = columns.value_offsets, plan.values_ = columns.values;
+        std::size_t saved = 0;
+        keyed_.column().for_each_span({0, nodes}, [&](std::span<key_t const> run) noexcept {
+            for (key_t const& key : run) columns.keys[saved++] = key;
+        });
         return {std::move(plan), status_t::success_k};
     }
 
@@ -1861,8 +1945,7 @@ struct vram_ragged_graph {
      *  - @c overflow_k A column is shorter than its count.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    template <typename key_type_>
-    status_t save(columns<key_type_, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
+    status_t save(columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         auto [plan, status] = plan_save(columns, context);
         if (failed(status)) return status;
         if (status_t const saved = plan.save({0, static_cast<node_id_t>(plan.extents.nodes)}); failed(saved))
@@ -1878,7 +1961,8 @@ struct vram_ragged_graph {
      *  appended IDs and padded to the connectivity with sentinels, a node with none pointing at
      *  itself, each value through the face's codec, which may pack it - and copies the half to the
      *  device while the host stages the other, refilling a half only once its event says the copies
-     *  out of it landed. @c finish is the one full wait, and turns the watermark over the nodes.
+     *  out of it landed, and assigns each node its key on the host. @c finish is the one full wait,
+     *  files the keys and turns the watermark over the nodes.
      *  Holds the claim for its whole life, so nothing else claims nodes while it runs; a plan that
      *  dies before @c finish gives its claim back and leaves the storage grown, its nodes unfilled.
      */
@@ -1896,8 +1980,9 @@ struct vram_ragged_graph {
         explicit load_plan_t(cuda_api_t const& api) noexcept
             : bounce_ {cuda_pinned_allocator_t {api}}, crossed_ {cuda_event_t {api}, cuda_event_t {api}} {}
         load_plan_t(load_plan_t&& other) noexcept
-            : base(other.base), entries(std::exchange(other.entries, 0)), neighbor_offsets_(other.neighbor_offsets_),
-              neighbor_ids_(other.neighbor_ids_), value_offsets_(other.value_offsets_), values_(other.values_),
+            : base(other.base), entries(std::exchange(other.entries, 0)), keys_(other.keys_),
+              neighbor_offsets_(other.neighbor_offsets_), neighbor_ids_(other.neighbor_ids_),
+              value_offsets_(other.value_offsets_), values_(other.values_),
               stored_offsets_(std::move(other.stored_offsets_)), bounce_(std::move(other.bounce_)),
               crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])}, stream_(other.stream_),
               half_nodes_(other.half_nodes_), half_bytes_(other.half_bytes_), neighbors_bytes_(other.neighbors_bytes_),
@@ -1946,6 +2031,7 @@ struct vram_ragged_graph {
                 u64_t* const offsets = reinterpret_cast<u64_t*>(staged + neighbors_bytes_);
                 byte_t* const values = staged + neighbors_bytes_ + offsets_bytes_;
                 for (node_id_t node = first; node != bound; ++node) {
+                    index_->keyed_.assign(static_cast<node_id_t>(base + node), keys_[node]);
                     node_id_t* const slots = neighbors + (node - first) * connectivity;
                     std::size_t kept = 0;
                     for (u64_t link = neighbor_offsets_[node]; link != neighbor_offsets_[node + 1]; ++link)
@@ -1979,8 +2065,9 @@ struct vram_ragged_graph {
         }
 
         /** Publishes the appended nodes once every one landed: the tape's extent, the longest value
-         *  and the widest span grow over them, and the watermark turns, which lifts the claim. A
-         *  success spends the plan; a refusal leaves it whole, so the missing nodes can still land.
+         *  and the widest span grow over them, their keys file under the claim, and the watermark
+         *  turns, which lifts the claim. A success spends the plan; a refusal leaves it whole, so
+         *  the missing nodes can still land.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
@@ -1994,6 +2081,7 @@ struct vram_ragged_graph {
             index.tape_bytes_ = tape_first_ + stored_offsets_[entries];
             index.longest_value_ = max_of(index.longest_value_, longest_);
             index.span_bytes_ = max_of(index.span_bytes_, span_bytes_);
+            index.publish_keys_({base, static_cast<node_id_t>(base + entries)});
             fu::standard_atomic_ref<std::size_t>(index.last_visible_id_)
                 .store(base + entries, std::memory_order_release);
             return status_t::success_k;
@@ -2002,7 +2090,8 @@ struct vram_ragged_graph {
       private:
         friend struct vram_ragged_graph;
 
-        /** The vetted columns but the keys, which the caller lands. */
+        /** The vetted columns. */
+        std::span<key_t const> keys_;
         std::span<u64_t const> neighbor_offsets_;
         std::span<node_id_t const> neighbor_ids_;
         std::span<u64_t const> value_offsets_;
@@ -2042,8 +2131,8 @@ struct vram_ragged_graph {
      *      columns in full, sizes every stored value, claims the nodes, grows the storage and pins
      *      the bounce.
      *
-     *  The key column's length names the node count, and the caller lands the keys itself, at
-     *  @c base on. Every neighbor ID must name a node of the columns, and no node may keep more
+     *  The key column's length names the node count, and the keys land at @c base on beside the
+     *  nodes. Every neighbor ID must name a node of the columns, and no node may keep more
      *  neighbors than the connectivity, both @c malformed_k otherwise.
      *
      *  @param[in] columns The five columns a save filled, by this face or another residency's.
@@ -2060,8 +2149,7 @@ struct vram_ragged_graph {
      *    reserved tape.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    template <typename key_type_>
-    expected<load_plan_t> plan_load(columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+    expected<load_plan_t> plan_load(columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
                                     traversal_context_t& context) noexcept {
         if (cuda_set_device(api(), device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
         load_plan_t plan {api()};
@@ -2113,6 +2201,7 @@ struct vram_ragged_graph {
         if (entries && failed(plan.bounce_.resize_uninitialized(
                            2 * (plan.neighbors_bytes_ + plan.offsets_bytes_ + plan.half_bytes_))))
             return {std::move(plan), status_t::bad_alloc_k};
+        plan.keys_ = columns.keys;
         plan.neighbor_offsets_ = columns.neighbor_offsets, plan.neighbor_ids_ = columns.neighbor_ids;
         plan.value_offsets_ = columns.value_offsets, plan.values_ = columns.values;
         return {std::move(plan), status_t::success_k};
@@ -2134,8 +2223,7 @@ struct vram_ragged_graph {
      *    reserved tape.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    template <typename key_type_>
-    status_t load(columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+    status_t load(columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
                   traversal_context_t& context) noexcept {
         auto [plan, status] = plan_load(columns, context);
         if (failed(status)) return status;
@@ -2337,13 +2425,15 @@ struct vram_ragged_graph {
     void unclaim_(std::size_t first, std::size_t nodes) noexcept { claims_.unclaim(first, nodes); }
 
     /**
-     *  Maps the offsets column and the neighbors matrix up to @p nodes, host work alone, so it
-     *  rides no stream, and leaves the fresh neighbor rows for @c grow_nodes_ to fill.
+     *  Covers the host keys and maps the offsets column and the neighbors matrix up to @p nodes,
+     *  host work alone, so it rides no stream, and leaves the fresh neighbor rows for
+     *  @c grow_nodes_ to fill.
      *
      *  @par Statuses:
-     *  - @c overflow_k The @p nodes pass the reserved range.
+     *  - @c overflow_k The @p nodes pass the reserved range or the host keys.
      */
     status_t map_nodes_(std::size_t nodes) noexcept {
+        if (status_t const covered = keyed_.cover(nodes); failed(covered)) return covered;
         if (nodes <= capacity()) return status_t::success_k;
         if (status_t const mapped = offsets_column_.commit((nodes + 1) * sizeof(u64_t)); failed(mapped)) return mapped;
         return neighbors_matrix_.commit(nodes * connectivity() * sizeof(node_id_t));
@@ -3060,6 +3150,10 @@ struct vram_ragged_graph {
 
     /** The modality's kits: their hooks, their fatbin's kernels and their device parameters. */
     kits_type_ kits_;
+
+    /** Every node's key, assigned by its claim's holder, and the key map that holder files them in
+     *  just before the watermark moves. */
+    keyed_t keyed_;
 };
 
 } // namespace unum::usearch::basic

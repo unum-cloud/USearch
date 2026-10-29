@@ -422,6 +422,37 @@ enum cuda_arch_t : int {
     cuda_arch_blackwellrtx_k = 1200,
 };
 
+/** Compute capability @p major. @p minor on the @c cuda_arch_t scale, as the driver reports it. */
+constexpr cuda_arch_t cuda_arch_of(u32_t major, u32_t minor) noexcept {
+    return static_cast<cuda_arch_t>(major * 100 + minor * 10);
+}
+
+/** The compute capabilities one class's cubins run on, both ends included: each class lists the
+ *  family its @c f or @c a target covers, never a whole major version. */
+struct nvidia_class_span_t {
+    gpu_class_t gpu_class;
+    cuda_arch_t first;
+    cuda_arch_t last;
+};
+
+/** Every NVIDIA class and the GPUs its unit runs natively; a new family is a new row. */
+inline constexpr nvidia_class_span_t nvidia_class_spans_k[] = {
+    {gpu_class_t::nvidia_ampere_k, cuda_arch_ampere_k, static_cast<cuda_arch_t>(870)},
+    {gpu_class_t::nvidia_ada_k, cuda_arch_ada_k, cuda_arch_ada_k},
+    {gpu_class_t::nvidia_hopper_k, cuda_arch_hopper_k, cuda_arch_hopper_k},
+    {gpu_class_t::nvidia_blackwell_k, cuda_arch_blackwell_k, static_cast<cuda_arch_t>(1030)},
+    {gpu_class_t::nvidia_blackwellrtx_k, cuda_arch_blackwellrtx_k, static_cast<cuda_arch_t>(1210)},
+};
+
+/** The class whose unit carries cubins for compute capability @p arch: the row listing it, else the
+ *  Ampere unit, whose PTX JIT-compiles for any newer GPU, and none older than Ampere. */
+constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
+    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
+    for (nvidia_class_span_t const& span : nvidia_class_spans_k)
+        if (span.first <= arch && arch <= span.last) return span.gpu_class;
+    return gpu_class_t::nvidia_ampere_k;
+}
+
 /** One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
  *  never derived policy. */
 struct cuda_device_specs_t {
@@ -454,7 +485,7 @@ struct cuda_device_specs_t {
     std::size_t reserved_shared_memory_per_block_bytes = 0;
 
     /** This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
-    cuda_arch_t arch() const noexcept { return static_cast<cuda_arch_t>(compute_major * 100 + compute_minor * 10); }
+    cuda_arch_t arch() const noexcept { return cuda_arch_of(compute_major, compute_minor); }
 
     /**
      *  Queries the driver for @p ordinal's specification; meaningful only on @c success_k.
@@ -546,7 +577,8 @@ struct cuda_virtual_memory_allocator {
         using other = cuda_virtual_memory_allocator<other_>;
     };
 
-    /** Preferred physical slab, rounded to the driver's granularity at reservation. */
+    /** Largest physical slab, rounded to the driver's granularity at reservation; smaller ones
+     *  double up to it, so a sparse shard maps one granularity, not one full slab per column. */
     inline static constexpr std::size_t preferred_slab_bytes_k = 128u << 20;
 
     cuda_api_t const* api_ = nullptr;
@@ -556,6 +588,7 @@ struct cuda_virtual_memory_allocator {
     /** Bytes mapped so far - the one grower advances it with a release, and any thread may read it
      *  through @c committed_bytes with an acquire; @c mutable for the reference. */
     std::size_t mapped_bytes_ = 0;
+    std::size_t granularity_ = 0;
     std::size_t slab_bytes_ = 0;
     int device_ = 0;
 
@@ -576,8 +609,8 @@ struct cuda_virtual_memory_allocator {
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator&& other) noexcept
         : api_(other.api_), base_(std::exchange(other.base_, 0)),
           virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
-          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_),
-          peers_(other.peers_) {}
+          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), granularity_(other.granularity_),
+          slab_bytes_(other.slab_bytes_), device_(other.device_), peers_(other.peers_) {}
     template <typename other_>
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
         : api_(other.api_), device_(other.device_), peers_(other.peers_) {}
@@ -591,10 +624,9 @@ struct cuda_virtual_memory_allocator {
         if (!api_ || !*api_) return status_t::device_error_k;
         cuda_api_t const& api = *api_;
         cuda_allocation_properties_t properties = allocation_properties_(device_);
-        std::size_t granularity = 0;
-        if (api.memory_granularity(&granularity, &properties, cuda_granularity_minimum_k) != cuda_success_k)
+        if (api.memory_granularity(&granularity_, &properties, cuda_granularity_minimum_k) != cuda_success_k)
             return status_t::device_error_k;
-        slab_bytes_ = max_of(granularity, preferred_slab_bytes_k / granularity * granularity);
+        slab_bytes_ = max_of(granularity_, preferred_slab_bytes_k / granularity_ * granularity_);
         virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         if (api.memory_address_reserve(&base_, virtual_address_bytes_, 0, 0, 0) != cuda_success_k)
             return status_t::bad_alloc_k;
@@ -626,17 +658,20 @@ struct cuda_virtual_memory_allocator {
         if (granted == peers_) return status_t::success_k;
         cuda_access_descriptor_t access[gpu_devices_capacity_k];
         std::size_t const readers = access_of_(granted, access);
-        for (std::size_t offset = 0; offset != mapped_bytes_; offset += slab_bytes_)
-            if (api.memory_set_access(base_ + offset, slab_bytes_, access, readers) != cuda_success_k)
+        for (std::size_t offset = 0, slab = 0; offset != mapped_bytes_; offset += slab) {
+            slab = min_of(slab_bytes_, max_of(granularity_, offset));
+            if (api.memory_set_access(base_ + offset, slab, access, readers) != cuda_success_k)
                 return status_t::device_error_k;
+        }
         peers_ = granted;
         return status_t::success_k;
     }
 
     /**
      *  Maps physical slabs until at least @p bytes are usable, for the owner and every peer; never
-     *  unmaps early. Each handle is released right after mapping, since the mapping alone keeps the
-     *  memory alive.
+     *  unmaps early. Each slab is as large as everything mapped before it, from the granularity up
+     *  to the preferred slab, so a shard's footprint tracks its rows. Each handle is released right
+     *  after mapping, since the mapping alone keeps the memory alive.
      *
      *  @par Statuses:
      *  - @c overflow_k The @p bytes pass the reserved range.
@@ -651,14 +686,13 @@ struct cuda_virtual_memory_allocator {
         std::size_t const readers = access_of_(peers_, access);
         while (mapped_bytes_ < bytes) {
             unsigned long long handle = 0;
-            if (api.memory_create(&handle, slab_bytes_, &properties, 0) != cuda_success_k) return status_t::bad_alloc_k;
-            bool const mapped = api.memory_map(base_ + mapped_bytes_, slab_bytes_, 0, handle, 0) == cuda_success_k &&
-                                api.memory_set_access(base_ + mapped_bytes_, slab_bytes_, access, readers) ==
-                                    cuda_success_k;
+            std::size_t const slab = min_of(slab_bytes_, max_of(granularity_, mapped_bytes_));
+            if (api.memory_create(&handle, slab, &properties, 0) != cuda_success_k) return status_t::bad_alloc_k;
+            bool const mapped = api.memory_map(base_ + mapped_bytes_, slab, 0, handle, 0) == cuda_success_k &&
+                                api.memory_set_access(base_ + mapped_bytes_, slab, access, readers) == cuda_success_k;
             api.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
-            fu::standard_atomic_ref<std::size_t>(mapped_bytes_)
-                .store(mapped_bytes_ + slab_bytes_, std::memory_order_release);
+            fu::standard_atomic_ref<std::size_t>(mapped_bytes_).store(mapped_bytes_ + slab, std::memory_order_release);
         }
         return status_t::success_k;
     }

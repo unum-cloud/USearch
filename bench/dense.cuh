@@ -731,20 +731,23 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
             fmt::println("Checkpoint {} disagrees with the run's geometry", path);
             return false;
         }
+        // A `u32` key column zero-extends into the `u64` rows, which the index files as its keys.
+        byte_t const* const key_column = header.data_of(monolith, header.key).data();
+        std::size_t const key_bytes = dtype_bytes(header.key.dtype);
+        std::vector<typename index_type_::key_t> keys(nodes);
+        for (std::size_t node = 0; node != nodes; ++node) {
+            id_to_row[loaded + node] = safegraphs_widened_key<u64_t>(key_column + node * key_bytes, header.key.dtype);
+            keys[node] = uuid_of(id_to_row[loaded + node]);
+        }
         // Each part's IDs are its own, so it appends as one source past every earlier part.
         status_t const restored = index.load(
             {header.data_of(monolith, header.value), header.data_of(monolith, header.neighbors),
              usearch::dense::norms_column_of(header, monolith, checkpoint_norms_dtype(index))},
-            nodes, {0, static_cast<node_id_t>(nodes)}, stream...);
+            {keys.data(), nodes}, nodes, {0, static_cast<node_id_t>(nodes)}, stream...);
         if (failed(restored)) {
             fmt::println("Failed to restore {}: {}", path, status_to_string(restored));
             return false;
         }
-        // A `u32` key column zero-extends into the `u64` rows.
-        byte_t const* const keys = header.data_of(monolith, header.key).data();
-        std::size_t const key_bytes = dtype_bytes(header.key.dtype);
-        for (std::size_t node = 0; node != nodes; ++node)
-            id_to_row[loaded + node] = safegraphs_widened_key<u64_t>(keys + node * key_bytes, header.key.dtype);
         loaded += nodes;
     }
     return true;

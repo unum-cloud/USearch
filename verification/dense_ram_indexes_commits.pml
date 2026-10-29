@@ -4,17 +4,19 @@
  *  @date October 10, 2026
  *  @brief A batch's commit across the shards, behind one counted sequence word.
  *
- *  `include/usearch/dense/ram_indexes.hpp` makes a batch visible whole across shards. A commit
- *  lands a row on each shard, stores both keys, waits for every shard's turn, then stores the
- *  watermarks between one add on the index's commit sequence word and a second add of the unit
- *  less one, so the low part counts the commits between their stores. A closer stands for a
- *  refine, an absorb, a clear or a checkpoint load of the sharded index.
+ *  `include/usearch/dense/ram_indexes.hpp` makes a batch visible whole across shards. A commit lands
+ *  a row and its key on each shard, awaits every turn, files each shard's key into its map while
+ *  holding that turn, then stores the watermarks between two adds on the commit sequence word. The
+ *  looker counts the first commit's key as `count` does, under `read_until_settled`; a closer,
+ *  standing for a refine, an absorb or a clear, runs in its place.
  *
  *  - An accepted snapshot holds each commit on both shards or on neither.
  *  - Every ID below an accepted snapshot has its key.
+ *  - A count the looker accepts holds the commit's key on every shard or on none.
  *  - Holding them all, the closer finds no commit in flight on any shard.
  *  - Once everyone is done every dispenser is open and level with its watermark.
  *
+ *  @budget 4096
  *  @verify pass sc,rc11
  *  @verify pass sc,rc11 closer=true
  *  @verify pass sc,rc11 commits=2 closer=true
@@ -22,12 +24,12 @@
  *      neither publish nor give back
  *  @verify fail sc closer=true reopen_in_reverse=false: a commit dispensing on the first is refused
  *      on the second with that range stranded
- *  @verify pass sc,rc11 counted_sequence=false
+ *  @verify pass sc,rc11 sequence=parity
  *  @verify pass sc,rc11 commits=2
- *  @verify fail sc,rc11 commits=2 counted_sequence=false: the searcher accepts a snapshot holding
- *      one shard's part
- *  @verify fail sc,rc11 commit_sequence=false: without it, the searcher takes a snapshot between the
- *      commit's two stores
+ *  @verify fail sc,rc11 commits=2 sequence=parity: the searcher accepts a snapshot holding one
+ *      shard's part
+ *  @verify fail sc,rc11 sequence=none: without it, the looker probes one shard before the commit's
+ *      watermark stores and the other after, and counts the key on one shard alone
  *  @verify stuck sc,rc11 commits=2 dispensing_mutex=false: dispensing each shard on its own, the
  *      ranges cross between the shards, and each commit waits for a turn only the other's store gives
  *  @verify fail rc11 closing_order=order_relaxed: the searcher accepts a closed word beside one
@@ -36,8 +38,8 @@
  *  @verify fail rc11 size_order=order_relaxed: the searcher re-reads the word as it was before the
  *      commit opened, and accepts the half
  */
-#define thread_count 3
-#define location_count 7
+#define thread_count 4
+#define location_count 11
 #define history_depth 5
 #define shards 2
 #include <weak_memory.pml>
@@ -47,10 +49,23 @@
 #define sequence_word 0
 #define last_visible_id(shard) (1 + (shard))
 #define key(shard, id) (3 + (shard) * 2 + (id))
+#define map_slot(shard, position) (7 + (shard) * 2 + (position))
 
-// The values a key slot carries: unset, or the key of the thread that landed the row.
+// The values a key slot carries: unset, or the key of the thread that landed the row. A map slot
+// is the key beside its node in one word, published with one release: its tag's ordering against
+// its slot is `ram_tables.pml`'s concern.
 #define unset 0
 #define key_of(thread) (10 + (thread))
+#define empty 0
+#define filed(key, id) ((key) * 2 + (id) + 1)
+#define key_in(slot) (((slot) - 1) / 2)
+#define node_in(slot) (((slot) - 1) % 2)
+
+// The sequence word's forms: the counted word `begin_commit` and `end_commit` move, the parity a
+// single commit in flight would allow, or no bracket at all.
+#define none 0
+#define parity 1
+#define counted 2
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef commits
@@ -59,11 +74,11 @@
 #if commits < 1 || commits > 2
 #error "commits is 1 or 2"
 #endif
-#ifndef counted_sequence
-#define counted_sequence true
+#ifndef sequence
+#define sequence counted
 #endif
-#ifndef commit_sequence
-#define commit_sequence true
+#if sequence != none && sequence != parity && sequence != counted
+#error "sequence is none, parity or counted"
 #endif
 #ifndef dispensing_mutex
 #define dispensing_mutex true
@@ -88,7 +103,7 @@
 #endif
 
 // the word's step after the turns: the counted word's carry into its high part, or the parity's
-#define sequence_unit (counted_sequence -> 4 : 2)
+#define sequence_unit (sequence == counted -> 4 : 2)
 
 byte dispensed[shards];              // each shard's `next_dispensed_id_`, a ghost, since no plan reads it
 bool closed[shards];                 // each shard's dispenser holds the closed state
@@ -105,11 +120,31 @@ inline dispense(shard, id) {
     dispensed[shard]++
 }
 
+// `keyed_nodes::publish` of one row by its turn holder, the shard map's one writer: relaxed peeks
+// until an empty slot, then the slot with the release
+inline publish_keys(t, shard, id, position, seen) {
+    position = 0;
+    do
+    :: assert(position < commits);
+        load(t, map_slot(shard, position), order_relaxed, seen);
+        if
+        :: seen == empty -> break
+        :: else -> position++
+        fi
+    od;
+    load(t, key(shard, id), order_relaxed, seen);
+    atomic {
+        assert(newest_value(map_slot(shard, position)) == empty);
+        store(t, map_slot(shard, position), order_release, filed(seen, id))
+    }
+}
+
 // a batch's commit: a row on each shard, both keys before the turns, every turn awaited outside the
-// bracket of the commit sequence word, and the watermark stores inside it
+// bracket of the commit sequence word, each shard's keys filed while its turn is held, and the
+// watermark stores inside the bracket
 proctype committer(byte t) {
-    byte shard;
-    int id, watermark, sequence;
+    byte shard, position;
+    int id, watermark, opened, seen;
     bool refused;
     // every shard's range under the mutex, so no two commits cross between the shards; a closed
     // shard refuses its dispense, and every shard takes one row, so only the first can refuse
@@ -148,15 +183,18 @@ proctype committer(byte t) {
     for (shard : 0 .. shards - 1) {
         await_turn(t, last_visible_id(shard), part(t, shard), watermark)
     };
+    for (shard : 0 .. shards - 1) {
+        publish_keys(t, shard, part(t, shard), position, seen)
+    };
     if
-    :: commit_sequence -> read_modify_write(t, sequence_word, order_release, sequence, sequence + 1)
+    :: sequence != none -> read_modify_write(t, sequence_word, order_release, opened, opened + 1)
     :: else
     fi;
     for (shard : 0 .. shards - 1) {
         end_turn(t, last_visible_id(shard), order_release, part(t, shard) + 1)
     };
     if
-    :: commit_sequence -> read_modify_write(t, sequence_word, closing_order, sequence, sequence + sequence_unit - 1)
+    :: sequence != none -> read_modify_write(t, sequence_word, closing_order, opened, opened + sequence_unit - 1)
     :: else
     fi;
 finished:
@@ -219,7 +257,7 @@ retry:
     };
     load(t, sequence_word, order_relaxed, after);
     if
-    :: commit_sequence && (before % sequence_unit != 0 || after != before) ->
+    :: sequence != none && (before % sequence_unit != 0 || after != before) ->
         (newest_value(sequence_word) % sequence_unit == 0);
         goto retry
     :: else
@@ -237,6 +275,47 @@ retry:
     }
 }
 
+// `count` of the first commit's key: `read_until_settled`'s commit loop around every shard's
+// `keyed_nodes::count`, each the watermark acquired, the chain probed with acquires and the nodes at
+// or above it dropped; no window opens here, so its epoch loop is left out
+proctype looker(byte t) {
+    byte shard, position;
+    int before, after, watermark, seen, found;
+retry:
+    found = 0;
+    load(t, sequence_word, before_order, before);
+    if
+    :: sequence != none && before % sequence_unit != 0 ->
+        (newest_value(sequence_word) % sequence_unit == 0);
+        goto retry
+    :: else
+    fi;
+    for (shard : 0 .. shards - 1) {
+        load(t, last_visible_id(shard), size_order, watermark);
+        position = 0;
+        do
+        :: position == commits -> break
+        :: else ->
+            load(t, map_slot(shard, position), order_acquire, seen);
+            if
+            :: seen == empty -> break
+            :: else
+            fi;
+            if
+            :: key_in(seen) == key_of(0) && node_in(seen) < watermark -> found++
+            :: else
+            fi;
+            position++
+        od
+    };
+    load(t, sequence_word, order_relaxed, after);
+    if
+    :: sequence != none && after != before -> goto retry
+    :: else
+    fi;
+    assert(found == 0 || found == shards)
+}
+
 init {
     atomic {
         run committer(0);
@@ -247,7 +326,7 @@ init {
         run searcher(2);
         if
         :: closer -> run closing(); run checker()
-        :: else
+        :: else -> run looker(3)
         fi
     }
 }

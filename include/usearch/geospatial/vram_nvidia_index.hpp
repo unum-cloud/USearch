@@ -36,7 +36,7 @@ struct vram_nvidia_kits {
     inline static constexpr std::size_t rungs_k = 1;
 
   private:
-    template <typename, typename>
+    template <typename, typename, typename, typename>
     friend struct basic::vram_ragged_graph;
 
     /** The breadth an insert or a refine walks at least: the candidates the cone selector needs to
@@ -106,6 +106,8 @@ struct vram_nvidia_index {
     using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
     using node_id_t = typename graph_t::node_id_t;
+    using key_t = typename graph_t::key_t;
+    using keyed_t = typename graph_t::keyed_t;
     using distance_t = typename graph_t::distance_t;
     using small_size_t = typename graph_t::small_size_t;
     using reserve_capacity_t = typename graph_t::reserve_capacity_t;
@@ -144,9 +146,9 @@ struct vram_nvidia_index {
         return graph_.traversal_memory_usage(tape, config);
     }
     expected<insert_plan_t> plan_insert(std::size_t entries) noexcept { return graph_.plan_insert(entries); }
-    expected<insert_result_t> insert(tape_view<byte_t const> tape, traversal_context_t& context,
-                                     insert_config_t config = {}) noexcept {
-        return graph_.insert(tape, context, config);
+    expected<insert_result_t> insert(std::span<key_t const> keys, tape_view<byte_t const> tape,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
+        return graph_.insert(keys, tape, context, config);
     }
     std::size_t traversal_memory_usage(tape_view<byte_t const> queries, search_config_t config) const noexcept {
         return graph_.traversal_memory_usage(queries, config);
@@ -189,34 +191,39 @@ struct vram_nvidia_index {
     expected<basic::columns_extents_t> columns_extents(traversal_context_t& context) noexcept {
         return graph_.columns_extents(context);
     }
-    template <typename key_type_>
-    expected<save_plan_t> plan_save(basic::columns<key_type_, node_id_t, byte_t, u64_t> columns,
+    expected<save_plan_t> plan_save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns,
                                     traversal_context_t& context) noexcept {
         return graph_.plan_save(columns, context);
     }
-    template <typename key_type_>
-    status_t save(basic::columns<key_type_, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
+    status_t save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         return graph_.save(columns, context);
     }
-    template <typename key_type_>
-    expected<load_plan_t> plan_load(basic::columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+    expected<load_plan_t> plan_load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
                                     traversal_context_t& context) noexcept {
         return graph_.plan_load(columns, context);
     }
-    template <typename key_type_>
-    status_t load(basic::columns<key_type_ const, node_id_t const, byte_t const, u64_t const> columns,
+    status_t load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
                   traversal_context_t& context) noexcept {
         return graph_.load(columns, context);
     }
 
+    keyed_t const& keys() const noexcept { return graph_.keys(); }
+    expected<key_t> key_of(node_id_t node) const noexcept { return graph_.key_of(node); }
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        graph_.find_each(key, callback);
+    }
+    std::size_t count(key_t const& key) const noexcept { return graph_.count(key); }
+    bool contains(key_t const& key) const noexcept { return graph_.contains(key); }
+
   private:
 
     /** A plural's shard table measures, closes and reopens the graph's claims. */
-    template <typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
     /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
-    template <typename index_type_, typename, typename, typename, typename, typename>
+    template <typename index_type_, typename, typename, typename, typename>
         requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
     friend struct basic::vram_nvidia_indexes;
 

@@ -9,10 +9,12 @@
  *  before its batch's turn: a row with room takes an append, and a full one is copied, unlocked,
  *  re-selected off-lock from the copy and the newcomer, relocked, revalidated slot by slot against
  *  the copy, and rewritten only when unchanged. A linker runs `link(row, N1)` once the watermark
- *  covers `N1`; an unlinker runs `unlink(row, a)`, moving the last slot into `a`'s.
+ *  covers `N1`; an unlinker runs `unlink(row, a)`, moving the last slot into `a`'s. Every holder
+ *  claims the row's `held_k` bit in its state word, beside `wired_k`, as `node_t::lock` does.
  *
  *  - At every unlock: the row holds no edge twice.
  *  - No edge `unlink` removed comes back.
+ *  - Every lock finds the row's `wired_k` bit still set.
  *
  *  @verify pass sc,rc11
  *  @verify fail sc revalidate=false: unchecked, a re-selection copied before `unlink(row, a)` writes
@@ -28,20 +30,23 @@
 #include <weak_memory.pml>
 #include <watermark_turn.pml>
 
-// The words, by the index member each stands for: the row's mutex flag, its size and three slots,
-// one past the budget for `link`'s growth, and the watermark.
-#define row_flag 0
+// The words, by the index member each stands for: the row's state, its size and three slots, one
+// past the budget for `link`'s growth, and the watermark.
+#define row_state 0
 #define row_size 1
 #define row_slot(position) (2 + (position))
 #define last_visible_id 5
 
 // The values: a slot holds an edge, and the IDs are `a`, `b`, then each back-linker's newcomer.
-#define hole 0
 #define linked(id) (1 + (id))
 #define node_a 0
 #define node_b 1
 #define newcomer(t) (2 + (t))
 #define connectivity 2
+
+// The bits of the row's state: `wired_k`, set before the row is reachable, and `held_k`.
+#define wired_bit 1
+#define held_bit 2
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef revalidate
@@ -60,23 +65,26 @@ bool a_gone; // `unlink` removed the edge to `a`
 #define holds(position, id) (newest_value(row_size) > (position) && newest_value(row_slot(position)) == linked(id))
 #define holds_anywhere(id) (holds(0, id) || holds(1, id) || holds(2, id))
 
-// the row mutex: the peek, then the claiming exchange, one step so the exchange never reads the flag back set
+// `node_t::lock`: the relaxed peek until `held_k` is clear, then `fetch_test_and_set_bit` with an
+// acquire, one step so the claim never finds the bit set and loops
 inline lock_row(t, displaced) {
     atomic {
-        newest_value(row_flag) == hole;
-        read_modify_write(t, row_flag, order_acquire, displaced, 1)
+        (newest_value(row_state) & held_bit) == 0;
+        read_modify_write(t, row_state, order_acquire, displaced, displaced | held_bit);
+        assert((displaced & held_bit) == 0 && (displaced & wired_bit) != 0)
     }
 }
 
-// the release store, after what every holder leaves behind: no edge twice, and `a` gone for good
-inline unlock_row(t) {
+// `node_t::unlock`'s `clear_bits` with a release, after what every holder leaves behind: no edge
+// twice, and `a` gone for good
+inline unlock_row(t, displaced) {
     atomic {
         assert(newest_value(row_size) < 2 || newest_value(row_slot(0)) != newest_value(row_slot(1)));
         assert(newest_value(row_size) < 3 || (newest_value(row_slot(2)) != newest_value(row_slot(0)) &&
                                               newest_value(row_slot(2)) != newest_value(row_slot(1))));
         assert(!a_gone || !holds_anywhere(node_a))
     };
-    store(t, row_flag, order_release, hole)
+    read_modify_write(t, row_state, order_release, displaced, displaced & ~held_bit)
 }
 
 // `link`'s scan of the row for @p id, under the row mutex
@@ -114,14 +122,14 @@ retry:
     lock_row(t, displaced);
     load(t, row_size, order_relaxed, size);
     if
-    :: size < connectivity -> append_edge(t, size, newcomer(t)); unlock_row(t); goto turn
+    :: size < connectivity -> append_edge(t, size, newcomer(t)); unlock_row(t, displaced); goto turn
     :: else
     fi;
     degree = size;
     load(t, row_slot(0), order_relaxed, first);
     load(t, row_slot(1), order_relaxed, second);
     if :: degree > 2 -> load(t, row_slot(2), order_relaxed, third) :: else fi;
-    unlock_row(t);
+    unlock_row(t, displaced);
     // off-lock: the selector keeps the nearest of the copy and the newcomer, and at most one more,
     // where picking the same member twice keeps one
     nearest = 0;
@@ -161,7 +169,7 @@ retry:
         fi
     :: else
     fi;
-    unlock_row(t);
+    unlock_row(t, displaced);
     if
     :: !unchanged -> goto retry
     :: else
@@ -187,7 +195,7 @@ proctype linker(byte t) {
         :: !found -> append_edge(t, size, newcomer(0))
         :: else
         fi;
-        unlock_row(t)
+        unlock_row(t, displaced)
     :: else
     fi
 }
@@ -211,12 +219,13 @@ proctype unlinker(byte t) {
         :: else -> position++
         fi
     od;
-    unlock_row(t)
+    unlock_row(t, displaced)
 }
 
 // the row starts full with the edges to `a` and `b`, both published, and neither newcomer is
 init {
     atomic {
+        seed(row_state, wired_bit);
         seed(row_size, 2);
         seed(row_slot(0), linked(node_a));
         seed(row_slot(1), linked(node_b));

@@ -18,7 +18,6 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the batch's contexts & landings
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - the landings' placement
-#include "usearch/utilities/ram_shards.hpp"  // `host_keys` - a shard's host key column
 #include "usearch/utilities/ram_sorts.hpp"   // `rankings_refusal` - the batch's output layout
 
 namespace unum::usearch::utilities {
@@ -249,7 +248,7 @@ struct vram_shard_fanout {
      *  @brief Runs @p search_shard on every live shard's own stream, each landing up to @p wanted
      *      node IDs and @c landed_score_t scores for each of @p queries_count queries, then
      *      merges them by score into @p keys, @p scores and @p counts, resolving node IDs through
-     *      each shard's host keys.
+     *      each shard's own keys.
      *
      *  @p search_shard is called as <tt>search_shard(shard, node_ids, scores, counts, traversal,
      *  visible) → status_t</tt> with that shard's own block of the landing: a query's matches end
@@ -288,9 +287,10 @@ struct vram_shard_fanout {
                 std::size_t live = 0;
                 for (; live != landed && landed_ids_[first + live] != node_id_unknown_k; ++live)
                     frame_[live] = landed_match_t {landed_ids_[first + live], landed_scores_[first + live]};
-                counts[query] = merge_search_results(
-                    std::span<landed_match_t const> {frame_.data(), live}, host_keys(shards_[shard].keys),
-                    to_span(keys.row(query).as_vector()), to_span(scores.row(query).as_vector()), counts[query]);
+                std::span<landed_match_t const> const matches {frame_.data(), live};
+                counts[query] = merge_search_results(matches, shards_[shard].index->keys(),
+                                                     to_span(keys.row(query).as_vector()),
+                                                     to_span(scores.row(query).as_vector()), counts[query]);
             }
         };
         for (std::size_t& count : counts) count = 0;

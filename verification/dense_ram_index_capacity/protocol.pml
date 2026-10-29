@@ -11,15 +11,19 @@
  *  against.
  *
  *  - The election, one thread growing at a time.
- *  - Existence, the rows a claim returns lying inside the chunks the claimer can see.
+ *  - Existence, the rows a claim returns lying inside the chunks the claimer can see, in every column:
+ *    the rows, the key column, and the map's control bytes and slots at seat = node.
  */
 #include <weak_memory.pml>
 
-// The words, by the index member each stands for; the frozen geometry comes last.
+// The words, by the index member each stands for; `keyed_` covers three columns of its own, its key
+// column and its map's control bytes and slots, each its own directory; the frozen geometry comes last.
 #define remaining_capacity 0
 #define last_allocated_id 1
 #define chunks_count 2
-#define geometry 3
+#define keyed_chunks(column) (3 + (column))
+#define keyed_columns 3
+#define geometry 6
 
 // The values: the rows one chunk adds, and the geometries a reservation may ask for; zero is the
 // unfrozen word.
@@ -43,12 +47,29 @@
 #ifndef release_floor
 #define release_floor count
 #endif
+#ifndef keyed_cover
+#define keyed_cover true
+#endif
 
 byte growing; // threads inside `create_next_chunk`
 
 // The inlines below name their callers' locals: `whole`, `old_remaining`, `reverted`,
-// `seen_chunks`, `added` and `unclaimed`, since a local an inline declares costs a step every time
-// the inline runs.
+// `seen_chunks`, `added`, `column` and `unclaimed`, since a local an inline declares costs a step
+// every time the inline runs.
+
+// the rows from `first` to `first + count` inside the chunks of every column the claimer sees
+inline check_covered(t, first, count) {
+    load(t, chunks_count, order_relaxed, seen_chunks);
+    assert(first + count <= seen_chunks * rows_per_chunk);
+    column = 0;
+    do
+    :: column == keyed_columns -> break
+    :: else ->
+        load(t, keyed_chunks(column), order_relaxed, seen_chunks);
+        assert(first + count <= seen_chunks * rows_per_chunk);
+        column++
+    od
+}
 
 // `release_capacity`: the deflation, then `fetch_add_if_at_least(count, release_floor)`, which adds
 // only where `whole + count >= release_floor`; the guard stands in for the header's acquire loads
@@ -85,17 +106,26 @@ inline claim(t, count, first) {
             :: else -> added = added + rows_per_chunk; seen_chunks = seen_chunks + 1
             od;
             store(t, chunks_count, order_relaxed, seen_chunks);
+            // `keyed_.cover`: the key column, then the map's control bytes and slots
+            if
+            :: keyed_cover ->
+                column = 0;
+                do
+                :: column == keyed_columns -> break
+                :: else -> store(t, keyed_chunks(column), order_relaxed, seen_chunks); column++
+                od
+            :: else
+            fi;
             growing--;
             // the grower's take releases the new chunks to a lucky taker its take pushed past the
             // released rows; the counter's own release sequence carries it
             read_modify_write(t, last_allocated_id, take_order, first, first + count);
-            assert(first + count <= seen_chunks * rows_per_chunk);
+            check_covered(t, first, count);
             add_no_return(t, remaining_capacity, order_release, added);
             break
         :: old_remaining - count >= 0 ->
             read_modify_write(t, last_allocated_id, order_acquire, first, first + count);
-            load(t, chunks_count, order_relaxed, seen_chunks);
-            assert(first + count <= seen_chunks * rows_per_chunk);
+            check_covered(t, first, count);
             break
         :: else ->
             // a deficit someone else is filling: release the subtract and wait. The wait is capped,

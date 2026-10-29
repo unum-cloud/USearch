@@ -286,11 +286,15 @@ struct specialized_index {
         return config;
     }
 
-    static void* create(nk_kernel_kind_t kernel, forkunion_allocator_t tables) noexcept {
+    static void* create(nk_kernel_kind_t kernel, std::size_t dimensions, connectivity_t connectivity,
+                        forkunion_allocator_t tables) noexcept {
         if constexpr (viewed_k) return new (std::nothrow) index_t(tables);
-        else if constexpr (is_ram_index<index_type_>)
-            return new (std::nothrow) index_t(kernel, tables, machine_cache_line_bytes());
-        else return new (std::nothrow) index_t(kernel, tables);
+        else {
+            typename index_t::geometry_t const geometry {dimensions, connectivity};
+            if constexpr (is_ram_index<index_type_>)
+                return new (std::nothrow) index_t(kernel, geometry, tables, machine_cache_line_bytes());
+            else return new (std::nothrow) index_t(kernel, geometry, tables);
+        }
     }
     static void destroy(void* index) noexcept { delete static_cast<index_t*>(index); }
     static void bound_shards(void* index, std::size_t nodes) noexcept {
@@ -331,10 +335,9 @@ struct specialized_index {
         else return of(index).storage_requirements(save_config_of());
     }
 
-    static status_t reserve(void* index, std::size_t capacity, connectivity_t connectivity,
-                            std::size_t dimensions) noexcept {
+    static status_t reserve(void* index, std::size_t capacity) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else return of(index).reserve({capacity, connectivity, dimensions}).status;
+        else return of(index).reserve({capacity}).status;
     }
     static status_t clear(void* index) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;

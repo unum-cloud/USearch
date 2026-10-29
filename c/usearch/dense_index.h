@@ -407,7 +407,7 @@ typedef struct usearch_dense_load_ram_t {
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound.
  */
 USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments);
 
@@ -459,7 +459,7 @@ typedef struct usearch_dense_load_vram_t {
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound.
  */
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments);
 
@@ -513,7 +513,7 @@ typedef struct usearch_dense_load_ram_buffer_t {
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound.
  */
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments);
 
@@ -565,7 +565,7 @@ typedef struct usearch_dense_load_vram_buffer_t {
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound.
  */
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments);
 
@@ -669,14 +669,14 @@ typedef struct usearch_dense_reserve_t {
 
 /**
  *  Grows the shards ahead of a number of incoming vectors - a capacity hint, since insertions grow
- *  them on demand and init froze the geometry already.
+ *  them on demand and init fixed the geometry already.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
  *  - @c usearch_status_uninitialized_k No shard is placed.
  *  - @c usearch_status_unknown_kind_k The stored scalar's kits cannot finalize the metric.
- *  - @c usearch_status_config_mismatch_k The frozen geometry differs from a shard's, or on VRAM a
- *    shard's neighbors live on another device or no walk fits the device.
+ *  - @c usearch_status_config_mismatch_k On VRAM, a shard's neighbors live on another device or no
+ *    walk fits the device.
  *  - @c usearch_status_overflow_k @c capacity passes a shard's ceiling, its ID space, its chunk
  *    directory or its key column.
  */
@@ -840,8 +840,8 @@ typedef struct usearch_dense_refine_t {
  *  @par Statuses:
  *  - @c usearch_status_device_k The executor's kind does not match the residency.
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
- *  - @c usearch_status_uninitialized_k No shard is placed or froze its geometry, the executor
- *    holds no threads, or a VRAM handle keeps such an earlier failure.
+ *  - @c usearch_status_uninitialized_k No shard is placed, the executor holds no threads, or a VRAM
+ *    handle keeps such an earlier failure.
  *  - @c usearch_status_contended_k An insertion, load, save, refinement or absorption holds the
  *    handle, or another call holds the executor or its pool.
  *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
@@ -967,8 +967,9 @@ typedef struct usearch_dense_search_t {
  *  the executor's threads, so it must tolerate that.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
- *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted
- *  succeeds without walking and lands only the counts, every one zero.
+ *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted,
+ *  or an index holding no entries, succeeds without walking and lands only the counts, every one
+ *  zero.
  *
  *  @code{.c}
  *  static void admits_tenant(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
@@ -1768,8 +1769,7 @@ typedef struct usearch_dense_save_buffer_t {
  *    executor or its pool, a dispensed batch has yet to publish, or a call, batch, load or plan
  *    holds the handle.
  *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint.
- *  - @c usearch_status_uninitialized_k No shard is placed or froze its geometry, or the executor
- *    holds no pool workers.
+ *  - @c usearch_status_uninitialized_k No shard is placed, or the executor holds no pool workers.
  *  - @c usearch_status_unknown_kind_k The stored scalar has no interchange dtype.
  *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
  *    device.

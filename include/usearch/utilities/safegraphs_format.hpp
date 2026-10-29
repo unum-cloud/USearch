@@ -1677,8 +1677,7 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string
  *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
  *    @p codec take, the segment is misaligned, @p index already holds entries, or a step's nodes
  *    fall outside the plan.
- *  - @c overflow_k The node count passes the node IDs, the key multimap or the locator map of
- *    @p index.
+ *  - @c overflow_k The node count passes the node IDs or the key multimap of @p index.
  *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
  *    @p executor has no workers.
  *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
@@ -1859,8 +1858,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
  *  - @c config_mismatch_k A column's dtype, shape or key width differs from what @p index and
  *    @p codec take, the segment is misaligned, @p index already holds entries, or a step's nodes
  *    fall outside the plan.
- *  - @c overflow_k The node count passes the node IDs, the key multimap or the locator map of
- *    @p index.
+ *  - @c overflow_k The node count passes the node IDs or the key multimap of @p index.
  *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity, or the pool of
  *    @p executor has no workers.
  *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.

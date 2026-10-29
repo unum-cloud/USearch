@@ -766,8 +766,9 @@ std::size_t test_basic_wiring(u64_t seed) {
 }
 
 /** Growth with no reserve: inserts cross three node chunks of 1'024 nodes, then twice as many per
- *  chunk, and the nodes on both sides of each boundary keep their keys and values; then @c clear
- *  forgets every node and key but keeps the chunks, and a rebuild restarts from ID zero. */
+ *  chunk, the nodes on both sides of each boundary keep their keys and values, and every key, filed
+ *  in the multimap the batches' own claims covered, counts once; then @c clear forgets every node
+ *  and key but keeps the chunks, and a rebuild restarts from ID zero. */
 template <typename fixture_type_>
 std::size_t test_basic_unreserved_growth(u64_t seed) {
     using index_t = typename fixture_type_::index_t;
@@ -816,6 +817,9 @@ std::size_t test_basic_unreserved_growth(u64_t seed) {
             failures += expect(index.find(keys[offset]).value == node_id);
             failures += expect(fixture_type_::value_equals(index.published_value_of(node_id), expected_values[offset]));
         }
+        std::size_t miscounted = 0;
+        for (key_t const& key : keys) miscounted += index.count(key) != 1;
+        failures += expect_eq(miscounted, 0u);
         // Whole-graph candidates cannot miss, wherever the best entry lies.
         auto const [found, found_status] = index.search(expected_values[nodes_k - 1], metric, context,
                                                         typename index_t::search_config_t {nodes_k});
@@ -881,7 +885,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::success_k);
 
         // A budget swept up from the live bytes refuses an insert's allocations one by one: the key
-        // seats', then the node chunk's, which a step far below its size refuses at least once.
+        // multimap's, then the node chunk's, which a step far below its size refuses at least once.
         // Every refusal, the cover's included, leaves the index empty and its claim given back,
         // until the first success dispenses ID zero.
         std::unique_ptr<index_t> const swept_ptr = fixture_type_::make_index(ledger);

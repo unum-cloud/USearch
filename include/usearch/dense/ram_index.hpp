@@ -15,7 +15,7 @@
 #include <limits>      // `std::numeric_limits`
 #include <numbers>     // `std::numbers::log2e_v`, `std::numbers::ln2_v` - the base-2 softmax
 #include <span>        // `std::span`
-#include <type_traits> // `std::has_unique_object_representations_v`
+#include <type_traits> // `std::is_same_v` - the tiles kit a scan streams through
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref`
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`
@@ -63,6 +63,11 @@ struct ram_cursor;
  *  turns run in dispensed order, so the publication gap is bounded by the batches in flight, and
  *  a small batch waits behind an earlier, larger batch's wiring before its turn.
  *
+ *  Every node keeps its key, and every key its nodes. A row's key lands beside its vector, and the
+ *  turn holder files the batch's keys right before moving the watermark, so the key map has one
+ *  writer and no read-modify-write per key. A lookup drops every node at or past the watermark it
+ *  acquired, so a key is found exactly when its node is visible.
+ *
  *  The sharded index closes the dispenser around its refines and loads: closing succeeds only
  *  once every dispensed ID is published, and a dispense meeting a closed dispenser answers
  *  @c contended_k, so no batch wires beside a load landing at the watermark or a refine
@@ -88,7 +93,9 @@ template <                                                                    //
     typename cache_hints_type_ = dummy_cache_hints_t,                         //
     typename vectors_allocator_type_ = std::allocator<byte_t>,                //
     typename neighbors_allocator_type_ = std::allocator<byte_t>,              //
-    typename traversals_allocator_type_ = std::allocator<byte_t>              //
+    typename traversals_allocator_type_ = std::allocator<byte_t>,             //
+    typename key_type_ = uuid_t,                                              //
+    typename key_hash_type_ = std::hash<key_type_>                            //
     >
 struct ram_index;
 
@@ -756,7 +763,7 @@ struct traversal_context {
     traversal_context& operator=(traversal_context&&) = default;
 
     /** Sizes every neighbor scratch for @p capacity entries through the context's own allocator;
-     *  geometry freezes once, so the tensors allocate once. */
+     *  geometry is fixed at construction, so the tensors allocate once. */
     status_t reserve_neighbors(std::size_t capacity) noexcept {
         if (selected_neighbors.capacity() >= capacity) return status_t::success_k;
         auto selected = selection_t::uninitialized({capacity}, candidates_allocator_t(allocator_));
@@ -784,8 +791,8 @@ struct traversal_context {
     }
 
     /** Sizes the exact scan's @p rows by @p columns dots tile, and its sums of squares and
-     *  thresholds for @p packs packs of @p columns queries; geometry freezes once, so the tile
-     *  allocates once per context, and the rest grow to the most packs a block holds. */
+     *  thresholds for @p packs packs of @p columns queries; geometry is fixed at construction, so
+     *  the tile allocates once per context, and the rest grow to the most packs a block holds. */
     status_t reserve_tiles(std::size_t rows, std::size_t columns, std::size_t packs) noexcept {
         if (step_dots.numel() < rows * columns) {
             auto dots = dots_tensor_t::uninitialized({rows, columns}, dots_allocator_t(allocator_));
@@ -819,7 +826,7 @@ template <                                                                      
     typename rmscast_kit_type_, typename visits_kit_type_,                              //
     typename wait_type_, template <typename> class atomic_ref_template_,                //
     typename cache_hints_type_, typename vectors_allocator_type_, typename neighbors_allocator_type_,
-    typename traversals_allocator_type_> //
+    typename traversals_allocator_type_, typename key_type_, typename key_hash_type_> //
 struct ram_index {
 
     using scalar_t = typename quads_kit_type_::scalar_t;
@@ -858,6 +865,10 @@ struct ram_index {
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using node_ids_view_t = nk::vector_view<node_id_t>;
 
+    /** The caller-visible identity of every node; several nodes may share one. */
+    using key_t = key_type_;
+    using keys_view_t = nk::vector_view<key_t>;
+
     /** The hardware wait monitor engaged on contended words - the class-local spelling of
      *  @c wait_type_, reused by external readers waiting out transient lock sentinels. */
     using wait_t = wait_type_;
@@ -878,7 +889,7 @@ struct ram_index {
     template <typename, typename, typename, typename, typename, typename, typename, template <typename> class, typename,
               typename>
     friend struct ram_indexes;
-    template <typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
     /** The distance kit @c src/ picked; its step is the row pitch the chunks round to. */
@@ -925,35 +936,13 @@ struct ram_index {
     inline static constexpr small_size_t max_chunks_k = static_cast<small_size_t>(
         chunk_schedule_t::locate(max_node_count_k).chunk);
 
-    /** Once-frozen geometry: vector dimensions in the high half, neighbor connectivity in the
-     *  low one; zero bits means not reserved yet. Both ride one word so competing first
-     *  reservations agree on both through a single cold-path compare-exchange - the only CAS in
-     *  the index - and every reader unpacks a local acquire-loaded copy, so a torn or
-     *  half-frozen geometry is unrepresentable. */
-    struct geometry_t {
-        u64_t packed_bits = 0;
+    /** Every node's key in a column beside the rows, and every key's nodes in a map placed by node,
+     *  growing in the rows' chunks. */
+    using keyed_t = keyed_nodes<key_t, node_id_t, chunk_schedule_t, max_node_count_k, vectors_allocator_type_,
+                                atomic_ref_template_, key_hash_type_>;
 
-        constexpr geometry_t() noexcept = default;
-
-        /** Packs @p dimensions & @p connectivity - the inverse of the accessors. */
-        constexpr geometry_t(std::size_t dimensions, connectivity_t connectivity) noexcept
-            : packed_bits((static_cast<u64_t>(dimensions) << 32u) | static_cast<u64_t>(connectivity)) {}
-
-        /** Scalar dimensions per vector. */
-        constexpr small_size_t dimensions() const noexcept { return static_cast<small_size_t>(packed_bits >> 32u); }
-
-        /** Neighbor slots per node. */
-        constexpr small_size_t connectivity() const noexcept { return static_cast<small_size_t>(packed_bits); }
-
-        /** @c true once frozen by the first successful @c reserve(). */
-        constexpr explicit operator bool() const noexcept { return packed_bits != 0; }
-        constexpr bool operator==(geometry_t const&) const noexcept = default;
-    };
-    static_assert(std::has_unique_object_representations_v<geometry_t>,
-                  "The compare-exchange compares object representations, never operator==: " //
-                  "padding would make value-equal geometries spuriously lose the freeze race");
-    static_assert(sizeof(geometry_t) == sizeof(u64_t),
-                  "Every geometry load must stay one word every class reference moves in one instruction");
+    /** The dimensions and connectivity every row keeps, fixed at construction. */
+    using geometry_t = dense::geometry_t;
 
     /** The allocator the vectors & norms grow through, whose memory domain the sharded index
      *  places by. */
@@ -965,15 +954,17 @@ struct ram_index {
     ram_index(ram_index&&) noexcept = delete;
     ram_index& operator=(ram_index&&) noexcept = delete;
 
-    /** Constructs an empty index walking by @p kernel, its vectors & norms growing through
-     *  @p vectors_allocator and its neighbors through @p neighbors_allocator, streaming rows ahead
-     *  of the walks @p line_bytes at a time; a @p kernel the dtype's kits cannot finalize is
-     *  refused at the first @c reserve. */
-    explicit ram_index(nk_kernel_kind_t kernel, vectors_allocator_type_ const& vectors_allocator = {},
+    /** Constructs an empty index of @p geometry walking by @p kernel, its vectors, norms & keys
+     *  growing through @p vectors_allocator and its neighbors through @p neighbors_allocator,
+     *  streaming rows ahead of the walks @p line_bytes at a time. Nothing is allocated: a malformed
+     *  geometry or a @p kernel the dtype's kits cannot finalize is refused at the first growth. */
+    explicit ram_index(nk_kernel_kind_t kernel, geometry_t geometry,
+                       vectors_allocator_type_ const& vectors_allocator = {},
                        neighbors_allocator_type_ const& neighbors_allocator = {},
                        std::size_t line_bytes = default_alignment_k) noexcept
         : vectors_allocator_(vectors_allocator), vectors_(vectors_allocator), norms_(vectors_allocator),
-          neighbors_(neighbors_allocator), kernel_(kernel), prefetcher_ {line_bytes} {}
+          neighbors_(neighbors_allocator), keyed_(vectors_allocator), geometry_(geometry), kernel_(kernel),
+          prefetcher_ {line_bytes} {}
 
 #pragma region Measures
 
@@ -985,19 +976,16 @@ struct ram_index {
      *  empty, and checkpoints carry no norms column. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k || quads_compensated<quads_kit_t>; }
 
-    /** Number of published vectors - the visibility watermark; the index itself stores no keys. */
+    /** Number of published vectors - the visibility watermark. */
     std::size_t size() const noexcept {
         return atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
     }
 
-    /** The dimensions & connectivity together, as one acquire load of the frozen word - empty
-     *  until the first successful @c reserve, and never a mix of two freezes. */
-    geometry_t geometry() const noexcept {
-        return atomic_ref<geometry_t const>(geometry_).load(std::memory_order_acquire);
-    }
+    /** The dimensions & connectivity together, fixed at construction. */
+    geometry_t geometry() const noexcept { return geometry_; }
 
     /** Neighbor slots per node - the full fixed capacity, none lost to bookkeeping. */
-    std::size_t connectivity() const noexcept { return geometry().connectivity(); }
+    std::size_t connectivity() const noexcept { return geometry_.connectivity; }
 
     /** The most candidates a walk asks an aggregating predicate between two settles: one expanded
      *  row of @p connectivity slots, or one batch of landmarks. */
@@ -1012,8 +1000,8 @@ struct ram_index {
                                        : static_cast<small_size_t>(default_expansion_factor(connectivity()));
     }
 
-    /** Scalar dimensions per stored vector; zero until the first reservation freezes it. */
-    std::size_t dimensions() const noexcept { return geometry().dimensions(); }
+    /** Scalar dimensions per stored vector. */
+    std::size_t dimensions() const noexcept { return geometry_.dimensions; }
 
     /** Rows hosted without growing again - unclaimed plus claimed. The release is read first:
      *  @ref release_capacity deflates the claim before it releases, so the sum can only dip, which
@@ -1026,21 +1014,19 @@ struct ram_index {
         return claimed_entries + static_cast<std::size_t>(unclaimed_rows > 0 ? unclaimed_rows : 0);
     }
 
-    /** Bytes the materialized chunks span - vectors, norms & neighbors - derived from the hosted
-     *  capacity and the growth schedule rather than from the chunks themselves, so it stays safe
-     *  under concurrent growth. Reserved-but-empty rows count from the moment they are granted. */
+    /** Bytes the materialized chunks span - vectors, norms & neighbors derived from the hosted
+     *  capacity and the growth schedule, keys from their published chunks - so it stays safe under
+     *  concurrent growth. Reserved-but-empty rows count from the moment they are granted. */
     std::size_t memory_usage() const noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return sizeof(ram_index);
         std::size_t const hosted_rows = capacity();
         small_size_t chunks = 0;
         while (chunks != max_chunks_k && chunk_schedule_t::nodes_before(chunks) < hosted_rows) ++chunks;
         std::size_t const rows = chunk_schedule_t::nodes_before(chunks);
         std::size_t bytes = sizeof(ram_index);
-        bytes += rows * padded_row_values(frozen) * sizeof(scalar_t);
+        bytes += rows * padded_row_values(geometry_) * sizeof(scalar_t);
         if (stores_norms()) bytes += rows * sizeof(vector_norms_t);
-        bytes += rows * frozen.connectivity() * sizeof(node_id_t);
-        return bytes;
+        bytes += rows * geometry_.connectivity * sizeof(node_id_t);
+        return bytes + keyed_.memory_usage();
     }
 
     /** The stored bytes of one node's vector - the ID-addressed read a key lookup or an export
@@ -1049,10 +1035,52 @@ struct ram_index {
         return vector_view_t {vector_for(chunk_schedule_t::locate(node)).data(), dimensions()};
     }
 
-    /** Storage values per row under the frozen @p geometry - the copy width every caller's
+    /** Every node's key, and every key's nodes; a reader passes the watermark it acquired. */
+    keyed_t const& keys() const noexcept { return keyed_; }
+
+    /**
+     *  The key of the published @p node.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k @p node is at or past the watermark.
+     */
+    expected<key_t> key_of(node_id_t node) const noexcept {
+        if (node >= size()) return {{}, status_t::config_mismatch_k};
+        return {keyed_[node], status_t::success_k};
+    }
+
+    /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
+     *  watermark - wait-free. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        keyed_.find_each(key, static_cast<node_id_t>(size()), callback);
+    }
+
+    /** Published nodes stored under @p key, as of one acquire of the watermark. */
+    std::size_t count(key_t const& key) const noexcept { return keyed_.count(key, static_cast<node_id_t>(size())); }
+
+    /** Whether any published node is stored under @p key, as of one acquire of the watermark. */
+    bool contains(key_t const& key) const noexcept { return keyed_.contains(key, static_cast<node_id_t>(size())); }
+
+    /** Exports up to @p wanted rows stored under @p key into @p vectors in their scalar, and
+     *  reports the @b true total under that key - a return above @p wanted means the copy
+     *  truncated; zero means absent. Rows at least as wide as the index take its columns and keep
+     *  their tails. */
+    std::size_t get(key_t const& key, rows_span_t vectors, std::size_t wanted) const noexcept {
+        rows_span_t const target {vectors.data, vectors.rows, dimensions(), vectors.stride, vectors.dtype};
+        std::size_t total = 0;
+        find_each(key, [&](node_id_t node) noexcept {
+            if (total < wanted && total < target.rows)
+                export_row<elementwise_kit_t>(vector(node).byte_data(), vector_dtype_k, target, total);
+            ++total;
+        });
+        return total;
+    }
+
+    /** Storage values per row under @p geometry - the copy width every caller's
      *  matrix must be as wide as. */
     static std::size_t stored_row_values(geometry_t geometry) noexcept {
-        return divide_round_up<std::size_t>(geometry.dimensions(), nk::dimensions_per_value<scalar_t>());
+        return divide_round_up<std::size_t>(geometry.dimensions, nk::dimensions_per_value<scalar_t>());
     }
 
     /** Storage values per row as the chunks hold it: whole steps of the picked quads kit, zero-tailed like the GPU's
@@ -1073,15 +1101,14 @@ struct ram_index {
         /** Logical dimensions per vector - the vectors matrix's trailing extent. */
         std::size_t dimensions = 0;
 
-        /** Neighbor IDs per neighbors-matrix row - the frozen connectivity. */
+        /** Neighbor IDs per neighbors-matrix row - the index's connectivity. */
         std::size_t connectivity = 0;
     };
 
     /** The shapes a @c save() of the current contents fills. */
     saved_shape_t saved_shape() const noexcept {
-        geometry_t const frozen = geometry();
         std::size_t const count = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
-        return {count, frozen.dimensions(), frozen.connectivity()};
+        return {count, geometry_.dimensions, geometry_.connectivity};
     }
 
     /** Where a save lands: row-major columns the caller sized from @ref saved_shape, handed
@@ -1124,61 +1151,40 @@ struct ram_index {
         small_size_t expansion_factor = 0;
     };
 
-    /** Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
+    /** Requested capacity for a @c reserve() call. */
     struct reserve_capacity_t {
 
         /** Minimal number of entries the index must be able to host. */
         std::size_t capacity = 0;
 
-        /** Neighbor slots per node; a power of two tiling whole cache lines. */
-        connectivity_t connectivity = connectivity_32_k;
-
-        /** Scalar dimensions per vector; required before the first insertion. */
-        std::size_t dimensions = 0;
-
-        /** Rows the index may ever host, clamped to the ID space; frozen with the geometry, past it
-         *  every claim answers @c overflow_k. */
+        /** Rows the index may ever host, clamped to the ID space; a reservation only lowers it, and
+         *  past it every claim answers @c overflow_k. */
         std::size_t ceiling = max_node_count_k;
+
+        /** A request for @p entries; the ceiling is set by name only, so no positional field lands
+         *  on it. */
+        reserve_capacity_t(std::size_t entries = 0) noexcept : capacity(entries) {}
     };
 
     /**
      *  @brief Ensures the index can host at least @p config.capacity entries, growing when
-     *      needed, and answers the capacity now in effect.
+     *      needed, and answers the capacity now in effect - a hint, since every claim grows the
+     *      storage it needs.
      *
      *  Safe to call concurrently with insertions, searches and other reservations: growth runs
-     *  the same grower-election protocol as @c insert, and the geometry freezes exactly once
-     *  through a single cold-path compare-exchange. A later call naming a different geometry
-     *  receives @c status_t::config_mismatch_k, as does a geometry with no dimensions, with
-     *  sub-byte dimensions that leave a storage value partly filled, or with a connectivity that
-     *  is not a power of two. Constructors allocate nothing, so every storage failure surfaces
-     *  here, in the returned status, and so does a kernel the dtype's kits cannot finalize, as
-     *  @c status_t::unknown_kind_k.
+     *  the same grower-election protocol as @c insert. Constructors allocate nothing, so every
+     *  storage failure surfaces at the first growth, here or in a claim, and so does a malformed
+     *  geometry or a kernel the dtype's kits cannot finalize.
      *
      *  @par Statuses:
      *  - @c unknown_kind_k The dtype's kits cannot finalize the kernel.
      *  - @c config_mismatch_k The geometry has no dimensions, leaves a storage value partly filled,
      *    or has a connectivity that is not a power of two.
-     *  - @c config_mismatch_k Another geometry froze first.
      *  - @c overflow_k The capacity passes the reserved ceiling or the chunk directory.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        if (!kernel_supported<quads_kit_t>(kernel_)) return {0, status_t::unknown_kind_k};
-        // Sub-byte rows fill whole storage values: a ragged tail would be dropped by the kernels' tail loads.
-        if (!config.dimensions || config.dimensions % nk::dimensions_per_value<scalar_t>() ||
-            !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
-            return {0, status_t::config_mismatch_k};
-
-        // Stored ahead of the freeze, the ceiling reaches every claim that sees the geometry.
-        if (!geometry())
-            atomic_ref<std::size_t>(ceiling_nodes_)
-                .store(min_of(config.ceiling, max_node_count_k), std::memory_order_relaxed);
-        // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
-        geometry_t const desired_geometry {config.dimensions, config.connectivity};
-        geometry_t expected_geometry {};
-        bool const froze_now = atomic_ref<geometry_t>(geometry_).compare_exchange_strong( //
-            expected_geometry, desired_geometry, std::memory_order_acq_rel, std::memory_order_acquire);
-        geometry_t const frozen_geometry = froze_now ? desired_geometry : expected_geometry;
-        if (frozen_geometry != desired_geometry) return {0, status_t::config_mismatch_k};
+        // Racing reservations keep the lowest ceiling any of them asked for.
+        atomic_ref<std::size_t>(ceiling_nodes_).min(config.ceiling, std::memory_order_relaxed);
 
         while (true) {
             std::size_t const total_nodes = capacity();
@@ -1235,16 +1241,13 @@ struct ram_index {
     }
 
     /**
-     *  @brief Bytes one context reserves for @p config under the frozen geometry; zero before
-     *      the geometry freezes.
+     *  @brief Bytes one context reserves for @p config under the index's geometry.
      *
      *  The first size of every structure a walk touches, reservation for reservation with
      *  @ref reserve_traversal. The visited set may still re-table as a walk widens.
      */
     std::size_t traversal_memory_usage(insert_config_t config = {}) const noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return 0;
-        std::size_t const node_connectivity = frozen.connectivity();
+        std::size_t const node_connectivity = geometry_.connectivity;
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
         using context_t = traversal_context_t;
         using arena_t = arena_allocator<std::byte>;
@@ -1256,12 +1259,12 @@ struct ram_index {
                             arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.ahead)) +
                             arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
                             context_t::neighbors_memory_usage(node_connectivity) +
-                            staged_rows_bytes(vector_dtype_k, 1, frozen.dimensions());
+                            staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions);
         return bytes;
     }
 
     /**
-     *  @brief Sizes @p context 's scratch for the frozen geometry and @p config - the other
+     *  @brief Sizes @p context 's scratch for the index's geometry and @p config - the other
      *      fallible half of an insertion, hoistable ahead of a fan-out.
      *
      *  Idempotent and monotone. The candidates and the neighbor scratch never allocate again and
@@ -1270,13 +1273,10 @@ struct ram_index {
      *  The staged queries hold one imported row, so a landing row or a lone query never grows them.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The geometry is not frozen yet.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     status_t reserve_traversal(traversal_context_t& context, insert_config_t config = {}) noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return status_t::uninitialized_k;
-        std::size_t const node_connectivity = frozen.connectivity();
+        std::size_t const node_connectivity = geometry_.connectivity;
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // `sorted_buffer::insert(.., limit)` never grows on its own, and `growing_hash_set::set`
@@ -1285,7 +1285,7 @@ struct ram_index {
             failed(sized))
             return sized;
         if (status_t const sized = context.reserve_neighbors(node_connectivity); failed(sized)) return sized;
-        return context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, frozen.dimensions()));
+        return context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions));
     }
 
 #pragma endregion Reservation
@@ -1320,31 +1320,36 @@ struct ram_index {
     };
 
     /**
-     *  @brief Inserts a batch of @p new_vectors, reporting each one's assigned node ID.
+     *  @brief Inserts a batch of @p new_vectors under @p keys, reporting each one's assigned node
+     *      ID.
      *
-     *  One compare-exchange dispenses the batch's IDs; every row lands its payload, walks the graph
-     *  for candidates and is wired, then one watermark turn publishes them all. All fallible
-     *  scratch allocations happen before the dispense; once IDs are dispensed, this thread must
-     *  roll forward to publication. @ref dense_ram_index_concurrency
+     *  One compare-exchange dispenses the batch's IDs; every row lands its key and payload, walks
+     *  the graph for candidates and is wired, then one watermark turn files the keys and publishes
+     *  them all. All fallible scratch allocations happen before the dispense; once IDs are
+     *  dispensed, this thread must roll forward to publication. @ref dense_ram_index_concurrency
      *
-     *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
+     *  @param[in] keys One key per row; several rows may share one.
+     *  @param[in] new_vectors The batch to insert, one row per vector, in the index's geometry.
      *  @param[out] assigned_ids Either empty, or one slot per incoming vector receiving its node
      *      ID. One batch's IDs are contiguous, in the order of its rows.
      *  @param[in,out] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k A non-empty @p assigned_ids differs in length from the batch.
-     *  - @c uninitialized_k The geometry is not frozen yet.
-     *  - @c config_mismatch_k The rows' width differs from the frozen dimensions.
+     *  - @c config_mismatch_k @p keys or a non-empty @p assigned_ids differs in length from the
+     *    batch.
+     *  - @c config_mismatch_k The rows' width differs from the dimensions, or the geometry is
+     *    malformed.
+     *  - @c unknown_kind_k The dtype's kits cannot finalize the kernel.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded, or the batch passes the
      *    reserved ceiling or the chunk directory.
      *  - @c contended_k The dispenser is closed by a refine or a load.
      */
-    expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+    expected<insert_result_t> insert(keys_view_t keys, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
                                      traversal_context_t& context, insert_config_t config = {}) noexcept {
 
         std::size_t const incoming_vectors_count = new_vectors.extent(0); // rows, not scalars
+        if (keys.size() != incoming_vectors_count) return {{size()}, status_t::config_mismatch_k};
         if (!incoming_vectors_count) return {{size()}, status_t::success_k};
         bool const report_assigned_ids = assigned_ids.size() != 0;
         if (report_assigned_ids && assigned_ids.size() != incoming_vectors_count)
@@ -1358,12 +1363,8 @@ struct ram_index {
         std::size_t const restarts_before = context.restarts;
         std::size_t const saturated_walks_before = context.saturated_walks;
 
-        // Without a frozen geometry neither the copy width nor the connectivity is defined.
-        geometry_t const frozen = geometry();
-        if (!frozen) return {{size()}, status_t::uninitialized_k};
-
         // Every row lands in a slot as wide as the geometry, so a wider row would overflow it.
-        if (new_vectors.extent(1) != frozen.dimensions()) return {{size()}, status_t::config_mismatch_k};
+        if (new_vectors.extent(1) != dimensions()) return {{size()}, status_t::config_mismatch_k};
 
         if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {{size()}, sized};
 
@@ -1371,7 +1372,7 @@ struct ram_index {
         // forward to publishing every ID it claims.
         auto [batch_claim, status] = claim(incoming_vectors_count);
         if (failed(status)) return {{size()}, status};
-        if (status_t const inserted = insert(std::move(batch_claim), new_vectors, assigned_ids, context, config);
+        if (status_t const inserted = insert(std::move(batch_claim), keys, new_vectors, assigned_ids, context, config);
             failed(inserted))
             return {{size()}, inserted};
 
@@ -1449,7 +1450,7 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c overflow_k @p count passes the reserved ceiling or the chunk directory.
-     *  - @c uninitialized_k A growth is needed before the geometry froze.
+     *  - @c config_mismatch_k or @c unknown_kind_k A growth meets a malformed geometry or kernel.
      */
     expected<capacity_claim_t> claim(std::size_t count) noexcept {
         auto const [first_row, status] = claim_capacity(count);
@@ -1487,20 +1488,18 @@ struct ram_index {
      *      a batch spanning several indexes commits or is refused as a whole. Consumes @p claim
      *      unless refused; telemetry accrues in @p context.
      *
-     *  One compare-exchange dispenses the claim's IDs, every row is wired, and one watermark turn
-     *  publishes them together. @p on_assigned fires per row with the assigned node ID, before the
-     *  walk and before publication - so an outer layer's per-ID state, like a key column, is
-     *  written ahead of the watermark turn and no reachable node can be observed without it.
+     *  One compare-exchange dispenses the claim's IDs, every row lands its key of @p keys and is
+     *  wired, and one watermark turn files the keys and publishes them together: the turn holder is
+     *  the key map's one writer, so filing takes no read-modify-write.
      *
      *  @par Statuses:
      *  - @c contended_k The dispenser is closed by a refine or a load; the claim's death
      *    releases its rows.
      */
-    template <typename callback_type_ = dummy_callback_t>
-    status_t insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                    traversal_context_t& context, insert_config_t config = {},
-                    callback_type_&& on_assigned = {}) noexcept {
-        assert(claim.entries() == new_vectors.extent(0) && "A claim holds exactly its batch's rows");
+    status_t insert(capacity_claim_t&& claim, keys_view_t keys, vectors_view_t new_vectors,
+                    node_ids_span_t assigned_ids, traversal_context_t& context, insert_config_t config = {}) noexcept {
+        assert(claim.entries() == new_vectors.extent(0) && claim.entries() == keys.size() &&
+               "A claim holds exactly its batch's rows and keys");
         // An empty range takes no turn: its first ID opens the next range too, which may publish first.
         if (!claim) return status_t::success_k;
         bool const report_assigned_ids = assigned_ids.size() != 0;
@@ -1510,10 +1509,11 @@ struct ram_index {
         for (node_id_t const new_node_id : range) {
             std::size_t const row = new_node_id - range.first;
             if (report_assigned_ids) assigned_ids[row] = new_node_id;
-            on_assigned(new_node_id);
+            keyed_.assign(new_node_id, keys[row]);
             wire_(new_node_id, new_rows, row, context, config);
         }
         await_turn_(range);
+        keyed_.publish(range);
         publish_(range);
         return status_t::success_k;
     }
@@ -1882,9 +1882,10 @@ struct ram_index {
      *  correct. Insertions may not overlap.
      *
      *  A split runs it in reverse: the source's rows partition into one graph-local part per
-     *  receiver, scatter into the receivers with the links inside each part rebased and the links
-     *  across dropped, and publish; then every receiver is refined in turn over its seams, the
-     *  prefix of rows that lost a link, and heals, the tallies summing over the receivers.
+     *  receiver, scatter into the receivers with their keys and the links inside each part rebased
+     *  and the links across dropped, every receiver files its keys on one step of its own, and the
+     *  parts publish; then every receiver is refined in turn over its seams, the prefix of rows
+     *  that lost a link, and heals, the tallies summing over the receivers.
      */
     struct refine_plan_t {
         using step_t = typename health_plan_t::step_t;
@@ -1918,12 +1919,17 @@ struct ram_index {
             if (audited_()) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
+            step.position = position;
+            // One step per receiver files the keys its part landed.
+            if (phase_ == phase_t::keys_k) {
+                step.nodes = {0, part_extents_[position].nodes};
+                return step;
+            }
             iota_view<node_id_t> const range = phase_nodes_();
             std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1)
                                                                      : chunk_schedule_t::nodes_in(0);
             std::size_t const first = range.first + (position * width);
             std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
-            step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
         }
@@ -1932,6 +1938,7 @@ struct ram_index {
         indexed_range<refine_plan_t> steps() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ == phase_t::partition_k) return {this, 1u};
+            if (phase_ == phase_t::keys_k) return {this, receivers_.size()};
             if (audited_()) return {this, audit.steps().size()};
             return {this, divide_round_up<std::size_t>(phase_nodes_().size(), chunk_schedule_t::nodes_in(0))};
         }
@@ -1941,19 +1948,19 @@ struct ram_index {
          *      of one phase, and never failing on a bound plan, since planning claimed and reserved
          *      everything a step writes.
          *
-         *  The one partition step grows a split's parts, and a scatter step copies source nodes
-         *  into their receivers, firing @p on_landed per row with the source row, the receiver's
-         *  position and the row there - what a sharded caller moves its keys by.
+         *  The one partition step grows a split's parts, a scatter step copies source nodes and
+         *  their keys into their receivers, and a keys step files one receiver's keys, its map's
+         *  one writer.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
          */
-        template <typename callback_type_ = dummy_callback_t>
-        status_t run(step_t const& step, traversal_context_t& context, callback_type_&& on_landed = {}) noexcept {
+        status_t run(step_t const& step, traversal_context_t& context) noexcept {
             if (!index_) return status_t::uninitialized_k;
             switch (phase_) {
             case phase_t::partition_k: partition_(); break;
-            case phase_t::scatter_k: scatter_(step, on_landed); break;
+            case phase_t::scatter_k: scatter_(step); break;
+            case phase_t::keys_k: receivers_[step.position]->keyed_.publish(step.nodes); break;
             case phase_t::reselect_k:
             case phase_t::reselect_islands_k: reselect_(step, context); break;
             case phase_t::sweep_k: audit.sweep(step); break;
@@ -1967,11 +1974,11 @@ struct ram_index {
          *  publishes a split's parts, or picks the next phase, and answers whether one follows. */
         bool advance() noexcept {
             if (!index_) return false;
-            if (phase_ == phase_t::partition_k) {
-                phase_ = phase_t::scatter_k;
+            if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) {
+                phase_ = phase_ == phase_t::partition_k ? phase_t::scatter_k : phase_t::keys_k;
                 return true;
             }
-            if (phase_ == phase_t::scatter_k) {
+            if (phase_ == phase_t::keys_k) {
                 publish_parts_();
                 bind_receiver_();
                 return true;
@@ -1990,13 +1997,15 @@ struct ram_index {
         }
 
         /** Stops the re-selection where its steps ran, so the next @ref advance turns to the heal;
-         *  a no-op in any other phase, a split's partition and scatter included. */
+         *  a no-op in any other phase, a split's partition, scatter and keys included. */
         void stop() noexcept {
             if (phase_ == phase_t::reselect_k) rounds_ = 0;
         }
 
-        /** Whether the current phase moves a split's rows - the phases no stop skips. */
-        bool landing() const noexcept { return phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k; }
+        /** Whether the current phase moves a split's rows or keys - the phases no stop skips. */
+        bool landing() const noexcept {
+            return phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k || phase_ == phase_t::keys_k;
+        }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
         bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
@@ -2019,6 +2028,7 @@ struct ram_index {
         enum class phase_t : u8_t {
             partition_k,
             scatter_k,
+            keys_k,
             reselect_k,
             sweep_k,
             reselect_islands_k,
@@ -2141,15 +2151,14 @@ struct ram_index {
             }
         }
 
-        /** Copies the source nodes of @p step into their receivers' claimed rows - vectors, norms,
-         *  and the links inside each part rebased through its slots, the links across dropped, a
-         *  row left with none becoming the published-empty self-loop - and fires @p on_landed. */
-        template <typename callback_type_>
-        void scatter_(step_t const& step, callback_type_& on_landed) noexcept {
+        /** Copies the source nodes of @p step into their receivers' claimed rows - keys, vectors,
+         *  norms, and the links inside each part rebased through its slots, the links across
+         *  dropped, a row left with none becoming the published-empty self-loop. */
+        void scatter_(step_t const& step) noexcept {
             ram_index const& source = *source_;
-            geometry_t const frozen = source.geometry();
-            std::size_t const connectivity = frozen.connectivity();
-            std::size_t const row_bytes = padded_row_values(frozen) * sizeof(scalar_t);
+            geometry_t const geometry = source.geometry();
+            std::size_t const connectivity = geometry.connectivity;
+            std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
             std::size_t const capacity = part_capacity_();
             node_id_t const source_nodes = source_nodes_();
             for (node_id_t node = step.nodes.first; node < step.nodes.bound; ++node) {
@@ -2157,6 +2166,7 @@ struct ram_index {
                 node_id_t const landed = static_cast<node_id_t>(slot % capacity);
                 ram_index& into = *receivers_[part];
                 location_t const from = chunk_schedule_t::locate(node), to = chunk_schedule_t::locate(landed);
+                into.keyed_.assign(landed, source.keyed_[node]);
                 std::memcpy(into.vectors_[to], source.vectors_[from], row_bytes);
                 if (source.stores_norms()) into.norm_ref_for(to) = source.norms_[from];
                 node_id_t* const links = into.neighbors_[to];
@@ -2167,7 +2177,6 @@ struct ram_index {
                 });
                 if (!kept) links[kept++] = landed;
                 for (std::size_t tail = kept; tail != connectivity; ++tail) links[tail] = node_id_unknown_k;
-                on_landed(node, part, landed);
             }
         }
 
@@ -2405,7 +2414,7 @@ struct ram_index {
      *  those neighbors never reaches. The plan borrows the bases, which must outlive it.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The geometry is not frozen yet.
+     *  - @c bad_alloc_k The audit's bitsets cannot be placed.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, refine_config_t config = {},
                                         std::span<node_id_t const> part_bases = {}) noexcept {
@@ -2413,7 +2422,6 @@ struct ram_index {
         auto [audit, status] = plan_health();
         refine_plan_t plan {std::move(audit), typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
         if (failed(status)) return {std::move(plan), status};
-        if (!geometry()) return {std::move(plan), status_t::uninitialized_k};
         small_size_t const expansion_factor = non_zero_expansion_factor(config);
         node_id_t const bound = min_of(nodes.bound, plan.audit.visible);
         std::size_t parts = 0;
@@ -2437,7 +2445,6 @@ struct ram_index {
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The geometry is not frozen yet.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
@@ -2462,19 +2469,18 @@ struct ram_index {
      *  The one partition step grows the parts breadth first over the links, one root per part
      *  through @ref seeded_bijection under @p seed, each part capped at the rows over the receivers
      *  rounded up; rows no growth reached seed the smallest part. Scatter steps copy each row's
-     *  vector, norms and neighbors into its receiver, the links inside its part rebased and the
-     *  links across dropped, and the phase boundary publishes every receiver's rows, then forgets
-     *  this index's, so its IDs restart from zero. Every receiver then re-selects its seams, the
-     *  prefix of rows that lost a link, sweeps and heals as @ref plan_refine does, and the result
-     *  sums over the receivers. A plan dying before the scatter published releases the receivers'
-     *  claims and leaves this index whole.
+     *  key, vector, norms and neighbors into its receiver, the links inside its part rebased and
+     *  the links across dropped, one step per receiver then files its keys, and the phase boundary
+     *  publishes every receiver's rows, then forgets this index's, so its IDs restart from zero.
+     *  Every receiver then re-selects its seams, the prefix of rows that lost a link, sweeps and
+     *  heals as @ref plan_refine does, and the result sums over the receivers. A plan dying before
+     *  the scatter published releases the receivers' claims and leaves this index whole.
      *
-     *  Every fallible step happens here: an unreserved receiver reserved to this index's geometry,
-     *  a full part's rows claimed and its audit placed in every receiver, everything the plan keeps
-     *  on this index's own allocator. The steps cannot fail on contexts their caller reserved for
-     *  the plan's expansion factor. Nothing may insert into this index or a receiver meanwhile, nor
-     *  search this one; the sharded index closes the dispensers, and a direct caller keeps the
-     *  others out itself.
+     *  Every fallible step happens here: a full part's rows claimed and its audit placed in every
+     *  receiver, everything the plan keeps on this index's own allocator. The steps cannot fail on
+     *  contexts their caller reserved for the plan's expansion factor. Nothing may insert into this
+     *  index or a receiver meanwhile, nor search this one; the sharded index closes the dispensers,
+     *  and a direct caller keeps the others out itself.
      *
      *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct; the
      *      slots must outlive the plan.
@@ -2485,7 +2491,6 @@ struct ram_index {
      *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
      *    index itself, another metric or another geometry.
      *  - @c contended_k An insertion in flight on this index or on a receiver.
-     *  - @c uninitialized_k This index was never reserved.
      */
     expected<refine_plan_t> plan_split(std::span<ram_index*> receivers, refine_config_t config = {},
                                        u64_t seed = 0) noexcept {
@@ -2493,14 +2498,11 @@ struct ram_index {
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
         refine_plan_t plan {health_plan_t {bitset_allocator_t {vectors_allocator_}},
                             typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
-        geometry_t const frozen = geometry();
-        if (!frozen) return {std::move(plan), status_t::uninitialized_k};
         std::size_t const parts = receivers.size();
         if (parts < 2) return {std::move(plan), status_t::config_mismatch_k};
         for (std::size_t receiver = 0; receiver != parts; ++receiver) {
             ram_index const* into = receivers[receiver];
-            if (!into || into == this || into->kernel_ != kernel_ || into->size() ||
-                (into->geometry() && into->geometry() != frozen))
+            if (!into || into == this || into->kernel_ != kernel_ || into->size() || into->geometry() != geometry_)
                 return {std::move(plan), status_t::config_mismatch_k};
             for (std::size_t earlier = 0; earlier != receiver; ++earlier)
                 if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
@@ -2523,13 +2525,6 @@ struct ram_index {
         // A full part's rows in every receiver, claimed from its empty watermark, die with the plan
         // unless the scatter publishes them.
         for (ram_index* into : receivers) {
-            if (!into->geometry())
-                if (status_t const reserved = into->reserve({capacity,
-                                                             static_cast<connectivity_t>(frozen.connectivity()),
-                                                             frozen.dimensions()})
-                                                  .status;
-                    failed(reserved))
-                    return {std::move(plan), reserved};
             auto [claimed, claim_status] = into->claim(capacity);
             if (failed(claim_status)) return {std::move(plan), claim_status};
             bool const based = claimed.base() == 0;
@@ -2602,14 +2597,14 @@ struct ram_index {
      *  @c immutable_k - or stronger - the caller certifies no mutators and the traversal runs
      *  atomics-free. @ref dense_ram_index_concurrency
      *
-     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[in] query_vector The query, in the index's own dtype & dimensionality.
      *  @param[in,out] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *
      *  @par Statuses:
      *  - @c unsupported_k @p config names neither a walk nor a scan.
-     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c config_mismatch_k The query's width differs from the index's dimensions.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
@@ -2645,7 +2640,7 @@ struct ram_index {
      *  @brief Walks exactly like @c search while @p fold reads every quad the walk scores - the
      *      entry point for verbs that reduce a walk to something other than its nearest matches.
      *
-     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[in] query_vector The query, in the index's own dtype & dimensionality.
      *  @param[in,out] fold The reader of every scored quad - see @c fold.
      *  @param[in,out] context The calling thread's scratch & telemetry: the nearest published
      *      candidates end up in @c context.results, ascending by distance.
@@ -2653,7 +2648,7 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c unsupported_k @p config names a traversal other than a walk.
-     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c config_mismatch_k The query's width differs from the index's dimensions.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <typename fold_type_>
@@ -2675,7 +2670,7 @@ struct ram_index {
      *  admissions buffer, pushing what it admits. Each node is tested at most once per query, so
      *  the exact visited set is the predicate's memoization.
      *
-     *  @param[in] query_vector The query, in the index's own dtype & frozen dimensionality.
+     *  @param[in] query_vector The query, in the index's own dtype & dimensionality.
      *  @param[in] predicate The admission filter, called with published node IDs only.
      *  @param[in,out] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the nearest first.
@@ -2683,7 +2678,7 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c unsupported_k @p config names neither a walk nor a scan.
-     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c config_mismatch_k The query's width differs from the index's dimensions.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <typename predicate_type_>
@@ -2699,7 +2694,7 @@ struct ram_index {
      *  @brief Graph products of one left-hand row: every pair the walk scores, node IDs beside native
      *      dots, written until the spans fill.
      *
-     *  @param[in] left The left-hand row, in the index's own dtype & frozen dimensionality.
+     *  @param[in] left The left-hand row, in the index's own dtype & dimensionality.
      *  @param[out] node_ids The node ID of each kept pair, in walk order.
      *  @param[out] products The dot of each kept pair, parallel to @p node_ids.
      *  @param[in,out] context The calling thread's scratch & telemetry.
@@ -2711,7 +2706,7 @@ struct ram_index {
      *  - @c config_mismatch_k The index does not walk by dot, or @p products and @p node_ids
      *    differ in length.
      *  - @c unsupported_k @p config names a traversal other than a walk.
-     *  - @c config_mismatch_k The row's width differs from the frozen dimensions.
+     *  - @c config_mismatch_k The row's width differs from the index's dimensions.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     expected<search_result_t> multiply(vector_view_t left, std::span<node_id_t> node_ids,
@@ -2794,7 +2789,7 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c unsupported_k @p config names a traversal other than a walk.
-     *  - @c config_mismatch_k The query's width differs from the frozen dimensions.
+     *  - @c config_mismatch_k The query's width differs from the index's dimensions.
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
      */
     template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
@@ -2915,11 +2910,11 @@ struct ram_index {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
-            geometry_t const frozen = index_->geometry();
-            std::size_t const connectivity = frozen.connectivity();
+            geometry_t const geometry = index_->geometry();
+            std::size_t const connectivity = geometry.connectivity;
             std::size_t const step_slots = rows.size() * connectivity;
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
-            std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
+            std::size_t const row_bytes = stored_row_values(geometry) * sizeof(scalar_t);
             std::size_t const first = step.source_nodes.first;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(),
@@ -3007,22 +3002,19 @@ struct ram_index {
      *  @param[in] synchronization The contract the caller certifies.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The geometry is not frozen yet.
      *  - @c contended_k A dispensed batch has yet to publish.
      *  - @c config_mismatch_k A column is too short for the rows, or norms are given to an index
      *    that stores none.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization) noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return {{}, status_t::config_mismatch_k};
         save_plan_t plan {*this, columns, synchronization};
         plan.visible = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
         node_id_t const dispensed = atomic_ref<node_id_t const>(next_dispensed_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
         if (dispensed != plan.visible && dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
         std::size_t const rows = static_cast<std::size_t>(plan.visible);
-        if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
-            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t) ||
+        if (columns.vectors.size() < rows * stored_row_values(geometry_) * sizeof(scalar_t) ||
+            columns.neighbors.size() < rows * geometry_.connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(vector_norms_t))))
             return {{}, status_t::config_mismatch_k};
         return {std::move(plan), status_t::success_k};
@@ -3033,8 +3025,8 @@ struct ram_index {
      *  one-shot over @ref plan_save for a caller with no threads to fan the steps out over.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The geometry is not frozen, a column is too short for the rows,
-     *    norms are given to an index that stores none, or @p scratch does not fit a step.
+     *  - @c config_mismatch_k A column is too short for the rows, norms are given to an index that
+     *    stores none, or @p scratch does not fit a step.
      *  - @c contended_k A dispensed batch has yet to publish, or under @c concurrent_k a counter
      *    moved during the save.
      */
@@ -3047,17 +3039,18 @@ struct ram_index {
     }
 
     /**
-     *  @brief One load in flight: the rows claimed after the watermark and the storage
-     *      chunks they span, filled by any number of threads; @ref finish publishes them.
+     *  @brief One load in flight: the rows claimed after the watermark and the storage chunks they
+     *      span, filled by any number of threads; @ref publish_keys files their keys, and
+     *      @ref finish publishes them.
      *
-     *  Demands sole ownership of an index whose geometry is already frozen. A step copies out of
-     *  the caller's columns or out of another index's chunks. A source's IDs are local to the rows
-     *  it delivers, so every chunk shifts them onto the appended range and folds every other ID
-     *  onto the sentinel; norms land beside the vectors, or re-derive from them where the source
-     *  carries none. Repeated plans append, and one plan takes several parts when the caller slices
-     *  its steps between them. The plan owns the claim its rows ride in: one that dies before
-     *  @c finish releases them, so the next plan appends at the same base and the rows it
-     *  half-filled are never published. Nothing a step writes is visible before @c finish, so a
+     *  Demands sole ownership of the index. A step copies out of the caller's columns or out of
+     *  another index's chunks, and lands its keys before tallying its rows. A source's IDs are
+     *  local to the rows it delivers, so every chunk shifts them onto the appended range and folds
+     *  every other ID onto the sentinel; norms land beside the vectors, or re-derive from them
+     *  where the source carries none. Repeated plans append, and one plan takes several parts when
+     *  the caller slices its steps between them. The plan owns the claim its rows ride in: one that
+     *  dies before @c finish releases them, so the next plan appends at the same base and the rows
+     *  it half-filled are never published. Nothing a step writes is visible before @c finish, so a
      *  caller holding plans on several indexes publishes all of them or none.
      */
     struct [[nodiscard]] load_plan_t {
@@ -3068,7 +3061,7 @@ struct ram_index {
         /** Rows the plan appends. */
         std::size_t rows = 0;
 
-        /** Rows whose vectors and neighbors landed, tallied through @c atomic_ref. */
+        /** Rows whose vectors, neighbors and keys landed, tallied through @c atomic_ref. */
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
@@ -3129,7 +3122,8 @@ struct ram_index {
 
         /**
          *  @brief Copies step @p step 's rows out of @p columns straight into chunk memory: the
-         *      vectors with their norms, copied or derived as they land, then the neighbors.
+         *      vectors with their norms, copied or derived as they land, then the neighbors and
+         *      the keys.
          *
          *  Every ID inside @p source_range is folded onto the appended range and every other onto
          *  the sentinel. A sharded plan drives it one part's slice at a time, its step naming the
@@ -3138,21 +3132,24 @@ struct ram_index {
          *  @param[in] step The step to fill; its source nodes address @p columns.
          *  @param[in] columns The rows' columns, one part's under a sharded plan.
          *  @param[in] source_range The ID space those rows speak.
+         *  @param[in] key_of Row @c r of the step's source nodes takes the key <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
          *  - @c config_mismatch_k The step holds no rows, or its rows fall outside @p columns.
          *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
-        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
+        template <typename key_of_type_>
+        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range,
+                      key_of_type_&& key_of) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
-            geometry_t const frozen = index_->geometry();
-            std::size_t const connectivity = frozen.connectivity();
+            geometry_t const geometry = index_->geometry();
+            std::size_t const connectivity = geometry.connectivity;
             std::size_t const step_slots = range.size() * connectivity;
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
-            std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
+            std::size_t const row_bytes = stored_row_values(geometry) * sizeof(scalar_t);
             std::size_t const first = step.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(),
@@ -3185,6 +3182,8 @@ struct ram_index {
             std::span<node_id_t> const landed {neighbors, step_slots};
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            for (node_id_t node = range.first; node != range.bound; ++node)
+                index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             atomic_ref<std::size_t>(covered).add(range.size(), std::memory_order_release);
             return status_t::success_k;
         }
@@ -3212,14 +3211,14 @@ struct ram_index {
         status_t load(step_t const& step, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_nodes;
-            geometry_t const frozen = index_->geometry();
-            if (range.empty() || range.size() != step.source_nodes.size() || source.geometry() != frozen ||
+            geometry_t const geometry = index_->geometry();
+            if (range.empty() || range.size() != step.source_nodes.size() || source.geometry() != geometry ||
                 source.stores_norms() != index_->stores_norms() || step.source_nodes.bound > source.size())
                 return status_t::config_mismatch_k;
             node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
-            std::size_t const connectivity = frozen.connectivity();
-            std::size_t const row_bytes = padded_row_values(frozen) * sizeof(scalar_t);
+            std::size_t const connectivity = geometry.connectivity;
+            std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
 
             // The step sits in one chunk here, while the source's chunks start elsewhere.
             for (node_id_t landing = range.first, reading = step.source_nodes.first; landing != range.bound;) {
@@ -3230,6 +3229,8 @@ struct ram_index {
                 if (index_->stores_norms())
                     std::memcpy(&index_->norms_[into], &source.norms_[from], run * sizeof(vector_norms_t));
                 std::memcpy(index_->neighbors_[into], source.neighbors_[from], run * connectivity * sizeof(node_id_t));
+                for (node_id_t offset = 0; offset != run; ++offset)
+                    index_->keyed_.assign(landing + offset, source.keyed_[reading + offset]);
                 landing += run;
                 reading += run;
             }
@@ -3242,11 +3243,20 @@ struct ram_index {
             return status_t::success_k;
         }
 
+        /** Files every appended row under the key its step landed, which @ref finish then makes
+         *  visible - the one writer of the index's key map, once every step landed and before the
+         *  finish; with a step missing it files nothing, so a refused finish leaves no key above
+         *  the watermark. */
+        void publish_keys() noexcept {
+            if (!index_ || atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != rows) return;
+            index_->keyed_.publish({base, static_cast<node_id_t>(base + rows)});
+        }
+
         /** Publishes the appended nodes once every chunk's vectors and neighbors landed: the claim
-         *  consumed first, then identity, then the watermark last with a release. The identity
-         *  releases too, and moves only an open dispenser: a closed one stays closed for its closer
-         *  to reopen past the rows. A success spends the plan; a refusal leaves it whole, so the
-         *  missing steps can still land.
+         *  consumed first, then identity, then the watermark last with a release, which carries the
+         *  keys @ref publish_keys filed. The identity releases too, and moves only an open
+         *  dispenser: a closed one stays closed for its closer to reopen past the rows. A success
+         *  spends the plan; a refusal leaves it whole, so the missing steps can still land.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
@@ -3284,17 +3294,16 @@ struct ram_index {
      *      index: claims them through the ordinary capacity protocol, so a preceding @c reserve is
      *      consumed rather than duplicated and chunks grow only on a genuine deficit.
      *
-     *  Refuses an unfrozen geometry, an insert mid-flight, and rows past the ID space. The sharded
-     *  index closes the dispenser first, so no insert arrives before @c finish; a direct caller
-     *  keeps insertions out itself.
+     *  Refuses an insert mid-flight and rows past the ID space. The sharded index closes the
+     *  dispenser first, so no insert arrives before @c finish; a direct caller keeps insertions out
+     *  itself.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The geometry is not frozen yet.
      *  - @c contended_k A dispensed batch has yet to publish, or another claim landed first.
      *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
+     *  - @c config_mismatch_k or @c unknown_kind_k A growth meets a malformed geometry or kernel.
      */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
-        if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         if (!rows) return {load_plan_t {*this, visible, {}}, status_t::success_k};
         node_id_t const dispensed = atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
@@ -3307,28 +3316,31 @@ struct ram_index {
     }
 
     /**
-     *  Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
-     *  caller with no threads to fan the steps out over; columns shorter than @p rows are refused
-     *  before a row is claimed.
+     *  Appends the whole source on the calling thread under @p keys, one per row - the one-shot
+     *  over @ref plan_load for a caller with no threads to fan the steps out over; columns shorter
+     *  than @p rows are refused before a row is claimed.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The geometry is not frozen, a column is shorter than @p rows, or
-     *    norms are given to an index that stores none.
+     *  - @c config_mismatch_k A column or @p keys is shorter than @p rows, or norms are given to an
+     *    index that stores none.
      *  - @c contended_k A dispensed batch has yet to publish, or another claim landed first.
      *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
      *  - @c config_mismatch_k @p source_range rebases past the loaded rows.
      */
-    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range) noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return status_t::config_mismatch_k;
-        if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
-            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t) ||
+    status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows,
+                  iota_view<node_id_t> source_range) noexcept {
+        if (keys.size() < rows || columns.vectors.size() < rows * stored_row_values(geometry_) * sizeof(scalar_t) ||
+            columns.neighbors.size() < rows * geometry_.connectivity * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(vector_norms_t))))
             return status_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step, columns, source_range); failed(loaded)) return loaded;
+            if (status_t const loaded = plan.load(step, columns, source_range,
+                                                  [&](node_id_t row) noexcept { return keys[row]; });
+                failed(loaded))
+                return loaded;
+        plan.publish_keys();
         return plan.finish();
     }
 
@@ -3544,9 +3556,14 @@ struct ram_index {
      *  inside it becomes visible, which chains through the same atomics.
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
-        // Growing before the geometry is frozen is a usage error, not an allocation failure.
-        geometry_t const frozen = geometry();
-        if (!frozen) return {0, status_t::uninitialized_k};
+        // Constructors allocate nothing, so the first growth is where a geometry or kernel is
+        // refused.
+        if (!kernel_supported<quads_kit_t>(kernel_)) return {0, status_t::unknown_kind_k};
+        // Sub-byte rows fill whole storage values: a ragged tail would be dropped by the kernels'
+        // tail loads.
+        if (!geometry_.dimensions || geometry_.dimensions % nk::dimensions_per_value<scalar_t>() ||
+            !std::has_single_bit(static_cast<u32_t>(geometry_.connectivity)))
+            return {0, status_t::config_mismatch_k};
 
         std::size_t const ceiling_rows = atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed);
         std::size_t added_capacity = 0;
@@ -3560,9 +3577,10 @@ struct ram_index {
             // alone. The all-ones neighbors fill is load-bearing: a sentinel leading slot reads as
             // unpublished, and sentinel tails terminate short rows, so no counts are stored.
             static_assert(node_id_unknown_k == static_cast<node_id_t>(~node_id_t {0}));
-            status_t covered = vectors_.cover(covered_rows, padded_row_values(frozen));
+            status_t covered = vectors_.cover(covered_rows, padded_row_values(geometry_));
             if (succeeded(covered) && stores_norms()) covered = norms_.cover(covered_rows);
-            if (succeeded(covered)) covered = neighbors_.cover(covered_rows, frozen.connectivity(), 0xFF);
+            if (succeeded(covered)) covered = neighbors_.cover(covered_rows, geometry_.connectivity, 0xFF);
+            if (succeeded(covered)) covered = keyed_.cover(covered_rows);
             if (failed(covered)) return {added_capacity, covered};
 
             // A chunk crossing the ceiling hosts only the rows below it.
@@ -3934,7 +3952,6 @@ struct ram_index {
      */
     void wire_(node_id_t new_node_id, rows_view_t new_rows, std::size_t new_row, traversal_context_t& context,
                insert_config_t config) noexcept {
-        geometry_t const frozen = geometry();
         location_t const new_location = chunk_schedule_t::locate(new_node_id);
 
         // The scratch structures persist across rows and calls - reset them for this one.
@@ -3948,7 +3965,7 @@ struct ram_index {
         // through the head of the staged queries, which an insertion walks without.
         vector_span_t const owned_vector = vector_span_for(new_location);
         nk::vector_span<f32_t> const widened {reinterpret_cast<f32_t*>(context.staged_queries.data()),
-                                              frozen.dimensions()};
+                                              geometry_.dimensions};
         import_row<elementwise_kit_t, rmscast_kit_t>(new_rows, new_row, kernel_, owned_vector, widened);
         vector_norms_t const new_norms = norms(owned_vector);
         if (stores_norms()) norm_ref_for(new_location) = new_norms;
@@ -3966,7 +3983,7 @@ struct ram_index {
         // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
         // 1.. need no lock and the untouched tail keeps its sentinel termination.
         selection_t& selected = context.selected_neighbors;
-        std::size_t const refine_distances = select_diverse(context.results, new_node_id, frozen.connectivity(),
+        std::size_t const refine_distances = select_diverse(context.results, new_node_id, geometry_.connectivity,
                                                             selected, context);
         context.computed_distances += refine_distances;
         context.computed_distances_in_refines += refine_distances;
@@ -3998,10 +4015,18 @@ struct ram_index {
     }
 
     /** Publishes every row of @p range at once, its turn having come: one release store moves the
-     *  watermark past them. */
+     *  watermark past them, and with them their keys @ref publish_keys_ filed. */
     void publish_(iota_view<node_id_t> range) noexcept {
         atomic_ref<node_id_t>(last_visible_id_).store(range.bound, std::memory_order_release);
     }
+
+    /** Stores the key of @p node, which only its claimer writes, ahead of its range's turn. */
+    void assign_key_(node_id_t node, key_t const& key) noexcept { keyed_.assign(node, key); }
+
+    /** Files every row of @p range under its key, the map's one writer: the holder of the range's
+     *  turn, before @ref publish_. Plain stores and one release byte per row, no
+     *  read-modify-write. */
+    void publish_keys_(iota_view<node_id_t> range) noexcept { keyed_.publish(range); }
 
 #pragma endregion Insertion
 
@@ -4029,12 +4054,14 @@ struct ram_index {
     }
 
     /** Forgets every row below @p visible - what a split's source becomes once its rows published
-     *  elsewhere: the watermark drops to zero, an open dispenser with it, the neighbor rows refill
-     *  with the sentinel, and their storage returns to the free rows, so the IDs restart from zero
-     *  and a closed dispenser reopens there. No claim may start meanwhile; a walk still reaching
-     *  the index reads storage nothing frees, and its caller's epoch discards what it read. */
+     *  elsewhere: the watermark drops to zero, an open dispenser with it, the key map empties, the
+     *  neighbor rows refill with the sentinel, and their storage returns to the free rows, so the
+     *  IDs restart from zero and a closed dispenser reopens there. No claim may start meanwhile; a
+     *  walk or lookup still reaching the index reads storage nothing frees, and its caller's epoch
+     *  discards what it read. */
     void forget_(node_id_t visible) noexcept {
         atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release);
+        keyed_.forget();
         node_id_t dispensed = visible;
         atomic_ref<node_id_t>(next_dispensed_id_)
             .compare_exchange_strong(dispensed, 0, std::memory_order_release, std::memory_order_relaxed);
@@ -4194,8 +4221,7 @@ struct ram_index {
                                             rescoring_type_ const& rescoring, node_id_t first_invisible_id) noexcept {
         if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
-        geometry_t const frozen = geometry();
-        if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
+        if (query_vector.size() != geometry_.dimensions) return {{}, status_t::config_mismatch_k};
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
@@ -4206,8 +4232,8 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
 
-        // An unfrozen geometry read before a racing first insert left the query width unchecked.
-        if (first_invisible_id == 0 || !frozen) return {{}, status_t::success_k};
+        // An empty snapshot has nothing to walk.
+        if (first_invisible_id == 0) return {{}, status_t::success_k};
 
         // Snapshot the context's running telemetry, to report this query's share on return.
         std::size_t const visited_members_before = context.visited_members;
@@ -4272,14 +4298,13 @@ struct ram_index {
     template <typename admits_type_>
     expected<search_result_t> scan_if_(vector_view_t query_vector, admits_type_&& admits, traversal_context_t& context,
                                        search_config_t config, node_id_t first_invisible_id) noexcept {
-        geometry_t const frozen = geometry();
-        if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
+        if (query_vector.size() != geometry_.dimensions) return {{}, status_t::config_mismatch_k};
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
         if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
             failed(sized))
             return {{}, sized};
         context.results.clear();
-        if (first_invisible_id == 0 || !frozen) return {{}, status_t::success_k};
+        if (first_invisible_id == 0) return {{}, status_t::success_k};
 
         std::size_t const computed_distances_before = context.computed_distances;
         auto land = [&](std::size_t, scored_node_t candidate) noexcept {
@@ -4593,8 +4618,13 @@ struct ram_index {
             // mutation-free contract every sampled node is published & unlocked - no probe needed.
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (neighbors_for(landmark_location).peek_first() == node_id_unknown_k) {
-                    if (landmark_node_id >= admission.first_invisible_id &&
-                        ++unpublished_draws == sampling_bound - admission.first_invisible_id)
+                    if (landmark_node_id >= admission.first_invisible_id) {
+                        if (++unpublished_draws == sampling_bound - admission.first_invisible_id) break;
+                    }
+                    // Below the snapshot only a lock holds the sentinel, unless a window forgot the
+                    // row since.
+                    else if (landmark_node_id >=
+                             atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_relaxed))
                         break;
                     continue;
                 }
@@ -4734,6 +4764,12 @@ struct ram_index {
             node_id_t const first_neighbor_id = candidate_neighbors.peek_first();
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
                 if (first_neighbor_id == node_id_unknown_k) {
+                    // Below the snapshot only a lock holds the sentinel, unless a window forgot the
+                    // row since.
+                    if (candidate.node_id < admission.first_invisible_id &&
+                        candidate.node_id >=
+                            atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_relaxed))
+                        break;
                     candidate_neighbors.wait_while_locked();
                     continue;
                 }
@@ -4853,6 +4889,10 @@ struct ram_index {
     /** One row per vector's fixed-capacity neighbors, sentinel-filled. */
     chunked_matrix<node_id_t, chunk_schedule_t, max_node_count_k, neighbors_allocator_type_> neighbors_;
 
+    /** Every node's key, and every key's nodes; the turn holder files a range's keys right before
+     *  its watermark store. */
+    keyed_t keyed_;
+
     /**
      *  @brief Signed integer describing "unsigned capacity", so concurrent under- and overflow stay
      *      detectable. @b Never assign to it - increment and decrement only.
@@ -4876,10 +4916,10 @@ struct ram_index {
      *  dispensed order by each batch taking its turn. @ref dense_ram_index_concurrency */
     alignas(default_alignment_k) node_id_t last_visible_id_ {0};
 
-    /** Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
-    alignas(default_alignment_k) geometry_t geometry_ {};
+    /** Fixed at construction - kept off the watermark's line with the other cold members. */
+    alignas(default_alignment_k) geometry_t geometry_;
 
-    /** Rows the index may ever host, stored by the reservation that froze the geometry. */
+    /** Rows the index may ever host, lowered only by a reservation before the index is shared. */
     std::size_t ceiling_nodes_ = max_node_count_k;
 
     /** The distance kind every walk ranks by; only the distance epilogue and the norms chunks
@@ -4902,9 +4942,9 @@ struct ram_index {
  *
  *  Strictly read-only under every contract, so readers never stall writers. Under @c concurrent_k
  *  the staging reads neighbor words through relaxed atomics, tolerating the same stale-but-valid
- *  mix the traversal does; exact neighbors come from the @c immutable_k contract, which reads
- *  plain memory. The cursor captures the frozen geometry once at construction, starts past the
- *  end, and @c seek(0) enters the graph.
+ *  mix the traversal does; exact neighbors come from the @c immutable_k contract, which reads plain
+ *  memory. The cursor captures the geometry once at construction, starts past the end, and
+ *  @c seek(0) enters the graph.
  *
  *  The staged neighbors may contain IDs at or above this cursor's watermark snapshot, discovered
  *  through fresh back-linking; @c seek & @c follow reject those, and @c refresh widens the
@@ -4953,7 +4993,7 @@ struct ram_cursor {
     /** The current node ID, or the watermark snapshot when past the end. */
     node_id_t current_;
 
-    /** The frozen connectivity, captured once at construction. */
+    /** The index's connectivity, captured once at construction. */
     small_size_t connectivity_;
 
     /** Binds the cursor & captures its snapshots; allocates nothing - call @c reserve(). */
@@ -4966,7 +5006,7 @@ struct ram_cursor {
     ram_cursor(ram_cursor&&) = default;
     ram_cursor& operator=(ram_cursor&&) = delete;
 
-    /** Sizes the staging for the frozen connectivity through @p allocator - the index's
+    /** Sizes the staging for the index's connectivity through @p allocator - the index's
      *  traversals-side family by default; call once before any @c seek. */
     status_t reserve(allocator_t allocator = {}) noexcept {
         if (staged_neighbors_.size() >= connectivity_) return status_t::success_k;

@@ -34,9 +34,10 @@ bool dense_download(void* destination, void const* source, std::size_t bytes) no
 template <typename indexes_type_>
 concept vram_collection = requires { indexes_type_::vendor_k; };
 
-/** The VRAM reading of the search race: the index admits no search during a mutation,
- *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
- *  reader walks the published entries only once the writer has returned. */
+/** The VRAM reading of the search race: the index admits no search during a mutation, so the
+ *  exclusion is the executor's - a search on a claimed executor is refused, and the reader walks
+ *  the published entries only once the writer has returned. Two shards take the batch with nothing
+ *  reserved, and every key counts exactly once across them. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_type_::executor_t& placement) {
     using index_t = typename indexes_type_::index_t;
@@ -47,9 +48,8 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_typ
     std::size_t const nodes_count = 4 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(indexes, placement)));
-    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes, placement)) && succeeded(place_shards(indexes, placement)));
 
     dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status)) return failures + expect(false);
@@ -76,6 +76,11 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_typ
                                                          vectors.view(), executor);
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(indexes.size(), nodes_count);
+    failures += expect(indexes.shard(0).size() && indexes.shard(1).size());
+    std::size_t miscounted = 0;
+    for (key_t const& key : keys) miscounted += indexes.count(key) != 1;
+    failures += expect_eq(miscounted, 0u);
+    failures += expect(!indexes.contains(dense_key<key_t>(0)) && indexes.count(dense_key<key_t>(0)) == 0);
 
     // Every published entry resolves to a key inside the assigned range - never the key column's
     // zero-fill.
@@ -92,7 +97,7 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_typ
     return failures;
 }
 
-/** The planned insertion: launched entries stay out of the size, the locators and a search until
+/** The planned insertion: launched entries stay out of the size, the key lookups and a search until
  *  @c finish publishes every one, a plan short of entries refuses to finish and stays whole, its
  *  gate turns a second batch away, and a plan dying unfinished publishes nothing and leaves its
  *  shard refusing every later batch. */
@@ -106,9 +111,9 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed, typename indexes_type_
 
     dense_indexes_executor<indexes_type_> writer {placement}, reader {placement};
     if (failed(writer.status) || failed(reader.status)) return failures + expect(false);
-    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes, placement)));
-    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    failures += expect(succeeded(indexes.reserve({rows_count}).status));
     auto const vectors = make_vectors<scalar_t>(2 * rows_count, dimensions, stream_key(seed, "indexes_planned"));
     std::vector<key_t> keys(2 * rows_count);
     for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = dense_key<key_t>(1 + row);
@@ -171,9 +176,9 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed, typename indexes_
 
         dense_indexes_executor<indexes_type_> driver {placement};
         if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
         failures += expect(succeeded(place_shards(indexes, placement)));
-        failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+        failures += expect(succeeded(indexes.reserve({rows_count}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
         std::array<key_t, rows_count> keys;
         for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row);
@@ -217,10 +222,10 @@ std::size_t test_dense_vram_indexes_device_merge(u64_t seed, typename indexes_ty
 
     dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status)) return failures + expect(false);
-    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(indexes.emplace(driver.executor.stream(0))));
     failures += expect(succeeded(indexes.emplace(driver.executor.stream(0))));
-    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    failures += expect(succeeded(indexes.reserve({rows_count}).status));
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_device_merge"));
     std::array<key_t, rows_count> keys;
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(1 + row);
@@ -235,15 +240,16 @@ std::size_t test_dense_vram_indexes_device_merge(u64_t seed, typename indexes_ty
 
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
     typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
-    std::vector<key_t> host_keys(ranks_count), merged_keys(ranks_count);
-    std::vector<distance_t> host_distances(ranks_count), merged_distances(ranks_count);
-    std::array<std::size_t, queries_count> host_counts, merged_counts;
-    failures += expect(succeeded(indexes
-                                     .search(queries, driver.executor, exhaustive,
-                                             nk::matrix_span<key_t> {host_keys.data(), queries_count, wanted},
-                                             nk::matrix_span<distance_t> {host_distances.data(), queries_count, wanted},
-                                             std::span {host_counts})
-                                     .status));
+    std::vector<key_t> host_landed_keys(ranks_count), merged_keys(ranks_count);
+    std::vector<distance_t> host_landed_distances(ranks_count), merged_distances(ranks_count);
+    std::array<std::size_t, queries_count> host_landed_counts, merged_counts;
+    failures += expect(
+        succeeded(indexes
+                      .search(queries, driver.executor, exhaustive,
+                              nk::matrix_span<key_t> {host_landed_keys.data(), queries_count, wanted},
+                              nk::matrix_span<distance_t> {host_landed_distances.data(), queries_count, wanted},
+                              std::span {host_landed_counts})
+                      .status));
     failures += expect(succeeded(indexes
                                      .search(queries, driver.executor, exhaustive,
                                              nk::matrix_span<key_t> {device_keys, queries_count, wanted},
@@ -259,24 +265,24 @@ std::size_t test_dense_vram_indexes_device_merge(u64_t seed, typename indexes_ty
     if (failures) return failures;
 
     for (std::size_t query = 0; query != queries_count; ++query) {
-        std::size_t const found = host_counts[query];
+        std::size_t const found = host_landed_counts[query];
         failures += expect_eq(found, wanted);
         failures += expect_eq(merged_counts[query], found);
         if (merged_counts[query] != found) continue;
         std::size_t const first = query * wanted;
         for (std::size_t rank = first; rank != first + found; ++rank)
-            failures += expect_near(merged_distances[rank], host_distances[rank]);
+            failures += expect_near(merged_distances[rank], host_landed_distances[rank]);
         for (std::size_t begin = first, end = first; begin != first + found; begin = end) {
-            while (end != first + found && host_distances[end] == host_distances[begin]) ++end;
+            while (end != first + found && host_landed_distances[end] == host_landed_distances[begin]) ++end;
             // A run the width cuts may keep different ties on either side.
             if (end == first + wanted) break;
             auto const by_number = [](key_t const& first, key_t const& second) noexcept {
                 return dense_key_number(first) < dense_key_number(second);
             };
-            std::sort(host_keys.begin() + begin, host_keys.begin() + end, by_number);
+            std::sort(host_landed_keys.begin() + begin, host_landed_keys.begin() + end, by_number);
             std::sort(merged_keys.begin() + begin, merged_keys.begin() + end, by_number);
-            failures += expect(
-                std::equal(host_keys.begin() + begin, host_keys.begin() + end, merged_keys.begin() + begin));
+            failures += expect(std::equal(host_landed_keys.begin() + begin, host_landed_keys.begin() + end,
+                                          merged_keys.begin() + begin));
         }
     }
     return failures;
@@ -297,7 +303,7 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     failures += expect(succeeded(
         reference.whole().save(reference.checkpoint.monolith.data(), save_config_t {}, reference.builder.executor)));
 
-    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes, placement)));
     dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status) || failures) return failures + expect(false);
@@ -347,17 +353,17 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
 
-    indexes_type_ source {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     for (std::size_t shard = 0; shard != shards_count; ++shard)
         failures += expect(succeeded(place_shards(source, placement)));
-    failures += expect(succeeded(source.reserve({rows, connectivity_16_k, dimensions}).status));
+    failures += expect_eq(source.reserve({rows}).status, status_t::success_k);
     failures += expect(
         succeeded(source.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
     // The source shards land in their order, so each one's nodes follow the counts before it.
     std::vector<std::size_t> shard_ends(shards_count);
     for (std::size_t shard = 0, end = 0; shard != shards_count; ++shard)
         shard_ends[shard] = end += source.shard(shard).size();
-    ram_t target {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    ram_t target {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(target.emplace(no_memory_domain_k)));
 
     indexes_type_* const sources[1] = {&source};
@@ -408,8 +414,8 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
     failures += expect(crossing > 0);
     failures += expect_eq(stray, 0u);
 
-    ram_t built {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += dense_indexes_build(built, host.executor, vectors, keys, dimensions);
+    ram_t built {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += dense_indexes_build(built, host.executor, vectors, keys);
     std::size_t const baseline = dense_recall_at_ten(built.shard(0), 0, queries.view());
     std::size_t const merged = dense_recall_at_ten(target.shard(0), 0, queries.view());
     failures += expect(merged * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
@@ -458,12 +464,11 @@ std::size_t test_dense_vram_indexes_generations(u64_t seed, typename indexes_typ
     auto bounded = [&](indexes_type_& indexes) {
         indexes.bound_shards(bound);
         return succeeded(place_shards(indexes, placement)) && succeeded(place_shards(indexes, placement)) &&
-               succeeded(indexes.reserve({bound, connectivity_16_k, dimensions}).status) &&
-               indexes.shard_capacity() == bound;
+               succeeded(indexes.reserve({bound}).status) && indexes.shard_capacity() == bound;
     };
 
     // One batch over two empty shards fills two generations and half a third.
-    indexes_type_ filled {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ filled {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(bounded(filled));
     failures += expect_eq(insert(filled, 0, rows), status_t::success_k);
     failures += expect_eq(filled.size(), rows);
@@ -472,7 +477,7 @@ std::size_t test_dense_vram_indexes_generations(u64_t seed, typename indexes_typ
 
     // 750 entries a shard, then a batch of 1000 tops both up to the bound and opens a generation
     // for the other 500, whole, and a search reaches the new generation's entries.
-    indexes_type_ crossed {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ crossed {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(bounded(crossed));
     failures += expect_eq(insert(crossed, 0, 1500), status_t::success_k);
     failures += expect_eq(crossed.shards_count(), 2u);

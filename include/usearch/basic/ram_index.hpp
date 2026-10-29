@@ -518,16 +518,16 @@ struct ram_cursor;
  *  batches, so a parked metric starves stop-the-world verbs, and delays the publication of the
  *  batches dispensed after its own.
  *
- *  Concurrency runs on plain primitives: batch capacity is claimed by a bounded add and
- *  covered before anything is dispensed, one more add dispenses the batch's whole ID range,
- *  any number of threads land its positions, and one turn of a watermark advanced in
- *  dispensed order publishes that range at once, so a search, a cursor or an ID lookup sees
- *  all of a batch or none of it. A batch's keys land in the multimap only after its turn, so
- *  a key an insert made findable names a published node; a load registers its keys before
- *  @c finish publishes, while the caller keeps readers out. Keys need not be unique: every
- *  holder of a key stays addressable through @c find_each, and ID → key stays authoritative.
- *  Node IDs are never recycled before a @c clear and removals are deleted, keeping every
- *  reader's stale ID valid until then.
+ *  Concurrency runs on plain primitives: batch capacity is claimed by a bounded add and covered
+ *  before anything is dispensed, one more add dispenses the batch's whole ID range, any number of
+ *  threads land its positions, and one turn of a watermark advanced in dispensed order publishes
+ *  that range at once, so a search, a cursor or an ID lookup sees all of a batch or none of it. A
+ *  batch's keys land in the multimap inside its turn, just before the watermark moves, so the map
+ *  has one writer and claims no slot; a key lookup drops every node at or above the watermark it
+ *  acquired, so it sees a batch's keys exactly when it sees its nodes. Keys need not be unique:
+ *  every holder of a key stays addressable through @c find_each, and ID → key stays authoritative.
+ *  Node IDs are never recycled before a @c clear and removals are deleted, keeping every reader's
+ *  stale ID valid until then.
  *
  *  One index is complete on its own: it needs no SafeGraphs files, no plural of shards and no
  *  UUIDs. Keys may be any hashable type, node IDs 32 or 64 bits wide, and every record keeps its
@@ -597,7 +597,7 @@ struct ram_index {
     friend struct ram_indexes;
 
     /** The plural's shard table measures, closes and reopens the claims. */
-    template <typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;
@@ -730,8 +730,7 @@ struct ram_index {
      *  @c bad_alloc_k keeps the chunks it did cover, so the same call retries.
      *
      *  @par Statuses:
-     *  - @c overflow_k @p config.capacity passes @c max_node_count_k, or the seats the key
-     *    multimap can ever hold.
+     *  - @c overflow_k @p config.capacity passes @c max_node_count_k.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         atomic_ref<std::size_t>(ceiling_nodes_)
@@ -746,8 +745,7 @@ struct ram_index {
      *  Covers @p capacity entries, bounded by the ID space alone.
      *
      *  @par Statuses:
-     *  - @c overflow_k @p capacity passes @c max_node_count_k, or the seats the key multimap can
-     *    ever hold.
+     *  - @c overflow_k @p capacity passes @c max_node_count_k.
      */
     expected<std::size_t> reserve(std::size_t capacity) noexcept { return reserve(reserve_capacity_t {capacity}); }
 
@@ -805,7 +803,7 @@ struct ram_index {
      *  into its record, wire the selected neighbors, mark the node wired, then back-link - locking
      *  one neighbor at a time, never during a metric verb. The walk admits the published nodes and
      *  the nodes other inserts wired ahead of their turns, this batch's earlier nodes among them.
-     *  One watermark turn then publishes the whole range, and the keys land last. A full reverse
+     *  One watermark turn then files the range's keys and publishes it whole. A full reverse
      *  neighbor list re-selects down to the selector's budget - manual over-wiring is advisory here
      *  and may be pruned back.
      *
@@ -828,7 +826,7 @@ struct ram_index {
      *    @p assigned_ids differs in length from @p incoming_values.
      *  - @c overflow_k A scratch capacity of @p context wraps when rounded.
      *  - @c contended_k A refine plan holds the claims closed.
-     *  - @c overflow_k The batch passes the key multimap's seats or the reserved ceiling.
+     *  - @c overflow_k The batch passes the reserved ceiling.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
               typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
@@ -862,8 +860,8 @@ struct ram_index {
     }
 
     /**
-     *  @brief One batched insertion in flight: the shared hold, the key seats and the dispensed
-     *      range, so its positions can only land, and @ref finish publishes them all at once.
+     *  @brief One batched insertion in flight: the shared hold and the dispensed range, so its
+     *      positions can only land, and @ref finish publishes them all at once.
      *
      *  Positions map onto @c range in order. Every position must land before @c finish: the range
      *  holds every later turn until then, so a caller fanning the steps out over threads lands a
@@ -880,12 +878,11 @@ struct ram_index {
         std::size_t landed = 0;
 
         insert_plan_t() noexcept = default;
-        insert_plan_t(ram_index* index, iota_view<node_id_t> range, typename key_map_t::seats_t seats,
-                      shared_lock_t&& hold) noexcept
-            : range(range), index_(index), hold_(std::move(hold)), seats_(seats) {}
+        insert_plan_t(ram_index* index, iota_view<node_id_t> range, shared_lock_t&& hold) noexcept
+            : range(range), index_(index), hold_(std::move(hold)) {}
         insert_plan_t(insert_plan_t&& other) noexcept
             : range(other.range), landed(other.landed), index_(std::exchange(other.index_, nullptr)),
-              hold_(std::move(other.hold_)), seats_(other.seats_) {}
+              hold_(std::move(other.hold_)) {}
         insert_plan_t& operator=(insert_plan_t&&) = delete;
         ~insert_plan_t() noexcept { assert((!index_ || range.empty()) && "A dispensed plan must finish"); }
 
@@ -924,9 +921,9 @@ struct ram_index {
         }
 
         /** Publishes every position at once: @c config_mismatch_k while any has yet to land,
-         *  leaving the plan whole; then the range's one watermark turn, the keys in their seats,
-         *  and the hold dropped. A success spends the plan, so a second call answers
-         *  @c uninitialized_k.
+         *  leaving the plan whole; then the range's one watermark turn, which files its keys and
+         *  moves the watermark, and the hold dropped. A success spends the plan, so a second call
+         *  answers @c uninitialized_k.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
@@ -945,11 +942,10 @@ struct ram_index {
                      watermark != range.first;
                      watermark = atomic_ref<node_id_t>(last_visible_id).load(std::memory_order_acquire))
                     wait_t {}(&last_visible_id, watermark, 0u);
+                // The turn holder is the map's one writer; readers drop these nodes until the
+                // store.
+                index_->publish_keys_(range);
                 atomic_ref<node_id_t>(last_visible_id).store(range.bound, std::memory_order_release);
-
-                // Post-turn: keys become findable only for published nodes, in seats claimed first.
-                for (node_id_t const node_id : range)
-                    index_->key_map_.insert(seats_, index_->nodes_[node_id].key, node_id);
             }
             hold_.unlock();
             index_ = nullptr;
@@ -964,18 +960,15 @@ struct ram_index {
 
         /** The shared hold spanning the plan's whole lifetime. */
         shared_lock_t hold_;
-
-        /** One key seat per position, claimed before the dispense. */
-        typename key_map_t::seats_t seats_ {};
     };
 
     /**
-     *  @brief Opens a batched insertion of @p count values: joins the shared side, claims the key
-     *      seats, claims and covers the node records, then dispenses the whole ID range in one add.
+     *  @brief Opens a batched insertion of @p count values: joins the shared side, claims and
+     *      covers the node records and the key multimap, then dispenses the whole ID range in one
+     *      add.
      *
      *  Every refusal precedes the dispense: @c overflow_k past the reserved ceiling, or a refused
-     *  cover's status once the claim is given back; a refused seat claim or cover strands its
-     *  seats, which only leaves their chunks emptier. Everything else fallible belongs before this
+     *  cover's status once the claim is given back. Everything else fallible belongs before this
      *  call, since nothing may refuse once the range is dispensed: building the values, sizing each
      *  stepping thread's context through @ref reserve_traversal, a metric's own setup. A @p count
      *  of zero dispenses nothing, and a refine plan holding the claims closed refuses with
@@ -984,7 +977,7 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c contended_k A refine plan holds the claims closed.
-     *  - @c overflow_k The batch passes the key multimap's seats or the reserved ceiling.
+     *  - @c overflow_k The batch passes the reserved ceiling.
      */
     expected<insert_plan_t> plan_insert(std::size_t count) noexcept {
         auto [claim, status] = claim_(count);
@@ -1474,21 +1467,20 @@ struct ram_index {
         /** An unbound pass placed by @p allocator - what a refused plan answers with. */
         explicit refine_plan_t(allocator_t const& allocator) noexcept
             : audit(allocator), part_bases_(allocator), donor_holds_(allocator), receiver_holds_(allocator),
-              receiver_seats_(allocator), part_slots_(allocator), part_members_(allocator), part_extents_(allocator) {}
+              part_slots_(allocator), part_members_(allocator), part_extents_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), taken(other.taken), ticked(other.ticked),
               index_(std::exchange(other.index_, nullptr)), hold_(std::move(other.hold_)), nodes_(other.nodes_),
               part_bases_(std::move(other.part_bases_)), donors_(other.donors_),
-              donor_holds_(std::move(other.donor_holds_)), landed_donors_(other.landed_donors_), seats_(other.seats_),
+              donor_holds_(std::move(other.donor_holds_)), landed_donors_(other.landed_donors_),
               source_(std::exchange(other.source_, nullptr)), source_hold_(std::move(other.source_hold_)),
               receivers_(other.receivers_), receiver_holds_(std::move(other.receiver_holds_)),
-              receiver_seats_(std::move(other.receiver_seats_)), part_slots_(std::move(other.part_slots_)),
-              part_members_(std::move(other.part_members_)), part_extents_(std::move(other.part_extents_)),
-              seed_(other.seed_), refined_receivers_(other.refined_receivers_),
-              receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
-              rounds_(other.rounds_), round_(other.round_), walk_(other.walk_), connectivity_(other.connectivity_),
-              phase_(other.phase_), swept_after_(other.swept_after_), islands_before_(other.islands_before_),
-              tally_(other.tally_) {}
+              part_slots_(std::move(other.part_slots_)), part_members_(std::move(other.part_members_)),
+              part_extents_(std::move(other.part_extents_)), seed_(other.seed_),
+              refined_receivers_(other.refined_receivers_), receivers_health_(other.receivers_health_),
+              receivers_islands_(other.receivers_islands_), rounds_(other.rounds_), round_(other.round_),
+              walk_(other.walk_), connectivity_(other.connectivity_), phase_(other.phase_),
+              swept_after_(other.swept_after_), islands_before_(other.islands_before_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
@@ -1699,17 +1691,17 @@ struct ram_index {
             }
         }
 
-        /** Publishes the current donor's nodes at once, then their keys in the seats claimed for
-         *  them, empties the donor and releases it, and nulls its slot. */
+        /** Files the current donor's keys and publishes its nodes at once, the closed claims making
+         *  this barrier the map's one writer, then empties the donor, releases it, and nulls its
+         *  slot. */
         void publish_landed_() noexcept {
             ram_index& donor = *donors_[landed_donors_];
             node_id_t const landed = static_cast<node_id_t>(donor.size());
             node_id_t const base = static_cast<node_id_t>(index_->size());
             if (landed) {
+                index_->publish_keys_({base, static_cast<node_id_t>(base + landed)});
                 atomic_ref<node_id_t>(index_->next_dispensed_id_).store(base + landed, std::memory_order_relaxed);
                 atomic_ref<node_id_t>(index_->last_visible_id_).store(base + landed, std::memory_order_release);
-                for (node_id_t node_id = base; node_id != base + landed; ++node_id)
-                    index_->key_map_.insert(seats_, index_->nodes_[node_id].key, node_id);
             }
             donor.forget_(landed);
             donor_holds_[landed_donors_].unlock();
@@ -1813,17 +1805,16 @@ struct ram_index {
             }
         }
 
-        /** Publishes every receiver's nodes at once, then their keys in the seats claimed for them,
-         *  and empties the source and releases it. */
+        /** Files every receiver's keys and publishes its nodes at once, the closed claims making
+         *  this barrier each map's one writer, then empties the source and releases it. */
         void publish_parts_() noexcept {
             for (std::size_t part = 0; part != receivers_.size(); ++part) {
                 ram_index& into = *receivers_[part];
                 node_id_t const nodes = part_extents_[part].nodes;
                 if (!nodes) continue;
+                into.publish_keys_({0, nodes});
                 atomic_ref<node_id_t>(into.next_dispensed_id_).store(nodes, std::memory_order_relaxed);
                 atomic_ref<node_id_t>(into.last_visible_id_).store(nodes, std::memory_order_release);
-                for (node_id_t node_id = 0; node_id != nodes; ++node_id)
-                    into.key_map_.insert(receiver_seats_[part], into.nodes_[node_id].key, node_id);
             }
             source_->forget_(source_nodes_());
             source_hold_.unlock();
@@ -1988,9 +1979,6 @@ struct ram_index {
         /** Donors landed so far. */
         std::size_t landed_donors_ = 0;
 
-        /** One key seat per donor node, claimed at planning. */
-        typename key_map_t::seats_t seats_ {};
-
         /** The index a split empties, whose unique side @c source_hold_ occupies until its nodes
          *  publish in the receivers; null otherwise. */
         ram_index* source_ = nullptr;
@@ -2003,9 +1991,6 @@ struct ram_index {
 
         /** One shared hold per receiver whose claims the split closed, in receiver order. */
         growing_buffer<shared_lock_t, allocator_t> receiver_holds_;
-
-        /** One run of key seats per receiver, as many as the part capacity. */
-        growing_buffer<typename key_map_t::seats_t, allocator_t> receiver_seats_;
 
         /** Per source node: its part times the part capacity, plus its ID in that receiver. */
         growing_buffer<node_id_t, allocator_t> part_slots_;
@@ -2092,11 +2077,11 @@ struct ram_index {
      *      walking across the parts round by round, and heals.
      *
      *  Every fallible step of every landing happens here, after the checks of @c plan_refine:
-     *  each donor's unique side taken, the records past the watermark covered, a key seat claimed
-     *  per donor node, and every donor neighbor list reserved to the budget. A landing step swaps a
+     *  each donor's unique side taken, the records and the key multimap past the watermark
+     *  covered, and every donor neighbor list reserved to the budget. A landing step swaps a
      *  donor node's value and neighbors in with every ID shifted, so nothing allocates, and the
-     *  phase boundary publishes the donor's nodes at once, their keys right after, empties the
-     *  donor and nulls its slot; at most one donor's nodes are ever unpublished. Donors must share
+     *  phase boundary files the donor's keys and publishes its nodes at once, empties the donor
+     *  and nulls its slot; at most one donor's nodes are ever unpublished. Donors must share
      *  this index's allocator, and nothing may search them meanwhile.
      *
      *  @param[in,out] donors The indexes giving their nodes up, each nulled once landed; the slots
@@ -2126,16 +2111,16 @@ struct ram_index {
      *  through @ref seeded_bijection under @p seed, each part capped at the nodes over the
      *  receivers rounded up; nodes no growth reached seed the smallest part. Scatter steps move
      *  each node's value, key and neighbors into its receiver, the links inside its part rebased
-     *  and the links across dropped, and the phase boundary publishes every receiver's nodes at
-     *  once, their keys right after, then empties this index and releases it, so its claims reopen
+     *  and the links across dropped, and the phase boundary files every receiver's keys and
+     *  publishes its nodes at once, then empties this index and releases it, so its claims reopen
      *  at zero. Every receiver then re-selects its seams, the prefix of nodes that lost a link,
      *  sweeps and heals as @ref plan_refine does, and the result sums over the receivers.
      *
      *  Every fallible step happens here: this index's unique side taken, each receiver's shared
-     *  side joined and its claims closed, the records, key seats and audit of a full part covered
-     *  in every receiver, and every neighbor list reserved to the budget. Receivers must share this
-     *  index's allocator, the slots must outlive the plan, and nothing may search this index
-     *  meanwhile.
+     *  side joined and its claims closed, the records, key multimap and audit of a full part
+     *  covered in every receiver, and every neighbor list reserved to the budget. Receivers must
+     *  share this index's allocator, the slots must outlive the plan, and nothing may search this
+     *  index meanwhile.
      *
      *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct.
      *  @param[in,out] context The traversal context the plan's walks draw their buffers from.
@@ -2446,20 +2431,24 @@ struct ram_index {
      *  @par Statuses:
      *  - @c malformed_k No published node is stored under @p key.
      */
-    expected<node_id_t> find(key_t const& key) const noexcept { return key_map_.find(key); }
-
-    /** Invokes @p callback with the ID of every published node under @p key -
-     *  wait-free, concurrent with everything. */
-    template <typename callback_type_>
-    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
-        key_map_.find_each(key, std::forward<callback_type_>(callback));
+    expected<node_id_t> find(key_t const& key) const noexcept {
+        expected<node_id_t> found {node_id_t {}, status_t::malformed_k};
+        find_each(key, [&](node_id_t node_id) noexcept { found = {node_id, status_t::success_k}; });
+        return found;
     }
 
-    /** Whether at least one published node exists under @p key. */
-    bool contains(key_t const& key) const noexcept { return key_map_.contains(key); }
+    /** Invokes @p callback with the ID of every published node under @p key, as of one acquire
+     *  of the watermark - wait-free, concurrent with everything. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        key_map_.find_each(key, static_cast<node_id_t>(size()), callback);
+    }
 
-    /** Number of published nodes under @p key. */
-    std::size_t count(key_t const& key) const noexcept { return key_map_.count(key); }
+    /** Whether at least one published node exists under @p key, stopping at the first. */
+    bool contains(key_t const& key) const noexcept { return key_map_.contains(key, static_cast<node_id_t>(size())); }
+
+    /** Number of published nodes under @p key, exact as of one acquire of the watermark. */
+    std::size_t count(key_t const& key) const noexcept { return key_map_.count(key, static_cast<node_id_t>(size())); }
 
     /** Post-construction graph report - the quality signal a recall number hides.
      *  Meaningful only on @c success_k. */
@@ -2791,7 +2780,7 @@ struct ram_index {
 
     /** One step-parallel load in flight - the mirror of @c save_plan_t: the vetted columns, the
      *  covered-node tally, and the shared mutex's unique hold, released when the plan dies or
-     *  @c finish publishes the loaded graph. */
+     *  @c finish files the keys and publishes the loaded graph. */
     struct [[nodiscard]] load_plan_t {
 
         /** The vetted columns being decoded. */
@@ -2801,23 +2790,16 @@ struct ram_index {
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
-        load_plan_t(ram_index* index, columns_view_t columns, std::size_t first_seat, unique_lock_t&& hold) noexcept
-            : columns(columns), index_(index), first_seat_(first_seat), hold_(std::move(hold)) {}
+        load_plan_t(ram_index* index, columns_view_t columns, unique_lock_t&& hold) noexcept
+            : columns(columns), index_(index), hold_(std::move(hold)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
-              first_seat_(other.first_seat_), hold_(std::move(other.hold_)) {}
+              hold_(std::move(other.hold_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
 
-        /** A plan that dies before @c finish wipes the keys its steps registered, still
-         *  under its hold: an insert on the empty index would otherwise dispense IDs the
-         *  unpublished attempt's keys still name, and spend the map's seats on the leftovers. */
-        ~load_plan_t() noexcept {
-            if (index_) index_->key_map_.clear();
-        }
-
-        /** Decodes the node range's keys, neighbor lists & values into its pre-constructed records
-         *  and registers the keys - the multimap inserts are concurrency-safe, so any number of
-         *  caller threads run their steps. A refusal of @p codec passes through.
+        /** Decodes the node range's keys, neighbor lists & values into its pre-constructed records,
+         *  which no other step touches, so any number of caller threads run their steps; the keys
+         *  enter the multimap in @c finish. A refusal of @p codec passes through.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already published.
@@ -2831,9 +2813,6 @@ struct ram_index {
             if (node_range.bound < node_range.first || static_cast<std::size_t>(node_range.bound) > node_count)
                 return status_t::config_mismatch_k;
 
-            // Each node takes the seat its position names, so concurrent steps never share one.
-            typename key_map_t::seats_t seats {first_seat_ + static_cast<std::size_t>(node_range.first),
-                                               first_seat_ + static_cast<std::size_t>(node_range.bound)};
             // The plan vetted both prefix-sum columns and every ID, and reserved every neighbor
             // list, so the slices are trusted and the lists fit.
             std::size_t widest_list = 0;
@@ -2855,17 +2834,15 @@ struct ram_index {
                                                         record.value);
                     failed(decoded))
                     return decoded;
-
-                index_->key_map_.insert(seats, record.key, node);
             }
             index_->widen_(widest_list);
             atomic_ref<std::size_t>(covered).add(node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
-        /** Publishes the loaded graph in the tier-wide order - claims, identity,
+        /** Publishes the loaded graph in the tier-wide order - keys, claims, identity,
          *  watermark last - and releases the hold: @c config_mismatch_k unless the
-         *  steps' sizes sum to the node count.
+         *  steps' sizes sum to the node count. The hold makes it the map's one writer.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already published.
@@ -2876,13 +2853,14 @@ struct ram_index {
             std::size_t const node_count = columns.keys.size();
             if (atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != node_count)
                 return status_t::config_mismatch_k;
+            index_->publish_keys_({0, static_cast<node_id_t>(node_count)});
             atomic_ref<std::size_t>(index_->claimed_count_).store(node_count, std::memory_order_relaxed);
             atomic_ref<node_id_t>(index_->next_dispensed_id_)
                 .store(static_cast<node_id_t>(node_count), std::memory_order_relaxed);
             atomic_ref<node_id_t>(index_->last_visible_id_)
                 .store(static_cast<node_id_t>(node_count), std::memory_order_release);
             hold_.unlock();
-            index_ = nullptr; // Published: the plan is spent, and its death wipes nothing.
+            index_ = nullptr;
             return status_t::success_k;
         }
 
@@ -2892,21 +2870,18 @@ struct ram_index {
          *  empty plan a refused @ref plan_load returns, and once @c finish published. */
         ram_index* index_ = nullptr;
 
-        /** The seat node zero's key takes, claimed with every other node's at planning. */
-        std::size_t first_seat_ = 0;
-
         /** The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
     };
 
     /**
      *  @brief Opens a step-parallel load into this empty index: takes the shared mutex's unique
-     *      side - held inside the returned plan until its @c finish or its death - vets both
-     *      prefix-sum columns and every neighbor ID in full, and wipes the key multimap.
+     *      side - held inside the returned plan until its @c finish or its death - and vets both
+     *      prefix-sum columns and every neighbor ID in full.
      *
-     *  The vetted nodes' records are then covered, their neighbor lists reserved and their key
-     *  seats claimed, so the plan's own @c load calls decode the per-node bulk and land no link or
-     *  key that needs memory; nothing publishes until its @c finish.
+     *  The vetted nodes' records and the key multimap are then covered and their neighbor lists
+     *  reserved, so the plan's own @c load calls decode the per-node bulk and land no link or key
+     *  that needs memory; nothing reaches the multimap or publishes until its @c finish.
      *
      *  @param[in] columns The five columns a prior @c save filled; the key column's length
      *      is the node count.
@@ -2916,8 +2891,7 @@ struct ram_index {
      *  - @c config_mismatch_k The index already publishes nodes.
      *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
      *    zero to its element column's length, or a neighbor ID names no node.
-     *  - @c overflow_k The nodes pass @c max_node_count_k or the key multimap's seats, or a node's
-     *    capacity wraps.
+     *  - @c overflow_k The nodes pass @c max_node_count_k, or a node's capacity wraps.
      */
     expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
         // The gate excludes mutators & flips certified probes to refusal; the exclusivity
@@ -2935,10 +2909,8 @@ struct ram_index {
                                                                       columns.neighbor_offsets[node]);
                 failed(grown))
                 return {{}, grown};
-        // A dying plan wipes the keys it registered, so the map arrives whole here.
-        auto [seats, seat_status] = key_map_.claim(node_count);
-        if (failed(seat_status)) return {{}, seat_status};
-        return {load_plan_t {this, columns, seats.next, std::move(hold)}, status_t::success_k};
+        if (status_t const keyed = key_map_.reserve(node_count); failed(keyed)) return {{}, keyed};
+        return {load_plan_t {this, columns, std::move(hold)}, status_t::success_k};
     }
 
     /**
@@ -2946,7 +2918,8 @@ struct ram_index {
      *      exclusive: decodes each value into its pre-constructed record, rebuilds the key
      *      multimap, and publishes the watermark last.
      *
-     *  The key map is wiped at planning, so a failed attempt may be retried with corrected columns.
+     *  No key reaches the multimap before the watermark, so a failed attempt may be retried with
+     *  corrected columns.
      *
      *  @param[in] columns The five columns a prior @c save filled.
      *  @param[in] codec Decodes each value slice into its record; its refusal passes through.
@@ -2956,8 +2929,7 @@ struct ram_index {
      *  - @c config_mismatch_k The index already publishes nodes.
      *  - @c malformed_k A prefix-sum column is not one longer than the keys, does not rise from
      *    zero to its element column's length, or a neighbor ID names no node.
-     *  - @c overflow_k The nodes pass @c max_node_count_k or the key multimap's seats, or a node's
-     *    capacity wraps.
+     *  - @c overflow_k The nodes pass @c max_node_count_k, or a node's capacity wraps.
      */
     template <typename value_codec_type_>
         requires value_codec<value_codec_type_, value_t>
@@ -3013,6 +2985,13 @@ struct ram_index {
      *  nothing frees, and every accessor gated by the watermark refuses its IDs. */
     void retire_() noexcept { atomic_ref<node_id_t>(last_visible_id_).store(0, std::memory_order_release); }
 
+    /** Files every node of @p range under its key ahead of its watermark, as their one writer: the
+     *  range's turn holder, a plan's barrier with the claims closed, or a load's @c finish under
+     *  the unique side. Plain stores and one release byte per node. */
+    void publish_keys_(iota_view<node_id_t> range) noexcept {
+        for (node_id_t const node_id : range) key_map_.insert(nodes_[node_id].key, node_id);
+    }
+
     /** Closes the claims at the watermark: one compare-exchange that succeeds only while every
      *  claimed ID is published, after which every batch refuses until @c reopen_. */
     status_t close_() noexcept {
@@ -3035,20 +3014,19 @@ struct ram_index {
     }
 
     /**
-     *  @brief One batch's capacity, claimed and covered but not dispensed: the shared hold, the key
-     *      seats and the entries, so a plural claims on every shard before it dispenses on any.
+     *  @brief One batch's capacity, claimed and covered but not dispensed: the shared hold and the
+     *      entries, so a plural claims on every shard before it dispenses on any.
      *
-     *  Dying undispensed gives the entries back, still under the hold, and strands the seats, which
-     *  only leaves their chunks emptier; @c dispense_ turns it into the batch's plan.
+     *  Dying undispensed gives the entries back, still under the hold; @c dispense_ turns it into
+     *  the batch's plan.
      */
     struct [[nodiscard]] capacity_claim_t {
         capacity_claim_t() noexcept = default;
-        capacity_claim_t(ram_index* index, std::size_t entries, typename key_map_t::seats_t seats,
-                         shared_lock_t&& hold) noexcept
-            : index_(index), entries_(entries), seats_(seats), hold_(std::move(hold)) {}
+        capacity_claim_t(ram_index* index, std::size_t entries, shared_lock_t&& hold) noexcept
+            : index_(index), entries_(entries), hold_(std::move(hold)) {}
         capacity_claim_t(capacity_claim_t&& other) noexcept
             : index_(std::exchange(other.index_, nullptr)), entries_(std::exchange(other.entries_, 0)),
-              seats_(other.seats_), hold_(std::move(other.hold_)) {}
+              hold_(std::move(other.hold_)) {}
         capacity_claim_t& operator=(capacity_claim_t&&) = delete;
         capacity_claim_t(capacity_claim_t const&) = delete;
         capacity_claim_t& operator=(capacity_claim_t const&) = delete;
@@ -3066,26 +3044,19 @@ struct ram_index {
         /** Entries claimed and covered, none dispensed; zero once dispensed. */
         std::size_t entries_ = 0;
 
-        /** One key seat per entry, claimed before the entries. */
-        typename key_map_t::seats_t seats_ {};
-
         shared_lock_t hold_;
     };
 
-    /** The fallible half of @c plan_insert: joins the shared side, claims the key seats, then
-     *  claims and covers @p count entries, dispensing none; it refuses as @ref plan_insert does. */
+    /** The fallible half of @c plan_insert: joins the shared side, then claims @p count entries and
+     *  covers their records and key map chunks, dispensing none; it refuses as @ref plan_insert
+     *  does. */
     expected<capacity_claim_t> claim_(std::size_t count) noexcept {
         // The gate opens before the claim, so a batch parked behind a unique holder never
         // sits on committed capacity, spuriously overflowing its peers.
         shared_lock_t hold {shared_mutex_};
-        if (!count) return {capacity_claim_t {this, 0, {}, std::move(hold)}, status_t::success_k};
-        // Refused before the seats, so batches retried against a refine strand none.
+        if (!count) return {capacity_claim_t {this, 0, std::move(hold)}, status_t::success_k};
         if (atomic_ref<std::size_t>(claimed_count_).load(std::memory_order_relaxed) == closed_claims_k)
             return {{}, status_t::contended_k};
-
-        // Key seats come first, so a refused seat claim leaves no capacity claimed.
-        auto [seats, seat_status] = key_map_.claim(count);
-        if (failed(seat_status)) return {{}, seat_status};
 
         // Claims convert one-to-one into dispensed IDs once covered, and commit only within the
         // ceiling, so peers never observe an overshoot. Covering to this claim's end suffices:
@@ -3097,11 +3068,15 @@ struct ram_index {
         if (claimed == closed_claims_k) return {{}, status_t::contended_k};
         // A ceiling lowered under the claims refuses every batch rather than wrapping.
         if (claimed > ceiling || ceiling - claimed < count) return {{}, status_t::overflow_k};
-        if (status_t const covered = nodes_.cover(claimed + count); failed(covered)) {
+        // The key map first, so a refused one leaves the node chunks, and the capacity, as they
+        // were.
+        status_t covered = key_map_.reserve(claimed + count);
+        if (succeeded(covered)) covered = nodes_.cover(claimed + count);
+        if (failed(covered)) {
             atomic_ref<std::size_t>(claimed_count_).sub(count, std::memory_order_release);
             return {{}, covered};
         }
-        return {capacity_claim_t {this, count, seats, std::move(hold)}, status_t::success_k};
+        return {capacity_claim_t {this, count, std::move(hold)}, status_t::success_k};
     }
 
     /** The half of @ref plan_insert that cannot fail: one add dispenses the entries of @p claim as
@@ -3109,13 +3084,13 @@ struct ram_index {
     insert_plan_t dispense_(capacity_claim_t&& claim) noexcept {
         if (!claim.index_) return {};
         std::size_t const count = std::exchange(claim.entries_, 0);
-        if (!count) return {this, {}, claim.seats_, std::move(claim.hold_)};
+        if (!count) return {this, {}, std::move(claim.hold_)};
         // The steps run between this add and the turn, so a slow scorer delays the batches
         // dispensed after this one.
         node_id_t const first_id = atomic_ref<node_id_t>(next_dispensed_id_)
                                        .fetch_add(static_cast<node_id_t>(count), std::memory_order_acq_rel);
         iota_view<node_id_t> const range {first_id, static_cast<node_id_t>(first_id + count)};
-        return {this, range, claim.seats_, std::move(claim.hold_)};
+        return {this, range, std::move(claim.hold_)};
     }
 
     /** An audit over the IDs below @p visible, its bitsets placed by @p allocator. */
@@ -3166,11 +3141,7 @@ struct ram_index {
             parts += donor_entries != 0;
         }
         if (status_t const covered = nodes_.cover(entries); failed(covered)) return refuse(covered);
-        if (entries != visible) {
-            auto const [seats, seat_status] = key_map_.claim(entries - visible);
-            if (failed(seat_status)) return refuse(seat_status);
-            plan.seats_ = seats;
-        }
+        if (status_t const keyed = key_map_.reserve(entries); failed(keyed)) return refuse(keyed);
         if (parts > 1) {
             if (failed(plan.part_bases_.reserve_exactly(parts))) return refuse(status_t::bad_alloc_k);
             if (visible) plan.part_bases_.push_back_reserved(0);
@@ -3240,8 +3211,7 @@ struct ram_index {
         plan.receivers_ = receivers;
         std::size_t const capacity = divide_round_up<std::size_t>(entries, parts);
         if (parts * capacity > static_cast<std::size_t>(missing_k)) return refuse(status_t::overflow_k);
-        if (failed(plan.receiver_holds_.reserve_exactly(parts)) ||
-            failed(plan.receiver_seats_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
+        if (failed(plan.receiver_holds_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
             failed(plan.part_slots_.resize(entries)) || failed(plan.part_members_.resize(parts * capacity)))
             return refuse(status_t::bad_alloc_k);
         // One audit over a full part sweeps every receiver in turn, rebound as its turn comes.
@@ -3261,9 +3231,7 @@ struct ram_index {
         }
         for (ram_index* receiver : receivers) {
             if (status_t const covered = receiver->nodes_.cover(capacity); failed(covered)) return refuse(covered);
-            auto [seats, seat_status] = receiver->key_map_.claim(capacity);
-            if (failed(seat_status)) return refuse(seat_status);
-            plan.receiver_seats_.push_back_reserved(seats);
+            if (status_t const keyed = receiver->key_map_.reserve(capacity); failed(keyed)) return refuse(keyed);
         }
         // Neighbor lists last; each moves its buffer into a receiver, where re-selecting allocates
         // nothing.
@@ -4023,7 +3991,8 @@ struct ram_index {
      *  since every search reads both and this one stops moving once the graph's budget is met. */
     std::size_t widest_list_ {0};
 
-    /** Key → ID multimap, covered by each batch's seats and by @c reserve. */
+    /** Key → ID multimap placed by node ID, covered beside the records, and written only by
+     *  whoever publishes a range: a batch's turn holder, a plan's barrier or a load's finish. */
     key_map_t key_map_;
 
     /** The world gate: mutators hold it shared, stop-the-world verbs try-unique, certified

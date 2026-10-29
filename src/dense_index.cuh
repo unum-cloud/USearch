@@ -63,14 +63,6 @@ struct usearch_dense_index_handle_t {
     dense_home_tables_t tables;
     void* index = nullptr;
 
-    /** The dimensionality the init arguments requested, consumed by the first @c reserve; once any
-     *  shard froze real geometry, the index answers and this stops mattering. */
-    std::size_t requested_dimensions = 0;
-
-    /** The neighbors-per-node bound the init arguments requested, consumed like the
-     *  dimensionality. */
-    connectivity_t requested_connectivity = connectivity_32_k;
-
     usearch_dense_index_handle_t(dense_home_tables_t picked, void* created) noexcept : tables(picked), index(created) {}
     usearch_dense_index_handle_t(usearch_dense_index_handle_t const&) = delete;
     usearch_dense_index_handle_t& operator=(usearch_dense_index_handle_t const&) = delete;
@@ -168,16 +160,15 @@ template <dense_home_t home_, typename placement_type_>
 static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& geometry,
                                                placement_type_ const& placement, dense_verbs<home_> const& verbs,
                                                nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
-    void* const created = verbs.create(kernel, host_allocator_of(placement));
+    connectivity_t const connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
+                                                              : connectivity_32_k;
+    void* const created = verbs.create(kernel, geometry.dimensions, connectivity, host_allocator_of(placement));
     if (!created)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     usearch_dense_index_t const handle = new (std::nothrow) usearch_dense_index_handle_t(&verbs, created);
     if (!handle)
         return verbs.destroy(created),
                propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    handle->requested_dimensions = geometry.dimensions;
-    handle->requested_connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
-                                                           : connectivity_32_k;
     // Placement is init's job, so a bad domain fails here rather than at the first reservation.
     punned_dense_index<home_> const punned {verbs, created};
     if (status_t const placed = place_shards(punned, placement); failed(placed))
@@ -300,6 +291,22 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     return propagate_error(usearch_status_device_k, outcome,
                            "The devices are not listed, or this build carries no kernels for them"),
            nullptr;
+}
+
+/** Refuses at init, before any variant is picked or device touched, a geometry the engines would
+ *  only refuse at the first growth: no dimensions, sub-byte rows ending inside a storage value, or
+ *  a connectivity that is not a power of two within @c connectivity_t; zero derives the default. */
+static bool refuses_geometry(usearch_dense_metadata_t const& geometry, usearch_outcome_t* outcome) noexcept {
+    nk_dtype_t const dtype = nk_dtype_of(geometry.quantization);
+    std::size_t const connectivity = geometry.connectivity;
+    // A dtype the build leaves out is refused by `with_variant`, so its packing is never read here.
+    bool const stored = dense_dtypes_t::position_of(dtype) != dense_dtypes_t::size_k;
+    bool const filled = !stored || geometry.dimensions % nk_dimensions_per_value(dtype) == 0;
+    bool const shaped = !connectivity || (std::has_single_bit(connectivity) &&
+                                          connectivity == static_cast<connectivity_t>(connectivity));
+    if (geometry.dimensions && filled && shaped) return false;
+    return !propagate_error(usearch_status_config_mismatch_k, outcome,
+                            "The dimensions or connectivity cannot shape a graph");
 }
 
 /** Routes the geometry onto its variant, built where @p placement names: every numeric dtype speaks
@@ -571,7 +578,7 @@ struct usearch_dense_refinement_handle_t {
     }
 };
 
-/** Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
+/** Fills every field a checkpoint holds; the type carries nothing a checkpoint cannot say. */
 static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
     metadata->connectivity = source.connectivity;
@@ -580,7 +587,7 @@ static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_me
     metadata->metric = usearch_metric_of(nk_kernel_named(metric.data(), metric.size()));
 }
 
-/** Builds a handle from the geometry @p source froze, placed where @p placement names, and copies
+/** Builds a handle from the geometry @p source holds, placed where @p placement names, and copies
  *  @p source into it; a failed or cancelled load frees the handle and leaves @c *index null. */
 template <typename source_type_, typename placement_type_>
 static void load_dense_index(source_type_ source, placement_type_ const& placement, usearch_executor_t executor,
@@ -661,26 +668,14 @@ extern "C" {
 
 #pragma region Lifetime
 
-/** Freezes the geometry @p handle was created with on every shard through a reservation of no
- *  entries, so a fresh index takes entries without one, and a later reservation only hints
- *  capacity. */
-static status_t freeze_geometry(usearch_dense_index_handle_t const& handle) noexcept {
-    return std::visit(
-        [&](auto const* verbs) noexcept {
-            return verbs->reserve(handle.index, 0, handle.requested_connectivity, handle.requested_dimensions);
-        },
-        handle.tables);
-}
-
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
+    if (refuses_geometry(geometry, outcome)) return;
     usearch_dense_index_t const index = with_variant(geometry, arguments->ram, outcome);
     if (!index) return;
-    if (status_t const frozen = freeze_geometry(*index); failed(frozen))
-        return delete index, propagate_error(frozen, outcome), void();
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -690,10 +685,9 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
+    if (refuses_geometry(geometry, outcome)) return;
     usearch_dense_index_t const index = with_variant(geometry, arguments->vram, outcome);
     if (!index) return;
-    if (status_t const frozen = freeze_geometry(*index); failed(frozen))
-        return delete index, propagate_error(frozen, outcome), void();
     *arguments->index = index;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -746,9 +740,7 @@ USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
     usearch_dense_index_handle_t const& handle = *arguments->index;
     std::visit(
         [&](auto const* verbs) noexcept {
-            propagate_error(verbs->reserve(handle.index, arguments->capacity, handle.requested_connectivity,
-                                           handle.requested_dimensions),
-                            outcome);
+            propagate_error(verbs->reserve(handle.index, arguments->capacity), outcome);
         },
         handle.tables);
 }
@@ -790,13 +782,10 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
     call_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t const& handle = *arguments->index;
     visit_punned(handle, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        std::size_t const dimensions = punned.verbs.dimensions(punned.index);
-        std::size_t const connectivity = punned.verbs.connectivity(punned.index);
         usearch_dense_index_description_t& description = *arguments->description;
         description.metadata = {usearch_metric_of(punned.verbs.kernel(punned.index)),
-                                usearch_scalar_of(punned.verbs.dtype),
-                                dimensions ? dimensions : handle.requested_dimensions,
-                                connectivity ? connectivity : static_cast<std::size_t>(handle.requested_connectivity)};
+                                usearch_scalar_of(punned.verbs.dtype), punned.verbs.dimensions(punned.index),
+                                punned.verbs.connectivity(punned.index)};
         description.size = punned.verbs.size(punned.index);
         description.capacity = punned.verbs.capacity(punned.index);
         description.memory_usage = punned.verbs.memory_usage(punned.index);
@@ -827,18 +816,14 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
 
 #pragma region Insertion and Search
 
-/** Refuses @p count rows of @p columns values unless that is the geometry @p index froze - its
- *  shards' once reserved, and the init's until then. */
+/** Refuses @p count rows of @p columns values unless that is the dimensions @p index was built
+ *  with. */
 static bool rejects_columns(usearch_dense_index_handle_t const& index, std::size_t count, std::size_t columns,
                             usearch_outcome_t* outcome) noexcept {
-    std::size_t reserved = 0;
-    std::visit([&](auto const* verbs) noexcept { reserved = verbs->dimensions(index.index); }, index.tables);
-    std::size_t const frozen = reserved ? reserved : index.requested_dimensions;
-    if (count && !frozen)
-        return !propagate_error(usearch_status_uninitialized_k, outcome, "The geometry was never frozen");
-    return count && columns != frozen &&
-           !propagate_error(usearch_status_shape_mismatch_k, outcome,
-                            "The rows' width differs from the frozen geometry");
+    std::size_t dimensions = 0;
+    std::visit([&](auto const* verbs) noexcept { dimensions = verbs->dimensions(index.index); }, index.tables);
+    return count && columns != dimensions &&
+           !propagate_error(usearch_status_shape_mismatch_k, outcome, "The rows' width differs from the index's");
 }
 
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
@@ -934,8 +919,9 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                                                           device, {arguments->queries.data}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        if (!wanted) {
-            // No walk serves zero matches; the counts are zeros staged on the host.
+        if (!wanted || !punned.verbs.size(punned.index)) {
+            // No walk serves zero matches or an empty index, whose shards may not have grown on any
+            // device yet; the counts are zeros staged on the host.
             auto const [zeros, carve_status] = carve_matches(arena->memory, count, 0);
             if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
             for (std::size_t query = 0; query != count; ++query) zeros.counts[query] = 0;

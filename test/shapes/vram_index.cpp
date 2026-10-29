@@ -188,6 +188,8 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
+    std::vector<us::utilities::uuid_t> keys(count);
+    for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
         std::span<std::size_t const> const batch_offsets {offsets.data() + first, bound - first + 1};
@@ -196,7 +198,8 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
             status_t::success_k);
         typename vram_index_t::traversal_context_t context {
             cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
-        auto const [inserted, status] = vram_index.insert({tape.data(), batch_offsets}, context, insert_config);
+        auto const [inserted, status] = vram_index.insert({keys.data() + first, bound - first},
+                                                          {tape.data(), batch_offsets}, context, insert_config);
         failures += expect_eq(status, status_t::success_k);
         failures += expect_eq(inserted.first_id, first);
         failures += expect_eq(inserted.new_size, bound);
@@ -282,9 +285,13 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
     std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
                                                                                            "ampere");
-    if (device.architecture_major == static_cast<u32_t>(cuda_arch_blackwell_k / 100))
-        failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
-                                                                                          "blackwell");
+    // A build whose architectures name no Blackwell compiles no Blackwell shapes kits to link
+    // against.
+    if constexpr (NUMKONG_TARGET_BLACKWELL)
+        if (nvidia_class_of(cuda_arch_of(device.architecture_major, device.architecture_minor)) ==
+            gpu_class_t::nvidia_blackwell_k)
+            failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
+                                                                                              "blackwell");
     return failures;
 }
 

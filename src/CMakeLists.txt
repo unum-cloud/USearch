@@ -250,14 +250,18 @@ function (usearch_gpu_bundle target_ vendor_ name_ source_)
                          --expt-relaxed-constexpr -split-compile=4 --threads=0
         )
         separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
-        set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O0$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"
+        # CUDA 13.4's front end cannot lower `__dp4a` at `-O0`, so `cicc` keeps `-O1` even in Debug.
+        set(optimization_ "$<$<CONFIG:Debug>:-O0$<SEMICOLON>-Xcicc$<SEMICOLON>-O1$<SEMICOLON>-Xptxas$<SEMICOLON>-O0>"
                           "$<$<NOT:$<CONFIG:Debug>>:-O3>"
         )
         # CUDA is no enabled language here, so the presets' RelWithDebInfo CUDA flags reach this pass only by name.
         if (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" AND DEFINED CMAKE_CUDA_FLAGS_RELWITHDEBINFO)
             separate_arguments(optimization_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS_RELWITHDEBINFO}")
         endif ()
-        set(host_only_ "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT}")
+        # The toolkit may be newer than this Clang knows; NVCC compiles the device side, so the check only warns.
+        set(host_only_
+            "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT};-Wno-unknown-cuda-version"
+        )
         # Clang's CUDA mode adds the toolkit's `include` alone, while CUDA 13 keeps `cuda/atomic` in CCCL's own.
         target_include_directories(${target_} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     else ()

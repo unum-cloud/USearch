@@ -154,6 +154,13 @@ struct further_scored_node_t {
     }
 };
 
+/** Vector dimensions and neighbor slots per node, fixed when a dense index is constructed. */
+struct geometry_t {
+    std::size_t dimensions = 0;
+    connectivity_t connectivity {};
+    bool operator==(geometry_t const&) const noexcept = default;
+};
+
 /** What a compaction targets: the most rows any target shard may hold, and the breadth of every
  *  re-selection walk. */
 struct compact_config_t {
@@ -190,10 +197,10 @@ struct softmax_state_t {
     f32_t partition;
 };
 
-/** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
- *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
- *  the graph & its frozen geometry, never the residency: what sections follow and how they
- *  are laid out is the per-storage contract versioned by @c version_k. */
+/** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile in-RAM
+ *  snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes the graph &
+ *  its geometry, never the residency: what sections follow and how they are laid out is the
+ *  per-storage contract versioned by @c version_k. */
 struct index_header_t {
 
     /** The expected @c magic contents: "usearch3" read as a little-endian word. */
@@ -214,10 +221,10 @@ struct index_header_t {
     /** The @c nk_kernel_kind_t metric; must match the loading index's kernel. */
     u32_t kernel;
 
-    /** Scalar dimensions per vector - one half of the frozen geometry. */
+    /** Scalar dimensions per vector - one half of the geometry. */
     u32_t dimensions;
 
-    /** Neighbor IDs per node - the other half of the frozen geometry. */
+    /** Neighbor IDs per node - the other half of the geometry. */
     u32_t connectivity;
 
     /** Published nodes in the payload; the chunk layout re-derives from it. */
@@ -299,12 +306,11 @@ status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::
     return status_t::success_k;
 }
 
-/** Whether @p first and @p second walk by one kernel over one frozen geometry, as two shards of a
- *  plural or the two sides of a copy between indexes must. */
+/** Whether @p first and @p second walk by one kernel over one geometry, as two shards of a plural
+ *  or the two sides of a copy between indexes must. */
 template <typename index_type_>
 bool same_geometry(index_type_ const& first, index_type_ const& second) noexcept {
-    return first.kernel() == second.kernel() && first.dimensions() == second.dimensions() &&
-           first.connectivity() == second.connectivity();
+    return first.kernel() == second.kernel() && first.geometry() == second.geometry();
 }
 
 /** Bytes @p count logical values of @p dtype span packed back to back. */

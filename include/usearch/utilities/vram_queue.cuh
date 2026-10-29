@@ -441,7 +441,7 @@ struct vram_register_frontier {
 
     /** The nearest undiscovered-from candidate, already marked expanded - or the
      *  sentinel when every rank is spent. */
-    __device__ __forceinline__ scored_node_t pop_nearest(u32_t lane) noexcept {
+    __device__ __forceinline__ scored_node_t pop_nearest(u32_t) noexcept {
         scored_node_t const nearest = ranks_.nearest_unexpanded();
         if (!(nearest == scored_node_t::sentinel())) ranks_.mark_expanded_at(nearest);
         return nearest;

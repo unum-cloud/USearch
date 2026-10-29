@@ -169,15 +169,16 @@ struct nvme_reference {
     template <typename key_of_type_ = key_t (*)(std::size_t) noexcept>
     nvme_reference(std::string_view scenario, nk_kernel_kind_t kernel, std::size_t rows, std::size_t dimensions,
                    u64_t seed, key_of_type_&& key_of = &default_key_) noexcept
-        : built(kernel, forkunion_allocator_t {no_memory_domain_k}),
+        : built(kernel, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}),
           vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))), keys(rows),
-          checkpoint(scenario), whole_(kernel, forkunion_allocator_t {no_memory_domain_k}) {
+          checkpoint(scenario),
+          whole_(kernel, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}) {
         for (std::size_t row = 0; row != rows; ++row) keys[row] = key_of(row);
         if (failed(builder.status)) {
             failures += expect(false);
             return;
         }
-        failures += dense_indexes_build(built, builder.executor, vectors, keys, dimensions);
+        failures += dense_indexes_build(built, builder.executor, vectors, keys);
     }
 
     /** Saves the group's manifest and parts at @p alignment and views them through @p viewed. */
@@ -193,7 +194,7 @@ struct nvme_reference {
     ram_t& whole() noexcept {
         if (whole_.shards_count()) return whole_;
         failures += expect(succeeded(whole_.emplace(no_memory_domain_k)));
-        failures += expect(succeeded(whole_.reserve({keys.size(), connectivity_16_k, vectors.extent(1)}).status));
+        failures += expect(succeeded(whole_.reserve({keys.size()}).status));
         failures += expect(
             succeeded(whole_.insert(std::span<key_t const> {keys}, vectors.view(), builder.executor).status));
         return whole_;
@@ -1214,7 +1215,7 @@ struct rewrite_fixture {
     void build(ram_t& group, std::size_t first, std::size_t count, std::size_t shards = 2) {
         for (std::size_t shard = 0; shard != shards; ++shard)
             failures += expect(succeeded(group.emplace(no_memory_domain_k)));
-        failures += expect(succeeded(group.reserve({count, connectivity_16_k, vectors.extent(1)}).status));
+        failures += expect(succeeded(group.reserve({count}).status));
         auto const all = vectors.view();
         auto const rows = all(nk::range(first, first + count), nk::slice);
         failures += expect(succeeded(
@@ -1224,7 +1225,7 @@ struct rewrite_fixture {
     /** Saves rows [first, first + count) as a RAM group of @p shards shards and answers the path:
      *  a lone shard's monolith, or a manifest beside one part per shard. */
     char const* save(std::size_t first, std::size_t count, std::size_t shards) {
-        ram_t group {kernel, forkunion_allocator_t {no_memory_domain_k}};
+        ram_t group {kernel, {vectors.extent(1), connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
         return save(group, first, count, shards);
     }
 
@@ -1259,7 +1260,7 @@ struct rewrite_fixture {
     /** The recall of a fresh RAM build of every entry into @p shards shards, so its searches walk
      *  as many graphs as a target of as many parts. */
     f64_t fresh_recall(std::size_t shards) {
-        ram_t fresh {kernel, forkunion_allocator_t {no_memory_domain_k}};
+        ram_t fresh {kernel, {vectors.extent(1), connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
         build(fresh, 0, keys.size(), shards);
         return recall(fresh, builder.executor, to_writable_span(builder.traversals));
     }
@@ -1369,7 +1370,7 @@ std::size_t test_nvme_rewrites_compact(u64_t seed) {
     fixture.expect_keys(viewed);
     fixture.expect_recall(viewed, "of two parts");
 
-    ram_t loaded {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    ram_t loaded {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     fixture.failures += expect(succeeded(place_shards(loaded)));
     fixture.failures += expect_eq(loaded.load(target.manifest.data(), load_config_t {}, fixture.builder.executor),
                                   status_t::success_k);
@@ -1438,7 +1439,7 @@ std::size_t test_nvme_rewrites_compact_capacity(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
     std::size_t const part_entries = rewrite_entries_k / 4;
     rewrite_fixture<nvme_type_> fixture {"rewrite_compact_capacity", kernel_, rewrite_entries_k, dimensions, seed};
-    ram_t group {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    ram_t group {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     nvme_type_ source = fixture.view(fixture.save(group, 0, rewrite_entries_k, 4));
     if (fixture.failures) return fixture.failures;
     fixture.failures += expect_eq(source.shards_count(), 4u);
@@ -1550,17 +1551,17 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     using scalar_t = typename nvme_type_::scalar_t;
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
     using workspace_allocator_t = arena_allocator<byte_t, lent_allocator<byte_t>>;
-    using block_index_t =
-        ram_index<typename nvme_type_::quads_kit_t, typename nvme_type_::tiles_kit_t,
-                  typename nvme_type_::elementwise_kit_t, typename nvme_type_::rmscast_kit_t,
-                  typename nvme_type_::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref, dummy_cache_hints_t,
-                  workspace_allocator_t, workspace_allocator_t, arena_allocator<byte_t, forkunion_allocator_t>>;
+    using block_index_t = ram_index<typename nvme_type_::quads_kit_t, typename nvme_type_::tiles_kit_t,
+                                    typename nvme_type_::elementwise_kit_t, typename nvme_type_::rmscast_kit_t,
+                                    typename nvme_type_::visits_kit_t, fu::standard_yield_t, fu::standard_atomic_ref,
+                                    dummy_cache_hints_t, workspace_allocator_t, workspace_allocator_t,
+                                    arena_allocator<byte_t, forkunion_allocator_t>, node_id_t>;
     constexpr std::size_t rows_count = 4 * rewrite_entries_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     rewrite_fixture<nvme_type_> fixture {"rewrite_build", kernel_, rows_count, dimensions, seed};
     // One RAM shard over every entry is both the rows the build reads and the graph it is judged
     // against.
-    ram_t group {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    ram_t group {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     char const* const saved = fixture.save(group, 0, rows_count, 1);
     if (fixture.failures) return fixture.failures;
 
@@ -1569,8 +1570,9 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     fixture.failures += expect_eq(probe_arena.reserve_exactly(probed.size()), status_t::success_k);
     {
         workspace_allocator_t const allocator {probe_arena};
-        std::unique_ptr<block_index_t> const probe {new (std::nothrow) block_index_t(kernel_, allocator, allocator)};
-        fixture.failures += expect(probe && succeeded(probe->reserve({1, connectivity_16_k, dimensions}).status));
+        std::unique_ptr<block_index_t> const probe {
+            new (std::nothrow) block_index_t(kernel_, {dimensions, connectivity_16_k}, allocator, allocator)};
+        fixture.failures += expect(probe && succeeded(probe->reserve({1}).status));
     }
     std::size_t const fixed = probe_arena.size();
     std::size_t const value_bytes = dense_rows_bytes(fixture.vectors.view(), 1), neighbors_bytes = 16 * sizeof(u32_t);
@@ -1664,6 +1666,7 @@ struct nvme_staged_indexes {
     using index_t = typename viewed_t::index_t;
     using ram_t = typename nvme_reference<viewed_t>::ram_t;
     using reserve_capacity_t = typename ram_t::reserve_capacity_t;
+    using geometry_t = typename ram_t::geometry_t;
 
     dense_indexes_executor<ram_t> builder;
     dense_indexes_executor<viewed_t> reader;
@@ -1671,9 +1674,10 @@ struct nvme_staged_indexes {
     viewed_t viewed;
     nvme_checkpoint_t checkpoint {"nvme_staged"};
 
-    /** The RAM group walks by @p kernel; the view reads it back from the parts' headers. */
-    nvme_staged_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
-        : built(kernel, allocator), viewed(allocator) {}
+    /** The RAM group walks by @p kernel in @p geometry; the view reads both back from the parts'
+     *  headers. */
+    nvme_staged_indexes(nk_kernel_kind_t kernel, geometry_t geometry, forkunion_allocator_t allocator) noexcept
+        : built(kernel, geometry, allocator), viewed(allocator) {}
 
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept { return built.emplace(memory_domain); }
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return built.reserve(config); }

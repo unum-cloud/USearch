@@ -7,19 +7,23 @@
  *  From `include/usearch/basic/ram_index.hpp`. A row's walk admits the rows below its snapshot
  *  outright and, past it, only the rows an acquire of their `wired_k` bit shows wired, as
  *  `dispensed_admission_t` does; each row writes its value and neighbors plain, then sets its own
- *  `wired_k` with a release. Two batches of two rows each: `serial.pml` lands a batch on its
- *  inserter's thread, as `insert` does, and `planned.pml` fans one out over steppers.
+ *  `wired_k` with a release. A range's turn holder files its keys in the map as its one writer,
+ *  between the turn's wait and the watermark's release. Two batches of two rows each: `serial.pml`
+ *  lands a batch on its inserter's thread, as `insert` does, and `planned.pml` fans one out over
+ *  steppers.
  */
 #include <weak_memory.pml>
 #include <watermark_turn.pml>
 
 // The words, by the index member each stands for: the two counters, each row's state, wired or not,
-// each row's value and neighbors, written plain before the state, and a plan's `landed` tally.
+// each row's value and neighbors, written plain before the state, a plan's `landed` tally, and each
+// row's seat in the key map, filed or not.
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define wired(id) (2 + (id))
 #define row(id) (6 + (id))
 #define landed_tally 10
+#define key_state(id) (11 + (id))
 #define range_rows 2
 #define rows 4
 
@@ -39,8 +43,8 @@
 #ifndef admit_order
 #define admit_order order_acquire
 #endif
-#ifndef keys_after_turn
-#define keys_after_turn true
+#ifndef keys_in_turn
+#define keys_in_turn true
 #endif
 #ifndef landed_order
 #define landed_order order_release
@@ -52,12 +56,24 @@
 #define caller_lands_refused true
 #endif
 
-bool keyed[rows]; // the key map holds the row's key
-
 // a read of a row a walk or a search admitted: its payload, in the reader's view
 inline read_row(t, id, seen) {
     load(t, row(id), order_relaxed, seen);
     assert(seen == moved(id))
+}
+
+// the turn of [@p first, @p bound): the wait, the keys filed by the holder, the map's one writer, a
+// release per seat, then the watermark's release; `keys_in_turn=false` files them past the release
+inline publish_range(t, first, bound, id, watermark) {
+    await_turn(t, last_visible_id, first, watermark);
+    if
+    :: keys_in_turn ->
+        for (id : first .. bound - 1) { store(t, key_state(id), order_release, 1) };
+        end_turn(t, last_visible_id, order_release, bound)
+    :: else ->
+        end_turn(t, last_visible_id, order_release, bound);
+        for (id : first .. bound - 1) { store(t, key_state(id), order_release, 1) }
+    fi
 }
 
 // one row: the walk over the rows below @p walk_bound, published below the snapshot and past it
@@ -85,17 +101,13 @@ inline wire(t, id, walk_bound, first_invisible, other, seen) {
     store(t, row(id), order_relaxed, moved(id));
     store(t, wired(id), wired_order, 1);
     if
-    :: !keys_after_turn -> keyed[id] = true
-    :: else
-    fi;
-    if
-    :: !range_turn -> take_turn(t, last_visible_id, id, id + 1, order_release, seen); keyed[id] = true
+    :: !range_turn -> publish_range(t, id, id + 1, other, seen)
     :: else
     fi
 }
 
 // `insert` of one batch on its thread: the range from one add, each row wired with its walk below
-// the range, since the batch's earlier row it wired itself, one turn, then the keys
+// the range, since the batch's earlier row it wired itself, then one turn that files the keys
 inline insert_batch(t) {
     byte other;
     int first, first_invisible, seen;
@@ -103,10 +115,7 @@ inline insert_batch(t) {
     wire(t, first, first, first_invisible, other, seen);
     wire(t, first + 1, first, first_invisible, other, seen);
     if
-    :: range_turn ->
-        take_turn(t, last_visible_id, first, first + range_rows, order_release, seen);
-        keyed[first] = true;
-        keyed[first + 1] = true
+    :: range_turn -> publish_range(t, first, first + range_rows, other, seen)
     :: else
     fi
 }
@@ -123,8 +132,8 @@ inline land_position(t, id, first_invisible, other, seen) {
 }
 
 // `insert_plan_t::finish`, retried while it refuses: the tally acquired until every position
-// landed, then the range's one turn and the keys
-inline finish(t, first, tally, watermark) {
+// landed, then the range's one turn, which files the keys
+inline finish(t, first, id, tally, watermark) {
     if
     :: finish_waits_landed ->
         do
@@ -136,20 +145,14 @@ inline finish(t, first, tally, watermark) {
         od
     :: else
     fi;
-    take_turn(t, last_visible_id, first, first + range_rows, order_release, watermark);
-    keyed[first] = true;
-    keyed[first + 1] = true
+    publish_range(t, first, first + range_rows, id, watermark)
 }
 
-// a search: the watermark acquired, never inside a range, every row below it wired and whole, and
-// under `sc` no key naming a row the watermark does not cover
+// a search: the watermark acquired, never inside a range, and every row below it wired and whole
 inline search(t) {
     byte id;
     int watermark, seen;
-    atomic {
-        load(t, last_visible_id, order_acquire, watermark);
-        for (id : 0 .. rows - 1) { assert(memory != sc || !keyed[id] || id < watermark) }
-    };
+    load(t, last_visible_id, order_acquire, watermark);
     assert(watermark % range_rows == 0);
     id = 0;
     do
@@ -160,4 +163,20 @@ inline search(t) {
         read_row(t, id, seen);
         id++
     od
+}
+
+// `count` as `find_each` runs it: the watermark acquired once, then every seat acquired, a hit kept
+// only below the watermark; every row below it counts once, and each kept hit's row is whole
+inline find_each(t) {
+    byte id, found;
+    int watermark, seen;
+    load(t, last_visible_id, order_acquire, watermark);
+    for (id : 0 .. rows - 1) {
+        load(t, key_state(id), order_acquire, seen);
+        if
+        :: seen == 1 && id < watermark -> found++; read_row(t, id, seen)
+        :: else
+        fi
+    };
+    assert(found == watermark)
 }

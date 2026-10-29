@@ -31,14 +31,13 @@
 #define sealed 8
 #define counted(word) ((word) % opening)
 
-// The knobs' values: a mutator's hold, when a plan closes its donors, and how in-place compaction
-// rewrites the locators of the rows it moved.
+// The knobs' values: a mutator's hold, when a plan closes its donors, and which nodes a probe of
+// a shard's key map keeps.
 #define none 0
 #define shared 1
 #define at_plan 0
 #define at_run 1
-#define replace 0
-#define rebuild 1
+#define below_watermark 2
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef claims_check
@@ -53,8 +52,14 @@
 #ifndef donor_close
 #define donor_close at_plan
 #endif
-#ifndef rewrite
-#define rewrite replace
+#ifndef keys_inside_window
+#define keys_inside_window true
+#endif
+#ifndef filter
+#define filter below_watermark
+#endif
+#if filter != none && filter != below_watermark
+#error "filter is none or below_watermark"
 #endif
 #ifndef count_bracket
 #define count_bracket true
@@ -235,7 +240,7 @@ inline reopen_shards(count) {
 // `forget_`: the shard emptied in place, its memory kept, inside a window
 inline forget(t, shard) {
     atomic { claimed[shard] = 0; dispensed[shard] = 0 };
-    store(t, watermark(shard), order_relaxed, 0)
+    store(t, watermark(shard), order_release, 0)
 }
 
 // `begin_window`, under the unique side: the epoch odd by a relaxed add, then the release fence

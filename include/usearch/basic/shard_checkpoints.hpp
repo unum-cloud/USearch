@@ -12,11 +12,9 @@
  *  object answering:
  *  - <tt>columns_extents(shards, shard, codec)</tt>, one sizing pass over a shard;
  *  - <tt>open_shard_save(shards, shard, columns, codec)</tt> and <tt>open_shard_load(shards, shard,
- *    columns)</tt>, one shard's own plans, landing nodes through <tt>save(range)</tt> and
- *    <tt>load(range)</tt>, the codec passed along where they take one;
- *  - <tt>save_keys(shards, shard, keys)</tt>, the keys a save writes beside the nodes;
- *  - <tt>claim_seats(shards, entries)</tt> and <tt>land_keys(shards, shard, first_node, keys,
- *    seats)</tt>, the keys a load lands beside the nodes before they publish;
+ *    columns)</tt>, one shard's own plans, landing nodes and their keys through
+ *    <tt>save(range)</tt> and <tt>load(range)</tt>, the codec passed along where they take one, the
+ *    load's @c finish filing the keys as the shard's one writer before its watermark moves;
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part lands on, placed or
  *    opened;
  *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load.
@@ -26,7 +24,6 @@
  */
 #pragma once
 
-#include <span>        // `std::span` - the keys a load lands
 #include <string_view> // `std::string_view` - the checkpoint paths
 
 #include "usearch/utilities/types.hpp"
@@ -51,7 +48,7 @@ struct shard_columns {
     residency_type_& residency;
     std::size_t shard = 0;
 
-    /** A save of the shard's nodes; its keys landed at planning. */
+    /** A save of the shard's nodes and keys. */
     struct save_plan_t {
         typename index_t::save_plan_t plan;
 
@@ -79,13 +76,11 @@ struct shard_columns {
         status_t finish() noexcept { return plan.finish(); }
     };
 
-    /** A load of the shard's nodes, whose keys land through the residency before the nodes publish,
-     *  the order an insert keeps. */
+    /** A load of the shard's nodes, whose own plan files their keys before the nodes publish, the
+     *  order an insert keeps. */
     struct load_plan_t {
         typename index_t::load_plan_t plan;
         shard_columns* view = nullptr;
-        std::span<key_t const> keys;
-        typename shards_type_::locators_map_t::seats_t seats {};
 
         /**
          *  Decodes @p range through the shard's own load plan, a refusal of @p codec passing
@@ -101,26 +96,15 @@ struct shard_columns {
             else return plan.load(range);
         }
 
-        /** The node the shard's plan appends at: its own base, or zero for a plan filling an empty
-         *  shard whole. */
-        std::size_t first_node() const noexcept {
-            if constexpr (requires { plan.base; }) return plan.base;
-            else return 0;
-        }
-
         /**
-         *  Lands the keys through the residency, then publishes the shard's nodes.
+         *  Publishes the shard's nodes and keys through its own plan, then routes past them.
          *
          *  @par Statuses:
-         *  - @c overflow_k On NVIDIA, the nodes pass the key column's directory.
          *  - @c uninitialized_k The shard's plan is empty or spent.
          *  - @c config_mismatch_k The steps covered other than every node.
          */
         status_t finish() noexcept {
             shards_type_& shards = view->shards;
-            if (status_t const landed = view->residency.land_keys(shards, view->shard, first_node(), keys, seats);
-                failed(landed))
-                return landed;
             if (status_t const finished = plan.finish(); failed(finished)) return finished;
             shards.reset_routing(shards.entries());
             return status_t::success_k;
@@ -135,7 +119,7 @@ struct shard_columns {
      *  @par Statuses:
      *  - @c config_mismatch_k On NVIDIA, the connectivity is not a power of two or differs from
      *    the frozen one.
-     *  - @c overflow_k @p entries pass the shard's node IDs or its key multimap's seats.
+     *  - @c overflow_k @p entries pass the shard's node IDs or its key multimap.
      */
     expected<std::size_t> reserve(std::size_t entries) noexcept { return residency.reserve(shards, shard, entries); }
 
@@ -152,7 +136,7 @@ struct shard_columns {
     }
 
     /**
-     *  Opens the shard's save plan into @p columns, writing its keys beside the nodes.
+     *  Opens the shard's save plan into @p columns, its keys beside the nodes.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k On NVIDIA, the shard has no stream.
@@ -164,15 +148,14 @@ struct shard_columns {
     expected<save_plan_t> plan_save(columns_t columns, codec_type_ const& codec) noexcept {
         auto [plan, status] = residency.open_shard_save(shards, shard, columns, codec);
         if (failed(status)) return {{}, status};
-        residency.save_keys(shards, shard, columns.keys);
         return {save_plan_t {std::move(plan)}, status_t::success_k};
     }
 
     /**
-     *  Claims the keys' seats through the residency, then opens the shard's load plan.
+     *  Opens the shard's load plan, which lands the keys beside the nodes.
      *
      *  @par Statuses:
-     *  - @c overflow_k The nodes pass the locator map, the shard's node IDs or its key multimap.
+     *  - @c overflow_k The nodes pass the shard's node IDs or its key multimap.
      *  - @c config_mismatch_k The shard already publishes nodes, or on NVIDIA has no stream.
      *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity yet.
      *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
@@ -180,11 +163,9 @@ struct shard_columns {
      *  - @c malformed_k On RAM, a prefix-sum column or a neighbor ID is out of shape.
      */
     expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
-        auto [seats, seat_status] = residency.claim_seats(shards, columns.keys.size());
-        if (failed(seat_status)) return {{}, seat_status};
         auto [plan, status] = residency.open_shard_load(shards, shard, columns);
         if (failed(status)) return {{}, status};
-        return {load_plan_t {std::move(plan), this, columns.keys, seats}, status_t::success_k};
+        return {load_plan_t {std::move(plan), this}, status_t::success_k};
     }
 };
 
@@ -269,7 +250,7 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, std::strin
  *  - @c invalid_argument_k The checkpoint or a part path does not parse.
  *  - @c malformed_k The checkpoint lists no part, or a part, its header, columns or sums do not
  *    parse.
- *  - @c overflow_k The nodes pass a shard's node IDs, key multimap or the locator map.
+ *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
  *  - @c contended_k The set is sealed while a shard generation must open, a mutator, batch,
  *    load or plan holds a shard, or the pool of @p executor runs another dispatch.
  *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.

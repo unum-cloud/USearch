@@ -87,8 +87,7 @@ expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_c
  *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
  *    source keeps it.
  *  - @c overflow_k A fresh target shard generation still has no room for a source shard, the
- *    landed rows pass a target shard's ceiling or key column or the locator chunks, or a source
- *    keeps it.
+ *    landed rows pass a target shard's ceiling, or a source keeps it.
  *  - @c unsupported_layout_k A source keeps it, as its @c status says.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_, typename progress_type_ = dummy_progress_t>
@@ -162,8 +161,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *    never land.
      *  - @c contended_k Another call holds either executor or a source's gate, or a target shard
      *    has a batch or load in flight.
-     *  - @c overflow_k The landed rows pass a target shard's ceiling or key column, or the locator
-     *    chunks.
+     *  - @c overflow_k The landed rows pass a target shard's ceiling.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t run(device_executor_t& device_executor, host_executor_t& host_executor,
@@ -314,18 +312,15 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         vram_indexes_t const* shaped = sources.front();
         for (std::size_t position = 0; position != sources.size(); ++position) {
             vram_indexes_t const* source = sources[position];
-            if (!source || source->kernel() != target.kernel()) return {{}, status_t::config_mismatch_k};
+            if (!source || source->kernel() != target.kernel() || source->dimensions() != target.dimensions() ||
+                source->connectivity() != target.connectivity())
+                return {{}, status_t::config_mismatch_k};
             for (std::size_t earlier = 0; earlier != position; ++earlier)
                 if (sources[earlier] == source) return {{}, status_t::config_mismatch_k};
             if (status_t const kept = source->status(); failed(kept)) return {{}, kept};
             if (status_t const paired = fanout_t::pairs_with(source->shards_, device_executor); failed(paired))
                 return {{}, paired};
-            if (!source->capacity()) continue;
             if (!shaped->capacity()) shaped = source;
-            if (source->dimensions() != shaped->dimensions() || source->connectivity() != shaped->connectivity() ||
-                (target.capacity() &&
-                 (source->dimensions() != target.dimensions() || source->connectivity() != target.connectivity())))
-                return {{}, status_t::config_mismatch_k};
         }
         // Zero, or anything past the target's own bound, means that bound.
         std::size_t const capacity = config.shard_capacity && config.shard_capacity < target.shard_capacity()
@@ -352,14 +347,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         }
         if (failed(refining.landings_.resize(count))) return {{}, status_t::bad_alloc_k};
         auto source_shard = [&](std::size_t from) noexcept -> vram_shard_t const& { return plan.shard_at_(from); };
-        // Only a source with rows needs a shard generation, so the geometry to take exists.
         auto open = [&]() noexcept {
-            if (!target.capacity())
-                if (status_t const reserved =
-                        target.reserve({0, static_cast<connectivity_t>(shaped->connectivity()), shaped->dimensions()})
-                            .status;
-                    failed(reserved))
-                    return reserved;
             // The target is sealed, so the shard generation opens closed like the rest, past the
             // seal.
             return target.shards_.open_shard_generation_past_seal_(
@@ -641,7 +629,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
      *  neighbors on its device's stream, a folding bin's fold rows replace the neighbors, already
      *  in the bin's dense ID space, and the target shard's load steps covering the bin copy out of
      *  the columns on the host threads, the keys beside them. Once every bin landed, the target
-     *  publishes, the keys resolve, and the source forgets its rows in place inside its window.
+     *  files the keys and publishes them with the rows, and the source forgets its rows in place
+     *  inside its window.
      */
     status_t land_(ram_indexes_t& target, vram_indexes_t& source, std::size_t first, device_executor_t& device_executor,
                    host_executor_t& host_executor) noexcept {
@@ -651,20 +640,11 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         // The source empties once its rows land, so its gate precedes anything a refusal undoes.
         typename vram_indexes_t::unique_lock_t const emptying {source.gate_, std::try_to_lock};
         if (!emptying) return status_t::contended_k;
-        if (!target.capacity())
-            if (status_t const reserved = target
-                                              .reserve({source.size(),
-                                                        static_cast<connectivity_t>(source.connectivity()),
-                                                        source.dimensions()})
-                                              .status;
-                failed(reserved))
-                return reserved;
 
         std::size_t const sources = landings.size();
         growing_buffer<ram_load_plan_t, forkunion_allocator_t> plans {target.shards_.allocator()};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {target.shards_.allocator()};
         if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards))) return status_t::bad_alloc_k;
-        std::size_t landing_rows = 0;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
             for (std::size_t from = 0; from != sources; ++from)
@@ -672,12 +652,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
             auto [plan, status] = target.shards_[into].index->plan_load(rows);
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
-            if (status_t const covered = target.shards_[into].keys.cover(plans[into].base + rows); failed(covered))
-                return covered;
-            landing_rows += rows;
         }
-        auto [seats, seat_status] = target.shards_.locators().claim(landing_rows);
-        if (failed(seat_status)) return seat_status;
 
         std::size_t const connectivity = source.connectivity();
         std::size_t const vectors_row_bytes = packed_bytes(vram_indexes_t::vector_dtype_k, source.dimensions());
@@ -735,19 +710,18 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 if (step.index_nodes.first >= step.index_nodes.bound) return status_t::success_k;
                 step.source_nodes = {static_cast<node_id_t>(step.index_nodes.first - landing.first),
                                      static_cast<node_id_t>(step.index_nodes.bound - landing.first)};
-                if (status_t const loaded = plans[into].load(step, view, {0, rows}); failed(loaded)) return loaded;
                 auto part_of = [&](std::size_t member) noexcept -> vram_shard_t const& {
                     return source.shards_[members_[member] - first];
                 };
-                // The rows ascend, so the member holding each only moves forward.
+                // The bin's rows ascend, so the member holding each only moves forward.
                 std::size_t member = bin.first;
-                node_id_t member_first = landing.first;
-                for (node_id_t row : step.index_nodes) {
+                node_id_t member_first = 0;
+                return plans[into].load(step, view, {0, rows}, [&](node_id_t row) noexcept {
                     while (row - member_first >= part_of(member).index->size())
                         member_first += static_cast<node_id_t>(part_of(member++).index->size());
-                    target.shards_[into].keys[row] = part_of(member).keys.host[row - member_first];
-                }
-                return status_t::success_k;
+                    typename vram_index_t::keyed_t const& member_keys = part_of(member).index->keys();
+                    return member_keys[row - member_first];
+                });
             };
             std::memset(cursors.data(), 0, shards * sizeof(std::size_t));
             if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, 0, land);
@@ -755,8 +729,9 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 return loaded;
         }
 
-        // Every bin landed, so no plan refuses; the bracket shows a search every shard's rows or
-        // none, and the keys resolve only once their rows are visible.
+        // Every bin landed, so no plan refuses; each plan files its keys ahead of the bracket,
+        // which shows a search every shard's rows with their keys or none.
+        for (ram_load_plan_t& plan : plans) plan.publish_keys();
         auto publish = [&]() noexcept {
             for (ram_load_plan_t& plan : plans)
                 if (status_t const finished = plan.finish(); failed(finished)) return finished;
@@ -768,10 +743,6 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         status_t const published = publish();
         target.shards_.end_commit();
         if (failed(published)) return published;
-        for (std::size_t into = 0; into != shards; ++into)
-            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                target.shards_.locators().insert(seats, target.shards_[into].keys[row],
-                                                 typename ram_indexes_t::key_locator_t {static_cast<u32_t>(into), row});
         source.shards_.begin_window();
         source.clear_();
         source.shards_.end_window();

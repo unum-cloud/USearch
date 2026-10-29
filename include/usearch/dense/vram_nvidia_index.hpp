@@ -196,14 +196,16 @@ struct cuda_arguments_t {
 /** The NVIDIA dense shard's kernels: the loaded fatbin and the hooks its @c vram_shard_core
  *  calls to load, launch and stage them, each reading the core it is handed. */
 template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
-          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_>
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
 struct vram_nvidia_kernels {
 
     /** The capabilities the kernels compiled under, as the binary holding them states. */
     inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
 
-    using core_t = vram_shard_core<cuda_vendor_t, vram_nvidia_kernels, vector_dtype_, cache_hints_type_,
-                                   vectors_allocator_type_, neighbors_allocator_type_, traversals_allocator_type_>;
+    using core_t =
+        vram_shard_core<cuda_vendor_t, vram_nvidia_kernels, vector_dtype_, cache_hints_type_, vectors_allocator_type_,
+                        neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using dot_t = typename dot_result_t::raw_t;
@@ -874,7 +876,7 @@ struct vram_nvidia_kernels {
     }
 
     /** The vectors matrix as the tensor map the walks gather rows through, spanning the ceiling the
-     *  first reservation froze, so the storage grows under it: encoded by the first walk launch and
+     *  first growth bound, so the storage grows under it: encoded by the first walk launch and
      *  kept, while launches racing it use their own. Zeroed where the schedule gathers no rows or
      *  the driver cannot encode the map. Defined in @c vram_nvidia_index.cuh. */
     cuda_rows_map_t rows_map_(core_t& core) noexcept;
@@ -1249,11 +1251,15 @@ template <                                                                      
     typename cache_hints_type_ = dummy_cache_hints_t,                           //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
-    typename traversals_allocator_type_ = cuda_arena_allocator_t>               //
+    typename traversals_allocator_type_ = cuda_arena_allocator_t,               //
+    typename key_type_ = uuid_t,                                                //
+    typename key_hash_type_ = std::hash<key_type_>                              //
+    >
 struct vram_nvidia_index {
 
-    using kernels_t = vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
-                                          neighbors_allocator_type_, traversals_allocator_type_>;
+    using kernels_t =
+        vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+                            neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
     using core_t = typename kernels_t::core_t;
     using vendor_t = typename core_t::vendor_t;
     using vectors_allocator_t = typename core_t::vectors_allocator_t;
@@ -1289,6 +1295,10 @@ struct vram_nvidia_index {
     using health_plan_t = typename core_t::health_plan_t;
     using save_plan_t = typename core_t::save_plan_t;
     using load_plan_t = typename core_t::load_plan_t;
+    using geometry_t = typename core_t::geometry_t;
+    using key_t = typename core_t::key_t;
+    using keyed_t = typename core_t::keyed_t;
+    using keys_view_t = typename core_t::keys_view_t;
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
     inline static constexpr std::size_t batch_rows_log2_k = core_t::batch_rows_log2_k;
@@ -1300,9 +1310,13 @@ struct vram_nvidia_index {
     inline static constexpr nk_capability_t picked_quads_capability_k =
         quads_ladder<scalar_t, kernels_t::capability_k>::picked_k;
 
-    explicit vram_nvidia_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
-                               neighbors_allocator_t const& neighbors_allocator = {}) noexcept
-        : core_(kernel, vectors_allocator, neighbors_allocator) {}
+    /** The @p kernel and @p geometry every row keeps, the device storage's allocators, and the
+     *  host allocator the keys and the key map sit on, as the core takes them. */
+    explicit vram_nvidia_index(nk_kernel_kind_t kernel, geometry_t geometry,
+                               vectors_allocator_t const& vectors_allocator = {},
+                               neighbors_allocator_t const& neighbors_allocator = {},
+                               forkunion_allocator_t const& keys_allocator = {}) noexcept
+        : core_(kernel, geometry, vectors_allocator, neighbors_allocator, keys_allocator) {}
 
     std::size_t size() const noexcept { return core_.size(); }
 
@@ -1311,6 +1325,7 @@ struct vram_nvidia_index {
 
     std::size_t capacity() const noexcept { return core_.capacity(); }
     std::size_t connectivity() const noexcept { return core_.connectivity(); }
+    geometry_t geometry() const noexcept { return core_.geometry(); }
     std::size_t dimensions() const noexcept { return core_.dimensions(); }
     device_specs_t const& device_specs() const noexcept { return core_.device_specs(); }
     cuda_api_t const& api() const noexcept { return core_.api(); }
@@ -1319,6 +1334,30 @@ struct vram_nvidia_index {
     std::size_t row_bytes() const noexcept { return core_.row_bytes(); }
     saved_shape_t saved_shape() const noexcept { return core_.saved_shape(); }
     std::size_t memory_usage() const noexcept { return core_.memory_usage(); }
+
+    /** Every node's key on the host and every key's nodes, as the core keeps them. */
+    keyed_t const& keys() const noexcept { return core_.keys(); }
+
+    /**
+     *  The key of the visible @p node.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p node is not visible.
+     */
+    expected<key_t> key_of(node_id_t node) const noexcept { return core_.key_of(node); }
+
+    /** Invokes @p callback for every published node stored under @p key, as of one acquire of the
+     *  watermark. */
+    template <typename callback_type_>
+    void find_each(key_t const& key, callback_type_&& callback) const noexcept {
+        core_.find_each(key, callback);
+    }
+
+    /** The visible nodes stored under @p key. */
+    std::size_t count(key_t const& key) const noexcept { return core_.count(key); }
+
+    /** Whether any visible node is stored under @p key. */
+    bool contains(key_t const& key) const noexcept { return core_.contains(key); }
 
     template <typename config_type_>
     small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
@@ -1346,14 +1385,15 @@ struct vram_nvidia_index {
     }
 
     /**
-     *  Ensures the index can host at least @p config.capacity entries, freezing the geometry on
-     *  the first success.
+     *  Ensures the index can host at least @p config.capacity entries - a hint, since every claim
+     *  grows the storage it needs; the first growth binds the device.
      *
      *  @par Statuses:
      *  - @c unknown_kind_k The metric is not one the kits score for this scalar.
      *  - @c config_mismatch_k The neighbors live on another device, the dimensions are zero, the
-     *    connectivity is not a power of two, the geometry differs from the frozen one, or no walk
-     *    fits the geometry.
+     *    connectivity is not a power of two, @p config names another geometry, or no walk fits the
+     *    geometry.
+     *  - @c contended_k A batch or load is in flight.
      *  - @c overflow_k The capacity passes the ID space or the reserved range.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return core_.reserve(config); }
@@ -1381,23 +1421,24 @@ struct vram_nvidia_index {
     }
 
     /**
-     *  Inserts @p new_rows under contiguous IDs claimed from the watermark, as the core's
-     *  @c insert does.
+     *  Inserts @p new_rows under @p keys and contiguous IDs claimed from the watermark, growing
+     *  the storage on demand, as the core's @c insert does.
      *
      *  @par Statuses:
      *  - @c cancelled_k The index keeps it, as @c status says.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
      *  - @c contended_k Another batch or load is in flight, or the claim word is closed.
-     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
-     *  - @c config_mismatch_k The rows are not as wide as the index, @p assigned_ids are not one
-     *    per row, @p context rides another device or cannot walk, or @c status keeps it.
+     *  - @c uninitialized_k The @c status keeps it.
+     *  - @c config_mismatch_k The @p keys are not one per row, the rows are not as wide as the
+     *    index, @p assigned_ids are not one per row, @p context rides another device or cannot
+     *    walk, or @c status keeps it.
      *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or @c status
      *    keeps it.
      *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @c status keeps it.
      */
-    expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
-                                     insert_config_t config = {}) noexcept {
-        return core_.insert(new_rows, assigned_ids, context, config);
+    expected<insert_result_t> insert(keys_view_t keys, rows_view_t new_rows, node_ids_span_t assigned_ids,
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
+        return core_.insert(keys, new_rows, assigned_ids, context, config);
     }
 
     /**
@@ -1410,7 +1451,7 @@ struct vram_nvidia_index {
      *    device or cannot walk.
      *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query
      *    rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
@@ -1432,7 +1473,7 @@ struct vram_nvidia_index {
      *    the stored one.
      *  - @c unsupported_layout_k An output's rows stride closer than @c count values, or query or
      *    head rows sit closer than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
@@ -1451,7 +1492,7 @@ struct vram_nvidia_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The query is not as wide as the index, or @p context rides another
      *    device or cannot walk.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
@@ -1481,7 +1522,7 @@ struct vram_nvidia_index {
      *    one.
      *  - @c unsupported_layout_k An output's rows stride closer than its width, or rows sit closer
      *    than one packed row apart.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
@@ -1502,7 +1543,7 @@ struct vram_nvidia_index {
      *  - @c unsupported_layout_k Output or query rows sit closer than one packed row apart.
      *  - @c shape_mismatch_k The @p head_count is zero or does not divide the rows, or a walk met
      *    a node with no value row.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
@@ -1518,7 +1559,7 @@ struct vram_nvidia_index {
      *  @c plan_refine does.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
@@ -1531,7 +1572,7 @@ struct vram_nvidia_index {
      *  One refinement of the nodes in @p nodes driven to its end on the calling thread.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c uninitialized_k The index never grew, or @c status keeps it.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk, or @c status
      *    keeps it.
      *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
@@ -1575,7 +1616,7 @@ struct vram_nvidia_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
      *    short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     typename executor_t::stream_t const& stream) const noexcept {
@@ -1588,7 +1629,7 @@ struct vram_nvidia_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p synchronization is @c concurrent_k, or @p columns are too
      *    short for the rows.
-     *  - @c uninitialized_k The index was never reserved.
+     *  - @c uninitialized_k The index never grew.
      */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
                   typename executor_t::stream_t const& stream) const noexcept {
@@ -1599,7 +1640,7 @@ struct vram_nvidia_index {
      *  Opens a load of @p rows at the watermark on @p stream, as the core's @c plan_load does.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
+     *  - @c uninitialized_k The index never grew, or @c status keeps it.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
      *  - @c contended_k A batch or load is in flight.
      *  - @c cancelled_k, @c config_mismatch_k, @c unsupported_k or @c unsupported_layout_k
@@ -1613,17 +1654,17 @@ struct vram_nvidia_index {
      *  Appends the whole source on the calling thread, as the core's one-shot @c load does.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index was never reserved, or @c status keeps it.
-     *  - @c config_mismatch_k The @p columns are shorter than @p rows, refused before a row is
-     *    claimed, or @c status keeps it.
+     *  - @c uninitialized_k The index never grew, or @c status keeps it.
+     *  - @c config_mismatch_k The @p columns or @p keys are shorter than @p rows, refused before a
+     *    row is claimed, or @c status keeps it.
      *  - @c overflow_k The rows pass the ceiling or the reserved range, or @c status keeps it.
      *  - @c contended_k A batch or load is in flight.
      *  - @c cancelled_k, @c unsupported_k or @c unsupported_layout_k The index keeps it,
      *    as @c status says.
      */
-    status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
+    status_t load(columns_view_t columns, keys_view_t keys, std::size_t rows, iota_view<node_id_t> source_range,
                   typename executor_t::stream_t const& stream) noexcept {
-        return core_.load(columns, rows, source_range, stream);
+        return core_.load(columns, keys, rows, source_range, stream);
     }
 
     /** The core, through which a load plan reads another shard's rows. */
@@ -1636,7 +1677,7 @@ struct vram_nvidia_index {
      *  maps every shard of a fold bin for the bin's other devices. */
     template <typename, nk_dtype_t, typename, typename, typename, typename>
     friend struct vram_nvidia_indexes;
-    template <typename, typename, typename, typename, template <typename> class, typename>
+    template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
     template <typename, typename, typename>
     friend struct utilities::vram_shard_fanout;
@@ -1651,13 +1692,17 @@ struct vram_nvidia_index {
     status_t close_() noexcept { return core_.close_(); }
     void reopen_() noexcept { core_.reopen_(); }
     void forget_() noexcept { core_.forget_(); }
+    void publish_keys_(iota_view<node_id_t> range) noexcept { core_.publish_keys_(range); }
+    key_t* device_keys_() const noexcept { return core_.device_keys_(); }
+    status_t map_nodes_(std::size_t rows) noexcept { return core_.map_nodes_(rows); }
     void share_with_(std::bitset<gpu_devices_capacity_k> devices) noexcept { core_.share_with_(devices); }
     status_t grant_(std::bitset<gpu_devices_capacity_k> devices) noexcept { return core_.grant_(devices); }
     std::size_t exported_bytes_(rows_span_t outputs) const noexcept { return core_.exported_bytes_(outputs); }
 
-    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
-                                             traversal_context_t& context, insert_config_t config) noexcept {
-        return core_.submit_insert_(new_rows, first_id, assigned_ids, context, config);
+    expected<insert_result_t> submit_insert_(keys_view_t keys, rows_view_t new_rows, node_id_t first_id,
+                                             node_ids_span_t assigned_ids, traversal_context_t& context,
+                                             insert_config_t config) noexcept {
+        return core_.submit_insert_(keys, new_rows, first_id, assigned_ids, context, config);
     }
 
     template <typename heads_type_ = dummy_heads_t>

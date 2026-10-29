@@ -357,7 +357,7 @@ typedef struct usearch_geospatial_load_ram_t {
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
  */
 USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments);
 
@@ -409,7 +409,7 @@ typedef struct usearch_geospatial_load_vram_t {
  *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
- *  - @c usearch_status_overflow_k A part passes a shard's bound, a key column or the locator map.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
  */
 USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments);
 
