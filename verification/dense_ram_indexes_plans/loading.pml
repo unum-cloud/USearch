@@ -2,11 +2,11 @@
  *  @file verification/dense_ram_indexes_plans/loading.pml
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief The sharded load path: every shard's keys landed and filed before `finish`, beside a
+ *  @brief The sharded load path: every shard's keys placed and filed before `finish`, beside a
  *      searcher.
  *
  *  The loader runs `plan_load` per shard on the still-empty index, never refused there; its steps
- *  land each shard's rows with their keys, and the last shard's may fall short. Its `finish` runs
+ *  place each shard's rows with their keys, and the last shard's may fall short. Its `finish` runs
  *  per shard: the plan's `publish_keys`, the shard map's one writer, then the plan's `finish`, which
  *  refuses a short shard and otherwise bumps the dispenser and releases the watermark.
  *
@@ -37,14 +37,14 @@ proctype loader(byte t) {
         load(t, next_dispensed_id(shard), order_acquire, dispensed_now);
         assert(visible[shard] == dispensed_now)
     };
-    // the steps, the last shard's possibly short, each landing its rows' keys
+    // the steps, the last shard's possibly short, each placing its rows' keys
     for (shard : 0 .. shards - 1) {
         if
         :: true -> whole[shard] = true
         :: shard == shards - 1 -> whole[shard] = false
         fi;
         if
-        :: keys_before_finish -> land_keys(t, shard, visible[shard], (whole[shard] -> row_limit : row_limit - 1))
+        :: keys_before_finish -> copy_keys(t, shard, visible[shard], (whole[shard] -> row_limit : row_limit - 1))
         :: else
         fi
     };
@@ -63,7 +63,7 @@ proctype loader(byte t) {
         store(t, last_visible_id(shard), order_release, visible[shard] + row_limit);
         if
         :: !keys_before_finish ->
-            land_keys(t, shard, visible[shard], row_limit);
+            copy_keys(t, shard, visible[shard], row_limit);
             publish_keys(t, shard, visible[shard], position, seen)
         :: else
         fi

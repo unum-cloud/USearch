@@ -18,7 +18,7 @@
  *  reads the header once, at @c view, and keeps only the columns' offsets, so its memory never
  *  grows with the node count. Expanding a node costs one covering read of its neighbors row, and
  *  scoring one costs a covering read of its value row, each rounded out to the medium's block;
- *  norms are recomputed from the landed row, so the norms column is never read.
+ *  norms are recomputed from the arrived row, so the norms column is never read.
  *
  *  @section dense_nvme_tiering Hot Working Set & Cold Storage
  *
@@ -27,10 +27,10 @@
  *  behind a FUSE mount, and is staged onto the local NVMe or High-Bandwidth-Flash the handle names
  *  when it is loaded, because a walk at device latency cannot run against a ranged @c GET that
  *  answers a thousand times slower. Nothing in this header decides when a shard moves or which
- *  shards stay warm; that policy belongs above it. What this header guarantees is the seam that
- *  policy needs: a shard is opened by path and addressed by a medium ID, so one that was staged
- *  from a bucket onto a drive, or evicted and staged again elsewhere, is re-attached without the
- *  state machine learning it moved.
+ *  shards stay warm; that policy belongs above it. What this header guarantees is the interface
+ *  that policy needs: a shard is opened by path and addressed by a medium ID, so one that was
+ *  staged from a bucket onto a drive, or evicted and staged again elsewhere, is re-attached without
+ *  the state machine learning it moved.
  *
  *  @section dense_nvme_concurrency Concurrency
  *
@@ -111,10 +111,10 @@ struct nvme_part_t {
  *
  *  A walk is the in-memory index's best-first walk, cut at every read: a hop issues one read of
  *  the expanded node's neighbors row, then one read of every unvisited neighbor's value row, and
- *  the landed rows are scored four at a time. Across the walks of a thread, everything overlaps.
+ *  the arrived rows are scored four at a time. Across the walks of a thread, everything overlaps.
  *  Rows fill an engine's queue first; whatever depth a short batch leaves idle lets each walk keep
  *  several hops in flight, expanding the next closest frontier nodes inside its candidates' radius
- *  before earlier hops land, so a full batch walks hop by hop and a lone query takes the queue.
+ *  before earlier hops arrive, so a full batch walks hop by hop and a lone query takes the queue.
  */
 template <                                                                    //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
@@ -151,7 +151,7 @@ struct nvme_index {
     using distance_t = f32_t;
 
     /** Default integer type to use for loops and indexing at sub-index scale. */
-    using small_size_t = u32_t;
+    using candidates_count_t = u32_t;
 
     /** Node identifier within this part, the class-local spelling of @c dense::node_id_t. */
     using node_id_t = dense::node_id_t;
@@ -174,14 +174,14 @@ struct nvme_index {
     struct search_config_t {
 
         /** How many candidates each walk keeps; defaults to twice the connectivity. */
-        small_size_t expansion_factor = 0;
+        candidates_count_t expansion_factor = 0;
 
         /** How entries are reached; @c scan_k streams every part's value column, ignoring the
          *  breadth. */
         traversal_t traversal = traversal_t::walk_k;
     };
 
-    /** Telemetry of one batched call; matches land in the caller's spans. */
+    /** Telemetry of one batched call; matches go to the caller's spans. */
     struct [[nodiscard]] search_result_t {
 
         /** Matches written across the batch, or what the verb counts instead. */
@@ -281,12 +281,12 @@ struct nvme_index {
      *      overlapping on every thread of @p executor.
      *
      *  @param[in] queries The batch, one query per row, in the part's stored scalar type.
-     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
-     *  @param[in] config The walk breadth; @c scan_k is refused with @c unsupported_k, as exact
-     *      scans run over @c nvme_indexes, which a monolith views as one shard.
      *  @param[out] node_ids Rankings by node ID, one query per row, as many matches as its width.
      *  @param[out] distances Distances of the same rankings, ascending per row.
      *  @param[out] counts Matches written per query.
+     *  @param[in] config The walk breadth; @c scan_k is refused with @c unsupported_k, as exact
+     *      scans run over @c nvme_indexes, which a monolith views as one shard.
+     *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *
      *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
      *  @c io_k.
@@ -300,9 +300,9 @@ struct nvme_index {
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<node_id_t> node_ids, nk::matrix_span<distance_t> distances,
-                                     std::span<std::size_t> counts) noexcept {
+    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<node_id_t> node_ids,
+                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+                                     search_config_t config, executor_t& executor) noexcept {
         return search_(queries, dummy_heads_t {}, executor, config, node_ids, distances, counts);
     }
 
@@ -312,18 +312,19 @@ struct nvme_index {
      *
      *  @param[in] queries The batch, as the batched @ref search takes it.
      *  @param[in] heads The indexer heads of every query row.
-     *  @param[in,out] executor The threads, as the batched @ref search takes them.
-     *  @param[in] config The walk configuration, as the batched @ref search takes it.
      *  @param[out] node_ids IDs of the matches, as the batched @ref search writes them.
      *  @param[out] distances The same matches' distances, parallel to @p node_ids.
      *  @param[out] counts Matches written per query.
+     *  @param[in] config The walk configuration, as the batched @ref search takes it.
+     *  @param[in,out] executor The threads, as the batched @ref search takes them.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k The part does not rank by dot.
      */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
-                                     search_config_t config, nk::matrix_span<node_id_t> node_ids,
-                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads,
+                                     nk::matrix_span<node_id_t> node_ids, nk::matrix_span<distance_t> distances,
+                                     std::span<std::size_t> counts, search_config_t config,
+                                     executor_t& executor) noexcept
         requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
@@ -370,7 +371,7 @@ struct nvme_index {
         return kernel != nk_kernel_dot_k || quads_compensated<quads_kit_t>;
     }
 
-    /** The norms of @p row that @p kernel reads, or none, so a plain dot never sums a landed
+    /** The norms of @p row that @p kernel reads, or none, so a plain dot never sums a fetched
      *  row. */
     static vector_norms_t norms_(nk_kernel_kind_t kernel, vector_view_t row) noexcept {
         return stores_norms_(kernel) ? dense::norms<quads_kit_t>(row) : vector_norms_t {};
@@ -474,7 +475,7 @@ struct nvme_index {
         /** Nodes already read for scoring; exact by design. */
         visited_set_t visited;
 
-        /** Landed score flights awaiting the next quad. */
+        /** Fetched score flights awaiting the next quad. */
         fu::limited_array<u32_t, quad_lanes_k> staged;
 
         /** Draws this walk's landmarks. */
@@ -524,7 +525,7 @@ struct nvme_index {
          *  shares of every other row slot of its thread, which then sit idle. */
         std::size_t hop_slots = 1;
 
-        /** Buffers per flight: two when keys land beside values. */
+        /** Buffers per flight: two when keys arrive beside values. */
         std::size_t buffers_per_flight = 1;
 
         /** Bytes every thread's arena carves for its walks, rows and flights. */
@@ -539,7 +540,7 @@ struct nvme_index {
         /** The next row any thread takes. */
         std::size_t* cursor = nullptr;
 
-        /** The first failure any thread met, which stops every thread priming rows. */
+        /** The first failure any thread hit, which stops every thread priming rows. */
         status_t* failure = nullptr;
 
         /** Nanoseconds per row from its first primed walk to its final write; empty collects
@@ -638,10 +639,10 @@ struct nvme_index {
             u32_t const source = walk.staged[min_of<std::size_t>(lane, fill - 1)];
             ids[lane] = walker.flights_[source].node;
             vectors[lane] = vector_view_t {
-                reinterpret_cast<scalar_t const*>(walker.landed_row_(source, nvme_purpose_t::score_k, source)),
+                reinterpret_cast<scalar_t const*>(walker.fetched_row_(source, nvme_purpose_t::score_k, source)),
                 part.dimensions};
             norms[lane] = norms_(walker.shape_.kernel, vectors[lane]);
-            if constexpr (keyed) keys[lane] = walker.landed_key_(source);
+            if constexpr (keyed) keys[lane] = walker.fetched_key_(source);
         }
         std::span<key_t const> const lane_keys = std::span<key_t const>(keys).first(keyed ? fill : 0);
         scores_result<dot_result_t> scores = dense::scores<quads_kit_t>(walker.shape_.kernel, row.query,
@@ -748,7 +749,7 @@ struct nvme_index {
             inputs.counts[row] = kept;
         }
         std::size_t output_count() const noexcept { return 0; }
-        nvme_locator<u32_t> output_locator(std::size_t) const noexcept { return {}; }
+        shard_node_t output_locator(std::size_t) const noexcept { return {}; }
         void resolve_output_key(std::size_t, key_t const&) noexcept {}
         status_t finish_query() noexcept { return status_t::success_k; }
     };

@@ -7,7 +7,7 @@
  *
  *  Clouds are eight planted prototypes of 12 to 16 points, each drawn with a few jittered points,
  *  one in four mirrored, and under a random rigid motion, so distances cluster by prototype while
- *  raw coordinates do not. Every cloud lands in [8, 16) on each axis, where one storage ulp exceeds
+ *  raw coordinates do not. Every cloud falls in [8, 16) on each axis, where one storage ulp exceeds
  *  the rounding of the packed coordinates twice over, so unpacking returns the inserted pose
  *  exactly, a reload packs the same bytes, and the scenarios' checks of identical answers after a
  *  reload hold in @c f16 as well as @c f32. The oracle is the serial kit's 1×1 call.
@@ -290,6 +290,7 @@ std::size_t check_shapes_kernels(u64_t seed) {
         std::vector<value_t> packs;
         for (std::vector<scalar_t> const& cloud : clouds) packs.push_back(fixture_type_::pack(cloud, allocator));
 
+        error_stats_t kernel_errors;
         for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
             metric_t metric(kernel, forkunion_allocator_t {});
             failures += expect_eq(metric.init(candidates_k), status_t::success_k);
@@ -299,10 +300,12 @@ std::size_t check_shapes_kernels(u64_t seed) {
             failures += expect(exact[0] <= mirror_tolerance);
             for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                 distance_t const truth = serial_distance<scalar_t>(kernel, packs[0][0], packs[1 + candidate][0]);
-                failures += expect_near(exact[candidate], truth);
-                failures += expect_near(zero_radius[candidate], truth);
+                kernel_errors.add(exact[candidate], truth);
+                kernel_errors.add(zero_radius[candidate], truth);
             }
         }
+        failures += expect_errors("shapes kernels", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                                  kernel_errors, 0);
     }
     failures += expect_eq(ledger.live_bytes, 0);
     return failures;
@@ -368,6 +371,7 @@ std::size_t check_shapes_packing(u64_t seed) {
     {
         counting_allocator_t const allocator {ledger};
         auto const shapes_codec = fixture_type_::make_codec();
+        error_stats_t transport_errors;
         for (std::vector<scalar_t> const& cloud : make_clouds<scalar_t>(4, stream_key(seed, "packing"))) {
             value_t first(allocator), second(allocator);
             failures += expect_eq(shapes_codec.load(std::as_bytes(std::span {cloud}), first), status_t::success_k);
@@ -387,16 +391,18 @@ std::size_t check_shapes_packing(u64_t seed) {
                 std::array<distance_t, 1> distances {1};
                 metric.drain(distances, unbounded_radius<distance_t>());
                 failures += expect_eq(metric.status(), status_t::success_k);
-                if (kernel == nk_kernel_gromovwassersteins_packed_k) failures += expect_near(distances[0], 0.0);
+                if (kernel == nk_kernel_gromovwassersteins_packed_k) transport_errors.add(distances[0], 0.0);
                 else failures += expect_eq(distances[0], distance_t {});
             }
         }
+        failures += expect_errors("transport self distances", comparison_family_t::approximate_k,
+                                  comparison_verdict_t::assert_k, transport_errors, 0);
     }
     failures += expect_eq(ledger.live_bytes, 0);
     return failures;
 }
 
-/** A saved monolith read back from storage, every cloud a ragged row of points the view locates
+/** A saved monolith read back from storage, every cloud a ragged entry of points the view locates
  *  through its directory and each round packs again. */
 std::size_t check_shapes_nvme(u64_t seed) {
     using fixture_t = chamfer_fixture_t;

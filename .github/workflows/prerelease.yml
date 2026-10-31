@@ -293,7 +293,7 @@ jobs:
 
   test_macos:
     name: macOS
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
@@ -539,7 +539,7 @@ jobs:
       - name: Build NumKong Artifact Bundle
         working-directory: numkong
         run: |
-          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -D NUMKONG_TARGET_ARCH=v128
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -D NUMKONG_MARCH=v128
           cmake --build --preset swift
       - name: Build Artifact Bundle
         run: |
@@ -617,7 +617,7 @@ jobs:
 
   test_windows_arm:
     name: Build for Windows Arm64
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -721,7 +721,7 @@ jobs:
 
   build_wheels_windows:
     name: Build Python Wheels for Windows cp${{ matrix.python-version }}
-    runs-on: windows-2022
+    runs-on: windows-2025
     needs: [test_windows_x86]
     strategy:
       matrix:
@@ -801,15 +801,16 @@ jobs:
   # Each machine profile compiles the shared library for one CPU class and one GPU code, compile only; the Arm ones build
   # natively on Arm runners, where the CUDA image also exists. Clang 22 compiles the host units, as Ubuntu 24.04's GCC
   # predates Olympus, and the family codes like `100f` need CMake 3.31, where Ubuntu 24.04 ships 3.28.
+  # Venice builds in AMD's image instead, as its preset compiles `gfx1250`.
   build_machine_profile:
     name: Compile Machine Profile ${{ matrix.preset }}
-    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-24.04-arm' || 'ubuntu-26.04' }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     timeout-minutes: 90
-    container: nvidia/cuda:13.4.3-devel-ubuntu26.04
+    container: ${{ matrix.preset == 'venice_mi450' && 'rocm/dev-ubuntu-26.04:10.0.0-full' || 'nvidia/cuda:13.4.3-devel-ubuntu26.04' }}
     strategy:
       fail-fast: false
       matrix:
-        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
+        preset: [xeon4_hopper, xeon6_blackwell, venice_mi450, grace_hopper, vera_rubin]
     steps:
       - name: Install Toolchain
         run: |

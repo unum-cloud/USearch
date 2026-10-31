@@ -42,11 +42,13 @@ from usearch.dense import (
     DenseMultiply,
     DenseRefine,
     DenseReserve,
+    DenseSample,
     DenseSave,
     DenseSaveBuffer,
     DenseSearch,
     DenseSearchStreamInit,
     DenseSearchStreamNext,
+    DenseSplit,
     DenseViewNvme,
     DenseViewRam,
 )
@@ -214,6 +216,10 @@ struct Symbols:
     """`usearch_dense_health`."""
     var dense_absorb: DenseAbsorb
     """`usearch_dense_absorb`."""
+    var dense_split: DenseSplit
+    """`usearch_dense_split`."""
+    var dense_sample: DenseSample
+    """`usearch_dense_sample`."""
     var dense_search: DenseSearch
     """`usearch_dense_search`."""
     var dense_count: DenseCount
@@ -306,6 +312,8 @@ struct Symbols:
         self.dense_refine = _resolve[DenseRefine](handle, "usearch_dense_refine")
         self.dense_health = _resolve[DenseHealth](handle, "usearch_dense_health")
         self.dense_absorb = _resolve[DenseAbsorb](handle, "usearch_dense_absorb")
+        self.dense_split = _resolve[DenseSplit](handle, "usearch_dense_split")
+        self.dense_sample = _resolve[DenseSample](handle, "usearch_dense_sample")
         self.dense_search = _resolve[DenseSearch](handle, "usearch_dense_search")
         self.dense_count = _resolve[DenseCount](handle, "usearch_dense_count")
         self.dense_get = _resolve[DenseGet](handle, "usearch_dense_get")

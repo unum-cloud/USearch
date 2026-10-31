@@ -176,7 +176,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     for (std::size_t query = 0; query != queries_count; ++query) {
         std::array const cloud {std::span<scalar_type_ const> {stored[count + query]}};
         value_t const value = value_t::make(cloud, value_allocator, 0).value;
-        failures += expect_eq(ram_index.search(value, metric, ram_context, {expansion_k}).status, status_t::success_k);
+        failures += expect_eq(ram_index.search(value, {expansion_k}, metric, ram_context).status, status_t::success_k);
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != min_of(wanted_k, ram_context.results.size()); ++rank)
             found.push_back(static_cast<f64_t>(ram_context.results[rank].distance));
@@ -218,17 +218,19 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     if (!failures)
         failures += expect_eq(vram_index
                                   .search({tape.data(), query_offsets}, {ids.data(), {queries_count, wanted_k}},
-                                          {distances.data(), {queries_count, wanted_k}}, context, search_config)
+                                          {distances.data(), {queries_count, wanted_k}}, search_config, context)
                                   .status,
                               status_t::success_k);
     std::size_t vram_matched = 0;
+    error_stats_t distance_errors;
     for (std::size_t query = 0; query != queries_count && !failures; ++query) {
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             u32_t const id = ids[query * wanted_k + rank];
             if (id == std::numeric_limits<u32_t>::max()) break;
             f64_t const distance = distances[query * wanted_k + rank];
-            failures += expect(id < count) || expect_near(distance, exact[query][id]);
+            failures += expect(id < count);
+            if (id < count) distance_errors.add(distance, exact[query][id]);
             failures += expect(found.empty() || found.back() <= distance);
             found.push_back(distance);
         }
@@ -241,7 +243,8 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
         fmt::print(stderr, "  recall at ten on {} clouds: {:.3f} on the GPU, {:.3f} in RAM\n", count, vram_recall,
                    ram_recall);
     failures += expect(vram_recall + 0.05 >= ram_recall);
-    return failures;
+    return failures + expect_errors("vram shapes distances", comparison_family_t::approximate_k,
+                                    comparison_verdict_t::assert_k, distance_errors, 0);
 }
 
 /** Every collection under the kits of @p gpu_class_, whose capabilities are @p capabilities_: the

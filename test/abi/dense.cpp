@@ -44,10 +44,10 @@ static nk::matrix<nk::f32_t> dense_rows(usearch_scalar_t scalar, std::size_t cou
                                            : make_vectors<nk::f32_t>(count, dense_dimensions_k, seed);
 }
 
-/** Every row searches for itself: nine in ten must land first, every landed key was minted, and
+/** Every row searches for itself: nine in ten must land first, every written key was minted, and
  *  every query's matches ascend. */
 static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
-    landed_matches_t found;
+    copied_matches_t found;
     usearch_traversal_stats_t stats {};
     std::size_t failures = check(search_queries(index, rows, count, cell_batch_k, cell_wanted_k, dense_expansion_k,
                                                 usearch_traversal_walk_k, stats, found));
@@ -57,10 +57,10 @@ static std::size_t expect_self_recall(handle<dense_verbs_t>& index, usearch_rows
     for (std::size_t query = 0; query != count; ++query) {
         std::size_t const first = offsets[query], last = offsets[query + 1];
         for (std::size_t match = first; match != last; ++match) {
-            std::optional<u64_t> const landed = offset_of_key(index.session->seed,
+            std::optional<u64_t> const minted = offset_of_key(index.session->seed,
                                                               std::bit_cast<usearch_key_t>(found.keys[match]));
-            unminted += !landed;
-            found_first += match == first && landed == query;
+            unminted += !minted;
+            found_first += match == first && minted == query;
             if (match != first) descending += found.scores[match] < found.scores[match - 1];
         }
     }
@@ -100,7 +100,7 @@ static void admit_listed(usearch_key_t const* keys, usearch_admission_t* admissi
                                    : usearch_reject_k;
 }
 
-/** A host walk lands only the keys of the even entries among the first @p count , chosen up front
+/** A host walk writes only the keys of the even entries among the first @p count , chosen up front
  *  for the predicate to look up; a device walk refuses a host predicate as unsupported. */
 static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_view_t rows, std::size_t count) {
     std::vector<usearch_key_t> admitted;
@@ -118,7 +118,7 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     if (index.residency == usearch_residency_vram_k) return check(outcome.status == usearch_status_unsupported_k);
     std::size_t failures = check(outcome);
     if (failures) return failures;
-    landed_matches_t const found = landed_matches(matches, dense_queries_k);
+    copied_matches_t const found = copy_matches(matches, dense_queries_k);
     std::size_t outside = 0;
     for (uuid_t const& key : found.keys)
         outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
@@ -170,7 +170,7 @@ static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t co
     failures += expect_self_recall(index, rows, dense_rows_k);
     failures += expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
     failures += expect_predicate(index, rows, dense_rows_k);
-    failures += expect_refined(index, usearch_status_success_k);
+    failures += expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
     failures += expect_health(index, dense_rows_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-dense-{:016x}", seed);
     failures += expect_persistence(cell, index, rows, rows, dense_queries_k, dense_expansion_k, 0.9, stem,

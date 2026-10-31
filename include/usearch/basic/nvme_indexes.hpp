@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date October 14, 2026
  *  @brief Similarity Search over the parts a basic graph was saved as, on block storage, read-only:
- *      the plural of @c nvme_index, serving a SafeGraphs monolith or manifest as the compiled
- *      library saves them.
+ *      the sharded index of @c nvme_index, serving a SafeGraphs monolith or manifest as the
+ *      compiled library saves them.
  *
  *  A view sniffs a monolith or a manifest by content, turns every part's SafeGraphs header into the
  *  @c persisted_columns_t its format's producer fills, and opens the parts on the executor's
@@ -42,7 +42,7 @@ namespace unum::usearch::basic {
  *  @c nvme_parts_catalog.
  *
  *  It keeps @p node_id_type_ and @p key_type_ as free as @c nvme_index does; only the compiled
- *  library narrows them, to the 32-bit IDs its plurals write.
+ *  library narrows them, to the 32-bit IDs its sharded indexes write.
  */
 template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
           typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
@@ -328,7 +328,7 @@ class nvme_indexes {
         }
         if (!paths.empty() && paths.size() != entries.size()) return status_t::config_mismatch_k;
 
-        // Every resolved path lands in one buffer, terminated for the OS, so the threads read them
+        // Every resolved path goes into one buffer, terminated for the OS, so the threads read them
         // as they are.
         std::string_view const checkpoint_name = safegraphs_basename(checkpoint);
         std::string_view const checkpoint_directory = checkpoint.substr(0, checkpoint.size() - checkpoint_name.size());

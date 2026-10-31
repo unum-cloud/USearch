@@ -20,4 +20,4 @@ template <>
 std::span<byte_t const* const> bundle_bounds<gpu_class_t::amd_cdna5_k>() noexcept {
     return {dense_amd_cdna5_bundles, 2 * dense_dtypes_t::size_k};
 }
-template struct dense_class_tables<dense_home_t::vram_amd_k, gpu_class_t::amd_cdna5_k>;
+template struct dense_class_tables<vendored_residency_t::vram_amd_k, gpu_class_t::amd_cdna5_k>;

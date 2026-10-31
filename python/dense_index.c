@@ -578,10 +578,59 @@ PyStructSequence_Desc usearch_py_dense_reachability_desc = {
 
 PyTypeObject DenseReachabilityType;
 
+static PyStructSequence_Field RefineReport_fields[] = {
+    {"reselected", "Entries whose neighbors were selected again, islands of every heal round included."},
+    {"changed", "Of those, the entries whose neighbor set gained a member it lacked; zero means settled."},
+    {"islands_found", "Entries the first audit found not reached both ways."},
+    {"islands_reconnected", "Links written between an island and an entry reached both ways."},
+    {"reachability", "The `DenseReachability` audit closing the heal, as `health` would take it right after."},
+    {NULL, NULL},
+};
+
+PyStructSequence_Desc usearch_py_refine_report_desc = {
+    "usearch.RefineReport", "What one refine-family call did to the graph, as `usearch_refine_report_t` counts it.",
+    RefineReport_fields, 5};
+
+PyTypeObject RefineReportType;
+
+static PyStructSequence_Field Sample_fields[] = {
+    {"keys", "(written, 16) identities drawn, most significant byte first."},
+    {"entry_ordinals", "(written,) which of its key's entries each draw is, in the order `get` writes them."},
+    {"parents", "`Matches` of one column: the shown or earlier draw each draw hangs from, and its distance."},
+    {"coordinates", "(written, 3) float32 places of the draws, beside the shown keys."},
+    {NULL, NULL},
+};
+
+PyStructSequence_Desc usearch_py_sample_desc = {
+    "usearch.Sample", "The draws one `sample` call wrote into an `Arena`, viewing it until it rewinds.", Sample_fields,
+    4};
+
+PyTypeObject SampleType;
+
 /** A new member of @p mirrored for @p value, or None for the zero value the enumeration calls
  *  unknown. */
 static PyObject* class_to_object(usearch_py_enum_t const* mirrored, int value) {
     return value ? usearch_py_enum_to_object(mirrored, value) : Py_NewRef(Py_None);
+}
+
+/** A new @c DenseReachability of @p reachability, or NULL with an exception set. */
+static PyObject* reachability_to_object(usearch_reachability_t const* reachability) {
+    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
+    (void)((fields[0] = PyLong_FromSize_t(reachability->audited)) &&
+           (fields[1] = PyLong_FromSize_t(reachability->reachable)) &&
+           (fields[2] = PyLong_FromSize_t(reachability->sweeps)) &&
+           (fields[3] = PyLong_FromSize_t(reachability->back_sweeps)));
+    return usearch_py_struct_sequence_steal(&DenseReachabilityType, fields, 4);
+}
+
+/** A new @c RefineReport of @p report, or NULL with an exception set. */
+static PyObject* refine_report_to_object(usearch_refine_report_t const* report) {
+    PyObject* fields[5] = {NULL, NULL, NULL, NULL, NULL};
+    (void)((fields[0] = PyLong_FromSize_t(report->reselected)) && (fields[1] = PyLong_FromSize_t(report->changed)) &&
+           (fields[2] = PyLong_FromSize_t(report->islands_found)) &&
+           (fields[3] = PyLong_FromSize_t(report->islands_reconnected)) &&
+           (fields[4] = reachability_to_object(&report->reachability)));
+    return usearch_py_struct_sequence_steal(&RefineReportType, fields, 5);
 }
 
 /** A new @c DenseMetadata of @p metadata, or NULL with an exception set. */
@@ -688,15 +737,7 @@ typedef struct health_call_t {
 
 static void health_submit(void* call) { usearch_dense_health(&((health_call_t*)call)->arguments); }
 
-static PyObject* health_answer(void* erased) {
-    usearch_reachability_t const* const reachability = &((health_call_t*)erased)->reachability;
-    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
-    (void)((fields[0] = PyLong_FromSize_t(reachability->audited)) &&
-           (fields[1] = PyLong_FromSize_t(reachability->reachable)) &&
-           (fields[2] = PyLong_FromSize_t(reachability->sweeps)) &&
-           (fields[3] = PyLong_FromSize_t(reachability->back_sweeps)));
-    return usearch_py_struct_sequence_steal(&DenseReachabilityType, fields, 4);
-}
+static PyObject* health_answer(void* erased) { return reachability_to_object(&((health_call_t*)erased)->reachability); }
 
 static usearch_py_verb_t const health_verb = {sizeof(health_call_t), health_submit, health_answer,
                                               usearch_py_call_release};
@@ -862,7 +903,7 @@ static char const doc_DenseIndex_insert[] =                                     
     "    must be as wide as the buffer's items.\n"                                              //
     "  progress (callable, optional): Called with (completed, total) entries. It reports and\n" //
     "    cannot stop the batch, every entry being claimed before the first report; what it\n"   //
-    "    raises surfaces once the batch has landed. Reports are serialized.\n"                  //
+    "    raises surfaces once the batch has finished. Reports are serialized.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
     "\n"                                                                                        //
@@ -951,7 +992,8 @@ static PyObject* DenseIndex_insert(PyObject* self, PyObject* const* args, Py_ssi
 }
 
 static char const doc_DenseIndex_refine[] =                                                  //
-    "refine(*, expansion_factor=0, progress=None, progress_steps=0, stats=None) -> int\n"    //
+    "refine(*, expansion_factor=0, progress=None, progress_steps=0, stats=None)\n"           //
+    "    -> RefineReport\n"                                                                  //
     "\n"                                                                                     //
     "Re-selects the neighbors of every stored entry against the finished graph, improving\n" //
     "edges that were chosen when the graph around them was still incomplete.\n"              //
@@ -960,11 +1002,11 @@ static char const doc_DenseIndex_refine[] =                                     
     "reaches a better graph, in less total time, than one expensive insertion pass - so a\n" //
     "wide `expansion_factor` belongs here rather than in `insert`. Searches may run\n"       //
     "throughout on a RAM handle but not on a VRAM one, and a caller loops until the\n"       //
-    "return falls below whatever change rate they consider settled.\n"                       //
+    "report's `changed` falls below whatever change rate they consider settled.\n"           //
     "\n"                                                                                     //
-    "Stopping is not an error here and raises nothing: re-selecting edges claims no\n"       //
-    "identity, so a stopped sweep leaves the graph correct and merely less improved. A\n"    //
-    "handler is therefore how a sweep is put under a time budget.\n"                         //
+    "Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still\n"    //
+    "re-links its islands, leaves the graph correct and merely less improved, and raises\n"  //
+    "`CancelledError`. A handler is therefore how a sweep is put under a time budget.\n"     //
     "Calls `usearch_dense_refine`.\n"                                                        //
     "\n"                                                                                     //
     "Args:\n"                                                                                //
@@ -975,22 +1017,23 @@ static char const doc_DenseIndex_refine[] =                                     
     "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"     //
     "\n"                                                                                     //
     "Returns:\n"                                                                             //
-    "  int: Nodes whose edges changed; zero means the graph has settled.\n"                  //
+    "  RefineReport: Entries re-selected and changed, the islands found and reconnected,\n"  //
+    "    and the audit closing the heal; `changed` at zero means the graph has settled.\n"   //
     "\n"                                                                                     //
     "Example:\n"                                                                             //
     "  >>> from array import array\n"                                                        //
     "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                              //
     "  >>> index.reserve(1)\n"                                                               //
     "  >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))\n"                            //
-    "  >>> index.refine()\n"                                                                 //
+    "  >>> index.refine().changed\n"                                                         //
     "  0";
 
-/** A @c usearch_dense_refine call and the count it lands. */
+/** A @c usearch_dense_refine call and the report it lands. */
 typedef struct refine_call_t {
     usearch_py_call_t call;
     usearch_dense_refine_t arguments;
     walk_reports_t reports;
-    size_t changed;
+    usearch_refine_report_t report;
 } refine_call_t;
 
 static void refine_submit(void* call) { usearch_dense_refine(&((refine_call_t*)call)->arguments); }
@@ -998,7 +1041,7 @@ static void refine_submit(void* call) { usearch_dense_refine(&((refine_call_t*)c
 static PyObject* refine_answer(void* erased) {
     refine_call_t* const call = (refine_call_t*)erased;
     walk_reports_answer(&call->reports);
-    return PyLong_FromSize_t(call->changed);
+    return refine_report_to_object(&call->report);
 }
 
 static void refine_release(void* erased) {
@@ -1044,7 +1087,7 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
         .executor = receiver.executor,
         .outcome = &call->call.outcome,
         .completion = receiver.completion,
-        .changed = &call->changed,
+        .report = &call->report,
         .expansion_factor = expansion_factor,
         .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
         .stats = &call->reports.stats,
@@ -1808,10 +1851,10 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
         .arena = ((Arena*)call->call.arena)->handle,
         .wanted = wanted,
         .expansion_factor = expansion_factor,
-        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
-        .stats = &call->reports.stats,
         .traversal = (usearch_traversal_t)traversal,
         .predicate = usearch_py_predicate_registered(&call->predicate),
+        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
+        .stats = &call->reports.stats,
     };
     return usearch_py_call_run(&receiver, &maxsim_verb, call);
 }
@@ -1820,25 +1863,29 @@ static PyObject* DenseIndex_maxsim(PyObject* self, PyObject* const* args, Py_ssi
 
 #pragma region Composition
 
-static char const doc_DenseIndex_absorb[] =                                                   //
-    "absorb(*donors, progress=None, progress_steps=0) -> None\n"                              //
-    "\n"                                                                                      //
-    "Absorbs every donor into this index, one after another, keeping their graphs rather\n"   //
-    "than re-inserting their vectors, and linking each in by walks across the appended\n"     //
-    "part. Each donor handle is consumed and every verb on it afterwards raises. Readers\n"   //
-    "of a RAM index may keep searching throughout, while a VRAM one admits no overlapping\n"  //
-    "search.\n"                                                                               //
-    "\n"                                                                                      //
-    "Cancellation stops between donors, so a donor already absorbed stays absorbed and one\n" //
-    "not yet reached stays a live handle its caller still owns. A donor whose absorption\n"   //
-    "fails stays usable too, though its entries may already have landed in this index.\n"     //
-    "Calls `usearch_dense_absorb`.\n"                                                         //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  donors (DenseIndex): The indexes to absorb.\n"                                         //
-    "  progress (callable, optional): Called with (completed, total) donors; returning\n"     //
-    "    False stops the absorb and raises `CancelledError`, None carries on.\n"              //
-    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
+static char const doc_DenseIndex_absorb[] =                                                     //
+    "absorb(*donors, progress=None, progress_steps=0) -> RefineReport\n"                        //
+    "\n"                                                                                        //
+    "Absorbs every donor into this index, one after another, keeping their graphs rather\n"     //
+    "than re-inserting their vectors, and linking each in by walks across the appended\n"       //
+    "part. Each donor handle is consumed and every verb on it afterwards raises. Readers\n"     //
+    "of a RAM index may keep searching throughout, while a VRAM one admits no overlapping\n"    //
+    "search.\n"                                                                                 //
+    "\n"                                                                                        //
+    "Cancellation stops the closing refinement alone: every donor is still consumed, the\n"     //
+    "islands still re-linked, and the call raises `CancelledError`. A donor whose absorption\n" //
+    "fails, and every later one, stays a live handle its caller still owns, though the\n"       //
+    "entries of the one it struck may already have moved into this index.\n"                    //
+    "Calls `usearch_dense_absorb`.\n"                                                           //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  donors (DenseIndex): The indexes to absorb.\n"                                           //
+    "  progress (callable, optional): Called with (completed, total) nodes the closing\n"       //
+    "    refinement re-selected; returning False stops it, None carries on.\n"                  //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
+    "\n"                                                                                        //
+    "Returns:\n"                                                                                //
+    "  RefineReport: What the closing refinement did to the graph.";
 
 /** A @c usearch_dense_absorb call, holding the donors whose handles it took until the call is
  *  final. */
@@ -1853,9 +1900,13 @@ typedef struct absorb_call_t {
     /** The slots the library reads the donors from, and nulls as it consumes them; NULL where
      *  nothing was taken. */
     usearch_dense_index_t* donated;
+
+    usearch_refine_report_t report;
 } absorb_call_t;
 
 static void absorb_submit(void* call) { usearch_dense_absorb(&((absorb_call_t*)call)->arguments); }
+
+static PyObject* absorb_answer(void* call) { return refine_report_to_object(&((absorb_call_t*)call)->report); }
 
 static void absorb_release(void* erased) {
     absorb_call_t* const call = (absorb_call_t*)erased;
@@ -1882,8 +1933,8 @@ static int absorb_traverse(void* erased, visitproc visit, void* arg) {
     return 0;
 }
 
-static usearch_py_verb_t const absorb_verb = {sizeof(absorb_call_t), absorb_submit, usearch_py_call_answer_none,
-                                              absorb_release, absorb_traverse};
+static usearch_py_verb_t const absorb_verb = {sizeof(absorb_call_t), absorb_submit, absorb_answer, absorb_release,
+                                              absorb_traverse};
 
 static PyObject* DenseIndex_absorb(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
@@ -1947,12 +1998,313 @@ static PyObject* DenseIndex_absorb(PyObject* self, PyObject* const* args, Py_ssi
         .completion = receiver.completion,
         .count = (size_t)positional_args_count,
         .donors = call->donated,
+        .report = &call->report,
         .progress = usearch_py_progress_registered(&call->progress, progress_steps),
     };
     return usearch_py_call_run(&receiver, &absorb_verb, call);
 }
 
+static char const doc_DenseIndex_split[] =                                                    //
+    "split(*receivers, expansion_factor=0, seed=0, progress=None, progress_steps=0,\n"        //
+    "    stats=None) -> RefineReport\n"                                                       //
+    "\n"                                                                                      //
+    "Splits this index into the empty receivers, the inverse of `absorb`: the entries are\n"  //
+    "partitioned along the graph, each part lands in one receiver with its edges kept, and\n" //
+    "a closing refinement re-links every receiver. This index is left empty and live.\n"      //
+    "Receivers match its residency, scalar, metric, geometry and shard count.\n"              //
+    "Calls `usearch_dense_split`.\n"                                                          //
+    "\n"                                                                                      //
+    "Args:\n"                                                                                 //
+    "  receivers (DenseIndex): At least two empty indexes, one per part.\n"                   //
+    "  expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.\n"       //
+    "  seed (int, optional): Picks the part roots; equal seeds split equally.\n"              //
+    "  progress (callable, optional): Called with (completed, total) nodes the closing\n"     //
+    "    refinements re-selected; returning False stops them, None carries on.\n"             //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"   //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"      //
+    "\n"                                                                                      //
+    "Returns:\n"                                                                              //
+    "  RefineReport: What the closing refinements did, across the receivers.";
+
+/** Reads an optional @c seed, leaving @p seed alone when @p object is NULL; returns 0 or -1 with an
+ *  exception set. */
+static int seed_from_object(PyObject* object, uint64_t* seed) {
+    if (!object) return 0;
+    unsigned long long const value = PyLong_AsUnsignedLongLong(object);
+    if (value == (unsigned long long)-1 && PyErr_Occurred()) return -1;
+    *seed = (uint64_t)value;
+    return 0;
+}
+
+/** A @c usearch_dense_split call, holding the receivers it borrows until the call is final. */
+typedef struct split_call_t {
+    usearch_py_call_t call;
+    usearch_dense_split_t arguments;
+    walk_reports_t reports;
+
+    /** The tuple of @c DenseIndex receivers, held, or NULL before the fill gathered it. */
+    PyObject* receivers;
+
+    /** The receivers' handles, as the library reads them. */
+    usearch_dense_index_t* handles;
+
+    usearch_refine_report_t report;
+} split_call_t;
+
+static void split_submit(void* call) { usearch_dense_split(&((split_call_t*)call)->arguments); }
+
+static PyObject* split_answer(void* erased) {
+    split_call_t* const call = (split_call_t*)erased;
+    walk_reports_answer(&call->reports);
+    return refine_report_to_object(&call->report);
+}
+
+static void split_release(void* erased) {
+    split_call_t* const call = (split_call_t*)erased;
+    PyMem_Free(call->handles);
+    call->handles = NULL;
+    Py_CLEAR(call->receivers);
+    walk_reports_release(&call->reports);
+    usearch_py_call_release(&call->call);
+}
+
+static int split_traverse(void* erased, visitproc visit, void* arg) {
+    split_call_t* const call = (split_call_t*)erased;
+    Py_VISIT(call->receivers);
+    return walk_reports_traverse(&call->reports, visit, arg);
+}
+
+static usearch_py_verb_t const split_verb = {sizeof(split_call_t), split_submit, split_answer, split_release,
+                                             split_traverse};
+
+static PyObject* DenseIndex_split(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                  PyObject* args_names_tuple) {
+    PyObject *expansion_object, *seed_object, *progress_object, *progress_steps_object, *stats_object;
+    usearch_py_argument_t const arguments[] = {
+        {"expansion_factor", &expansion_object},    {"seed", &seed_object},   {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object}, {"stats", &stats_object},
+    };
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t handle = NULL;
+    size_t expansion_factor = 0, progress_steps = 0;
+    uint64_t seed = 0;
+    // Every positional argument is a receiver, so only the keywords go through the table.
+    if (usearch_py_arguments_parse("split", args + positional_args_count, 0, args_names_tuple, 0, 0, arguments,
+                                   usearch_py_table_size_(arguments)) != 0 ||
+        !(handle = receiver_from_object(self, &receiver)) ||
+        usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
+        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        seed_from_object(seed_object, &seed) != 0)
+        return NULL;
+    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
+        if (!PyObject_TypeCheck(args[position], &DenseIndexType)) {
+            PyErr_Format(PyExc_TypeError, "expected DenseIndex receivers, got %S", Py_TYPE(args[position]));
+            return NULL;
+        }
+    }
+
+    split_call_t stack;
+    split_call_t* const call = usearch_py_call_open(&receiver, &split_verb, &stack);
+    if (!call) return NULL;
+    if (walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
+        !(call->receivers = PyTuple_New(positional_args_count)))
+        return usearch_py_call_discard(&receiver, &split_verb, call);
+    call->handles = (usearch_dense_index_t*)PyMem_Calloc(positional_args_count ? positional_args_count : 1,
+                                                         sizeof(usearch_dense_index_t));
+    if (!call->handles) {
+        PyErr_NoMemory();
+        return usearch_py_call_discard(&receiver, &split_verb, call);
+    }
+    for (Py_ssize_t position = 0; position != positional_args_count; ++position) {
+        PyTuple_SET_ITEM(call->receivers, position, Py_NewRef(args[position]));
+        if (!(call->handles[position] = index_handle((DenseIndex*)args[position])))
+            return usearch_py_call_discard(&receiver, &split_verb, call);
+    }
+
+    call->arguments = (usearch_dense_split_t) {
+        .index = handle,
+        .executor = receiver.executor,
+        .outcome = &call->call.outcome,
+        .completion = receiver.completion,
+        .count = (size_t)positional_args_count,
+        .receivers = call->handles,
+        .report = &call->report,
+        .expansion_factor = expansion_factor,
+        .seed = seed,
+        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
+        .stats = &call->reports.stats,
+    };
+    return usearch_py_call_run(&receiver, &split_verb, call);
+}
+
 #pragma endregion Composition
+
+#pragma region Sampling
+
+static char const doc_DenseIndex_sample[] =                                                     //
+    "sample(wanted, arena, /, *, shown=None, shown_coordinates=None, focus=None, seed=0,\n"     //
+    "    expansion_factor=0, progress=None, progress_steps=0, stats=None) -> Sample\n"          //
+    "\n"                                                                                        //
+    "Draws keys around `focus`, or across the whole index, each hanging from a shown or\n"      //
+    "earlier draw and placed in three dimensions beside the shown ones - so a view grows one\n" //
+    "connected sample as it zooms, never scanning the index. Equal seeds, shown keys and\n"     //
+    "focus over an unchanged index draw equally, and a larger `wanted` draws a superset.\n"     //
+    "Only a RAM index samples yet.\n"                                                           //
+    "Calls `usearch_dense_sample`.\n"                                                           //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  wanted (int): The upper bound on draws.\n"                                               //
+    "  arena (Arena): Where the draws are written, rewound by the call.\n"                      //
+    "  shown (keys, optional): The keys already shown, never drawn again.\n"                    //
+    "  shown_coordinates (tensor, optional): (len(shown), 3) float32 places of the shown\n"     //
+    "    keys, the points later draws are placed against.\n"                                    //
+    "  focus (keys, optional): The keys to look around; None looks across the index.\n"         //
+    "  seed (int, optional): The draw; equal seeds draw equally.\n"                             //
+    "  expansion_factor (int, optional): Breadth of the walks behind the draws; 0 derives.\n"   //
+    "  progress (callable, optional): Called with (written, wanted) draws.\n"                   //
+    "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.\n"     //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"        //
+    "\n"                                                                                        //
+    "Returns:\n"                                                                                //
+    "  Sample: The keys, entry ordinals, parents and coordinates of the draws, fewer than\n"    //
+    "    `wanted` only once the region is exhausted.";
+
+/** A @c usearch_dense_sample call and the draws it writes into the claimed arena. */
+typedef struct sample_call_t {
+    usearch_py_call_t call;
+    usearch_dense_sample_t arguments;
+    walk_reports_t reports;
+    usearch_py_keys_t shown;
+    usearch_py_buffer_backing_t shown_coordinates;
+    usearch_py_keys_t focus;
+    usearch_keys_view_t keys;
+    size_t const* entry_ordinals;
+    usearch_matches_view_t parents;
+    usearch_rows_view_t coordinates;
+    size_t written;
+} sample_call_t;
+
+static void sample_submit(void* call) { usearch_dense_sample(&((sample_call_t*)call)->arguments); }
+
+static PyObject* sample_answer(void* erased) {
+    sample_call_t* const call = (sample_call_t*)erased;
+    walk_reports_answer(&call->reports);
+    PyObject* const arena = call->call.arena;
+    Py_ssize_t const written = (Py_ssize_t)call->written;
+    Py_ssize_t const keys_shape[2] = {written, (Py_ssize_t)sizeof(usearch_key_t)};
+    Py_ssize_t const entry_ordinals_shape[1] = {written};
+    Py_ssize_t const coordinates_shape[2] = {written, 3};
+    PyObject* fields[4] = {NULL, NULL, NULL, NULL};
+    (void)((fields[0] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->keys.data, "B", 1, keys_shape, 2)) &&
+           (fields[1] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->entry_ordinals, "N", sizeof(size_t),
+                                                entry_ordinals_shape, 1)) &&
+           (fields[2] = usearch_py_matches_new(arena, &call->parents, call->written)) &&
+           (fields[3] = usearch_py_arena_buffer(&ArenaBufferType, arena, call->coordinates.data, "f", sizeof(float),
+                                                coordinates_shape, 2)));
+    return usearch_py_struct_sequence_steal(&SampleType, fields, 4);
+}
+
+static void sample_release(void* erased) {
+    sample_call_t* const call = (sample_call_t*)erased;
+    usearch_py_keys_release(&call->shown);
+    usearch_py_buffer_release(&call->shown_coordinates);
+    usearch_py_keys_release(&call->focus);
+    walk_reports_release(&call->reports);
+    usearch_py_call_release(&call->call);
+}
+
+static int sample_traverse(void* call, visitproc visit, void* arg) {
+    return walk_reports_traverse(&((sample_call_t*)call)->reports, visit, arg);
+}
+
+static usearch_py_verb_t const sample_verb = {sizeof(sample_call_t), sample_submit, sample_answer, sample_release,
+                                              sample_traverse};
+
+/** Gathers the optional keys @p object names into @p keys; None or NULL leaves them empty. Returns
+ *  0 or -1 with an exception set. */
+static int optional_keys_from_object(PyObject* object, size_t* count, usearch_py_keys_t* keys) {
+    *count = 0;
+    if (!object || object == Py_None) return 0;
+    Py_ssize_t const length = PyObject_Length(object);
+    if (length < 0 || usearch_py_keys_from_object(object, (size_t)length, keys) != 0) return -1;
+    *count = (size_t)length;
+    return 0;
+}
+
+static PyObject* DenseIndex_sample(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
+    PyObject *wanted_object, *arena_object, *shown_object, *coordinates_object, *focus_object, *seed_object,
+        *expansion_object, *progress_object, *progress_steps_object, *stats_object;
+    usearch_py_argument_t const arguments[] = {
+        {"wanted", &wanted_object},
+        {"arena", &arena_object},
+        {"shown", &shown_object},
+        {"shown_coordinates", &coordinates_object},
+        {"focus", &focus_object},
+        {"seed", &seed_object},
+        {"expansion_factor", &expansion_object},
+        {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object},
+        {"stats", &stats_object},
+    };
+    usearch_py_receiver_t receiver;
+    usearch_dense_index_t handle = NULL;
+    size_t wanted = 0, expansion_factor = 0, progress_steps = 0;
+    uint64_t seed = 0;
+    if (usearch_py_arguments_parse("sample", args, positional_args_count, args_names_tuple, 2, 2, arguments,
+                                   usearch_py_table_size_(arguments)) != 0 ||
+        !(handle = receiver_from_object(self, &receiver)) ||
+        usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
+        usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
+        usearch_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0 ||
+        seed_from_object(seed_object, &seed) != 0)
+        return NULL;
+
+    sample_call_t stack;
+    sample_call_t* const call = usearch_py_call_open(&receiver, &sample_verb, &stack);
+    if (!call) return NULL;
+    usearch_matrix_view_t coordinates = {0};
+    size_t shown_count = 0, focus_count = 0;
+    if ((coordinates_object && coordinates_object != Py_None &&
+         usearch_py_matrix_from_object(coordinates_object, usearch_scalar_f32_k, &coordinates,
+                                       &call->shown_coordinates) != 0) ||
+        optional_keys_from_object(shown_object, &shown_count, &call->shown) != 0 ||
+        optional_keys_from_object(focus_object, &focus_count, &call->focus) != 0 ||
+        walk_reports_fill(&call->reports, &call->call, progress_object, stats_object) != 0 ||
+        usearch_py_arena_claim(arena_object, &call->call.arena) != 0)
+        return usearch_py_call_discard(&receiver, &sample_verb, call);
+    if (shown_count != coordinates.rows) {
+        PyErr_Format(PyExc_ValueError, "%zu shown keys need as many coordinates, got %zu", shown_count,
+                     coordinates.rows);
+        return usearch_py_call_discard(&receiver, &sample_verb, call);
+    }
+
+    call->arguments = (usearch_dense_sample_t) {
+        .index = handle,
+        .executor = receiver.executor,
+        .outcome = &call->call.outcome,
+        .completion = receiver.completion,
+        .shown_count = shown_count,
+        .shown = {call->shown.keys, sizeof(usearch_key_t)},
+        .shown_coordinates = rows_of(&coordinates),
+        .focus_count = focus_count,
+        .focus = {call->focus.keys, sizeof(usearch_key_t)},
+        .keys = &call->keys,
+        .entry_ordinals = &call->entry_ordinals,
+        .parents = &call->parents,
+        .coordinates = &call->coordinates,
+        .written = &call->written,
+        .arena = ((Arena*)call->call.arena)->handle,
+        .wanted = wanted,
+        .seed = seed,
+        .expansion_factor = expansion_factor,
+        .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
+        .stats = &call->reports.stats,
+    };
+    return usearch_py_call_run(&receiver, &sample_verb, call);
+}
+
+#pragma endregion Sampling
 
 #pragma region Iteration
 
@@ -2228,11 +2580,11 @@ static PyObject* DenseIndex_cursor(PyObject* self, PyObject* const* args, Py_ssi
 
     usearch_dense_cursor_t cursor_handle = NULL;
     usearch_outcome_t outcome = {0};
-    usearch_dense_cursor_init_t arguments_init = {.cursor = &cursor_handle,
-                                                  .index = handle,
+    usearch_dense_cursor_init_t arguments_init = {.index = handle,
                                                   .outcome = &outcome,
                                                   .starts_count = starts_count,
-                                                  .starts = starts.keys};
+                                                  .starts = starts.keys,
+                                                  .cursor = &cursor_handle};
     Py_BEGIN_ALLOW_THREADS;
     usearch_dense_cursor_init(&arguments_init);
     Py_END_ALLOW_THREADS;
@@ -2638,8 +2990,9 @@ static PyObject* DenseIndex_save_buffer(PyObject* self, PyObject* const* args, P
 }
 
 /**
- *  @brief Reads what every load takes beside its source: the residency arm @p arm_name, the `executor`,
- *      `values_per_key`, `progress` and `progress_steps`, the source itself landing in @p source.
+ *  @brief Reads what every load takes beside its source: the residency arm @p arm_name, the
+ *      @p executor, @p values_per_key, @p progress and @p progress_steps, the source itself written
+ *      to @p source.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -3119,6 +3472,8 @@ static PyMethodDef DenseIndex_methods[] = {
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
     {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
+    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
     {NULL, NULL, 0, NULL},
@@ -3143,6 +3498,8 @@ PyMethodDef usearch_py_on_methods[] = {
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
     {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
+    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
     {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS, doc_receiver_class_getitem},
@@ -3163,6 +3520,8 @@ PyMethodDef usearch_py_deferred_on_methods[] = {
     {"attend", (PyCFunction)DenseIndex_attend, usearch_py_method_flags_k, doc_DenseIndex_attend},
     {"maxsim", (PyCFunction)DenseIndex_maxsim, usearch_py_method_flags_k, doc_DenseIndex_maxsim},
     {"absorb", (PyCFunction)DenseIndex_absorb, usearch_py_method_flags_k, doc_DenseIndex_absorb},
+    {"split", (PyCFunction)DenseIndex_split, usearch_py_method_flags_k, doc_DenseIndex_split},
+    {"sample", (PyCFunction)DenseIndex_sample, usearch_py_method_flags_k, doc_DenseIndex_sample},
     {"save", (PyCFunction)DenseIndex_save, usearch_py_method_flags_k, doc_DenseIndex_save},
     {"save_buffer", (PyCFunction)DenseIndex_save_buffer, usearch_py_method_flags_k, doc_DenseIndex_save_buffer},
     {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS, doc_receiver_class_getitem},

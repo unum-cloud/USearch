@@ -692,7 +692,7 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
  *  @param[in] settings Supplies @c load_name and @c checkpoints_dir.
  *  @param[in,out] index A virgin index already reserved to the run's geometry, which every part's
  *      header is vetted against.
- *  @param[out] id_to_row Landing for the restored map; spans at least the checkpoint's rows.
+ *  @param[out] id_to_row Output for the restored map; spans at least the checkpoint's rows.
  *  @param[in] stream The executor's stream a device index restores on; a RAM index takes none.
  *  @return True on a fully restored index; false after printing what failed.
  */
@@ -822,7 +822,8 @@ void widen_row(nk::vector_view<scalar_type_> row, std::span<f32_t> widened) noex
                                                              nk_f32_k, widened.size(), nullptr);
 }
 
-/** @p rows in @c f32, multiplied by @p scale, landed in the stored scalar - the staging every row takes. */
+/** @p rows in @c f32, multiplied by @p scale and cast to the stored scalar, which is the staging
+ *  every row goes through. */
 template <typename scalar_type_>
 std::vector<scalar_type_> stage_widened(std::vector<f32_t> rows, f32_t scale) {
     for (f32_t& value : rows) value *= scale;
@@ -832,7 +833,7 @@ std::vector<scalar_type_> stage_widened(std::vector<f32_t> rows, f32_t scale) {
     return staged;
 }
 
-/** Every row of @p rows landed in the stored scalar under @p scale, row-major. */
+/** Every row of @p rows cast to the stored scalar under @p scale, row-major. */
 template <typename scalar_type_, typename dataset_scalar_type_>
 std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows, f32_t scale) {
     std::size_t const dimensions = rows.extent(1);
@@ -926,7 +927,7 @@ struct streamed_dataset {
     vector_view_t stage(nk::vector_view<dataset_scalar_type_> source, std::size_t thread, std::size_t task) noexcept {
         std::size_t const dimensions = vectors.extent(1);
         std::size_t const rotation = task % staging.extent(1);
-        auto landing = staging.row(thread).row(rotation).as_vector();
+        auto staged = staging.row(thread).row(rotation).as_vector();
         nk::status_t status = nk::status_t::success_k;
         if constexpr (scaled_k) {
             // An f32 source feeds @c nk::scale straight from the mapping, skipping the widening cast.
@@ -935,11 +936,11 @@ struct streamed_dataset {
                 status = nk::scale<nk::f32_t>(source, scale, 0.0f, rescaled);
             else if (nk::succeeded(status = nk::cast<dataset_scalar_type_, nk::f32_t>(source, rescaled)))
                 status = nk::scale<nk::f32_t>(rescaled, scale, 0.0f, rescaled);
-            if (nk::succeeded(status)) status = nk::cast<nk::f32_t, scalar_t>(rescaled, landing);
+            if (nk::succeeded(status)) status = nk::cast<nk::f32_t, scalar_t>(rescaled, staged);
         }
-        else { status = nk::cast<dataset_scalar_type_, scalar_t>(source, landing); }
+        else { status = nk::cast<dataset_scalar_type_, scalar_t>(source, staged); }
         // A failed conversion stages an empty row, which the index refuses rather than storing garbage.
-        return nk::succeeded(status) ? vector_view_t {landing.data(), dimensions} : vector_view_t {};
+        return nk::succeeded(status) ? vector_view_t {staged.data(), dimensions} : vector_view_t {};
     }
 };
 

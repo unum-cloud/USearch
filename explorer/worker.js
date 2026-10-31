@@ -312,7 +312,7 @@ function outputs(name, ...members) {
 }
 
 /** What a call left in the room of its pointer member. @param {string} name @param {string} member @param {number} address @returns {any} */
-function landed(name, member, address) {
+function readOutput(name, member, address) {
   const type = pointee(`${name}_t`, member);
   return type.kind === "structure" ? read(address, type) : load(address, type);
 }
@@ -392,7 +392,7 @@ const handlers = {
     const name = named("init_ram");
     const created = outputs(name, "index");
     call(name, { ...options, index: created.index, outcome });
-    index = landed(name, "index", created.index);
+    index = readOutput(name, "index", created.index);
     return {};
   },
 
@@ -404,7 +404,7 @@ const handlers = {
     const name = named("view_ram");
     const viewed = outputs(name, "index");
     call(name, { ...options, index: viewed.index, outcome, path: { data: place(text), length: text.length } });
-    index = landed(name, "index", viewed.index);
+    index = readOutput(name, "index", viewed.index);
     return {};
   },
 
@@ -420,36 +420,55 @@ const handlers = {
       [entriesMember(name, 0)]: entries.value,
       ...out,
     });
-    return { stats: landed(name, "stats", out.stats) };
+    return { stats: readOutput(name, "stats", out.stats) };
   },
 
-  sample({ anchors: payloads, options }) {
+  /** Draws around `focus`, or the whole index without it, beside the `shown` keys already shown at
+   *  their engine coordinates, three `f32` apiece; each draw comes back with its entry ordinal, its
+   *  parent and its coordinates. */
+  sample({ shown, focus, options }) {
     const name = named("sample");
-    const region = payloads?.length ? borrow(payloads) : null;
-    const out = outputs(name, "keys", "links", "written", "stats");
+    const shownCount = shown ? shown.keys.byteLength / keyBytes : 0;
+    const looked = focus ? focus.byteLength / keyBytes : 0;
+    const out = outputs(name, "keys", "entry_ordinals", "parents", "coordinates", "written", "stats");
     call(name, {
       ...options,
       index,
       outcome,
       arena,
-      anchors_count: region?.count ?? 0,
-      anchors: region?.value,
+      shown_count: shownCount,
+      shown: shownCount ? { data: place(shown.keys), stride: keyBytes } : undefined,
+      shown_coordinates: shownCount
+        ? {
+            data: place(new Uint8Array(shown.coordinates.buffer, shown.coordinates.byteOffset, shownCount * 12)),
+            stride: 12,
+            columns: 3,
+            scalar: "usearch_scalar_f32_k",
+          }
+        : undefined,
+      focus_count: looked,
+      focus: looked ? { data: place(focus), stride: keyBytes } : undefined,
       ...out,
     });
-    const stats = landed(name, "stats", out.stats);
-    const written = succeeded() ? landed(name, "written", out.written) : 0;
+    const stats = readOutput(name, "stats", out.stats);
+    const written = succeeded() ? readOutput(name, "written", out.written) : 0;
     if (written === 0) return { written, stats };
-    const keys = landed(name, "keys", out.keys);
-    const links = landed(name, "links", out.links);
-    const linkOffsets = copySizes(links.offsets, written + 1);
-    const linked = linkOffsets[written];
+    const keys = readOutput(name, "keys", out.keys);
+    const parents = readOutput(name, "parents", out.parents);
+    const coordinates = readOutput(name, "coordinates", out.coordinates);
     return {
       written,
       stats,
       keys: copyKeys(keys.data, keys.stride, written),
-      linkOffsets,
-      linkKeys: copyKeys(links.keys, keyBytes, linked),
-      linkDistances: new Float64Array(copy(links.scores, linked * 8).buffer),
+      entryOrdinals: copySizes(readOutput(name, "entry_ordinals", out.entry_ordinals), written),
+      parentCounts: copySizes(parents.counts, written),
+      parentKeys: copyKeys(parents.keys, keyBytes * parents.columns, written),
+      parentDistances: Float64Array.from({ length: written }, (_, draw) =>
+        memory().getFloat64(parents.scores + draw * parents.columns * 8, true),
+      ),
+      coordinates: Float32Array.from({ length: written * 3 }, (_, value) =>
+        memory().getFloat32(coordinates.data + Math.floor(value / 3) * coordinates.stride + (value % 3) * 4, true),
+      ),
     };
   },
 
@@ -471,8 +490,8 @@ const handlers = {
         key: keys.subarray(key * keyBytes, (key + 1) * keyBytes),
         ...out,
       });
-      const written = succeeded() ? landed(name, "written", out.written) : 0;
-      payloads.push(copied(landed(name, member, out[member]), written));
+      const written = succeeded() ? readOutput(name, "written", out.written) : 0;
+      payloads.push(copied(readOutput(name, member, out[member]), written));
     }
     return { payloads };
   },
@@ -490,9 +509,9 @@ const handlers = {
       [entriesMember(name, 0)]: entries.value,
       ...out,
     });
-    const stats = landed(name, "stats", out.stats);
+    const stats = readOutput(name, "stats", out.stats);
     if (!succeeded()) return { stats };
-    const matches = landed(name, "matches", out.matches);
+    const matches = readOutput(name, "matches", out.matches);
     const cells = entries.count * matches.columns;
     return {
       stats,
@@ -516,14 +535,14 @@ const handlers = {
     const pulled = [];
     const opened = outputs(init, "cursor");
     call(init, { index, outcome, starts_count: count, starts: place(starts), ...opened });
-    const cursor = succeeded() ? landed(init, "cursor", opened.cursor) : 0;
+    const cursor = succeeded() ? readOutput(init, "cursor", opened.cursor) : 0;
     for (let entry = 0; cursor && entry < count;) {
       const wanted = Math.min(cursorBatch, count - entry);
       const out = outputs(next, "keys", "links", "written");
       call(next, { index, outcome, arena, cursor, wanted, ...out });
-      const written = succeeded() ? landed(next, "written", out.written) : 0;
+      const written = succeeded() ? readOutput(next, "written", out.written) : 0;
       if (written === 0) break;
-      const links = landed(next, "links", out.links);
+      const links = readOutput(next, "links", out.links);
       const linkOffsets = copySizes(links.offsets, written + 1);
       pulled.push(copyKeys(links.keys, keyBytes, linkOffsets[written] - linkOffsets[0]).subarray(0));
       for (let local = 0; local < written; local++)
@@ -557,7 +576,7 @@ async function loadModule(request) {
   const saved = library.stackSave();
   const opened = outputs("usearch_arena_init", "arena");
   call("usearch_arena_init", { ...opened, outcome });
-  arena = landed("usearch_arena_init", "arena", opened.arena);
+  arena = readOutput("usearch_arena_init", "arena", opened.arena);
   library.stackRestore(saved);
   return { version: library.UTF8ToString(library._usearch_version_name()) };
 }

@@ -32,11 +32,15 @@ import cloud.unum.usearch.DenseIndex.DenseOptions;
 import cloud.unum.usearch.DenseIndex.DenseProducts;
 import cloud.unum.usearch.DenseIndex.DenseReachability;
 import cloud.unum.usearch.DenseIndex.DenseRefineConfig;
+import cloud.unum.usearch.DenseIndex.DenseSampleConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchStream;
 import cloud.unum.usearch.DenseIndex.DenseSoftmaxState;
+import cloud.unum.usearch.DenseIndex.DenseSplitConfig;
 import cloud.unum.usearch.DenseIndex.DenseTraversalStats;
 import cloud.unum.usearch.DenseIndex.DenseVectors;
+import cloud.unum.usearch.DenseIndex.RefineReport;
+import cloud.unum.usearch.DenseIndex.Sample;
 import cloud.unum.usearch.DenseIndex.ValueLookup;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.Deferred;
@@ -343,6 +347,39 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void refineReportsWhatItChanged() {
+        try (DenseIndex index = populated()) {
+            RefineReport report = index.on(POOL).refine();
+            assertTrue(report.changed() <= report.reselected());
+            assertEquals(2, report.reachability().audited());
+        }
+    }
+
+    @Test
+    public void splitEmptiesTheSourceIntoItsReceivers() {
+        try (DenseIndex index = populated();
+                DenseIndex left = empty(twoDimensional());
+                DenseIndex right = empty(twoDimensional())) {
+            left.on(POOL).reserve(2);
+            right.on(POOL).reserve(2);
+            index.on(POOL).split(new DenseSplitConfig().seed(7), left, right);
+            assertEquals(2, left.describe().size() + right.describe().size());
+            assertEquals(0, index.describe().size());
+        }
+    }
+
+    @Test
+    public void sampleDrawsEveryEntryOfASmallIndex() {
+        try (DenseIndex index = populated();
+                Arena arena = new Arena(POOL)) {
+            Sample sample = index.on(POOL).sample(8, arena, new DenseSampleConfig().seed(42));
+            assertEquals(2, sample.written());
+            assertEquals(2, sample.parents().queries());
+            assertNotEquals(sample.key(0), sample.key(1));
+        }
+    }
+
+    @Test
     public void lateInteractionDividesTokenRowsIntoQueries() {
         try (DenseIndex index = empty(new DenseOptions()
                         .dimensions(2)
@@ -435,12 +472,12 @@ public class DenseIndexTest {
             assertEquals(2 * Double.BYTES, every.strideBytes());
             // A sharded index deals one batch's entries across its shards, so only the multiset is promised.
             double[] values = every.segment().toArray(ValueLayout.JAVA_DOUBLE);
-            double[][] landed = new double[3][];
-            for (int row = 0; row != landed.length; ++row) {
-                landed[row] = Arrays.copyOfRange(values, row * 2, row * 2 + 2);
+            double[][] read = new double[3][];
+            for (int row = 0; row != read.length; ++row) {
+                read[row] = Arrays.copyOfRange(values, row * 2, row * 2 + 2);
             }
-            Arrays.sort(landed, Arrays::compare);
-            assertArrayEquals(new double[][] {{0, 1}, {1, 0}, {1, 1}}, landed);
+            Arrays.sort(read, Arrays::compare);
+            assertArrayEquals(new double[][] {{0, 1}, {1, 0}, {1, 1}}, read);
             MemorySegment rows = every.segment();
             assertEquals(0, index.on(POOL).get(Key.of(6), Scalar.F32, arena).rows());
             // The second call rewound the arena, so the first one's rows refuse to be read.

@@ -65,7 +65,12 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(cpuClass + 8,
                      (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.ShardsCount)));
         Assert.Equal(cpuClass + 8 + word, Unsafe.SizeOf<NativeDenseDescription>());
-        Assert.True(Unsafe.SizeOf<NativeDenseDescription>() <= 12 * sizeof(ulong), "the report landing holds it");
+        Assert.True(Unsafe.SizeOf<NativeDenseDescription>() <= 12 * sizeof(ulong), "the report slots hold it");
+        Assert.True(Unsafe.SizeOf<SampleReports>() <= 12 * sizeof(ulong), "the report slots hold a sample's views");
+        // The traversal enum packs right after the float scale, with no padding between them.
+        Assert.Equal((int)Marshal.OffsetOf<NativeDenseAttend>(nameof(NativeDenseAttend.ScoreScale)) + 4,
+                     (int)Marshal.OffsetOf<NativeDenseAttend>(nameof(NativeDenseAttend.Traversal)));
+        Assert.Equal(4 * word, (int)Marshal.OffsetOf<NativeDenseCursorInit>(nameof(NativeDenseCursorInit.Cursor)));
     }
 
     #endregion Layouts
@@ -266,7 +271,7 @@ public sealed class DenseIndexTests : IDisposable
 
         Matches found = index.Search(Rows(RowOf(2f)), wanted: 1, this._arena);
         Assert.Equal(Key.FromUInt64(2), found[0].Keys[0]);
-        Assert.Equal(0UL, index.Refine());
+        Assert.Equal(0UL, index.Refine().Changed);
     }
 
     #endregion Executors
@@ -614,12 +619,41 @@ public sealed class DenseIndexTests : IDisposable
         using DenseIndex index = SmallIndex();
         index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
 
-        index.On(this._pool).Refine(expansionFactor: 64);
+        RefineReport report = index.On(this._pool).Refine(expansionFactor: 64);
         DenseReachability reachability = index.On(this._pool).Health();
 
+        Assert.True(report.Changed <= report.Reselected);
+        Assert.Equal(3UL, report.Reachability.Audited);
         Assert.Equal(3UL, reachability.Audited);
         Assert.Equal(3UL, reachability.Reachable);
         Assert.Equal(Key.FromUInt64(3), index.Search(Rows(RowOf(3f)), wanted: 1, this._arena)[0].Keys[0]);
+    }
+
+    [Fact]
+    public void SplitEmptiesTheSourceIntoItsReceivers()
+    {
+        using DenseIndex index = SmallIndex();
+        using DenseIndex left = SmallIndex();
+        using DenseIndex right = SmallIndex();
+        index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
+
+        index.On(this._pool).Split([left, right], seed: 7);
+
+        Assert.Equal(3UL, left.Describe().Size + right.Describe().Size);
+        Assert.Equal(0UL, index.Describe().Size);
+    }
+
+    [Fact]
+    public void SampleDrawsEveryEntryOfASmallIndex()
+    {
+        using DenseIndex index = SmallIndex();
+        index.On(this._pool).Insert(KeysOf(1, 2, 3), Rows([.. RowOf(1f), .. RowOf(2f), .. RowOf(3f)]));
+
+        Sample sample = index.On(this._pool).Sample(8, this._arena, new DenseSampleConfig { Seed = 42 });
+
+        Assert.Equal(3, sample.Count);
+        Assert.Equal(3, sample.Parents.Queries);
+        Assert.Equal(9, sample.Coordinates.Length);
     }
 
     [Fact]

@@ -5,7 +5,7 @@
  *  @brief Two concurrent reservations, each growing through the claimer's election.
  *
  *  Reserver 0 asks for two rows, reserver 1 for one. Each picks a geometry, freezes it with the
- *  exchange that lands first or reads the frozen one back, and on a match claims its deficit from
+ *  exchange that wins first or reads the frozen one back, and on a match claims its deficit from
  *  the claimed rows and releases the whole claim until the rows are there. Two reservers can still
  *  send each other round, each reading the other's transient dip, so three claims between them
  *  bound the loop.
@@ -15,7 +15,7 @@
  *  @verify pass sc,rc11,far
  *  @verify pass sc same_geometry=true
  *  @verify fail far deflation_order=order_relaxed: relaxed, it is posted and still in flight when
- *      the release lands, and a reserver takes rows past the end of the chunks it can see
+ *      the release arrives, and a reserver takes rows past the end of the chunks it can see
  *  @verify fail sc waits_for_whole=false: two threads are inside `create_next_chunk`, whose
  *      `chunks_count_` and directory writes are plain
  *  @verify fail sc release_floor=0: a second reserver is elected into `create_next_chunk`
@@ -40,7 +40,7 @@ proctype reserver(byte t) {
     int whole, old_remaining, reverted, seen_chunks, added, unclaimed;
     byte column;
     bool succeeded;
-    // the geometry, frozen by whichever exchange lands first; a loser reads the frozen one back
+    // the geometry, frozen by whichever exchange wins first; a loser reads the frozen one back
     if
     :: desired = first_geometry
     :: !same_geometry -> desired = second_geometry

@@ -4,7 +4,7 @@
  *  @date October 10, 2026
  *  @brief The sharded dense index's plans from `include/usearch/dense/ram_indexes.hpp`.
  *
- *  The monolith save taking one `plan_save` per shard, and the load path landing every shard's keys
+ *  The monolith save taking one `plan_save` per shard, and the load path placing every shard's keys
  *  through its plan, filed by one publisher per shard before `finish`, beside the search merge
  *  reading `keys[node]` and counting each shard's map below its watermark. Two shards of two rows
  *  each. A shard's dispenser is a word here, since the plans compare the watermark with it.
@@ -23,7 +23,7 @@
 #define sequence_word 8
 #define map_slot(shard, position) (9 + (shard) * row_limit + (position))
 
-// The values a key slot carries: unset, or the key of the thread that landed the row. A map slot
+// The values a key slot carries: unset, or the key of the thread that placed the row. A map slot
 // is the key beside its node in one word, published with one release: its tag's ordering against
 // its slot is `ram_tables.pml`'s concern.
 #define unset 0
@@ -70,7 +70,7 @@ inline publish_key(t, shard, id, position, seen) {
 }
 
 // a planned batch of one row per shard: `insert` dispenses every shard's range before any row
-// lands, then the keys; `finish` awaits every turn, files each shard's key while its turn is held,
+// places, then the keys; `finish` awaits every turn, files each shard's key while its turn is held,
 // then stores the watermarks inside the bracket of the commit sequence word
 inline insert_batch(t) {
     byte shard, position;
@@ -134,9 +134,9 @@ inline finish_shard(t, shard, planned) {
     od
 }
 
-// the load plan's `land_keys` of @p rows rows at the shard's base, relaxed, each step the one
+// the load plan's `copy_keys` of @p rows rows at the shard's base, relaxed, each step the one
 // writer of its rows
-inline land_keys(t, shard, base, rows) {
+inline copy_keys(t, shard, base, rows) {
     byte row;
     row = 0;
     do

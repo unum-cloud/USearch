@@ -537,7 +537,7 @@ struct indexed_range {
     constexpr iterator end() const noexcept { return {owner, count}; }
 };
 
-/** Moves neighbor IDs between ID spaces: an ID inside @p source_range lands at
+/** Moves neighbor IDs between ID spaces: an ID inside @p source_range moves to
  *  @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
  *  reads as naming no node. */
 template <std::unsigned_integral id_type_>
@@ -626,7 +626,8 @@ constexpr std::size_t default_expansion_factor(std::size_t connectivity) noexcep
  *  parses those spellings into. */
 enum class dtype_t : u32_t {
     unknown_k = 0,
-    /* Floats, by shrinking dynamic range. */
+
+    // Floats, widest first
     f64_k,
     f32_k,
     bf16_k,
@@ -635,26 +636,30 @@ enum class dtype_t : u32_t {
     e4m3_k,
     e3m2_k,
     e2m3_k,
-    /* Signed integers, by shrinking dynamic range; the packed pair is two nibbles to the byte. */
+
+    // Signed integers
     i64_k,
     i32_k,
     i16_k,
     i8_k,
     i4x2_k,
-    /* Unsigned integers, by shrinking dynamic range; the packed families ride two or eight to the byte. */
+
+    // Unsigned integers
     u64_k,
     u32_k,
     u16_k,
     u8_k,
     u4x2_k,
     u1x8_k,
-    /* Opaque widths, naming bits and nothing else. */
+
+    // Opaque bits
     b128_k,
     b64_k,
     b32_k,
     b16_k,
     b8_k,
-    /* A sixteen-byte identity, and bytes a reader may assume are valid text. */
+
+    // Keys and text
     uuid_k,
     utf8_k,
 };
@@ -895,7 +900,7 @@ constexpr count_type_ walk_width(count_type_ concurrent_walks, count_type_ live_
 }
 
 /** Outcome of one reachability audit, the same on every tier, layer and residency. */
-struct health_result_t {
+struct reachability_t {
 
     /** Nodes published when the audit started - the population it judges; later insertions are not
      *  counted. */
@@ -913,7 +918,7 @@ struct health_result_t {
 
 /** Folds another shard's audit in: populations add, and the depth is the deepest shard's, since a
  *  searcher waits for the last one. */
-inline health_result_t& operator+=(health_result_t& into, health_result_t const& other) noexcept {
+inline reachability_t& operator+=(reachability_t& into, reachability_t const& other) noexcept {
     into.audited_nodes += other.audited_nodes;
     into.reachable_nodes += other.reachable_nodes;
     into.sweeps = max_of(into.sweeps, other.sweeps);
@@ -923,7 +928,7 @@ inline health_result_t& operator+=(health_result_t& into, health_result_t const&
 
 /** The per-walk counters every traversal accumulates; results report one call's share as the
  *  difference of two snapshots. */
-struct traversal_telemetry_t {
+struct traversal_stats_t {
 
     /** Metric invocations, batched rounds counted once per scored candidate: the walks' and the two
      *  subsets below. */
@@ -943,10 +948,10 @@ struct traversal_telemetry_t {
     std::size_t computed_distances_in_refines = 0;
 
     /** Subset of @c computed_distances spent back-linking: ranking a full neighbor list and the
-     *  newcomer against the list's owner, then re-selecting it. */
+     *  appended node against the list's owner, then re-selecting it. */
     std::size_t computed_distances_in_reverse_refines = 0;
 
-    traversal_telemetry_t operator-(traversal_telemetry_t const& before) const noexcept {
+    traversal_stats_t operator-(traversal_stats_t const& before) const noexcept {
         return {computed_distances - before.computed_distances,
                 visited_members - before.visited_members,
                 restarts - before.restarts,
@@ -956,7 +961,7 @@ struct traversal_telemetry_t {
     }
 
     /** Folds another walk's or thread's counters in, every one a spend that adds. */
-    traversal_telemetry_t& operator+=(traversal_telemetry_t const& other) noexcept {
+    traversal_stats_t& operator+=(traversal_stats_t const& other) noexcept {
         computed_distances += other.computed_distances;
         visited_members += other.visited_members;
         restarts += other.restarts;
@@ -969,7 +974,7 @@ struct traversal_telemetry_t {
 
 /** Outcome of one refinement or heal pass: every count means the same in every family, layer and
  *  residency. */
-struct [[nodiscard]] refine_result_t {
+struct [[nodiscard]] refine_report_t {
 
     /** Nodes re-selected: the planned nodes, then the fresh nodes of every later round, then the
      *  islands of every heal round. */
@@ -987,26 +992,26 @@ struct [[nodiscard]] refine_result_t {
     std::size_t islands_reconnected = 0;
 
     /** The audit closing the heal, as a fresh health audit right after would take it. */
-    health_result_t health;
+    reachability_t reachability;
 
     /** The re-selection walks' and back-links' spend. */
-    traversal_telemetry_t telemetry;
+    traversal_stats_t traversal_stats;
 
     /** Folds another pass or shard in: every count is a population or a spend and adds, and the
-     *  audits fold as @c health_result_t does. */
-    refine_result_t& operator+=(refine_result_t const& other) noexcept {
+     *  audits fold as @c reachability_t does. */
+    refine_report_t& operator+=(refine_report_t const& other) noexcept {
         reselected_nodes += other.reselected_nodes;
         changed_nodes += other.changed_nodes;
         islands_found += other.islands_found;
         islands_reconnected += other.islands_reconnected;
-        health += other.health;
-        telemetry += other.telemetry;
+        reachability += other.reachability;
+        traversal_stats += other.traversal_stats;
         return *this;
     }
 };
 
 /** The tail slots of a full neighbor list a heal may give up to islands, which spread over them by
- *  ID so islands sharing a list land apart: the farther half, keeping the nearer half that carries
+ *  ID so islands sharing a list end apart: the farther half, keeping the nearer half that carries
  *  search and slot 0, and nothing in a single-neighbor list. */
 template <typename size_type_>
 constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
@@ -1024,6 +1029,15 @@ constexpr iota_view<node_id_type_> part_across(node_id_type_ const* part_bases, 
     std::size_t const first = ((part >> round) ^ 1u) << round, bound = first + (std::size_t {1} << round);
     if (first >= parts) return {};
     return {part_bases[first], bound < parts ? part_bases[bound] : nodes};
+}
+
+/** The part among the ascending @p part_bases that holds @p node_id: the last base at or below it,
+ *  the first part when none is. */
+template <typename node_id_type_>
+constexpr std::size_t part_of(std::span<node_id_type_ const> part_bases, node_id_type_ node_id) noexcept {
+    std::size_t part = 0;
+    while (part + 1 < part_bases.size() && part_bases[part + 1] <= node_id) ++part;
+    return part;
 }
 
 /** The universal matrix-engine row count: Intel AMX tiles, Arm SME's ZA at SVL-512,
@@ -1572,7 +1586,7 @@ struct dummy_progress_t {
     }
 };
 
-/** The one-thread executor a SafeGraphs read or write fans out over when its index lands regions
+/** The one-thread executor a SafeGraphs read or write fans out over when its index copies regions
  *  in order: every region runs on the calling thread. */
 struct serial_executor_t {
     std::size_t size() const noexcept { return 1; }
@@ -1589,11 +1603,15 @@ struct serial_executor_t {
  *  lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
  *  libraries are linked. */
 enum class cpu_class_t : u32_t {
+
+    /** No class detected yet, or none of the classes below. */
     unknown_k = 0,
 
+    // Portable floor
     /** The portable floor: no SIMD assumptions, standard yields. */
     serial_k,
 
+    // x86 classes
     /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     intel_haswell_k,
 
@@ -1621,7 +1639,9 @@ enum class cpu_class_t : u32_t {
      *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
     intel_diamond_k,
 
-    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones land
+    // Arm classes
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones fall
      *  here too. */
     aws_g2_k,
 
@@ -1640,10 +1660,12 @@ enum class cpu_class_t : u32_t {
     /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
     nvidia_vera_k,
 
+    // RISC-V classes
     /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
      *  @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
     alibaba_c930_k,
 
+    // WebAssembly classes
     /** WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width @c simd128
      *  tier, so it runs on WebKit and in a page served without cross-origin isolation. */
     wasm32_v128_k,
@@ -1652,6 +1674,7 @@ enum class cpu_class_t : u32_t {
      *  bundled because every engine that ships one ships the other two. */
     wasm64_extended_k,
 
+    // Monoversioned builds
     /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
      *  preset vouches for, as the libraries compiled them. */
     monoversioned_k,
@@ -1677,8 +1700,11 @@ enum class gpu_vendor_t : u32_t {
  *  implies its vendor, and within a vendor an unknown newer device takes the newest class it
  *  satisfies. */
 enum class gpu_class_t : u32_t {
+
+    /** No class detected yet, or none of the classes below. */
     unknown_k = 0,
 
+    // NVIDIA classes
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
     nvidia_ampere_k,
 
@@ -1699,6 +1725,7 @@ enum class gpu_class_t : u32_t {
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     nvidia_rubin_k,
 
+    // AMD classes
     /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
     amd_cdna3_k,
 
@@ -1708,6 +1735,7 @@ enum class gpu_class_t : u32_t {
     /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
     amd_cdna5_k,
 
+    // Apple classes
     /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
     apple_metal7_k,
 
@@ -1830,7 +1858,7 @@ constexpr u32_t ring_offset(u32_t candidate, u32_t query) noexcept { return gold
 
 /** The image of @p position under a bijection over <tt>[0, count)</tt> keyed by @p seed: two odd
  *  multiplies around an xor-shift over the next power of two, its cycle walked until the image
- *  lands below @p count, so the first few positions name distinct nodes in constant expected time,
+ *  falls below @p count, so the first few positions name distinct nodes in constant expected time,
  *  never a scan. Positions at or past @p count have no image. */
 constexpr u64_t seeded_bijection(u64_t position, u64_t count, u64_t seed) noexcept {
     if (count < 2) return 0;
@@ -1882,7 +1910,7 @@ constexpr splitmix64_t seeded_stream(u64_t key) noexcept { return splitmix64_t {
  *  Bias is about @c bound / 2^w for the index's bit width w, negligible for entry-point selection.
  *
  *  The random operand narrows to the index width @b before the multiply: wider surviving
- *  engine bits would land in the kept half and escape the bound.
+ *  engine bits would fall in the kept half and escape the bound.
  */
 template <typename index_type_>
 struct uniform_below;
@@ -1909,24 +1937,36 @@ struct uniform_below<u64_t> {
     }
 };
 
-/** Graph node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
-using node_id_t = u32_t;
+/** The sentinel an engine of @p node_id_type_ IDs writes where a neighbor slot holds none: the
+ *  all-ones pattern, never a valid node ID within a sub-index, doubling as the lock word of every
+ *  neighbor list it guards. */
+template <typename node_id_type_>
+struct node_id_limits {
+    static constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+};
 
 /** Distance representation shared by all metrics, regardless of the stored dtype. */
 using distance_t = f32_t;
 
-/** Reserved all-ones value, never a valid node ID within a sub-index. Doubles as the
- *  lock & empty-slot sentinel in neighbor lists of every index design. */
-inline constexpr node_id_t node_id_unknown_k = 0xFFFFFFFFu;
-
-/** One traversal candidate: a node ID paired with its distance to the query. */
+/** One traversal candidate as the device result buffers hold it: a 32-bit node ID paired with its
+ *  distance to the query. */
 struct scored_node_t {
 
     /** Identifier of the scored node within its sub-index. */
-    node_id_t node_id;
+    u32_t node_id;
 
     /** Distance to the query, in the instantiated kernel's metric. */
     distance_t distance;
+};
+
+/** One entry as a sharded index names it: the shard holding it, positional in placement order, and
+ *  its node ID inside that shard's own space. */
+template <typename node_id_type_>
+struct alignas(sizeof(u64_t)) shard_node {
+    u32_t shard = 0;
+    node_id_type_ node = 0;
+
+    friend constexpr bool operator==(shard_node const&, shard_node const&) noexcept = default;
 };
 
 /** Warps per thread block across every kernel of the VRAM design - four schedulers per
@@ -2092,7 +2132,7 @@ struct shared_mutex {
         bool unlocked() const noexcept { return !holders && !unique; }
     };
 
-    /** Joins the shared side, waiting out a unique holder through the waiter. */
+    /** Enters the shared side, waiting out a unique holder through the waiter. */
     void lock_shared() noexcept {
         annotate_lock_shared_started(&word);
         // A masked compare-exchange kept the fields apart while the generation sat under the

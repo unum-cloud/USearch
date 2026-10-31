@@ -7,5 +7,5 @@
  */
 #include "sequence_specializations.cuh"
 
-template struct basic_class_tables<sequence_traits_t, dense_home_t::ram_k, cpu_class_t::intel_haswell_k>;
-template struct basic_class_tables<sequence_traits_t, dense_home_t::nvme_k, cpu_class_t::intel_haswell_k>;
+template struct basic_class_tables<sequence_traits_t, vendored_residency_t::ram_k, cpu_class_t::intel_haswell_k>;
+template struct basic_class_tables<sequence_traits_t, vendored_residency_t::nvme_k, cpu_class_t::intel_haswell_k>;

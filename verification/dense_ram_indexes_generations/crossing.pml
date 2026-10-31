@@ -11,7 +11,7 @@
  *  fails, it puts the count back and the insert is refused, and the planner takes the bit and
  *  builds instead.
  *
- *  - Every insert not refused lands its row, and the count ends past the new generation.
+ *  - Every insert not refused places its row, and the count ends past the new generation.
  *
  *  @verify pass sc,rc11
  *  @verify pass sc,rc11 opening_cap=false: the cap is not what ends the wait: a monitored waiter
@@ -59,7 +59,7 @@ proctype reader(byte t) {
     od
 }
 
-// once both adders are done: the generation open and built once, and every claim landed
+// once both adders are done: the generation open and built once, and every claim placed
 proctype checker() {
     (done == 2);
     assert(newest_value(shards_count) == 2 && constructed[1]);

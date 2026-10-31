@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 16, 2026
  *  @brief The vocabulary every Apple traversal context and its Metal kernels share: the walk's
- *      fixed extents and the counter words a launch lands its telemetry in.
+ *      fixed extents and the counter words a launch writes its telemetry to.
  *
  *  Written in the C++ that MSL shares with every host compiler, as plain enums: the host includes
  *  it, and the dense Apple index embeds it first among the Metal sources, which cannot include, so
@@ -46,25 +46,58 @@ constexpr unsigned int walk_width(unsigned int concurrent_walks, unsigned int li
  *  no value row, then the walks' telemetry, each tally a low and a high word, so a batch's totals
  *  outgrow 32 bits as on CUDA and HIP. */
 enum metal_counter_t : unsigned int {
+
+    /** The batch's entries assigned to walks so far. */
     metal_assigned_k = 0,
+
+    /** The walks still running. */
     metal_live_k = 1,
+
+    /** The nodes the batch published. */
     metal_published_k = 2,
+
+    /** The nodes the batch changed. */
     metal_changed_k = 3,
+
+    /** The value-lookup miss word a walk raises at a node with no value row. */
     metal_missed_k = 4,
+
+    /** The walks' hops, its low word then its high one. */
     metal_hops_k = 5,
+
+    /** The nodes the walks scored, its low word then its high one. */
     metal_scored_k = 7,
+
+    /** The walks' restarts, its low word then its high one. */
     metal_restarts_k = 9,
+
+    /** The walks' lock attempts, its low word then its high one. */
     metal_lock_attempts_k = 11,
+
+    /** The walks' lock skips, its low word then its high one. */
     metal_lock_skips_k = 13,
+
+    /** The walks' re-selections, its low word then its high one. */
     metal_reselections_k = 15,
+
+    /** The candidates dropped at a locked row, its low word then its high one. */
     metal_locked_drops_k = 17,
+
+    /** The walks' saturations, its low word then its high one. */
     metal_saturations_k = 19,
+
+    /** The walks' tail compactions, its low word then its high one. */
     metal_tail_compactions_k = 21,
+
+    /** The candidates dropped from a tail, its low word then its high one. */
     metal_tail_dropped_k = 23,
+
+    /** A batch's per-query counts summed on the device, its low word then its high one. */
+    metal_matched_k = 25,
 
     /** The word count, padded to an even one so whatever follows a block in staging stays 8-byte
      *  aligned. */
-    metal_counter_words_k = 26,
+    metal_counter_words_k = 28,
 };
 
 } // namespace unum::usearch::utilities

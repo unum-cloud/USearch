@@ -43,6 +43,8 @@ static struct {
     {"DenseMetadata", &DenseMetadataType, &usearch_py_dense_metadata_desc},
     {"DenseIndexDescription", &DenseIndexDescriptionType, &usearch_py_dense_index_description_desc},
     {"DenseReachability", &DenseReachabilityType, &usearch_py_dense_reachability_desc},
+    {"RefineReport", &RefineReportType, &usearch_py_refine_report_desc},
+    {"Sample", &SampleType, &usearch_py_sample_desc},
     {"DenseTraversalStats", &DenseTraversalStatsType, NULL},
     {"DenseCursor", &DenseCursorType, NULL},
     {"DenseBatch", &DenseBatchType, NULL},

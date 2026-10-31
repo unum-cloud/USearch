@@ -162,7 +162,7 @@ static_assert(query<std::string_view, levenshtein_metric_t, std::string>);
 static_assert(value_codec<sentence_codec_t, std::string>);
 
 /** The transparency case: a @c string_view query - never a stored value - opens the
- *  metric's rounds, and its self-match still lands at distance zero. */
+ *  metric's rounds, and its self-match still ranks at distance zero. */
 static std::size_t check_sentences_transparent_search(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -179,7 +179,7 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
         std::vector<u32_t> assigned_ids;
         failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
-        auto const [result, status] = index.search(std::string_view {copied_value}, metric, context);
+        auto const [result, status] = index.search(std::string_view {copied_value}, {}, metric, context);
         failures += expect_eq(status, status_t::success_k);
         failures += expect(result.count > 0);
         failures += expect_eq(context.results[0].distance, u64_t {0});

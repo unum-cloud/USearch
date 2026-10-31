@@ -537,7 +537,7 @@ struct i8_cdna3_quads_kit_t {
 
 #if NUMKONG_TARGET_CDNA5
 
-/** Four signed byte products added to @p sum by @c v_dot4_i32_iu8, both operands marked signed. */
+/** Four signed byte products added to @p sum by @c v_dot4_i32_iu8, both operands flagged signed. */
 __device__ __forceinline__ int hip_dot_i8x4_cdna5(u32_t a, u32_t b, int sum) noexcept {
     return __builtin_amdgcn_sudot4(true, static_cast<int>(a), true, static_cast<int>(b), sum, false);
 }
@@ -598,7 +598,7 @@ struct i8_cdna5_quads_kit_t {
 
 #else
 
-/** The kit this unit cannot carry - MI400's signedness-marked byte dot - kept so its ladder names
+/** The kit this unit cannot carry - MI400's signedness-flagged byte dot - kept so its ladder names
  *  it whatever the unit compiles. */
 struct i8_cdna5_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
@@ -1595,7 +1595,7 @@ __device__ __forceinline__ void hip_copy_rows(storage_ const& storage, cache_ ca
 }
 
 /** The staging every ROCm device runs: each lane copies the fragments it strides over through its
- *  registers, and one wavefront barrier lands them before the staging returns. */
+ *  registers, and one wavefront barrier publishes them before the staging returns. */
 struct rocm_registers_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
@@ -1696,7 +1696,7 @@ __device__ __forceinline__ __attribute__((address_space(3))) void* hip_shared_po
 
 /*  The CDNA3 and CDNA4 staging: LDS DMA moves a unit per lane from global memory straight into the
  *  shared cache, past the registers - a 32-bit word on CDNA3, a whole fragment on CDNA4. One
- *  instruction lands a wavefront's units side by side above one wavefront-uniform base, and the
+ *  instruction stores a wavefront's units side by side above one wavefront-uniform base, and the
  *  cache rows lie back to back, so a unit's index in the staged rows is its offset in the cache.
  *  The copies count against @c vmcnt like loads, which one wait drains. A size of dependent type
  *  defers the builtin's constant check to instantiation, where it is one. */

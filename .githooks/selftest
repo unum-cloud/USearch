@@ -1,0 +1,3510 @@
+#!/usr/bin/env bash
+#
+# Feeds known-good and known-bad fixtures through the real `pre-commit` and `commit-msg` and asserts
+# the verdict. Run it after touching any check:
+#
+# .githooks/selftest
+#
+# A rejection counts only when exactly one check fired and it was the expected one, which turns
+# every rejected fixture into a false-positive test for all the other rules. Each rule also gets an
+# accepted fixture, usually prose naming the construct the rule bans.
+
+set -u
+export LC_ALL=C
+
+hooks_directory=$(cd "$(dirname "$0")" && pwd)
+scratch_root=${SELFTEST_DIR:-${TMPDIR:-/tmp}/pre-commit-selftest-$$}
+rm -rf "$scratch_root"
+mkdir -p "$scratch_root"
+trap 'rm -rf "$scratch_root"' EXIT
+
+passed_count=0
+failed_count=0
+fixture_ordinal=0
+project_namespace=$(sed -n 's/^project_namespace="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
+project_directory=$(sed -n 's/^project_name="\(.*\)"$/\1/p' "$hooks_directory/pre-commit" | tr '[:upper:]' '[:lower:]')
+
+# region Fixture Helpers
+
+# A throwaway repository outside this tree, with one empty commit so `git diff --cached` has a HEAD.
+create_fixture_repository() {
+    fixture_ordinal=$((fixture_ordinal + 1))
+    fixture_directory="$scratch_root/fixture-$fixture_ordinal"
+    mkdir -p "$fixture_directory"
+    git -C "$fixture_directory" init --quiet
+    git -C "$fixture_directory" config user.email selftest@example.invalid
+    git -C "$fixture_directory" config user.name Selftest
+    git -C "$fixture_directory" commit --quiet --allow-empty -m "Chore: Seed the fixture"
+}
+
+# Stages stdin at the path, behind the file header every C-family source carries.
+stage_fixture_with_header() { # stage_fixture_with_header <relative-path> <<< content
+    create_fixture_repository
+    local fixture_path="$fixture_directory/$1"
+    mkdir -p "$(dirname "$fixture_path")"
+    case "$1" in
+    *.h | *.hpp | *.c | *.cpp | *.cu | *.cuh | *.hip | *.metal)
+        {
+            printf '/**\n *  @file %s\n *  @author Selftest\n *  @date January 1, 2026\n' "$1"
+            printf ' *  @brief One staged fixture for one rule.\n *\n *  The case under test follows.\n */\n'
+            printf '#pragma once\n\n'
+            cat
+        } > "$fixture_path"
+        ;;
+    *.go)
+        {
+            printf '// File: %s\n// Author: Selftest\n// Date: January 1, 2026\n\n' "$1"
+            cat
+        } > "$fixture_path"
+        ;;
+    *.rs)
+        {
+            printf '//! One staged fixture for one rule.\n//!\n//! File: %s\n//! Author: Selftest\n//! Date: January 1, 2026\n\n' "$1"
+            cat
+        } > "$fixture_path"
+        ;;
+    *.py | *.pyi)
+        {
+            printf '"""One staged fixture for one rule.\n\nFile: %s\nAuthor: Selftest\nDate: January 1, 2026\n"""\n\n' "$1"
+            cat
+        } > "$fixture_path"
+        ;;
+    *.ts | *.mts | *.js | *.mjs | *.cjs | *.swift)
+        {
+            printf '/**\n *  @file %s\n *  @author Selftest\n *  @date January 1, 2026\n *  @brief One staged fixture for one rule.\n */\n\n' "$1"
+            cat
+        } > "$fixture_path"
+        ;;
+    *) cat > "$fixture_path" ;;
+    esac
+    git -C "$fixture_directory" add -- "$1"
+}
+
+# Stages one more file into the current fixture, behind the same header, so a rule can see a
+# sibling.
+stage_sibling_with_header() { # stage_sibling_with_header <relative-path> <<< content
+    local sibling_path="$fixture_directory/$1"
+    mkdir -p "$(dirname "$sibling_path")"
+    {
+        printf '/**\n *  @file %s\n *  @author Selftest\n *  @date January 1, 2026\n' "$1"
+        printf ' *  @brief One staged fixture for one rule.\n *\n *  The case under test follows.\n */\n'
+        printf '#pragma once\n\n'
+        cat
+    } > "$sibling_path"
+    git -C "$fixture_directory" add -- "$1"
+}
+
+# Commits the fixture first, then applies a sed edit and stages it, for the rules about rewriting a
+# line.
+stage_edited_fixture() { # stage_edited_fixture <relative-path> <sed-expression>
+    create_fixture_repository
+    local fixture_path="$fixture_directory/$1"
+    mkdir -p "$(dirname "$fixture_path")"
+    {
+        printf '/**\n *  @file %s\n *  @author Selftest\n *  @date January 1, 2026\n' "$1"
+        printf ' *  @brief One staged fixture for one rule.\n *\n *  The case under test follows.\n */\n'
+        printf '#pragma once\n\nint settled(void);\n'
+    } > "$fixture_path"
+    git -C "$fixture_directory" add -- "$1"
+    git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+    sed "$2" "$fixture_path" > "$fixture_path.edited" && mv "$fixture_path.edited" "$fixture_path"
+    git -C "$fixture_directory" add -- "$1"
+}
+
+# Stages stdin at the path exactly as given, for the rules about the file header itself.
+stage_fixture_verbatim() { # stage_fixture_verbatim <relative-path> <<< content
+    create_fixture_repository
+    local fixture_path="$fixture_directory/$1"
+    mkdir -p "$(dirname "$fixture_path")"
+    cat > "$fixture_path"
+    git -C "$fixture_directory" add -- "$1"
+}
+
+run_precommit() { # run_precommit [--all-lines <relative-path>...]
+    hook_output=$(cd "$fixture_directory" && "$hooks_directory/pre-commit" "$@" 2>&1)
+    hook_status=$?
+    fired_count=$(printf '%s\n' "$hook_output" | sed -n 's/^pre-commit: \([0-9][0-9]*\) check(s) failed$/\1/p')
+    [ -n "$fired_count" ] || fired_count=0
+}
+
+report_failure() { # report_failure <label> <detail>
+    failed_count=$((failed_count + 1))
+    echo "FAIL  $1"
+    echo "      $2"
+    printf '%s\n' "$hook_output" | sed 's/^/      | /' | head -8
+}
+
+expect_rejection() { # expect_rejection <label> <phrase-identifying-the-rule>
+    if [ "$hook_status" -eq 0 ]; then
+        report_failure "$1" "expected a rejection, the hook accepted it"
+    elif ! printf '%s\n' "$hook_output" | grep -qF -- "$2"; then
+        report_failure "$1" "rejected, but not by the expected rule, wanted: $2"
+    elif [ "$fired_count" -ne 1 ]; then
+        report_failure "$1" "$fired_count rules fired, expected exactly 1; another rule is over-matching"
+    else
+        passed_count=$((passed_count + 1))
+    fi
+}
+
+expect_acceptance() { # expect_acceptance <label>
+    if [ "$hook_status" -ne 0 ]; then
+        report_failure "$1" "expected acceptance, $fired_count rule(s) rejected it"
+    else
+        passed_count=$((passed_count + 1))
+    fi
+}
+
+assert_rejects() { # assert_rejects <label> <phrase> <relative-path> <<< content
+    stage_fixture_with_header "$3"
+    run_precommit
+    expect_rejection "$1" "$2"
+}
+
+assert_accepts() { # assert_accepts <label> <relative-path> <<< content
+    stage_fixture_with_header "$2"
+    run_precommit
+    expect_acceptance "$1"
+}
+
+assert_verbatim_rejects() { # assert_verbatim_rejects <label> <phrase> <relative-path> <<< content
+    stage_fixture_verbatim "$3"
+    run_precommit
+    expect_rejection "$1" "$2"
+}
+
+assert_verbatim_accepts() { # assert_verbatim_accepts <label> <relative-path> <<< content
+    stage_fixture_verbatim "$2"
+    run_precommit
+    expect_acceptance "$1"
+}
+
+run_commit_msg() { # run_commit_msg <<< message
+    fixture_ordinal=$((fixture_ordinal + 1))
+    local message_path="$scratch_root/message-$fixture_ordinal"
+    cat > "$message_path"
+    hook_output=$("$hooks_directory/commit-msg" "$message_path" 2>&1)
+    hook_status=$?
+}
+
+assert_message_rejects() { # assert_message_rejects <label> <phrase> <<< message
+    run_commit_msg
+    if [ "$hook_status" -eq 0 ]; then
+        report_failure "$1" "expected a rejection, commit-msg accepted it"
+    elif ! printf '%s\n' "$hook_output" | grep -qF -- "$2"; then
+        report_failure "$1" "rejected, but not for the expected reason, wanted: $2"
+    else
+        passed_count=$((passed_count + 1))
+    fi
+}
+
+assert_message_accepts() { # assert_message_accepts <label> <<< message
+    run_commit_msg
+    if [ "$hook_status" -ne 0 ]; then
+        report_failure "$1" "expected acceptance, commit-msg rejected it"
+    else
+        passed_count=$((passed_count + 1))
+    fi
+}
+
+# endregion Fixture Helpers
+
+# region Doxygen Block Fixtures
+
+assert_accepts "the header preamble alone" include/usearch/probe.h <<'FIXTURE'
+int probe(void);
+FIXTURE
+
+assert_rejects "param without direction" "has a @param without" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @param value The value.
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "param spelled inout" "has a @param without" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @param[inout] value The value.
+ */
+int probe(int *value);
+FIXTURE
+
+assert_accepts "param with direction" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @param[in] value The value.
+ *  @param[in,out] total The running total.
+ */
+int probe(int value, int *total);
+FIXTURE
+
+assert_rejects "Markdown emphasis" "uses Markdown emphasis" include/usearch/probe.h <<'FIXTURE'
+/** Reads the **whole** buffer. */
+int probe(void);
+FIXTURE
+
+assert_accepts "C keyword spellings" include/usearch/probe.h <<'FIXTURE'
+/** Reads through a __restrict__ pointer and a __half2float(__x) call. */
+int probe(void);
+FIXTURE
+
+assert_rejects "backtick span in a docblock" "puts a backtick span in a docblock" include/usearch/probe.h <<'FIXTURE'
+/** Reads @p `value` once. */
+int probe(int value);
+FIXTURE
+
+assert_accepts "backtick span in a line comment" include/usearch/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(void) {
+    // Reads `value` once.
+    return 0;
+}
+FIXTURE
+
+assert_accepts "markup command alone" include/usearch/probe.h <<'FIXTURE'
+/** Reads @p value once, never a backticked token. */
+int probe(int value);
+FIXTURE
+
+assert_rejects "glued Doxygen command" "glues a Doxygen command" include/usearch/probe.h <<'FIXTURE'
+/** Reads the value (@p value) once. */
+int probe(int value);
+FIXTURE
+
+assert_accepts "free-standing Doxygen command" include/usearch/probe.h <<'FIXTURE'
+/** Reads @p value once, as ash@example.invalid would. */
+int probe(int value);
+FIXTURE
+
+assert_rejects "C library and C++ headers in one group" "misgroups its includes" include/usearch/probe.h <<'FIXTURE'
+#include <cstdint>
+#include <span>
+FIXTURE
+
+assert_accepts "include groups in order, a blank line apart" include/usearch/probe.h <<FIXTURE
+#include <cstdint>
+
+#include <sys/types.h>
+
+#include <span>
+
+#include <fmt/core.h>
+
+#include <numkong/numkong.hpp>
+
+#include "$project_directory/probe_internal.h"
+FIXTURE
+
+assert_rejects "own header in angle brackets" "is an own header" include/usearch/probe.h <<FIXTURE
+#include <$project_directory/probe_internal.h>
+FIXTURE
+
+assert_rejects "sibling header in quotes" "is a sibling header" include/usearch/probe.h <<'FIXTURE'
+#include "numkong/numkong.hpp"
+FIXTURE
+
+assert_rejects "quoted header that is not in the repository" "is not in this repository" include/usearch/probe.h <<'FIXTURE'
+#include "probe_internal.h"
+FIXTURE
+
+stage_fixture_with_header bench/probe.cpp <<'FIXTURE'
+#include <vector>
+
+#include "harness.h"
+FIXTURE
+stage_sibling_with_header bench/harness.h <<'FIXTURE'
+int harness(void);
+FIXTURE
+run_precommit
+expect_acceptance "quoted header beside the including file"
+
+stage_fixture_with_header c/$project_directory/probe.h <<'FIXTURE'
+#include "probe_internal.h"
+FIXTURE
+stage_sibling_with_header c/$project_directory/probe_internal.h <<'FIXTURE'
+int probe_internal(void);
+FIXTURE
+run_precommit
+expect_rejection "public header quoted without the prefix" "is a public header"
+
+assert_accepts "misordered includes under an #if" include/usearch/probe.h <<'FIXTURE'
+#include <span>
+#if defined(PROBE_EXTRAS)
+#include <cstdint>
+#endif
+FIXTURE
+
+assert_rejects "misordered includes after an #endif" "misgroups its includes" include/usearch/probe.h <<'FIXTURE'
+#if defined(PROBE_EXTRAS)
+#include <windows.h>
+#endif
+#include <span>
+#include <cstdint>
+FIXTURE
+
+assert_rejects "misordered includes inside an include guard" "misgroups its includes" include/usearch/probe.h <<'FIXTURE'
+#ifndef PROBE_H_
+#define PROBE_H_
+#include <span>
+#include <cstdint>
+#endif
+FIXTURE
+
+assert_rejects "double-spaced Doxygen command" "aligns Doxygen text into columns" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief  Reads the value once.
+ *
+ *  Never twice, as the value is volatile.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "parameter descriptions aligned into a column" "aligns Doxygen text into columns" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes two values.
+ *  @param[in] a     The first value.
+ *  @param[in] count The second value.
+ */
+int probe(int a, int count);
+FIXTURE
+
+assert_accepts "single-spaced Doxygen text" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes two values.
+ *  @param[in] a The first value.
+ *  @param[in] count The second value.
+ */
+int probe(int a, int count);
+FIXTURE
+
+assert_rejects "@see naming an identifier" "mixes the cross-reference tags" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @see probe_serial
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "inline cross-reference" "writes @sa or @see mid-line" include/usearch/probe.h <<'FIXTURE'
+/** Agrees to polynomial precision, as in @sa probe_serial. */
+int probe(void);
+FIXTURE
+
+assert_accepts "@sa for identifiers, @see for URLs" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @sa probe_serial
+ *  @see Probe reference: https://example.invalid/probe
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "section without anchor" "without a domain_topic anchor" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @section Finalize Output Types
+ *
+ *  Body.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "section anchor without a domain" "without a domain_topic anchor" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @section references References
+ *
+ *  Body.
+ */
+int probe(void);
+FIXTURE
+
+stage_fixture_with_header include/usearch/first.h <<'FIXTURE'
+/**
+ *  @section probe_shared Shared Topic
+ *
+ *  Body.
+ */
+int first(void);
+FIXTURE
+stage_sibling_with_header include/usearch/second.h <<'FIXTURE'
+/**
+ *  @section probe_shared Shared Topic
+ *
+ *  Body.
+ */
+int second(void);
+FIXTURE
+run_precommit
+if [ "$hook_status" -ne 0 ] && printf '%s\n' "$hook_output" | grep -qF "reuses a Doxygen section anchor"; then
+    passed_count=$((passed_count + 1))
+else
+    report_failure "duplicated section anchor" "expected the anchor-uniqueness rule to reject it"
+fi
+
+assert_accepts "section with anchor" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @section probe_finalize Finalize Output Types
+ *
+ *  Body.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "trailing member doc" "with a trailing marker" include/usearch/probe.h <<'FIXTURE'
+struct probe_t {
+    int value; /// The value.
+};
+FIXTURE
+
+assert_accepts "member doc above the member" include/usearch/probe.h <<'FIXTURE'
+struct probe_t {
+
+    /** The value, never a trailing ///< column. */
+    int value;
+};
+FIXTURE
+
+assert_rejects "bare trailing doc marker" "with a trailing marker" include/usearch/probe.h <<'FIXTURE'
+static int probe_value; //< The value.
+FIXTURE
+
+assert_rejects "trailing field comment" "on its own line's tail" include/usearch/probe.h <<'FIXTURE'
+typedef struct {
+    int value; // The value.
+} probe_t;
+FIXTURE
+
+assert_rejects "trailing enumerator comment" "on its own line's tail" include/usearch/probe.h <<'FIXTURE'
+enum {
+    probe_one_k = 1, /* One. */
+};
+FIXTURE
+
+assert_accepts "why comment trailing a statement" include/usearch/probe.h <<'FIXTURE'
+static int probe(int value) {
+    return value + 1; // Rounds up.
+}
+FIXTURE
+
+assert_rejects "removed linkage macro" "uses a removed linkage macro" include/usearch/probe.h <<'FIXTURE'
+NUMKONG_API_COMPTIME int probe_serial(int value);
+FIXTURE
+
+assert_rejects "unapproved code-generation macro" "nobody approved" include/usearch/probe.h <<'FIXTURE'
+#define nk_define_probe_unapproved_(name) \
+    void probe_##name##_serial(void) {}
+FIXTURE
+
+assert_rejects "shape with x" "spells a shape" include/usearch/probe.h <<'FIXTURE'
+/** Returns a matrix of shape [rows x columns]. */
+int probe(void);
+FIXTURE
+
+assert_accepts "shape in bold brackets" include/usearch/probe.h <<'FIXTURE'
+/** Returns a matrix of shape @b [rows,columns], packed as 8 × 16-bit lanes, read at [max_lane]. */
+int probe(void);
+FIXTURE
+
+assert_accepts "pointer dereference statements are code" include/usearch/probe.h <<'FIXTURE'
+static inline void probe(int *max_value_output, int *max_index_output, int const *slots, int max_slot) {
+    *max_value_output = slots[max_slot],
+    *max_index_output = slots[max_slot * 16];
+}
+FIXTURE
+
+assert_rejects "formula in backticks" "puts a formula in backticks" include/usearch/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(void) {
+    // Computes `1/√x` quickly.
+    return 0;
+}
+FIXTURE
+
+assert_rejects "formula in TeX dollars" "puts a formula in backticks" include/usearch/probe.h <<'FIXTURE'
+/** Accumulates $A*B$ over the whole stream. */
+int probe(void);
+FIXTURE
+
+assert_accepts "formula in Unicode prose" include/usearch/probe.h <<'FIXTURE'
+/** Computes 1/√x quickly, as Σᵢ xᵢ² over @c values. */
+int probe(void);
+FIXTURE
+
+assert_rejects "docblock against the line above" "opens a docblock against" include/usearch/probe.h <<'FIXTURE'
+int first(void);
+/** Second. */
+int second(void);
+FIXTURE
+
+assert_accepts "stacked copydoc lines" include/usearch/probe.h <<'FIXTURE'
+/** First. */
+int first(void);
+/** @copydoc first */
+int second(void);
+/** @copydoc first */
+int third(void);
+FIXTURE
+
+assert_rejects "orphan docblock" "documents no single declaration" include/usearch/probe.h <<'FIXTURE'
+struct probe_t {
+    int value;
+
+    /** Dangling. */
+};
+FIXTURE
+
+assert_rejects "docblock over explicit instantiations" "documents no single declaration" include/probe.hpp <<'FIXTURE'
+template <typename value_type_> struct probe {};
+
+/** Instantiations compile every probe. */
+template struct probe<int>;
+template struct probe<long>;
+FIXTURE
+
+assert_rejects "docblock detached by an empty line" "documents no single declaration" include/probe.hpp <<'FIXTURE'
+/** Helpers for the probes below. */
+
+inline int probe_once() { return 1; }
+FIXTURE
+
+assert_accepts "group note as a plain block" include/probe.hpp <<'FIXTURE'
+template <typename value_type_> struct probe {};
+
+/*  Instantiations compile every probe. */
+template struct probe<int>;
+template struct probe<long>;
+FIXTURE
+
+assert_verbatim_accepts "file header above a blank line and the pragma" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @file include/usearch/probe.h
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+
+#pragma once
+
+int probe(void);
+FIXTURE
+
+assert_verbatim_rejects "misordered file header" "misorders its file header" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief One staged fixture for one rule.
+ *  @file include/usearch/probe.h
+ *  @author Selftest
+ *  @date January 1, 2026
+ */
+#pragma once
+
+int probe(void);
+FIXTURE
+
+assert_verbatim_rejects "file header naming another path" "misorders its file header" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @file include/usearch/other.h
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+#pragma once
+
+int probe(void);
+FIXTURE
+
+assert_verbatim_accepts "header brief hanging over two lines" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @file include/usearch/probe.h
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule, with a summary long enough that it has to hang over a
+ *      second line, which it does here.
+ */
+#pragma once
+
+int probe(void);
+FIXTURE
+
+assert_rejects "brief on a lone paragraph" "tags a one-paragraph docblock" include/usearch/probe.h <<'FIXTURE'
+/** @brief Lonely. */
+int probe(void);
+FIXTURE
+
+assert_rejects "summary above a section without brief" "whose summary sits above a section" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  Summary without the tag.
+ *
+ *  @param[in] value The value.
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "brief past three lines" "lets a tag entry run past three lines" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value whose summary is long enough to wrap, spelling out every constraint it
+ *      keeps across the call, and then some more, so that it has to hang over a second line, and
+ *      then a third line, and then yet another line past the limit of three lines, which is one too
+ *      many for any summary that wants to stay a summary.
+ *  @param[in] value The value.
+ */
+int probe(int value);
+FIXTURE
+
+assert_accepts "parameter names inside a bold shape" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes the entries.
+ *  @param[in] entries_count How many entries @p values holds.
+ *  @param[in] values Values of shape @b [entries_count,depth_count].
+ *  @param[in] depth_count How many values each entry holds.
+ */
+int probe(int entries_count, float const *values, int depth_count);
+FIXTURE
+
+assert_rejects "orphan last line" "leaves an orphan of one or two words" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief The standing instruction the store consults, plus the tally of calls that reached the
+ *      store.
+ *  @return The count.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "ALL-CAPS emphasis in a comment" "uses ALL-CAPS emphasis in a comment" include/usearch/probe.h <<'FIXTURE'
+/** The comparator MUST be transparent. */
+int probe(void);
+FIXTURE
+
+assert_rejects "bare qualified name" "writes a qualified name bare in doc prose" include/usearch/probe.h <<'FIXTURE'
+/** Lookups are heterogeneous, just like std::map and std::set. */
+int probe(void);
+FIXTURE
+
+assert_rejects "inline code block" "has a malformed code block" include/usearch/probe.h <<'FIXTURE'
+/** The comparator defines @code{.cpp} using is_transparent = void; @endcode to enable this. */
+int probe(void);
+FIXTURE
+
+assert_accepts "marked qualified names" include/usearch/probe.h <<'FIXTURE'
+/** Lookups are heterogeneous, just like @c std::map and @c std::set<int>. */
+int probe(void);
+FIXTURE
+
+assert_accepts "member named in a one-line body, and a concept" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+
+    /** Grows the storage, keeping the identifier space from @c id_space in step. */
+    void resize(int count) { id_space(count); }
+
+    /** The identifier space. */
+    int id_space(int count);
+};
+
+/** Types whose alignment fits @c max_align_t. */
+template <typename type_>
+concept aligned_type = requires(type_ value) { alignof(type_) <= alignof(max_align_t); };
+FIXTURE
+
+assert_rejects "suffixed variable template" "suffixes a variable template" test/probe.cpp <<'FIXTURE'
+/** Half-precision types, judged against an error bound. */
+template <typename scalar_type_>
+constexpr bool bounded_k = sizeof(scalar_type_) == 2;
+FIXTURE
+
+assert_accepts "bare variable template and a suffixed constant" test/probe.cpp <<'FIXTURE'
+/** Half-precision types, judged against an error bound. */
+template <typename scalar_type_>
+constexpr bool bounded = sizeof(scalar_type_) == 2;
+
+/** The tolerance every bounded type shares. */
+constexpr double tolerance_k = 1e-3;
+FIXTURE
+
+assert_accepts "suffixed constants inside a function template's body" test/probe.cpp <<'FIXTURE'
+template <typename indexes_type_>
+std::size_t probe(u64_t seed) {
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t samples_k = 32;
+    constexpr std::size_t wanted_k = 10;
+    return samples_k + wanted_k + seed;
+}
+FIXTURE
+
+assert_rejects "tag right below a body paragraph" "starts a tag section right below a body paragraph" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Steals work from a neighbour.
+ *
+ *  Probing the neighbours in a coprime order keeps two drained threads apart.
+ *  @sa probe_serial
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "note past three lines" "lets a tag entry run past three lines" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Do several threads see one address space, so atomics and parks mean anything?
+ *  @note Always true where a kernel schedules the threads. On WebAssembly it is a build-time
+ *      choice: @c -pthread puts each worker on its own Web Worker over a shared memory. Without it
+ *      a module has one thread, and @c std::atomic degenerates to plain loads as no other thread
+ *      can contend for the same address.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "continuation aligned under the tag text" "misaligns a continuation line" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value whose summary is long enough to wrap, spelling out every constraint it
+ *         keeps across the call.
+ *  @param[in] value The value.
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "bullet continuation hanging past its text" "misaligns a continuation line" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  - First item, whose description is long enough to wrap, spelling out every constraint that it
+ *      keeps across the call.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "bullet past three lines" "writes a list item past three lines" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lists the rejected experiments.
+ *
+ *  - RCPPS with Newton-Raphson refinement: fast reciprocal approximation, ~4 cycles, with one
+ *    refinement iteration for ~22-bit precision, tested as an alternative to VDIVPS, ~11 cycles.
+ *    Did not improve performance combined with Estrin's scheme, likely because the division is not
+ *    on the critical path when processing large arrays of inputs.
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "hanging tag and bullet continuations" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value whose summary is long enough to wrap, spelling out every constraint it
+ *      keeps across the call.
+ *  @param[in] value The value, whose description is also long enough to wrap onto another line of
+ *      its own, with room to spare.
+ *
+ *  - First item, whose description is long enough to wrap, spelling out every constraint that it
+ *    keeps across the call.
+ *  1. Numbered item, whose description is long enough to wrap, spelling out every constraint it
+ *     keeps across the call.
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "untagged block on bare lines" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/** Prose that runs long enough to wrap onto a second line, spelling out every constraint it keeps
+ *  across the call.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "tagged block squeezed onto the opener" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/** @brief Probes a value.
+ *  @param[in] value The value. */
+int probe(int value);
+FIXTURE
+
+assert_accepts "untagged prose closing on its last line" include/usearch/probe.h <<'FIXTURE'
+/** Prose that runs long enough to wrap onto a second line, spelling out every constraint it keeps
+ *  across the call. */
+int probe(void);
+FIXTURE
+
+assert_rejects "plain comment opening on text, closing bare" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/*  Backends from Ampere on, with every call asynchronous on its stream and every pointer reachable
+ *  from the device.
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "plain comments with symmetric brackets" include/usearch/probe.h <<'FIXTURE'
+/*  Backends from Ampere on, with every call asynchronous on its stream and every pointer reachable
+ *  from the device. */
+int first(void);
+
+/*  Backends from Ampere on, with every call asynchronous on its stream and every pointer reachable
+ *  from the device.
+ *
+ *  A second paragraph closes on its last line. */
+int second(void);
+FIXTURE
+
+assert_rejects "note inside a preprocessor section" "opens a section with a note inside it" include/usearch/probe.h <<'FIXTURE'
+#if PROBE_TARGET_WFET
+
+/*  WFET has no MSVC intrinsic, so the timed waiter is inline-assembly only. */
+int probe(void);
+
+#endif // PROBE_TARGET_WFET
+FIXTURE
+
+assert_rejects "note past a section's target pragmas" "opens a section with a note inside it" include/usearch/probe.h <<'FIXTURE'
+#if PROBE_TARGET_RELAXED
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("relaxed-simd"))), apply_to = function)
+#endif
+
+/*  The relaxed dot product forms pairwise products of signed and 7-bit bytes. */
+int probe(void);
+
+#endif // PROBE_TARGET_RELAXED
+FIXTURE
+
+assert_verbatim_accepts "note opening a file inside its include guard" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @file include/usearch/probe.h
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+#ifndef PROBE_H_
+#define PROBE_H_
+
+/*  The probe family has one kernel. */
+int probe(void);
+
+#endif // PROBE_H_
+FIXTURE
+
+assert_accepts "note on a nested directive, a group label, and a guard spelled with defined" include/usearch/probe.h <<'FIXTURE'
+/*  Debugging and testing. */
+#if !defined(PROBE_DEBUG)
+#define PROBE_DEBUG 0
+#define PROBE_TRACE 0
+#endif
+
+#if PROBE_TARGET_EMSCRIPTEN
+#include <emscripten.h>
+
+/*  The probes trip strict-prototype warnings, silenced for this block alone. */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#endif
+
+/*  Loads: plain and acquire. */
+
+int probe(void);
+#endif // PROBE_TARGET_EMSCRIPTEN
+FIXTURE
+
+assert_accepts "note above a preprocessor section, and a branch note inside a body" include/usearch/probe.h <<'FIXTURE'
+/*  WFET has no MSVC intrinsic, so the timed waiter is inline-assembly only. */
+#if PROBE_TARGET_WFET
+int probe(void) {
+#if PROBE_TARGET_X86
+    /* The x86 path pauses instead. */
+    return 1;
+#endif
+    return 0;
+}
+#endif // PROBE_TARGET_WFET
+FIXTURE
+
+assert_rejects "plain comment on bare lines" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/*
+ *  Layer 2 is capabilities, each answering exactly one question.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "verbatim block squeezed onto its brackets" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/** Tri-state glyphs:
+ *  @verbatim
+ *  ● compiled and usable
+ *  ○ neither
+ *  @endverbatim */
+int probe(void);
+FIXTURE
+
+assert_rejects "section without air" "crams an @section" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value first.
+ *  @section probe_topic Topic
+ *
+ *  Body.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "statuses without air" "crams a @par" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @par Statuses:
+ *  - @c success_k
+ */
+status_t probe(void);
+FIXTURE
+
+assert_rejects "code block without language" "has a malformed code block" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Shows usage.
+ *
+ *  @code
+ *  probe();
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "code block never closed" "has a malformed code block" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Shows usage.
+ *
+ *  @code{.c}
+ *  probe();
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "code block with language, wide inside" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Shows usage.
+ *
+ *  @code{.c}
+ *  int const result = probe(); // a code line may run past the prose limit when it has to, like this one
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "comment in a macro padded to its backslash" include/usearch/probe.h <<'FIXTURE'
+#define probe_(name)                                                                                   \
+    /* Short note inside a macro body. */                                                             \
+    int name(void)
+FIXTURE
+
+assert_accepts "argument-name comments opening a code line" include/usearch/probe.h <<'FIXTURE'
+static inline int probe(int first, int second, int third) {
+    return probe_call(first, second, third,
+                      /*output_scale=*/1.0f, /*accumulate=*/0, /*stream=*/0, /*reserved=*/0, /*options=*/0);
+}
+FIXTURE
+
+assert_rejects "prose past 100 columns" "writes prose past 100 columns" include/usearch/probe.h <<'FIXTURE'
+/** A sentence that keeps going well past the prose limit of one hundred columns, and then some more. */
+int probe(void);
+FIXTURE
+
+assert_accepts "Unicode prose at 100 characters" include/usearch/probe.h <<'FIXTURE'
+/** A formula Σᵢ √xᵢ × yᵢ counts characters rather than bytes, so this line fits the limit here. */
+int probe(void);
+FIXTURE
+
+assert_rejects "prose past 100 columns in a HIP source" "writes prose past 100 columns" probe.hip <<'FIXTURE'
+/** A sentence that keeps going well past the prose limit of one hundred columns, and then some more. */
+int probe(void);
+FIXTURE
+
+assert_rejects "pipe table" "draws a pipe table" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lists the instructions.
+ *
+ *  | Instruction | Notes |
+ *  | lxsihzx | Load f16 → VSR, zero-extended |
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "pipe table in a Python comment" "draws a pipe table" python/probe.py <<'FIXTURE'
+# | Kernel | Notes |
+# | dots | Inner products |
+FIXTURE
+
+assert_accepts "aligned plain table" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lists the instructions.
+ *
+ *  @verbatim
+ *  Instruction   Notes
+ *  lxsihzx       Load f16 → VSR, zero-extended
+ *  xscvhpdp      Convert half → double precision
+ *  @endverbatim
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "indented code sample inside a line comment" include/usearch/probe.h <<'FIXTURE'
+static inline int probe(int count) {
+    // The loop below replaces a vector compare that is only available for narrower integers:
+    //
+    //      int total = 0;
+    //      for (int index = 0; index < count; index++) {
+    //          total += index;
+    //      }
+    return count;
+}
+FIXTURE
+
+assert_accepts "marked notes filled across lines, and a greeting in a code sample" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  @code{.cpp}
+ *  std::printf("Hi from thread %zu\n", index);
+ *  @endcode
+ */
+static inline int probe(int count) {
+    // ! The decrement must come after the task is executed, because the release ordering chains
+    // ! every contributor's writes into the last one.
+    // ? A plain note follows the marked one without merging into it.
+    return count;
+}
+FIXTURE
+
+assert_accepts "labelled field lines in a docblock" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  Tests: Baseline probing, growth and tombstone reuse on the cheapest possible key.
+ *  Lookup: exact key only.
+ *  Memory: stack.
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "labelled lines start fresh" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Packs two nibbles per byte.
+ *
+ *  Layout: [high nibble : low nibble].
+ *  Range per element: [0, 15].
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "one sentence per line" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Packs two nibbles per byte.
+ *
+ *  Elements are zero-extended to u8.
+ *  Arithmetic then runs in u8 lanes.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "glued Unicode arrow" "glues a Unicode arrow" include/usearch/probe.h <<'FIXTURE'
+/** Converts FP8→FP16 in one instruction. */
+int probe(void);
+FIXTURE
+
+assert_accepts "spaced Unicode arrow, glued one in code" include/usearch/probe.h <<'FIXTURE'
+/** Converts FP8 → FP16 in one instruction. */
+static inline int probe(void) {
+    // Spelled `a→b` in code.
+    return 0;
+}
+FIXTURE
+
+assert_accepts "single name with @c, a longer span in tt" include/usearch/probe.h <<'FIXTURE'
+/** Marks helpers with @c __arm_locally_streaming and calls <tt>probe(values, count)</tt> once. */
+int probe(void);
+FIXTURE
+
+assert_rejects "table outside verbatim" "lays out a table outside @verbatim" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Compares the types.
+ *
+ *      Type          Speed
+ *      double        1.0x
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "markup inside verbatim" "lays out a table outside @verbatim" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Compares the types.
+ *
+ *  @verbatim
+ *  Type                Speed
+ *  `boost::float128`   91x
+ *  @endverbatim
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "table split into adjacent verbatim blocks" "lays out a table outside @verbatim" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lists the variables.
+ *
+ *  @verbatim
+ *  PROBE_SEED=N        - RNG seed
+ *  @endverbatim
+ *
+ *  @verbatim
+ *  PROBE_BUDGET_SECS=N - Time budget
+ *  @endverbatim
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "piped fields" "separates fields with pipes" include/usearch/probe.h <<'FIXTURE'
+/** Lookup: heterogeneous | Copy: Trivial | Memory: Stack */
+int probe(void);
+FIXTURE
+
+assert_rejects "underfilled paragraph" "leaves a prose line underfilled" include/usearch/probe.h <<'FIXTURE'
+/** Quantization keeps i16 from saturating, as the worst pair sum stays below the limit, and then
+ *  XOR-0x80 turns signed queries
+ *  unsigned before the u8 dot product. */
+int probe(void);
+FIXTURE
+
+assert_accepts "paragraph wrapped narrow throughout" include/usearch/probe.h <<'FIXTURE'
+/** Quantization keeps i16 from saturating, as the worst pair
+ *  sum stays below the limit, and then XOR-0x80 turns signed
+ *  queries unsigned before the u8 dot product runs. */
+int probe(void);
+FIXTURE
+
+assert_accepts "filled paragraph and a line ending in a colon" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Quantization keeps i16 from saturating, as the worst pair sum stays below the limit, and
+ *      XOR-0x80 turns signed queries unsigned.
+ *
+ *  The two steps are:
+ *  1. Quantize.
+ *  2. Correct the bias.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "abbreviated register role" "abbreviates a word this project spells out" include/usearch/probe.h <<'FIXTURE'
+static inline int probe(int sum_hi) { return sum_hi; }
+FIXTURE
+
+assert_accepts "register roles spelled out" include/usearch/probe.h <<'FIXTURE'
+/** Splits the word into its high and low halves, never into a hint or a lookup. */
+static inline int probe(int sum_high) { return sum_high; }
+FIXTURE
+
+assert_rejects "abbreviation in prose" "abbreviates a word this project spells out" include/usearch/probe.h <<'FIXTURE'
+/** Copies the tmp value into place. */
+static inline int probe(int value) { return value; }
+FIXTURE
+
+assert_accepts "prose naming a parameter, a mnemonic and a code span" include/usearch/probe.h <<'FIXTURE'
+/** Reads @p buffer with CNT, as <tt>buffer[0]</tt> does, and widens the value. */
+static inline int probe(int const *buffer) { return buffer[0]; }
+FIXTURE
+
+stage_fixture_with_header include/usearch/probe.h <<'FIXTURE'
+typedef int const *probe_buf_t;
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+stage_sibling_with_header include/usearch/probe/serial.h <<'FIXTURE'
+/** Reads the first value. */
+static inline int probe_serial(probe_buf_t values) { return values[0]; }
+FIXTURE
+run_precommit
+expect_acceptance "new header reusing a name from HEAD's headers"
+
+assert_rejects "line comment above a preprocessor block" "writes a // comment outside a function body" include/usearch/probe.h <<'FIXTURE'
+// EM_JS expands to an empty-parameter-list declaration, tripping -Wstrict-prototypes.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#endif
+FIXTURE
+
+assert_rejects "line comment above a file-scope declaration" "writes a // comment outside a function body" include/usearch/probe.h <<'FIXTURE'
+// Probes a value.
+int probe(void);
+FIXTURE
+
+assert_rejects "line comment inside extern C" "writes a // comment outside a function body" include/usearch/probe.h <<'FIXTURE'
+extern "C" {
+
+// Probes a value.
+int probe(void);
+}
+FIXTURE
+
+assert_accepts "block comments at file scope, line comments in bodies" include/usearch/probe.h <<FIXTURE
+/*  EM_JS expands to an empty-parameter-list declaration, which trips -Wstrict-prototypes under
+ *  Clang. */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#endif
+
+namespace ${project_namespace} {
+
+static inline int probe(void) {
+    // A note inside a body stays a line comment.
+    return 0;
+}
+
+} // namespace ${project_namespace}
+FIXTURE
+
+assert_rejects "plain comment above a single-macro conditional" "explains a macro in a plain" include/usearch/probe.h <<'FIXTURE'
+/* True when the compiler supports multi-argument subscripts. */
+#if defined(__cpp_multidimensional_subscript)
+#define PROBE_SUBSCRIPT_ 1
+#else
+#define PROBE_SUBSCRIPT_ 0
+#endif
+FIXTURE
+
+assert_accepts "docblock above a single-macro conditional, plain comment above a mixed block" include/usearch/probe.h <<'FIXTURE'
+/** True when the compiler supports multi-argument subscripts. */
+#if defined(__cpp_multidimensional_subscript)
+#define PROBE_SUBSCRIPT_ 1
+#else
+#define PROBE_SUBSCRIPT_ 0
+#endif
+
+/* Silences a warning that the macros below would otherwise trigger under Clang. */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#define PROBE_FIRST_ 1
+#endif
+FIXTURE
+
+assert_rejects "line comment documenting a member" "documents a declaration with a bare" include/usearch/probe.h <<'FIXTURE'
+struct probe_t {
+    // The value.
+    int value;
+};
+FIXTURE
+
+assert_accepts "line comment inside a function body" include/usearch/probe.h <<'FIXTURE'
+static inline int probe(void) {
+    // A local, where `//` is an implementation note.
+    int value = 0;
+    return value;
+}
+FIXTURE
+
+assert_rejects "code block cramped under its caption" "crams a @code or @verbatim block" include/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  These run as standalone objects:
+ *  @code{.py}
+ *  probe(1)  # one call
+ *  @endcode
+ */
+int probe(int value);
+FIXTURE
+
+assert_accepts "code block set apart" include/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  These run as standalone objects:
+ *
+ *  @verbatim
+ *  Input   Output
+ *  1       2
+ *  @endverbatim
+ *
+ *  The table above lists one row per input.
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "URL outside an @see entry" "cites a URL outside a titled @see" include/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  Reference: https://example.com/probe
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "@see with the title after its URL" "cites a URL outside a titled @see" include/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  @see https://example.com/probe - the probe paper
+ */
+int probe(int value);
+FIXTURE
+
+assert_accepts "titled and bare @see URLs" include/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  @see The probe paper: https://example.com/probe
+ *  @see A reference whose address runs past the prose width: https://example.com/a/very/long/path/to/the/reference/and/further/still
+ *  @see https://example.com/untitled
+ */
+int probe(int value);
+FIXTURE
+
+assert_rejects "enumerators documented in part" "documents enumerators unevenly" include/probe.h <<'FIXTURE'
+/** Kinds of probe. */
+typedef enum {
+
+    /** Reads once. */
+    probe_once_k = 0,
+    probe_twice_k = 1,
+} probe_kind_t;
+FIXTURE
+
+assert_rejects "enum docblock listing its enumerators" "documents enumerators unevenly" include/probe.h <<'FIXTURE'
+/** Kinds of probe: probe_once_k, probe_twice_k and probe_never_k. */
+typedef enum {
+    probe_once_k = 0,
+    probe_twice_k = 1,
+    probe_never_k = 2,
+} probe_kind_t;
+FIXTURE
+
+assert_accepts "enumerators each documented" include/probe.h <<'FIXTURE'
+/** Kinds of probe, by how often a probe reads its input. */
+typedef enum {
+
+    /** Reads once. */
+    probe_once_k = 0,
+
+    /** Reads twice. */
+    probe_twice_k = 1,
+
+    /** Never reads. */
+    probe_never_k = 2,
+} probe_kind_t;
+FIXTURE
+
+assert_rejects "ASCII math in a code span" "puts a formula in backticks" include/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(int value) {
+    // Returns `a^T * M * b` for the metric tensor.
+    return value;
+}
+FIXTURE
+
+assert_rejects "shape product in a code span" "puts a formula in backticks" include/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(int value) {
+    // Writes entries of shape `[tokens, heads * depth]`.
+    return value;
+}
+FIXTURE
+
+assert_accepts "code in a code span, math in Unicode" include/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(int value) {
+    // Returns aᵀ × M × b, computed as `a * b + c` once `d >= rank`.
+    return value;
+}
+FIXTURE
+
+assert_rejects "equation with marked terms" "marks the terms of an equation" include/probe.h <<'FIXTURE'
+/** Counts the subtree, whose weight is @c size = 1 + @c size(left) + @c size(right). */
+int probe(int value);
+FIXTURE
+
+assert_accepts "equation in plain prose, and a lone marked name" include/probe.h <<'FIXTURE'
+/** Counts the subtree, whose weight is size = 1 + size(left) + size(right), as @c probe reports. */
+int probe(int value);
+FIXTURE
+
+# endregion Doxygen Block Fixtures
+
+# region C and C++ Idiom Fixtures
+
+assert_rejects "unpinned string split" "splits a string literal" include/usearch/probe.h <<'FIXTURE'
+static char const *probe_text = "first half "
+                                "second half";
+FIXTURE
+
+assert_accepts "pinned string split" include/usearch/probe.h <<'FIXTURE'
+static char const *probe_text = "first half " //
+                                "second half";
+FIXTURE
+
+stage_edited_fixture include/usearch/probe.h 's/^#pragma once$/#pragma once\n#define PROBE_FIRST "first"/; s/^int settled(void);$/"second";/'
+run_precommit
+expect_acceptance "string lines apart in the file, split only by an unchanged line"
+
+assert_rejects "harness namespace missing" "does not open" bench/probe.hpp <<FIXTURE
+namespace unum {}
+FIXTURE
+
+assert_rejects "harness opens a second namespace" "opens a file-scope namespace other" bench/probe.hpp <<FIXTURE
+namespace ${project_namespace}::bench {
+} // namespace ${project_namespace}::bench
+namespace numkong {}
+FIXTURE
+
+assert_accepts "harness namespace matching its directory" bench/probe.hpp <<FIXTURE
+namespace ${project_namespace}::bench {
+/* A comment naming namespace other { never opens a scope. */
+int probe();
+} // namespace ${project_namespace}::bench
+FIXTURE
+
+assert_accepts "harness specializing a project template in its home namespace" bench/probe.hpp <<FIXTURE
+namespace ${project_namespace}::bench {
+struct key_t {};
+} // namespace ${project_namespace}::bench
+
+/*  Hashes for the fixture key, so the collection can shard it. */
+namespace ${project_namespace} {
+template <typename type_>
+struct hash;
+template <>
+struct hash<bench::key_t> {};
+} // namespace ${project_namespace}
+FIXTURE
+
+assert_rejects "punctuated region name" "punctuates a '#pragma region' name" include/probe.hpp <<'FIXTURE'
+#pragma region Probes: Hash
+inline int first() { return 1; }
+inline int second() { return 2; }
+inline int third() { return 3; }
+inline int fourth() { return 4; }
+inline int fifth() { return 5; }
+inline int sixth() { return 6; }
+inline int seventh() { return 7; }
+inline int eighth() { return 8; }
+inline int ninth() { return 9; }
+inline int tenth() { return 10; }
+inline int eleventh() { return 11; }
+inline int twelfth() { return 12; }
+inline int thirteenth() { return 13; }
+inline int fourteenth() { return 14; }
+inline int fifteenth() { return 15; }
+inline int sixteenth() { return 16; }
+inline int seventeenth() { return 17; }
+inline int eighteenth() { return 18; }
+inline int nineteenth() { return 19; }
+inline int twentieth() { return 20; }
+inline int twenty_first() { return 21; }
+inline int twenty_second() { return 22; }
+inline int twenty_third() { return 23; }
+inline int twenty_fourth() { return 24; }
+inline int twenty_fifth() { return 25; }
+inline int twenty_sixth() { return 26; }
+inline int twenty_seventh() { return 27; }
+inline int twenty_eighth() { return 28; }
+inline int twenty_ninth() { return 29; }
+inline int thirtieth() { return 30; }
+#pragma endregion Probes: Hash
+FIXTURE
+
+assert_rejects "pragma mark" "'#pragma mark'" include/probe.hpp <<'FIXTURE'
+#pragma mark Probes
+FIXTURE
+
+assert_rejects "two literal fragments on one line" "two string-literal fragments on one line" include/probe.hpp <<'FIXTURE'
+inline char const *probe() { return "first" "second"; }
+FIXTURE
+
+assert_rejects "unqualified memcpy" "unqualified memcpy" include/probe.hpp <<'FIXTURE'
+inline void probe(char *to, char const *from) { memcpy(to, from, 8); }
+FIXTURE
+
+assert_rejects "unqualified memcpy behind a return" "unqualified memcpy" include/probe.hpp <<'FIXTURE'
+inline void *probe(char *to, char const *from) { return memcpy(to, from, 8); }
+FIXTURE
+
+assert_accepts "a function named memcpy, declared and defined" include/probe.hpp <<'FIXTURE'
+inline void *memcpy(void *to, void const *from) noexcept;
+inline void *memcpy(void *to, void const *from) noexcept { return std::memcpy(to, from, 8); }
+FIXTURE
+
+assert_accepts "qualified memcpy, and prose naming the bare forms" include/probe.hpp <<'FIXTURE'
+/** Copies eight bytes with @c std::memcpy, never an unqualified memcpy or a pragma mark. */
+inline void probe(char *to, char const *from) { std::memcpy(to, from, 8); }
+FIXTURE
+
+# endregion C and C++ Idiom Fixtures
+
+# region Other Language Fixtures
+
+assert_rejects "CMake list mutation" "mutates a variable" CMakeLists.txt <<'FIXTURE'
+list(APPEND probe_sources_ probe.c)
+FIXTURE
+
+assert_rejects "CMake manual RPATH" "builds an RPATH by hand" CMakeLists.txt <<'FIXTURE'
+set_target_properties(probe PROPERTIES INSTALL_RPATH "$ORIGIN")
+FIXTURE
+
+assert_accepts "CMake variable written once" CMakeLists.txt <<'FIXTURE'
+# A variable is written once; never list(APPEND ...) it.
+set(probe_sources_ probe.c)
+FIXTURE
+
+assert_accepts "CMake foreach builds its list" CMakeLists.txt <<'FIXTURE'
+set(probe_definitions_ "")
+foreach (probe_tier_ IN ITEMS haswell skylake)
+    list(APPEND probe_definitions_ "PROBE_${probe_tier_}=1")
+endforeach ()
+FIXTURE
+
+assert_verbatim_rejects "CMake arguments parsed from ARGN" "other than through \`PARSE_ARGV" cmake/probe.cmake <<'FIXTURE'
+cmake_parse_arguments(probe "" "OUTPUT" "" ${ARGN})
+FIXTURE
+
+assert_verbatim_accepts "CMake arguments parsed through PARSE_ARGV" cmake/probe.cmake <<'FIXTURE'
+cmake_parse_arguments(
+    PARSE_ARGV 1 arg "" "OUTPUT" ""
+)
+FIXTURE
+
+assert_verbatim_rejects "CMake macro" "defines a \`macro()\`" cmake/probe.cmake <<'FIXTURE'
+macro(probe_sources)
+endmacro ()
+FIXTURE
+
+assert_verbatim_rejects "CMake function outside the project prefix" "names a function without" cmake/probe.cmake <<'FIXTURE'
+function(add_probe target_)
+endfunction ()
+FIXTURE
+
+assert_verbatim_accepts "CMake function under the project prefix, and prose naming a macro" cmake/probe.cmake <<FIXTURE
+# A macro() would leak its locals into the caller.
+function(${project_directory}_add_probe target_)
+endfunction ()
+FIXTURE
+
+assert_verbatim_rejects "CMake loop variable without its underscore" "names a loop variable" cmake/probe.cmake <<'FIXTURE'
+foreach (tier IN ITEMS haswell skylake)
+endforeach ()
+FIXTURE
+
+assert_verbatim_rejects "CMake lowercase local without its underscore" "sets a lowercase local" cmake/probe.cmake <<'FIXTURE'
+set(probe_sources probe.c)
+FIXTURE
+
+assert_verbatim_accepts "CMake lowercase cache entry" cmake/probe.cmake <<'FIXTURE'
+set(probe_target_haswell_compiles 1
+    CACHE INTERNAL "Whether the compiler targets Haswell"
+)
+FIXTURE
+
+assert_verbatim_rejects "CMake uppercase internal" "sets an uppercase name" cmake/probe.cmake <<'FIXTURE'
+set(PROBE_SOURCES probe.c)
+FIXTURE
+
+assert_verbatim_accepts "CMake variable of CMake's own, a sibling option and a packaging input" cmake/probe.cmake <<'FIXTURE'
+set(CMAKE_CXX_STANDARD 17)
+set(NUMKONG_BUILD_TEST OFF)
+set(CPACK_GENERATOR TGZ)
+FIXTURE
+
+assert_verbatim_rejects "CMake forced cache entry" "forces a cache entry" cmake/probe.cmake <<'FIXTURE'
+set(PROBE_LEVEL 1 CACHE STRING "Probe level" FORCE)
+FIXTURE
+
+assert_verbatim_accepts "CMake cache entry written once" cmake/probe.cmake <<'FIXTURE'
+set(PROBE_LEVEL 1 CACHE STRING "Probe level")
+FIXTURE
+
+assert_verbatim_rejects "CMake double dereference" "reads a name through" cmake/probe.cmake <<'FIXTURE'
+set(probe_value_ "${${probe_name_}}")
+FIXTURE
+
+assert_verbatim_accepts "CMake result through an output parameter" cmake/probe.cmake <<'FIXTURE'
+set(${output_} "${probe_value_}" PARENT_SCOPE)
+FIXTURE
+
+assert_rejects "Go pseudo-heading" "pseudo-heading" golang/probe.go <<'FIXTURE'
+package probe
+
+// Usage:
+func Probe() {}
+FIXTURE
+
+assert_rejects "Go call reference" "references an exported Go name" golang/probe.go <<'FIXTURE'
+package probe
+
+// Calls Probe() once.
+func Probe() {}
+FIXTURE
+
+assert_accepts "Go doc link" golang/probe.go <<'FIXTURE'
+package probe
+
+// Calls [Probe] once.
+func Probe() {}
+FIXTURE
+
+assert_rejects "Rust macro" "macro_rules" rust/probe.rs <<'FIXTURE'
+macro_rules! probe { () => {} }
+FIXTURE
+
+assert_rejects "Python capital emphasis" "ALL-CAPS emphasis" python/probe.py <<'FIXTURE'
+"""Reads ONLY the header."""
+FIXTURE
+
+assert_accepts "Python lowercase emphasis" python/probe.py <<'FIXTURE'
+"""Reads only the header."""
+FIXTURE
+
+stage_fixture_with_header python/probe.py <<'FIXTURE'
+import os
+def probe(value):
+    return value
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+cat >> "$fixture_directory/python/probe.py" <<'FIXTURE'
+
+
+def settled(value):
+    return value
+FIXTURE
+git -C "$fixture_directory" add -- python/probe.py
+run_precommit
+expect_acceptance "ruff debt HEAD carries outside the added lines"
+cat >> "$fixture_directory/python/probe.py" <<'FIXTURE'
+
+
+def probed(value):
+    return undefined_value
+FIXTURE
+git -C "$fixture_directory" add -- python/probe.py
+run_precommit
+expect_rejection "ruff finding on an added line beside that debt" "has ruff lint findings on its added lines"
+
+assert_rejects "Python arguments aligned into a column" "aligns docstring arguments into a column" python/probe.py <<'FIXTURE'
+"""Probes a value.
+
+Args:
+    value:   The value.
+    count:   How many times.
+"""
+FIXTURE
+
+assert_accepts "Python arguments single-spaced" python/probe.py <<'FIXTURE'
+"""Probes a value.
+
+Args:
+    value: The value.
+    count: How many times.
+"""
+FIXTURE
+
+assert_rejects "TSDoc type braces" "uses JSDoc tag syntax" javascript/probe.ts <<'FIXTURE'
+/**
+ *  Probes a value.
+ *  @param {number} value - The value.
+ */
+export function probe(value: number): void {}
+FIXTURE
+
+assert_rejects "TSDoc call reference" "references a function as a call" javascript/probe.ts <<'FIXTURE'
+/** Wraps probe() once. */
+export function probe(): void {}
+FIXTURE
+
+assert_accepts "TSDoc link" javascript/probe.ts <<'FIXTURE'
+/**
+ *  Wraps {@link probe} once.
+ *  @param value - The value.
+ */
+export function probe(value: number): void {}
+FIXTURE
+
+assert_rejects "unsorted editor settings" "unsorted top-level keys" .vscode/settings.json <<'FIXTURE'
+{
+    "b": 1,
+    "a": 2
+}
+FIXTURE
+
+assert_accepts "sorted editor settings with a comment" .vscode/extensions.json <<'FIXTURE'
+{
+    // Recommended for every contributor.
+    "recommendations": ["alpha.one", "Beta.two"]
+}
+FIXTURE
+
+# endregion Other Language Fixtures
+
+# region All File Fixtures
+
+assert_rejects "banner ruler" "adds a banner ruler" scripts/probe.sh <<'FIXTURE'
+# ----
+echo probe
+FIXTURE
+
+assert_rejects "label between rulers" "adds a banner ruler" scripts/probe.sh <<'FIXTURE'
+# ==== Probes ====
+echo probe
+FIXTURE
+
+assert_rejects "box-drawing banner in TOML" "adds a banner ruler" probe.toml <<'FIXTURE'
+# ── Probes ──────────────────
+[probe]
+name = "probe"
+FIXTURE
+
+assert_rejects "box-drawing banner in Python" "adds a banner ruler" python/probe.py <<'FIXTURE'
+# ════════════════════════════
+FIXTURE
+
+assert_accepts "YAML document marker" config/probe.yml <<'FIXTURE'
+---
+probe: key -> slot
+FIXTURE
+
+assert_accepts "region marker and arrows beside rulers" include/probe.hpp <<'FIXTURE'
+#pragma region Probes
+
+/** Maps a key → its slot. */
+inline int probe(int key) noexcept { return key; }
+
+/** Maps a key → its second slot. */
+inline int second(int key) noexcept { return key; }
+
+/** Maps a key → its third slot. */
+inline int third(int key) noexcept { return key; }
+
+/** Maps a key → its fourth slot. */
+inline int fourth(int key) noexcept { return key; }
+
+/** Maps a key → its fifth slot. */
+inline int fifth(int key) noexcept { return key; }
+
+/** Maps a key → its sixth slot. */
+inline int sixth(int key) noexcept { return key; }
+
+/** Maps a key → its seventh slot. */
+inline int seventh(int key) noexcept { return key; }
+
+/** Maps a key → its eighth slot. */
+inline int eighth(int key) noexcept { return key; }
+
+/** Maps a key → its ninth slot. */
+inline int ninth(int key) noexcept { return key; }
+
+/** Maps a key → its tenth slot. */
+inline int tenth(int key) noexcept { return key; }
+
+/** Maps a key → its last slot. */
+inline int last(int key) noexcept { return key; }
+
+#pragma endregion Probes
+FIXTURE
+
+assert_accepts "ruler in Markdown" docs/probe.md <<'FIXTURE'
+| Column |
+| ------ |
+FIXTURE
+
+assert_rejects "formatter toggle" "disables a formatter in-band" include/usearch/probe.h <<'FIXTURE'
+// clang-format off
+int probe(void);
+FIXTURE
+
+assert_rejects "double space between sentences" "double-spaces between sentences" docs/probe.txt <<'FIXTURE'
+One sentence.  Two sentences.
+FIXTURE
+
+assert_accepts "single space between sentences" docs/probe.txt <<'FIXTURE'
+One sentence. Two sentences.
+FIXTURE
+
+# endregion All File Fixtures
+
+# region Imported Rule Fixtures
+
+assert_rejects "tuple of names in backticks" "spells a tuple of names apart from a shape" include/usearch/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(void) {
+    // Reads the `(start, stop, limit)` a windowed call takes.
+    return 0;
+}
+FIXTURE
+
+assert_rejects "tuple of names bolded with spaces" "spells a tuple of names apart from a shape" include/usearch/probe.h <<'FIXTURE'
+/** Reads the @b (start, stop, limit) a windowed call takes. */
+int probe(void);
+FIXTURE
+
+assert_rejects "one-name tuple in backticks" "spells a tuple of names apart from a shape" include/usearch/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(void) {
+    // Edge queries take two names, and medium queries `(target)` alone.
+    return 0;
+}
+FIXTURE
+
+assert_accepts "tuple of names bolded as one token, beside an acronym and a call" include/usearch/probe.h <<'FIXTURE'
+/** Reads the @b (start,stop,limit) a windowed call takes, avoiding @b (CAS) loops, and calls
+ *  <tt>hints(address, level)</tt> once per window. */
+int probe(void);
+FIXTURE
+
+assert_rejects "call with arguments after @c" "marks a call with arguments" include/usearch/probe.h <<'FIXTURE'
+/** Balances the range from @c insert(first, last) in linear time. */
+int probe(void);
+FIXTURE
+
+assert_accepts "call with arguments in tt, and a bare call after @c" include/usearch/probe.h <<'FIXTURE'
+/** Balances the range from <tt>insert(first, last)</tt> in linear time, like @c reserve(). */
+int probe(void);
+FIXTURE
+
+assert_rejects "math operator glued to a name" "glues a math operator" include/usearch/probe.h <<'FIXTURE'
+/** True if balanced: weight(left) ≤ Δ×weight(right). */
+int probe(void);
+FIXTURE
+
+assert_accepts "spaced operators, a dimension, a factor, and a shape" include/usearch/probe.h <<'FIXTURE'
+/** True if weight(left) ≤ Δ × weight(right) on a 16×16 tile, 4× faster over @b [rows,2×ffn].
+ *  The P × V and Q × Kᵀ products cost O(n · d) each, ≈128× less than before, skipping '×'. */
+int probe(void);
+FIXTURE
+
+assert_rejects "single-letter algebra glued" "glues a math operator" include/usearch/probe.h <<'FIXTURE'
+/** Scores accumulate P×V after the softmax. */
+int probe(void);
+FIXTURE
+
+assert_rejects "trailing comment gluing an operator" "glues a math operator" test/probe.cpp <<'FIXTURE'
+int probe(int value) {
+    return value * 2; // doubles the P×V tile
+}
+FIXTURE
+
+assert_rejects "drifting comments in a code sample" "lets the trailing comments of a @code sample drift" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lays out one table.
+ *
+ *  @code{.cpp}
+ *  key_t *keys = (key_t *)memory;                  // Direct indexing
+ *  mapped_t *values = (mapped_t *)(memory + bytes);   // Direct indexing
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "aligned comments in a code sample" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Lays out one table.
+ *
+ *  @code{.cpp}
+ *  key_t *keys = (key_t *)memory;                    // Direct indexing
+ *  mapped_t *values = (mapped_t *)(memory + bytes);  // Direct indexing
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "a vector of products in brackets" include/usearch/probe.h <<'FIXTURE'
+/** Accumulates [c_real × b_real, c_imag × b_imag, ...] with the sign flip deferred. */
+int probe(void);
+FIXTURE
+
+assert_rejects "titled paragraph" "titles a paragraph with @par" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Rebalances one node.
+ *
+ *  @par Complexity O(log n).
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "statuses list" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *
+ *  @par Statuses:
+ *  - @c success_k
+ *  - @c missing_kernel_k No capability has it.
+ */
+status_t probe(void);
+FIXTURE
+
+assert_rejects "capitalized emphasis beyond the modal verbs" "uses ALL-CAPS emphasis in a comment" include/usearch/probe.h <<'FIXTURE'
+/** The kernel reads BOTH halves of the entry. */
+int probe(void);
+FIXTURE
+
+assert_rejects "ASCII arrow in a comment" "writes an arrow as" include/usearch/probe.h <<'FIXTURE'
+/** Maps a key -> a value. */
+int probe(void);
+FIXTURE
+
+stage_fixture_with_header include/usearch/probe.h <<'FIXTURE'
+/** Maps a key -> a value. */
+int probe(void);
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+run_precommit --all-lines include/usearch/probe.h
+expect_rejection "whole-file mode reads committed lines" "writes an arrow as"
+
+stage_fixture_with_header include/usearch/probe.h <<'FIXTURE'
+#if defined(PROBE_A) || \
+    defined(PROBE_B)
+#endif
+extern "C" {
+
+/** Maps a key -> a value. */
+int probe(void);
+}
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+run_precommit --all-lines include/usearch/probe.h
+expect_rejection "whole-file mode reads past a continued directive" "writes an arrow as"
+
+assert_accepts "URL inside a code sample" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Tabulates the probe.
+ *
+ *  @code{.py}
+ *  url = "https://www.unicode.org/Public/UCD/latest/ucd/UnicodeData.txt"
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "glued arrows inside an HTML code span" README.md <<'FIXTURE'
+<code>→ ↘</code> = movement direction
+FIXTURE
+
+assert_rejects "URL in code after a code block closing with its docblock" "mismatches a comment's brackets" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Prints the site.
+ *
+ *  @code{.c}
+ *  puts(site);
+ *  @endcode */
+int probe(void);
+
+static char const *site = "https://example.com/probe";
+FIXTURE
+
+stage_fixture_with_header include/usearch/probe.hpp <<'FIXTURE'
+struct alignas(64) probe_t {
+
+    /** Maps a key -> a value. */
+    int field;
+};
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+run_precommit --all-lines include/usearch/probe.hpp
+expect_rejection "whole-file mode reads members of an aligned struct" "writes an arrow as"
+
+assert_rejects "TeX command inside a Markdown code span" "TeX inside a Markdown code span" README.md <<'FIXTURE'
+Rows count `4 \cdot h \cdot n_q` operations.
+FIXTURE
+
+assert_rejects "TeX subscript inside a Markdown code span" "TeX inside a Markdown code span" README.md <<'FIXTURE'
+Each head reads `n_{kv}` keys.
+FIXTURE
+
+assert_accepts "TeX between dollar signs and escapes in code spans" README.md <<'FIXTURE'
+Rows count $4 \cdot h \cdot n_{kv}$ operations, and `printf("\n")`, `"\x41"` or `nk_{operation}_{type}` stay code.
+FIXTURE
+
+assert_accepts "arrows inside HTML code spans holding a less-than" README.md <<'FIXTURE'
+* The binding reads <code>x <- y</code> and <code>a < b->c</code> as code.
+FIXTURE
+
+assert_accepts "hash inside a Python string before a return annotation" python/probe.py <<'FIXTURE'
+
+def probe(marker: str = "#") -> int:
+    return len(marker)
+FIXTURE
+
+assert_rejects "ASCII arrow closing a comment" "writes an arrow as" include/usearch/probe.h <<'FIXTURE'
+int probe(void); // takes the value <-
+FIXTURE
+
+assert_accepts "sentence ending inside a bracket" include/usearch/probe.h <<'FIXTURE'
+/** Pads each entry to a whole cache line, as the stride says [bytes].
+ *  Reads never cross into the next entry, and writes never touch the padding at all. */
+int probe(void);
+FIXTURE
+
+assert_accepts "arrow inside a fenced Rust sample" rust/probe.rs <<'FIXTURE'
+/// Allocates through the arena.
+///
+/// ```rust
+/// fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+///     todo!()
+/// }
+/// ```
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "member access in a doc code sample" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Loads two lanes.
+ *
+ *  @code{.c}
+ *      bfloat16x8_t first = vreinterpretq_bf16_s16(pair.val[0]);
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "a name as an exponent stays code" include/usearch/probe.h <<'FIXTURE'
+/** Probes a value. */
+static inline int probe(void) {
+    // Allocates `2^scale` vertices per community.
+    return 0;
+}
+FIXTURE
+
+assert_rejects "usage pseudo-heading" "labels a code block with a pseudo-heading" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes the build.
+ *
+ *  Usage:
+ *
+ *  @code{.sh}
+ *  cmake -B build_release
+ *  @endcode
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "binding fence without a language" "opens a code fence without naming its language" javascript/probe.ts <<'FIXTURE'
+/**
+ *  Builds the probe:
+ *
+ *  ```
+ *  npm run build
+ *  ```
+ */
+export function probe() {}
+FIXTURE
+
+assert_accepts "Rust doctest in a bare fence" rust/probe.rs <<'FIXTURE'
+/// Probes once:
+///
+/// ```
+/// probe();
+/// ```
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "code block introduced by a sentence, fence naming its language" rust/probe.rs <<'FIXTURE'
+/// Builds the probe in release mode:
+///
+/// ```sh
+/// cargo build --release
+/// ```
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "ASCII arrow inside a code span" rust/probe.rs <<'FIXTURE'
+/// Merges two accumulators with `fn(T, T) -> T`.
+pub fn probe() {}
+FIXTURE
+
+assert_rejects "two empty comment lines in a row" "leaves two empty comment lines in a row" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes the build.
+ *
+ *
+ *  @section probe_details Details
+ *
+ *  Nothing else.
+ */
+int probe(void);
+FIXTURE
+
+assert_accepts "ASCII arrow after a dereference in a macro" include/usearch/probe.h <<'FIXTURE'
+#define probe_read_(header, width) \
+    *width = header->column_count;
+FIXTURE
+
+assert_accepts "ASCII arrow in a C macro body" include/usearch/probe.h <<'FIXTURE'
+#define probe_field_(pointer) ((pointer)->field)
+FIXTURE
+
+assert_rejects "glued bidirectional ASCII arrow" "writes an arrow as" include/usearch/probe.h <<'FIXTURE'
+/** Converts F16<->F32 in hardware. */
+int probe(void);
+FIXTURE
+
+assert_rejects "backward-looking comment" "backward-looking comment" include/usearch/probe.h <<'FIXTURE'
+/** This member used to be a pointer. */
+int probe(void);
+FIXTURE
+
+assert_rejects "Dtype in a Go method name" "miscases a name" golang/probe.go <<'FIXTURE'
+package probe
+
+// Probe reports the element type.
+func (p Matrix) Dtype() string { return p.kind }
+FIXTURE
+
+assert_rejects "miscased vendor in a comment" "miscases a name" include/usearch/probe.h <<'FIXTURE'
+/** Runs on Nvidia Grace and on numpy arrays. */
+int probe(void);
+FIXTURE
+
+assert_accepts "proper names cased, code spans and paths untouched" include/usearch/probe.h <<'FIXTURE'
+/** Runs on NVIDIA Grace, takes NumPy arrays through @c numpy.asarray, and reports a DType. */
+int probe(void);
+FIXTURE
+
+assert_rejects "design justified by a sibling" "justifies a decision by another repo" include/usearch/probe.h <<'FIXTURE'
+/** Mirrors the convention NumKong uses for its tables. */
+int probe(void);
+FIXTURE
+
+assert_accepts "sibling named as a dependency" include/usearch/probe.h <<'FIXTURE'
+/** StringZilla computes the reference hashes this kernel is checked against. */
+int probe(void);
+FIXTURE
+
+assert_rejects "bool parameter selecting behaviour" "takes a bool parameter that selects behaviour" include/usearch/probe.h <<'FIXTURE'
+int probe(int key, bool reverse);
+FIXTURE
+
+assert_rejects "discarding through a void cast" "casts a result to void" include/usearch/probe.h <<'FIXTURE'
+static inline void probe(void) { (void)compute(); }
+FIXTURE
+
+assert_accepts "void parameter list" include/usearch/probe.h <<'FIXTURE'
+static inline int probe(void) { return 0; }
+FIXTURE
+
+assert_rejects "thread_local state" "declares a thread_local" include/usearch/probe.hpp <<'FIXTURE'
+static thread_local int probe_counter = 0;
+FIXTURE
+
+assert_accepts "prose naming thread_local" include/usearch/probe.hpp <<'FIXTURE'
+/** Keeps no thread_local counter; the executor owns per-thread state. */
+inline int probe() { return 0; }
+FIXTURE
+
+assert_rejects "filesystem include in the library" "uses std::filesystem in library code" include/usearch/probe.hpp <<'FIXTURE'
+#include <filesystem>
+FIXTURE
+
+assert_accepts "filesystem include in a test harness" test/probe.cpp <<'FIXTURE'
+#include <filesystem>
+FIXTURE
+
+assert_rejects "vector in the library" "uses a standard container, std::pair or std::tuple" include/usearch/probe.hpp <<'FIXTURE'
+#include <vector>
+FIXTURE
+
+assert_rejects "pair in a binding" "uses a standard container, std::pair or std::tuple" python/probe.cpp <<'FIXTURE'
+std::pair<int, int> probe_bounds(void);
+FIXTURE
+
+assert_accepts "containers in a test harness" test/probe.cpp <<'FIXTURE'
+#include <vector>
+std::vector<std::pair<int, int>> probe_pairs;
+FIXTURE
+
+assert_accepts "move and tuple traits in the library" include/usearch/probe.hpp <<'FIXTURE'
+#include <utility>
+using probe_first_t = std::tuple_element_t<0, probe_types_t>;
+FIXTURE
+
+assert_rejects "retval tag" "uses @retval" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @retval zero on success.
+ */
+int probe(void);
+FIXTURE
+
+assert_rejects "deprecation" "adds a deprecation" include/usearch/probe.h <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @param[in] value The value.
+ *  @deprecated Use the other probe.
+ */
+int probe(int value);
+FIXTURE
+
+stage_edited_fixture include/usearch/probe.h 's/@date January 1, 2026/@date February 2, 2026/'
+run_precommit
+expect_rejection "rewritten header date" "rewrites the @date in its header"
+
+stage_edited_fixture include/usearch/probe.h '/@date/d; s/^\( \*  @brief One staged fixture for one rule\.\)$/\1\n *  @date January 1, 2026/'
+run_precommit
+expect_rejection "header date moved, value kept, only the order fires" "misorders its file header"
+
+assert_rejects "generated artifact" "is generated output" python/usearch/__pycache__/probe.pyc <<'FIXTURE'
+compiled
+FIXTURE
+
+assert_rejects "unnamed workflow step" "without a name" .github/workflows/probe.yml <<'FIXTURE'
+name: Probe
+on: push
+jobs:
+  probe:
+    name: Probe
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe
+FIXTURE
+
+assert_rejects "Metal template parameter without private suffix" "exposes a template parameter name" include/usearch/probe.metal <<'FIXTURE'
+template <typename stage_t, uint dtype>
+struct probe {};
+FIXTURE
+
+assert_rejects "C++ template value parameter without private suffix" "exposes a template parameter name" include/usearch/probe.hpp <<'FIXTURE'
+template <typename value_type_,
+          unsigned width>
+struct probe {};
+FIXTURE
+
+assert_accepts "Metal private template parameters and local aliases" include/usearch/probe.metal <<'FIXTURE'
+template <typename stage_type_, uint dtype_>
+struct probe {
+    using stage_t = stage_type_;
+    static constexpr uint dtype = dtype_;
+};
+FIXTURE
+
+# endregion Imported Rule Fixtures
+
+# region Binding Doc Fixtures
+
+assert_rejects "binding line past 100 columns" "doc or comment line past 100 columns" rust/probe.rs <<'FIXTURE'
+/// Computes the probe over every entry of the input, which keeps going well past the prose width here.
+pub fn probe() {}
+FIXTURE
+
+assert_rejects "binding paragraph underfilled" "leaves a doc or comment line underfilled" rust/probe.rs <<'FIXTURE'
+/// Computes the probe over every row of the input, accumulating in f64 so the long rows stay exact,
+/// and writes
+/// one value per row back into the output.
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "binding paragraph filled, with a heading and bullets" rust/probe.rs <<'FIXTURE'
+/// Computes the probe over every entry of the input, accumulating in f64 so that the long entries
+/// stay exact, and writes one value per entry back into the output.
+///
+/// # Arguments
+/// - `entries` - Row-major input of shape __[rows,columns]__, which the kernel reads once per call
+///   and never writes.
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "binding note markers and labels" rust/probe.rs <<'FIXTURE'
+/// Computes the probe over every entry of the input, accumulating in f64 so that the long entries
+/// stay exact, and writes one value per entry back into the output.
+pub fn probe() {
+    // ? The entries arrive in order.
+    // ! Never reorder them.
+}
+FIXTURE
+
+assert_rejects "Rust strong emphasis with asterisks" "marks Markdown with asterisks" rust/probe.rs <<'FIXTURE'
+/// Takes the closure **by value** and finishes internally.
+pub fn probe() {}
+FIXTURE
+
+assert_rejects "Rust asterisk bullet" "marks Markdown with asterisks" rust/probe.rs <<'FIXTURE'
+/// Probes the value.
+///
+/// * `value` - The value.
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "Rust underscores, dashes and multiplication" rust/probe.rs <<'FIXTURE'
+/// Takes the closure __by value__, _not_ by reference, and returns `a * b * c`, which is a * b.
+///
+/// - `value` - The value.
+pub fn probe() {}
+FIXTURE
+
+assert_rejects "binding parenthetical aside" "puts a parenthetical aside in doc prose" golang/probe.go <<'FIXTURE'
+package usearch
+
+// Probe returns the great-circle distance (in meters).
+func Probe() {}
+FIXTURE
+
+assert_rejects "binding aside holding an em-dash" "puts a parenthetical aside in doc prose" golang/probe.go <<'FIXTURE'
+package usearch
+
+// Probe returns the distance (great-circle — never Euclidean) between the two points.
+func Probe() {}
+FIXTURE
+
+assert_accepts "binding parentheses around math and code" golang/probe.go <<'FIXTURE'
+package usearch
+
+// Probe returns 1 - (a / b) and calls [Matrix.Depth] once, like `probe(a, b)` does.
+func Probe() {}
+FIXTURE
+
+assert_rejects "binding formula in a code span" "puts a formula in a code span" rust/probe.rs <<'FIXTURE'
+/// Normalizes as `y = x * rsqrt(mean(x^2) + eps)`.
+pub fn probe() {}
+FIXTURE
+
+assert_accepts "binding formula in Unicode, code in a span" rust/probe.rs <<'FIXTURE'
+/// Normalizes as y = x / √(mean(x²) + ε), writing `height * width` values.
+pub fn probe() {}
+FIXTURE
+
+assert_rejects "binding shape as a product" "spells a shape as a product or a tuple" rust/probe.rs <<'FIXTURE'
+/// Returns the product matrix C of m × n entries.
+pub fn probe() {}
+FIXTURE
+
+assert_verbatim_rejects "Swift callout header" "opens without its header" swift/Probe.swift <<'FIXTURE'
+//
+//  swift/Probe.swift
+//  One staged fixture for one rule.
+//
+//  - Author: Selftest
+//  - Date: January 1, 2026
+//
+public struct Probe {}
+FIXTURE
+
+assert_verbatim_accepts "Swift docblock header" swift/Probe.swift <<'FIXTURE'
+/**
+ *  @file swift/Probe.swift
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief One staged fixture for one rule.
+ */
+public struct Probe {}
+FIXTURE
+
+assert_accepts "Swift - Warning: continuation aligned under the text like a bullet" swift/Probe.swift <<'FIXTURE'
+public struct Probe {
+    /// - Warning: This may move storage, which invalidates every `view()`, `span()` and `entry()`
+    ///   pointer obtained before the call.
+    public func reserve() {}
+}
+FIXTURE
+
+assert_rejects "Swift - Warning: continuation hanging 4 like a C tag" "misaligns a doc continuation" swift/Probe.swift <<'FIXTURE'
+public struct Probe {
+    /// - Warning: This may move storage, which invalidates every `view()`, `span()` and `entry()`
+    ///     pointer obtained before the call.
+    public func reserve() {}
+}
+FIXTURE
+
+assert_verbatim_rejects "Swift file without its header" "opens without its header" swift/Probe.swift <<'FIXTURE'
+import Foundation
+FIXTURE
+
+assert_rejects "binding ALL-CAPS emphasis" "uses ALL-CAPS emphasis in a doc" swift/Probe.swift <<'FIXTURE'
+/// Reserving storage is NEVER free.
+public func reserve() {}
+FIXTURE
+
+assert_rejects "Go method referenced as a call" "references a Go method as a call" golang/probe.go <<'FIXTURE'
+package usearch
+
+// Probe reads b.Depth() dimensions per entry.
+func Probe() {}
+FIXTURE
+
+assert_accepts "Go method called inside a tab-indented example" golang/probe.go <<'FIXTURE'
+package usearch
+
+// Probe reads every entry; for example:
+//
+//	probe := usearch.NewProbe()
+//	defer probe.Close()
+func Probe() {}
+FIXTURE
+
+assert_rejects "Python docstring literal with Parameters" "names a docstring section outside Google style" python/probe.c <<'FIXTURE'
+char const doc_probe[] =                                              //
+    "Probe a value.\n\n"                                              //
+    "Parameters:\n"                                                   //
+    "    value (int): The value.\n";
+FIXTURE
+
+assert_rejects "Python docstring literal with a tuple shape" "spells a shape as a product or a tuple" python/probe.c <<'FIXTURE'
+char const doc_probe[] =                                              //
+    "Probe a value.\n\n"                                              //
+    "Args:\n"                                                         //
+    "    a (Tensor): Matrix with shape (height, depth).\n";
+FIXTURE
+
+assert_verbatim_rejects "Go package comment outside its file" "documents the package outside the file named after it" golang/probe.go <<'FIXTURE'
+// Package usearch wraps the USearch indexes.
+//
+// File: golang/probe.go
+// Author: Selftest
+// Date: January 1, 2026
+package usearch
+FIXTURE
+
+assert_verbatim_accepts "Go package comment in the file named after it, closing with its fields" golang/usearch.go <<'FIXTURE'
+// Package usearch wraps the USearch indexes for Go, one batch call per verb.
+//
+// File: golang/usearch.go
+// Author: Selftest
+// Date: January 1, 2026
+package usearch
+FIXTURE
+
+assert_verbatim_rejects "Go package comment without its fields" "opens without its file header" golang/usearch.go <<'FIXTURE'
+// Package usearch wraps the USearch indexes for Go, one batch call per verb.
+package usearch
+FIXTURE
+
+assert_verbatim_rejects "Rust module doc without its fields" "opens without the module fields; end its //! doc" rust/probe.rs <<'FIXTURE'
+//! Probes a value.
+pub fn probe() {}
+FIXTURE
+
+assert_verbatim_rejects "Go file without its header" "opens without its file header" golang/probe.go <<'FIXTURE'
+package probe
+FIXTURE
+
+assert_verbatim_accepts "Go file opening with a summary above its header" golang/probe.go <<'FIXTURE'
+// Probes a value over Go strings.
+//
+// File: golang/probe.go
+// Author: Selftest
+// Date: January 1, 2026
+
+package probe
+FIXTURE
+
+assert_verbatim_rejects "Python module without its fields" "opens without the module fields" python/probe.py <<'FIXTURE'
+"""Probes a value."""
+FIXTURE
+
+assert_accepts "Python module with its fields" python/probe.py <<'FIXTURE'
+PROBE_VALUE = 1
+FIXTURE
+
+assert_verbatim_rejects "TypeScript header in the wrong order" "opens without its header" javascript/probe.ts <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ *  @file javascript/probe.ts
+ *  @author Selftest
+ *  @date January 1, 2026
+ */
+export function probe(): void {}
+FIXTURE
+
+assert_rejects "JavaScript docblock with one-space lines" "indents a docblock line by one space" test/probe.mjs <<'FIXTURE'
+/**
+ * Probes a value.
+ *
+ * @returns Nothing at all.
+ */
+export function probe() {}
+FIXTURE
+
+assert_rejects "JavaScript brief below the header" "uses @brief below the file header" test/probe.mjs <<'FIXTURE'
+/**
+ *  @brief Probes a value.
+ */
+export function probe() {}
+FIXTURE
+
+assert_verbatim_accepts "JavaScript header after a shebang" test/probe.mjs <<'FIXTURE'
+#!/usr/bin/env node
+/**
+ *  @file test/probe.mjs
+ *  @author Selftest
+ *  @date January 1, 2026
+ *  @brief Probes a value.
+ */
+
+/** Probes a value once. */
+export function probe() {}
+FIXTURE
+
+assert_rejects "TypeScript declaration documented with //" "documents a declaration with a bare" javascript/probe.ts <<'FIXTURE'
+// The probe's shared counter.
+let probeCounter: number = 0;
+FIXTURE
+
+assert_accepts "TypeScript declaration documented with TSDoc" javascript/probe.ts <<'FIXTURE'
+/** The probe's shared counter. */
+let probeCounter: number = 0;
+
+export function probe(): void {
+    // Reset before every call.
+    probeCounter = 0;
+}
+FIXTURE
+
+assert_verbatim_accepts "Python dotfile config under a comment" .cmake-format.py <<'FIXTURE'
+# How wide a line may run.
+line_width = 120
+FIXTURE
+
+assert_rejects "Python attribute under a comment" "documents an attribute with a # comment" python/probe.py <<'FIXTURE'
+# Buffer-compatible inputs accepted by most functions.
+BufferType = bytes | memoryview
+FIXTURE
+
+assert_accepts "Python attribute docstring, notes in bodies, directives" python/probe.py <<'FIXTURE'
+BufferType = bytes | memoryview
+"""Buffer-compatible inputs accepted by most functions."""
+
+# region Helpers
+
+
+def probe(values):
+    """Counts the values."""
+    # Counted once, so the loop below never re-reads it.
+    total = len(values)
+    return total
+
+
+settings = {
+    # Wide enough for every kernel.
+    "width": 120,
+}
+# endregion Helpers
+FIXTURE
+
+# endregion Binding Doc Fixtures
+
+# region USearch Fixtures
+
+assert_rejects "sibling include in the dependency-free core" "lives in the dependency-free core" include/usearch/basic/ram_index.hpp <<'FIXTURE'
+#include <numkong/numkong.hpp>
+FIXTURE
+
+assert_accepts "standard include in the dependency-free core" include/usearch/basic/ram_index.hpp <<'FIXTURE'
+#include <cstdint>
+FIXTURE
+
+assert_rejects "id in a comment" "writes id or ids in a comment" include/usearch/probe.h <<'FIXTURE'
+/** Reads the node id once. */
+int probe(void);
+FIXTURE
+
+assert_accepts "ID in a comment, id in an identifier" include/usearch/probe.h <<'FIXTURE'
+/** Reads the node ID once, as @c node_id spells it. */
+int probe(int node_id);
+FIXTURE
+
+assert_rejects "id in Markdown prose" "writes id or ids;" docs/probe.md <<'FIXTURE'
+Each node carries an id.
+FIXTURE
+
+assert_accepts "ID in Markdown prose, id in a code span" docs/probe.md <<'FIXTURE'
+Each node carries an ID, read through `node.id`.
+FIXTURE
+
+assert_rejects "plane in device storage prose" "calls device row storage a plane" src/probe_kernels.cuh <<'FIXTURE'
+/** Walks one plane of the matrix. */
+void probe();
+FIXTURE
+
+assert_accepts "flat matrix in device storage prose" src/probe_kernels.cuh <<'FIXTURE'
+/** Walks one flat matrix, never a hyperplane. */
+void probe();
+FIXTURE
+
+assert_rejects "two blank lines in Markdown" "separates paragraphs with more than one blank line" docs/probe.md <<'FIXTURE'
+First paragraph.
+
+
+Second paragraph.
+FIXTURE
+
+assert_accepts "one blank line in Markdown, two inside a fence" docs/probe.md <<'FIXTURE'
+First paragraph.
+
+```sh
+echo one
+
+
+echo two
+```
+FIXTURE
+
+assert_rejects "short pragma region" "shorter than 30 lines" include/usearch/probe.hpp <<'FIXTURE'
+#pragma region Probes
+
+inline int probe() { return 0; }
+
+#pragma endregion Probes
+FIXTURE
+
+assert_accepts "prose naming a short region" include/usearch/probe.hpp <<'FIXTURE'
+/** Folds into its neighbour rather than opening a region of its own. */
+inline int probe() { return 0; }
+FIXTURE
+
+assert_rejects "namespace no directory backs" "opens a namespace no directory backs" include/usearch/probe.hpp <<'FIXTURE'
+namespace stub {
+inline int probe() { return 0; }
+} // namespace stub
+FIXTURE
+
+assert_accepts "namespace the directory names" include/usearch/probe.hpp <<'FIXTURE'
+namespace unum::usearch {
+inline int probe() { return 0; }
+} // namespace unum::usearch
+FIXTURE
+
+assert_rejects "inline Rust module" "declares a module no file backs" rust/probe.rs <<'FIXTURE'
+mod probe {}
+FIXTURE
+
+assert_accepts "Rust unit tests inline" rust/probe.rs <<'FIXTURE'
+pub fn probe() {}
+
+#[cfg(test)]
+mod tests {}
+FIXTURE
+
+assert_rejects "verb output after its arena" "orders a verb's fields" c/usearch/probe.h <<'FIXTURE'
+typedef struct usearch_probe_t {
+    usearch_arena_t arena;
+    usearch_f32_view_t *results;
+} usearch_probe_t;
+FIXTURE
+
+assert_accepts "verb outputs before its arena" c/usearch/probe.h <<'FIXTURE'
+typedef struct usearch_probe_t {
+    usearch_f32_view_t *results;
+    usearch_arena_t arena;
+} usearch_probe_t;
+FIXTURE
+
+assert_rejects "substring assertion" "asserts on a fragment of a repr" python/probe.py <<'FIXTURE'
+import pytest
+
+
+def probe():
+    raise ValueError("bad")
+
+
+def test_probe():
+    with pytest.raises(ValueError, match="bad"):
+        probe()
+FIXTURE
+
+assert_accepts "assertion on the exception type" python/probe.py <<'FIXTURE'
+import pytest
+
+
+def probe():
+    raise ValueError("bad")
+
+
+def test_probe():
+    with pytest.raises(ValueError):
+        probe()
+FIXTURE
+
+assert_rejects "copydoc in a backend file" "is a backend file carrying @copydoc" include/usearch/dense/haswell.hpp <<'FIXTURE'
+/** @copydoc probe */
+inline int probe() { return 0; }
+FIXTURE
+
+assert_accepts "backend note on its own difference" include/usearch/dense/haswell.hpp <<'FIXTURE'
+/** Reads eight lanes per step, where the serial backend reads one. */
+inline int probe() { return 0; }
+FIXTURE
+
+assert_rejects "Doxygen command in a line comment" "uses a Doxygen command in a // comment" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int count) {
+    // Reads @p count entries.
+    return count;
+}
+FIXTURE
+
+assert_accepts "backticks in a line comment" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int count) {
+    // Reads `count` entries.
+    return count;
+}
+FIXTURE
+
+assert_rejects "doc trailer on a statement" "documents with a //! trailer" include/usearch/probe.hpp <<'FIXTURE'
+static int probe_value = 0; //! The value.
+FIXTURE
+
+assert_accepts "plain note on a statement" include/usearch/probe.hpp <<'FIXTURE'
+static int probe_value = 0; // Reset by every call.
+FIXTURE
+
+assert_rejects "fully qualified project namespace" "spells unum::usearch:: in full" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(unum::usearch::utilities::uuid_t key) { return 0; }
+FIXTURE
+
+assert_accepts "project namespace through an alias" include/usearch/probe.hpp <<'FIXTURE'
+namespace us = unum::usearch;
+inline int probe(us::utilities::uuid_t key) { return 0; }
+FIXTURE
+
+assert_rejects "harness qualifying the visible library namespace" "the library namespace is already visible" test/dense/probe.cpp <<'FIXTURE'
+namespace unum::usearch::test::dense {
+us::dense::index_t index;
+} // namespace unum::usearch::test::dense
+FIXTURE
+
+assert_accepts "harness naming the library type bare" test/dense/probe.cpp <<'FIXTURE'
+namespace unum::usearch::test::dense {
+index_t index;
+} // namespace unum::usearch::test::dense
+FIXTURE
+
+assert_rejects "namespace reopened" "reopens namespace" test/probe.cpp <<'FIXTURE'
+namespace unum::usearch::test {
+int first;
+} // namespace unum::usearch::test
+
+namespace unum::usearch::test {
+int second;
+} // namespace unum::usearch::test
+FIXTURE
+
+assert_accepts "namespace opened once" test/probe.cpp <<'FIXTURE'
+namespace unum::usearch::test {
+int first;
+int second;
+} // namespace unum::usearch::test
+FIXTURE
+
+assert_rejects "utility reaching into a design" "reaches above utilities" include/usearch/utilities/probe.hpp <<'FIXTURE'
+#include "usearch/dense/types.hpp"
+FIXTURE
+
+assert_accepts "utility including a utility" include/usearch/utilities/probe.hpp <<'FIXTURE'
+#include "usearch/utilities/types.hpp"
+FIXTURE
+
+assert_rejects "function-like ALL_CAPS macro" "defines a function-like ALL_CAPS macro" include/usearch/probe.hpp <<'FIXTURE'
+#define USEARCH_PROBE_TWICE(value) ((value) * 2)
+FIXTURE
+
+assert_accepts "object-like macro and a snake_case_ generator" include/usearch/probe.hpp <<'FIXTURE'
+#define USEARCH_PROBE_LIMIT 64
+#define probe_twice_(value) ((value) * 2)
+FIXTURE
+
+assert_rejects "spelled-out byte span" "spells out a byte span" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(std::span<std::byte> bytes);
+FIXTURE
+
+assert_accepts "named byte span" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(bytes_span_t bytes);
+FIXTURE
+
+assert_rejects "chevron launch" "launches a kernel with <<<>>>" src/probe.cuh <<'FIXTURE'
+inline void probe() { probe_kernel<<<1, 32>>>(); }
+FIXTURE
+
+assert_accepts "launch through cuda_launch" src/probe.cuh <<'FIXTURE'
+inline status_t probe() { return cuda_launch(probe_kernel, 1, 32); }
+FIXTURE
+
+assert_rejects "trailing return type" "declares a trailing return type" include/usearch/probe.hpp <<'FIXTURE'
+auto probe(int key) -> int;
+FIXTURE
+
+assert_accepts "leading return type and a lambda arrow" include/usearch/probe.hpp <<'FIXTURE'
+int probe(int key);
+inline int twice(int key) { return [](int value) -> int { return value * 2; }(key); }
+FIXTURE
+
+assert_rejects "redundant nodiscard" "repeats [[nodiscard]]" include/usearch/probe.hpp <<'FIXTURE'
+[[nodiscard]] status_t probe();
+FIXTURE
+
+assert_accepts "nodiscard on a plain type" include/usearch/probe.hpp <<'FIXTURE'
+[[nodiscard]] int probe();
+FIXTURE
+
+assert_rejects "hand-rolled ceiling division" "hand-rolls a ceiling division" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int count) { return (count + 16 - 1) / 16; }
+FIXTURE
+
+assert_accepts "ceiling division through the helper" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int count) { return divide_round_up(count, 16); }
+FIXTURE
+
+assert_rejects "C limit macro" "spells a C limit macro" include/usearch/probe.hpp <<'FIXTURE'
+inline std::size_t probe() { return SIZE_MAX; }
+FIXTURE
+
+assert_accepts "numeric limits" include/usearch/probe.hpp <<'FIXTURE'
+inline std::size_t probe() { return std::numeric_limits<std::size_t>::max(); }
+FIXTURE
+
+assert_rejects "bare libc math" "calls a C math function bare" include/usearch/probe.hpp <<'FIXTURE'
+inline float probe(float value) { return sqrt(value); }
+FIXTURE
+
+assert_accepts "qualified math and a member call" include/usearch/probe.hpp <<'FIXTURE'
+inline float probe(float value) { return std::sqrt(value) + kernel.exp(value); }
+FIXTURE
+
+assert_rejects "std::min in the library" "uses std::min/std::max" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int left, int right) { return std::min(left, right); }
+FIXTURE
+
+assert_accepts "min_of in the library" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int left, int right) { return min_of(left, right); }
+FIXTURE
+
+assert_rejects "preferred ForkUnion alias" "names a ForkUnion alias meant for units that dispatch nothing" include/usearch/probe.hpp <<'FIXTURE'
+using yield_t = fu::preferred_yield_t;
+FIXTURE
+
+assert_accepts "class waiter alias" include/usearch/probe.hpp <<'FIXTURE'
+using yield_t = waiter_of<class_>;
+FIXTURE
+
+assert_rejects "expected bound as a participle" "binds an expected as [payload, participle]" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { auto [value, inserted] = insert(); }
+FIXTURE
+
+assert_accepts "expected bound as a status" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { auto [value, insert_status] = insert(); }
+FIXTURE
+
+assert_rejects "printf in C++" "prints through the C stdio family" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { printf("probe\n"); }
+FIXTURE
+
+assert_accepts "fmt::println in C++" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { fmt::println("probe"); }
+FIXTURE
+
+assert_rejects "partial print" "prints half a line" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { fmt::print("probe"); }
+FIXTURE
+
+assert_accepts "print ending its line, and a redraw" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { fmt::print("probe\n"); fmt::print("\rprobe"); }
+FIXTURE
+
+assert_rejects "test body printing to stdout" "prints to stdout from a test body" test/probe.cpp <<'FIXTURE'
+void test_probe() { fmt::println("probe passed"); }
+FIXTURE
+
+assert_accepts "test body failing on stderr" test/probe.cpp <<'FIXTURE'
+void test_probe() { fmt::println(stderr, "probe failed"); }
+FIXTURE
+
+assert_rejects "iostream include" "uses C++ iostreams" include/usearch/probe.hpp <<'FIXTURE'
+#include <iostream>
+FIXTURE
+
+assert_accepts "fmt include" include/usearch/probe.hpp <<'FIXTURE'
+#include <fmt/core.h>
+FIXTURE
+
+assert_rejects "algorithm include in the library" "pulls the std::ranges templates into the library" include/usearch/probe.hpp <<'FIXTURE'
+#include <algorithm>
+FIXTURE
+
+assert_accepts "cstring include in the library" include/usearch/probe.hpp <<'FIXTURE'
+#include <cstring>
+FIXTURE
+
+assert_rejects "memcpy type pun" "reinterprets one object through memcpy" include/usearch/probe.hpp <<'FIXTURE'
+inline unsigned probe(float value) {
+    unsigned punned = 0;
+    std::memcpy(&punned, &value, sizeof(value));
+    return punned;
+}
+FIXTURE
+
+assert_accepts "bit_cast and a byte copy" include/usearch/probe.hpp <<'FIXTURE'
+inline unsigned probe(float value, char *bytes) {
+    std::memcpy(bytes, &value, sizeof(value));
+    return std::bit_cast<unsigned>(value);
+}
+FIXTURE
+
+assert_rejects "range rebuilt from its parts" "rebuilds a range from its own .data()/.size()" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(span_t values) { consume(std::span<int const>(values.data(), values.size())); }
+FIXTURE
+
+assert_accepts "range passed whole" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(span_t values) { consume(values); }
+FIXTURE
+
+assert_rejects "emptiness through data()" "probes emptiness through .data()" include/usearch/probe.hpp <<'FIXTURE'
+inline bool probe(span_t values) { return !values.data(); }
+FIXTURE
+
+assert_accepts "emptiness through empty()" include/usearch/probe.hpp <<'FIXTURE'
+inline bool probe(span_t values) { return values.empty(); }
+FIXTURE
+
+assert_rejects "subscript on a call result" "subscripts a call result" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(matrix_t matrix) { return matrix.entry(0)[1]; }
+FIXTURE
+
+assert_accepts "multi-index call and a dereference subscript" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(matrix_t matrix, int *owner) { return matrix(0, 1) + (*owner)[1]; }
+FIXTURE
+
+assert_rejects "raw CUDA atomic" "calls a CUDA atomic intrinsic" src/probe.cuh <<'FIXTURE'
+__device__ void probe(unsigned *word) { atomicAdd(word, 1u); }
+FIXTURE
+
+assert_accepts "ordered CUDA atomic reference" src/probe.cuh <<'FIXTURE'
+__device__ void probe(unsigned *word) { cuda_atomic_ref<unsigned> {*word}.fetch_add(1u, relaxed_k); }
+FIXTURE
+
+assert_rejects "vendor name in a shared GPU file" "is shared by every GPU vendor" include/usearch/dense/vram_index.hpp <<'FIXTURE'
+inline void probe(cuda_stream_t stream);
+FIXTURE
+
+assert_accepts "vram name in a shared GPU file" include/usearch/dense/vram_index.hpp <<'FIXTURE'
+inline void probe(vram_stream_t stream);
+FIXTURE
+
+assert_rejects "C verb comparing its residency" "branches a C verb on residency or vendor" src/dense_index.cpp <<'FIXTURE'
+inline bool probe(index_t const &index) { return index.residency_ == residency_t::vram_k; }
+FIXTURE
+
+assert_accepts "C verb served by its face" src/dense_index.cpp <<'FIXTURE'
+inline status_t probe(index_t const &index) { return index.face().probe(); }
+FIXTURE
+
+assert_rejects "deleted verb" "deletes a verb" include/usearch/dense/ram_index.hpp <<'FIXTURE'
+struct probe_index_t {
+    status_t search(query_t query) = delete;
+};
+FIXTURE
+
+assert_accepts "deleted copy constructor" include/usearch/dense/ram_index.hpp <<'FIXTURE'
+struct probe_index_t {
+    probe_index_t(probe_index_t const &) = delete;
+};
+FIXTURE
+
+assert_rejects "tower including another vendor" "reaches into a vendor's tower" include/usearch/dense/vram_amd_index.hpp <<'FIXTURE'
+#include "usearch/utilities/vram_nvidia_device.hpp"
+FIXTURE
+
+assert_accepts "tower including its own vendor" include/usearch/dense/vram_amd_index.hpp <<'FIXTURE'
+#include "usearch/utilities/vram_amd_device.hpp"
+FIXTURE
+
+assert_rejects "call on a call result" "calls a call result" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(tensor_t values) { values.view()(range, slice); }
+FIXTURE
+
+assert_accepts "owning tensor sliced directly" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(tensor_t values) { values(range, slice); }
+FIXTURE
+
+assert_rejects "iterator laundered through a reference" "launders an iterator through &*" include/usearch/probe.hpp <<'FIXTURE'
+inline int *probe(iterator_t first) { return &*first; }
+FIXTURE
+
+assert_accepts "pointer from data()" include/usearch/probe.hpp <<'FIXTURE'
+inline int *probe(span_t values, int offset) { return values.data() + offset; }
+FIXTURE
+
+assert_rejects "third preprocessor level" "tangles its preprocessor conditionals" include/usearch/probe.hpp <<'FIXTURE'
+#if PROBE_FIRST
+#if PROBE_SECOND
+#if PROBE_THIRD
+inline int probe() { return 3; }
+#endif // PROBE_THIRD
+#endif // PROBE_SECOND
+#endif // PROBE_FIRST
+FIXTURE
+
+assert_accepts "two preprocessor levels, the outer named" include/usearch/probe.hpp <<'FIXTURE'
+#if PROBE_FIRST
+#if PROBE_SECOND
+inline int probe() { return 2; }
+#endif
+#endif // PROBE_FIRST
+FIXTURE
+
+assert_rejects "negated requires-clause" "opens a requires-clause with a negation" include/usearch/probe.hpp <<'FIXTURE'
+template <typename type_>
+    requires (!bounded<type_>)
+struct probe {};
+FIXTURE
+
+assert_accepts "plain requires-clause" include/usearch/probe.hpp <<'FIXTURE'
+template <typename type_>
+    requires bounded<type_> && other<type_>
+struct probe {};
+FIXTURE
+
+assert_rejects "const_cast in the library" "writes through const" include/usearch/probe.hpp <<'FIXTURE'
+inline int &probe(int const &value) { return const_cast<int &>(value); }
+FIXTURE
+
+assert_accepts "prose naming const_cast" include/usearch/probe.hpp <<'FIXTURE'
+/** Takes the mutable span rather than reaching for const_cast. */
+inline int &probe(int &value) { return value; }
+FIXTURE
+
+assert_rejects "host thread in a GPU unit" "spawns host threads in a GPU backend" src/probe.cuh <<'FIXTURE'
+inline void probe() { std::thread worker; }
+FIXTURE
+
+assert_accepts "stream and event in a GPU unit" src/probe.cuh <<'FIXTURE'
+inline void probe(cudaStream_t stream, cudaEvent_t event) { cudaStreamWaitEvent(stream, event); }
+FIXTURE
+
+assert_rejects "GCC atomic builtin" "uses a GCC atomic builtin" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int *word) { return __atomic_load_n(word, __ATOMIC_ACQUIRE); }
+FIXTURE
+
+assert_accepts "ForkUnion atomic reference" include/usearch/probe.hpp <<'FIXTURE'
+inline int probe(int *word) { return atomic_ref_t {*word}.load(std::memory_order_acquire); }
+FIXTURE
+
+assert_rejects "release missing before the unlock bracket" "misplaces the release of a probed word" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int *word) {
+    annotate_acquire(&word);
+    annotate_unlock_started(&word);
+    annotate_unlock_finished(&word);
+}
+FIXTURE
+
+assert_accepts "release right before the unlock bracket" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int *word) {
+    annotate_acquire(&word);
+    annotate_release(&word);
+    annotate_unlock_started(&word);
+    annotate_unlock_finished(&word);
+}
+FIXTURE
+
+assert_rejects "quotient compared to zero" "compares an integer quotient against zero" include/usearch/probe.hpp <<'FIXTURE'
+inline bool probe(int numerator, int denominator) { return numerator / denominator == 0; }
+FIXTURE
+
+assert_accepts "comparison instead of a quotient" include/usearch/probe.hpp <<'FIXTURE'
+inline bool probe(int numerator, int denominator) { return numerator < denominator; }
+FIXTURE
+
+assert_rejects "CMake string surgery" "derives a name or flag by editing a string" CMakeLists.txt <<'FIXTURE'
+string(REPLACE "a" "b" probe_name_ "${probe_source_}")
+FIXTURE
+
+assert_accepts "CMake names spelled at the call" CMakeLists.txt <<'FIXTURE'
+usearch_dense_dtype_sources(probe BF16 probe_bf16.cpp F16 probe_f16.cpp)
+FIXTURE
+
+assert_rejects "CPython format shortcut" "calls a format-string shortcut of the C API" python/probe.c <<'FIXTURE'
+static int probe(PyObject *arguments, int *value) { return PyArg_ParseTuple(arguments, "i", value); }
+FIXTURE
+
+assert_accepts "CPython arguments walked by hand" python/probe.c <<'FIXTURE'
+static PyObject *probe(PyObject *const *arguments, Py_ssize_t count) { return PyLong_FromSize_t(count); }
+FIXTURE
+
+assert_rejects "sys.version parsed" "parses \`sys.version\`" python/probe.py <<'FIXTURE'
+import sys
+
+BANNER = "Python " + sys.version.split()[0]
+"""The banner the tool prints."""
+FIXTURE
+
+assert_accepts "sys.version_info compared" python/probe.py <<'FIXTURE'
+import sys
+
+MODERN = sys.version_info >= (3, 10)
+"""Whether the interpreter is recent."""
+FIXTURE
+
+assert_rejects "bare ndarray annotation" "annotates a bare np.ndarray" python/probe.py <<'FIXTURE'
+import numpy as np
+
+
+def probe(values: np.ndarray) -> int:
+    return len(values)
+FIXTURE
+
+assert_accepts "typed array annotation" python/probe.py <<'FIXTURE'
+import numpy.typing as npt
+
+
+def probe(values: npt.ArrayLike) -> int:
+    return len(values)
+FIXTURE
+
+assert_rejects "library type deriving from a base" "derives one type from another in library code" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t : shared_t {};
+FIXTURE
+
+assert_accepts "library type holding its component, and a scoped enum" include/usearch/probe.hpp <<'FIXTURE'
+enum class probe_kind_t : int { first_k, second_k };
+struct probe_t {
+    shared_t shared_;
+};
+FIXTURE
+
+assert_rejects "standard atomic in an engine" "uses a standard atomic" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { std::atomic<int> word; }
+FIXTURE
+
+assert_accepts "class atomic reference in an engine" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int &word) { atomic_ref_t {word}.store(1, std::memory_order_release); }
+FIXTURE
+
+assert_rejects "sleep in an engine" "sleeps or yields in an engine" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() { std::this_thread::yield(); }
+FIXTURE
+
+assert_accepts "wait through the class waiter" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int const &word) { waiter_t::wait(&word, 0); }
+FIXTURE
+
+assert_rejects "capability mask in an engine" "holds or takes a NumKong capability mask" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(nk_capability_t mask) {}
+FIXTURE
+
+assert_accepts "kit's own capability constant" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+};
+FIXTURE
+
+assert_rejects "CPU class named in an engine" "names a CPU or GPU class under include/" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(cpu_class_t kind) {}
+FIXTURE
+
+assert_accepts "engine taking its kits" include/usearch/probe.hpp <<'FIXTURE'
+template <typename kit_>
+inline void probe(kit_ kit) {}
+FIXTURE
+
+assert_rejects "hand-widened accumulation in a test" "accumulates hand-widened BFloat16" test/probe.cu <<'FIXTURE'
+void test_probe(__nv_bfloat16 const *values, float *total) { *total += __bfloat162float(values[0]); }
+FIXTURE
+
+assert_accepts "reduction through NumKong in a test" test/probe.cu <<'FIXTURE'
+void test_probe(nk::vector_span<bf16_t> values, float *total) { *total = nk::reduce_moments(values).sum; }
+FIXTURE
+
+assert_rejects "node_id_t under utilities" "names a node ID width" include/usearch/utilities/probe.hpp <<'FIXTURE'
+inline int probe(node_id_t node) { return 0; }
+FIXTURE
+
+assert_accepts "node ID width from the template parameter" include/usearch/utilities/probe.hpp <<'FIXTURE'
+template <typename node_id_type_>
+struct probe {
+    using node_id_t = node_id_type_;
+    inline int at(node_id_type_ node) { return 0; }
+};
+FIXTURE
+
+assert_rejects "decltype in an engine" "names a type through decltype" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int value) { decltype(value) copy = value; }
+FIXTURE
+
+assert_accepts "type spelled by its alias" include/usearch/probe.hpp <<'FIXTURE'
+/** Spells the alias rather than reaching for decltype. */
+inline void probe(int value) { value_t copy = value; }
+FIXTURE
+
+assert_rejects "bool member" "adds a bool member" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    bool sorted_ = false;
+};
+FIXTURE
+
+assert_accepts "enum member, bool local and bool constant" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    static constexpr bool sortable_k = true;
+    ordering_t ordering_ = ordering_t::unsorted_k;
+    inline void sort() { bool done = false; }
+};
+FIXTURE
+
+assert_rejects "owner beside a borrowed handle" "holds an owning unique_ptr beside a raw pointer" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    std::unique_ptr<device_t> owned_;
+    device_t *borrowed_;
+};
+FIXTURE
+
+assert_accepts "owner alone, and a borrowed handle of another type" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    std::unique_ptr<device_t> device_;
+    stream_t *stream_;
+};
+FIXTURE
+
+assert_rejects "F64 distance under dense" "widens a score, distance, accumulator or product to F64" include/usearch/dense/probe.hpp <<'FIXTURE'
+inline void probe() { f64_t distance = 0; }
+FIXTURE
+
+assert_accepts "F64 sums and totals under dense" include/usearch/dense/probe.hpp <<'FIXTURE'
+inline void probe(std::span<f64_t> sums) {
+    f64_t total = 0;
+}
+FIXTURE
+
+assert_accepts "NumKong result alias under dense, and the C distance" include/usearch/dense/probe.hpp <<'FIXTURE'
+inline void probe() {
+    dot_result_t distance = 0;
+    usearch_distance_t reported_distance = 0;
+}
+FIXTURE
+
+assert_rejects "hot entry without its size pinned" "adds a hot entry without pinning its size" include/usearch/dense/probe.hpp <<'FIXTURE'
+struct probe_entry_t {
+    u32_t node;
+    f32_t distance;
+};
+FIXTURE
+
+assert_accepts "hot entry with its size pinned" include/usearch/dense/probe.hpp <<'FIXTURE'
+struct probe_entry_t {
+    u32_t node;
+    f32_t distance;
+};
+static_assert(sizeof(probe_entry_t) == 8);
+FIXTURE
+
+assert_rejects "refused identifier word" "names a concept by a refused word" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int join_count) {}
+FIXTURE
+
+assert_accepts "vocabulary words, lanes_k and a SIMD lane" include/usearch/probe.hpp <<'FIXTURE'
+/** Awaits the shards it picked, never a join of a dirty pool. */
+inline void probe(int await_count, int picked_count) {
+    constexpr int quad_lanes_k = 4;
+    int simd_lane = quad_lanes_k;
+}
+FIXTURE
+
+assert_rejects "member named by a role word alone" "names a member by its type or a role word alone" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    std::size_t state = 0;
+};
+FIXTURE
+
+assert_accepts "members naming what they hold" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    std::size_t picked_this_round_ = 0;
+    growing_bitset_t visited_;
+};
+FIXTURE
+
+assert_rejects "dense word in a utility" "speaks of rows, vectors, dimensions, norms or heads in a utility" include/usearch/utilities/probe.hpp <<'FIXTURE'
+inline void probe(std::size_t rows) {}
+FIXTURE
+
+assert_accepts "utility vocabulary and a NumKong span type" include/usearch/utilities/probe.hpp <<'FIXTURE'
+inline void probe(std::size_t entries_count, nk::matrix_span<f32_t> entries) {}
+FIXTURE
+
+stage_fixture_verbatim .githooks/pre-commit < "$hooks_directory/pre-commit"
+run_precommit
+expect_acceptance "the hook's shared regions at their pinned sums"
+
+stage_fixture_verbatim .githooks/pre-commit < <(sed 's/^# Prints the reason and the first offending lines\./# Prints the reason and the offending lines./' "$hooks_directory/pre-commit")
+run_precommit
+expect_rejection "a shared region edited away from its pinned sum" "drifts from NumKong's shared regions"
+
+stage_fixture_verbatim CONTRIBUTING.md <<'FIXTURE'
+### Vocabulary
+
+| Concept | Word | Refused |
+| :- | :- | :- |
+| the device fan-out's wait | await | join |
+FIXTURE
+run_precommit
+expect_rejection "vocabulary table missing refused words" "Vocabulary table lacks the refused words"
+
+stage_fixture_verbatim CONTRIBUTING.md <<'FIXTURE'
+### Vocabulary
+
+| Concept | Word | Refused |
+| :- | :- | :- |
+| RAM, VRAM or NVMe | residency | home, memory side |
+| a fixed-shape collection a verb fills | outputs | landing, lander |
+| a callback consuming intermediate results | sink | landing |
+| the device fan-out's wait | await | join |
+| the nodes a refinement round re-selects | picked | dirty, seam, marked |
+| the nodes a walk has met and the ones it still has to expand | visited, frontier | met, seen, queue |
+| device row storage | flat matrix, flat column | plane |
+| a sharded index's shard, the thread it claims and the work it hands out | shard, thread, partition | pool, seat, deal, landed |
+| a member of a plan, cursor or walk | what it holds and when it holds it | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
+FIXTURE
+run_precommit
+expect_acceptance "vocabulary table naming every refused word"
+
+assert_accepts "a template added, which only warns" include/usearch/probe.hpp <<'FIXTURE'
+template <typename type_>
+struct probe {};
+FIXTURE
+
+create_fixture_repository
+printf 'usearch_sibling(numkong 0123456789abcdef0123456789abcdef01234567)\n' > "$fixture_directory/CMakeLists.txt"
+git -C "$fixture_directory" add -- CMakeLists.txt
+git -C "$fixture_directory" update-index --add --cacheinfo 160000,fedcba9876543210fedcba9876543210fedcba98,numkong
+run_precommit
+expect_rejection "sibling pin disagreeing with its gitlink" "pin has drifted"
+
+create_fixture_repository
+printf 'usearch_sibling(numkong 0123456789abcdef0123456789abcdef01234567)\n' > "$fixture_directory/CMakeLists.txt"
+git -C "$fixture_directory" add -- CMakeLists.txt
+git -C "$fixture_directory" update-index --add --cacheinfo 160000,0123456789abcdef0123456789abcdef01234567,numkong
+run_precommit
+expect_acceptance "sibling pin agreeing with its gitlink"
+
+assert_accepts "quad lanes, simdgroup lanes and lanes_k-derived names" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe() {
+    constexpr int every_lane_k = 1;
+    int quad_lane = every_lane_k;
+    int simdgroup_lanes = quad_lane;
+}
+FIXTURE
+
+assert_accepts "warp lanes in a GPU source" include/usearch/probe.cuh <<'FIXTURE'
+__device__ inline void probe() { int active_lanes = 32; }
+FIXTURE
+
+create_fixture_repository
+mkdir -p "$fixture_directory/include/usearch"
+printf '/**\n *  @file include/usearch/probe.hpp\n *  @author Selftest\n *  @date January 1, 2026\n *  @brief One staged fixture for one rule.\n *\n *  Walks one lane at a time.\n */\n#pragma once\n' \
+    > "$fixture_directory/include/usearch/probe.hpp"
+git -C "$fixture_directory" add -- include/usearch/probe.hpp
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+sed -i.bak 's/Walks one lane at a time./Walks one lane and then the next lane./' "$fixture_directory/include/usearch/probe.hpp"
+rm -f "$fixture_directory/include/usearch/probe.hpp.bak"
+git -C "$fixture_directory" add -- include/usearch/probe.hpp
+run_precommit
+expect_acceptance "lane in prose inside an unchanged docblock opener"
+
+assert_accepts "defaulted comparison and bool function declarations" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    bool operator==(probe_t const &) const = default;
+    bool empty() const;
+    inline bool full() const { return true; }
+};
+FIXTURE
+
+assert_rejects "bool member beside a defaulted comparison" "adds a bool member" include/usearch/probe.hpp <<'FIXTURE'
+struct probe_t {
+    bool operator==(probe_t const &) const = default;
+    bool sorted_ = false;
+};
+FIXTURE
+
+assert_accepts "static constants after a record and function template" include/usearch/probe.hpp <<'FIXTURE'
+/** Plans one step. */
+template <typename scalar_type_>
+struct sample_plan {
+    static constexpr int width_k = 4;
+};
+
+/** Counts one step. */
+template <typename scalar_type_>
+constexpr int count_steps();
+
+/** Names one type. */
+template <typename scalar_type_>
+using step_alias = scalar_type_;
+FIXTURE
+
+assert_rejects "suffixed variable template after a record template" "suffixes a variable template" include/usearch/probe.hpp <<'FIXTURE'
+/** Plans one step. */
+template <typename scalar_type_>
+struct sample_plan {};
+
+/** Half-precision types, judged against an error bound. */
+template <typename scalar_type_>
+constexpr bool bounded_k = sizeof(scalar_type_) == 2;
+FIXTURE
+
+assert_accepts "void discard in C11 glue" javascript/probe.c <<'FIXTURE'
+static void probe(int value) { (void)value; }
+FIXTURE
+
+assert_accepts "void discard in Python glue" python/probe.c <<'FIXTURE'
+static void probe(int value) { (void)value; }
+FIXTURE
+
+assert_rejects "void discard in a C source outside the glue" "casts a result to void" c/probe.c <<'FIXTURE'
+static void probe(int value) { (void)value; }
+FIXTURE
+
+assert_accepts "JSDoc braces in plain JavaScript" explorer/probe.js <<'FIXTURE'
+/**
+ *  Counts the nodes.
+ *  @param {number} count - How many nodes to count.
+ *  @returns {number} The counted nodes.
+ */
+export function probe(count) {
+    return count;
+}
+FIXTURE
+
+assert_rejects "JSDoc braces in TypeScript" "uses JSDoc tag syntax" explorer/probe.ts <<'FIXTURE'
+/**
+ *  Counts the nodes.
+ *  @param {number} count - How many nodes to count.
+ */
+export function probe(count: number): number {
+    return count;
+}
+FIXTURE
+
+assert_accepts "Go doc code block" golang/probe.go <<'FIXTURE'
+// Probe counts the nodes in one pass over the whole index and returns them to the caller
+// without taking any locks.
+//
+//	counted := index.WithEveryNode.AndEveryEdge.AndEveryTombstone.ButNeverTheDeletedOnes.CountedInOnePass.Total
+func Probe() {}
+FIXTURE
+
+assert_rejects "Go prose past the width" "past 100 columns" golang/probe.go <<'FIXTURE'
+// Probe counts the nodes in one pass over the whole index and returns them to the caller without taking any locks.
+func Probe() {}
+FIXTURE
+
+assert_accepts "Rust own crate judged by its own name" rust/probe.rs <<'FIXTURE'
+use std::fmt;
+
+use numkong::dot;
+
+use usearch::index;
+FIXTURE
+
+assert_rejects "Rust own crate before a dependency" "order imports as standard library" rust/probe.rs <<'FIXTURE'
+use std::fmt;
+
+use usearch::index;
+
+use numkong::dot;
+FIXTURE
+
+# endregion USearch Fixtures
+
+# region Commit Message Fixtures
+
+assert_message_rejects "unknown verb" "approved verb" <<'FIXTURE'
+Refactor: Split the dispatch table
+FIXTURE
+
+assert_message_rejects "lowercase summary" "approved verb" <<'FIXTURE'
+Fix: split the dispatch table
+FIXTURE
+
+assert_message_accepts "approved verb" <<'FIXTURE'
+Improve: Split the dispatch table
+FIXTURE
+
+assert_message_rejects "assistant trailer" "AI-assistant attribution" <<'FIXTURE'
+Fix: Split the dispatch table
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+FIXTURE
+
+assert_message_accepts "prose mentioning generation" <<'FIXTURE'
+Improve: Split the dispatch table
+
+Each generation of the table keeps its own entries.
+FIXTURE
+
+# endregion Commit Message Fixtures
+
+echo ""
+echo "selftest: $passed_count passed, $failed_count failed"
+[ "$failed_count" -eq 0 ] || exit 1
+exit 0

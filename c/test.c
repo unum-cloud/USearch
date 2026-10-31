@@ -716,9 +716,9 @@ void test_absorb(size_t const dimensions) {
     usearch_dense_refinement_init(&(usearch_dense_refinement_init_t) {.index = indexes[0],
                                                                       .executor = executor,
                                                                       .outcome = &outcome,
-                                                                      .refinement = &refinement,
                                                                       .donors = indexes + 3,
-                                                                      .count = 1});
+                                                                      .count = 1,
+                                                                      .refinement = &refinement});
     expect(!outcome.message, outcome.message);
     expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
     usearch_key_t const late_key = key_of(rows_count);
@@ -744,7 +744,7 @@ void test_absorb(size_t const dimensions) {
                                                                           .outcome = &outcome,
                                                                           .refinement = refinement,
                                                                           .progress = {record_and_cancel, &reports},
-                                                                          .visited = &pulled_visited,
+                                                                          .reselected = &pulled_visited,
                                                                           .changed = &pulled_changed,
                                                                           .stats = &pulled_stats});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
@@ -759,21 +759,19 @@ void test_absorb(size_t const dimensions) {
         if (!cancelled) break;
     } while (pulls != rows_count);
     expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total == rows_count, "The handler must hear the walks over every row");
+    expect(reports.calls > 0 && reports.total >= rows_count, "The handler must hear the walks over every row");
     expect(reports.ascending, "Every pull must count on from where the last stopped");
 
-    size_t finished_changed = 0;
-    usearch_reachability_t reported = {0};
+    usearch_refine_report_t finished = {0};
     usearch_traversal_stats_t finished_stats = {0};
     usearch_dense_refinement_finish(&(usearch_dense_refinement_finish_t) {.index = indexes[0],
                                                                           .executor = executor,
                                                                           .outcome = &outcome,
                                                                           .refinement = refinement,
-                                                                          .changed = &finished_changed,
-                                                                          .reachability = &reported,
+                                                                          .report = &finished,
                                                                           .stats = &finished_stats});
     expect(!outcome.message, outcome.message);
-    expect(finished_changed >= changed && finished_changed > 0 &&
+    expect(finished.changed >= changed && finished.changed > 0 &&
                finished_stats.computed_distances >= stats.computed_distances,
            "The refinement must report at least the work its pulls reported");
 
@@ -800,7 +798,8 @@ void test_absorb(size_t const dimensions) {
                                                     .reachability = &reachability});
     expect(!outcome.message, outcome.message);
     expect_eq(reachability.reachable, rows_count, "Every absorbed row must stay reachable");
-    expect(reported.audited == reachability.audited && reported.reachable == reachability.reachable,
+    expect(finished.reachability.audited == reachability.audited &&
+               finished.reachability.reachable == reachability.reachable,
            "The closing audit must match a health call right after");
 
     free(keys);
@@ -878,9 +877,9 @@ void test_sequence_absorb(void) {
     usearch_sequence_refinement_init(&(usearch_sequence_refinement_init_t) {.index = indexes[0],
                                                                             .executor = executor,
                                                                             .outcome = &outcome,
-                                                                            .refinement = &refinement,
                                                                             .donors = indexes + 3,
-                                                                            .count = 1});
+                                                                            .count = 1,
+                                                                            .refinement = &refinement});
     expect(!outcome.message, outcome.message);
     expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
     usearch_key_t const late_key = key_of(reads_count);
@@ -904,7 +903,7 @@ void test_sequence_absorb(void) {
                                                    .outcome = &outcome,
                                                    .refinement = refinement,
                                                    .progress = {record_and_cancel, &reports},
-                                                   .visited = &pulled_visited,
+                                                   .reselected = &pulled_visited,
                                                    .changed = &pulled_changed,
                                                    .stats = &pulled_stats});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
@@ -919,31 +918,28 @@ void test_sequence_absorb(void) {
         if (!cancelled) break;
     } while (pulls != reads_count);
     expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total == reads_count, "The handler must hear the walks over every read");
+    expect(reports.calls > 0 && reports.total >= reads_count, "The handler must hear the walks over every read");
     expect(reports.ascending, "Every pull must count on from where the last stopped");
 
-    size_t finished_changed = 0;
-    usearch_reachability_t reported = {0};
+    usearch_refine_report_t finished = {0};
     usearch_sequence_refinement_finish(&(usearch_sequence_refinement_finish_t) {.index = indexes[0],
                                                                                 .executor = executor,
                                                                                 .outcome = &outcome,
                                                                                 .refinement = refinement,
-                                                                                .changed = &finished_changed,
-                                                                                .reachability = &reported});
+                                                                                .report = &finished});
     expect(!outcome.message, outcome.message);
-    expect(finished_changed >= changed && finished_changed > 0, "The refinement must report what its pulls changed");
-    expect_eq(reported.audited, reads_count, "The closing audit must judge every read");
+    expect(finished.changed >= changed && finished.changed > 0, "The refinement must report what its pulls changed");
+    expect_eq(finished.reachability.audited, reads_count, "The closing audit must judge every read");
 
     // The index reopened: a one-shot refine runs to its end and leaves every read reachable.
-    usearch_reachability_t refined = {0};
-    size_t refined_changed = 0;
+    usearch_refine_report_t refined = {0};
     usearch_sequence_refine(&(usearch_sequence_refine_t) {.index = indexes[0],
                                                           .executor = executor,
                                                           .outcome = &outcome,
-                                                          .changed = &refined_changed,
-                                                          .reachability = &refined});
+                                                          .report = &refined});
     expect(!outcome.message, outcome.message);
-    expect(refined.audited == reads_count && refined.reachable == reads_count, "Every read must stay reachable");
+    expect(refined.reachability.audited == reads_count && refined.reachability.reachable == reads_count,
+           "Every read must stay reachable");
     for (size_t read = 0; read != reads_count; ++read) {
         usearch_sequence_key_stats_t key_stats = {0};
         usearch_sequence_count(&(usearch_sequence_count_t) {.index = indexes[0],
@@ -961,7 +957,7 @@ void test_sequence_absorb(void) {
     printf("Test: Sequence Absorb - PASSED\n");
 }
 
-/** Reads entries back by key. @c usearch_dense_get sizes its own output, landing every row under
+/** Reads entries back by key. @c usearch_dense_get sizes its own output, writing every row under
  *  the key in an arena and reporting how many there were. */
 void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get... %zu dimensions\n", dimensions);
@@ -1254,7 +1250,7 @@ void test_walks_name_their_index(size_t const dimensions) {
     expect(!outcome.message, outcome.message);
 
     usearch_dense_cursor_t cursor = NULL;
-    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = index, .outcome = &outcome, .cursor = &cursor});
     expect(!outcome.message, outcome.message);
     usearch_arena_t const arena = create_arena(executor);
     usearch_keys_view_t walked = {0};
@@ -1321,7 +1317,7 @@ void test_walks_name_their_index(size_t const dimensions) {
     printf("Test: Walks Name Their Index - PASSED\n");
 }
 
-enum { neighborhood_rows_k = 200, neighborhood_dimensions_k = 16, sampled_wanted_k = 48, sampled_links_k = 3 };
+enum { neighborhood_rows_k = 200, neighborhood_dimensions_k = 16, sampled_wanted_k = 48 };
 
 /** The integer identity a key wraps, as @c key_of wrapped it. */
 uint64_t value_of(usearch_key_t key) {
@@ -1329,17 +1325,6 @@ uint64_t value_of(usearch_key_t key) {
     for (unsigned byte_index = 0; byte_index != 8; ++byte_index)
         value |= (uint64_t)key.bytes[15 - byte_index] << (byte_index * 8);
     return value;
-}
-
-/** The Euclidean distance between two of @p rows. */
-double row_distance(float const* rows, size_t first, size_t second) {
-    double squared = 0;
-    for (size_t dimension = 0; dimension != neighborhood_dimensions_k; ++dimension) {
-        double const delta = (double)rows[first * neighborhood_dimensions_k + dimension] -
-                             (double)rows[second * neighborhood_dimensions_k + dimension];
-        squared += delta * delta;
-    }
-    return sqrt(squared);
 }
 
 /** A Euclidean index over @p rows, each under the key of its position but row 1, which shares row
@@ -1373,77 +1358,176 @@ usearch_dense_index_t create_neighborhood(float const* rows, usearch_executor_t 
     return index;
 }
 
-/** One run of draws with their links, copied out of the arena every call rewinds. */
+/** One sample's draws, copied out of the arena every call rewinds. */
 typedef struct sampled_t {
     size_t written;
-    usearch_key_t keys[sampled_wanted_k];
-    size_t offsets[sampled_wanted_k + 1];
-    usearch_key_t linked[sampled_wanted_k * sampled_links_k];
-    usearch_distance_t distances[sampled_wanted_k * sampled_links_k];
+    usearch_key_t keys[neighborhood_rows_k];
+    size_t ordinals[neighborhood_rows_k];
+    size_t parented[neighborhood_rows_k];
+    usearch_key_t parents[neighborhood_rows_k];
+    float coordinates[neighborhood_rows_k * 3];
 } sampled_t;
 
-/** Draws up to @p wanted more of the sequence @p seed names, past the draws @p sampled holds, and
- *  appends them; answers the outcome, which an implementation that cannot sample fails. */
-usearch_outcome_t sample_more(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
-                              uint64_t seed, size_t wanted, sampled_t* sampled) {
+/** Draws up to @p wanted entries under @p seed around the @p focus_count keys at @p focus, the
+ *  draws of @p shown, when given, standing as shown keys at their coordinates, and copies them into
+ *  @p sampled; answers the outcome, which an implementation that cannot sample fails. */
+usearch_outcome_t sample_draws(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                               sampled_t const* shown, usearch_key_t const* focus, size_t focus_count, size_t wanted,
+                               uint64_t seed, sampled_t* sampled) {
     usearch_outcome_t outcome = {0};
-    usearch_keys_view_t drawn = {0};
-    usearch_matches_tape_view_t links = {0};
+    usearch_keys_view_t keys = {0};
+    size_t const* ordinals = NULL;
+    usearch_matches_view_t parents = {0};
+    usearch_rows_view_t coordinates = {0};
     size_t written = 0;
-    usearch_dense_sample(&(usearch_dense_sample_t) {.index = index,
-                                                    .executor = executor,
-                                                    .outcome = &outcome,
-                                                    .keys = &drawn,
-                                                    .links = &links,
-                                                    .written = &written,
-                                                    .arena = arena,
-                                                    .wanted = wanted,
-                                                    .offset = sampled->written,
-                                                    .links_per_draw = sampled_links_k,
-                                                    .seed = seed});
+    usearch_dense_sample(&(usearch_dense_sample_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .shown_count = shown ? shown->written : 0,
+        .shown = {shown ? shown->keys : NULL, sizeof(usearch_key_t)},
+        .shown_coordinates = {shown ? shown->coordinates : NULL, 3 * sizeof(float), 3, usearch_scalar_f32_k},
+        .focus_count = focus_count,
+        .focus = {focus, sizeof(usearch_key_t)},
+        .keys = &keys,
+        .entry_ordinals = &ordinals,
+        .parents = &parents,
+        .coordinates = &coordinates,
+        .written = &written,
+        .arena = arena,
+        .wanted = wanted,
+        .seed = seed});
     if (outcome.status != usearch_status_success_k) return outcome;
-    expect(written <= wanted, "A sample writes at most the draws wanted");
-    size_t const base = sampled->written;
+    expect(written <= wanted && written <= neighborhood_rows_k, "A sample writes at most the draws wanted");
+    expect(coordinates.columns == 3 && coordinates.scalar == usearch_scalar_f32_k,
+           "Draws are placed in three f32 dimensions");
+    sampled->written = written;
     for (size_t draw = 0; draw != written; ++draw) {
-        sampled->keys[base + draw] = drawn.data[draw];
-        sampled->offsets[base + draw + 1] = sampled->offsets[base] + links.offsets[draw + 1];
+        sampled->keys[draw] = keys.data[draw];
+        sampled->ordinals[draw] = ordinals[draw];
+        sampled->parented[draw] = parents.counts[draw];
+        if (parents.counts[draw]) sampled->parents[draw] = parents.keys[draw * parents.columns];
+        memcpy(sampled->coordinates + draw * 3, (char const*)coordinates.data + draw * coordinates.stride,
+               3 * sizeof(float));
     }
-    size_t const linked = links.offsets[written];
-    memcpy(sampled->linked + sampled->offsets[base], links.keys, linked * sizeof(usearch_key_t));
-    memcpy(sampled->distances + sampled->offsets[base], links.scores, linked * sizeof(usearch_distance_t));
-    sampled->written = base + written;
     return outcome;
 }
 
-/** Whether two runs drew the same keys and links, their distances within a relative tolerance. */
+/** Whether two samples drew the same entries from the same parents at the same coordinates, bit for
+ *  bit. */
 bool same_samples(sampled_t const* first, sampled_t const* second) {
-    size_t const links = first->offsets[first->written];
-    if (first->written != second->written ||
-        memcmp(first->keys, second->keys, first->written * sizeof(usearch_key_t)) != 0 ||
-        memcmp(first->offsets, second->offsets, (first->written + 1) * sizeof(size_t)) != 0 ||
-        memcmp(first->linked, second->linked, links * sizeof(usearch_key_t)) != 0)
-        return false;
-    for (size_t link = 0; link != links; ++link)
-        if (fabs(first->distances[link] - second->distances[link]) > 1e-6 * fabs(first->distances[link]) + 1e-12)
-            return false;
-    return true;
+    size_t const written = first->written;
+    return written == second->written && !memcmp(first->keys, second->keys, written * sizeof(usearch_key_t)) &&
+           !memcmp(first->ordinals, second->ordinals, written * sizeof(size_t)) &&
+           !memcmp(first->parented, second->parented, written * sizeof(size_t)) &&
+           !memcmp(first->parents, second->parents, written * sizeof(usearch_key_t)) &&
+           !memcmp(first->coordinates, second->coordinates, written * 3 * sizeof(float));
 }
 
-/** A sample extends one seeded sequence: two calls joined by @c offset draw what one call does, an
- *  equal seed repeats it, every draw after the first links to earlier ones, and a radius around an
- *  anchor bounds the region. An implementation that cannot sample says so, and the test skips. */
+/** Whether @p sampled drew the entry @p ordinal of @p key among its first @p count draws. */
+bool drew(sampled_t const* sampled, size_t count, usearch_key_t key, size_t ordinal) {
+    for (size_t draw = 0; draw != count; ++draw)
+        if (!memcmp(sampled->keys[draw].bytes, key.bytes, sizeof(key.bytes)) && sampled->ordinals[draw] == ordinal)
+            return true;
+    return false;
+}
+
+/** Whether @p sampled drew @p key at all among its first @p count draws. */
+bool drew_key(sampled_t const* sampled, size_t count, usearch_key_t key) {
+    for (size_t draw = 0; draw != count; ++draw)
+        if (!memcmp(sampled->keys[draw].bytes, key.bytes, sizeof(key.bytes))) return true;
+    return false;
+}
+
+/** How many entries @p key holds, as @c usearch_dense_get lands them, copying the one at
+ *  @p ordinal into @p row when it exists. */
+size_t get_entry(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena, usearch_key_t key,
+                 size_t ordinal, float* row) {
+    usearch_outcome_t outcome = {0};
+    usearch_rows_view_t vectors = {0};
+    size_t written = 0;
+    usearch_dense_get(&(usearch_dense_get_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .key = key,
+                                              .vectors = &vectors,
+                                              .written = &written,
+                                              .arena = arena,
+                                              .outputs_scalar = usearch_scalar_f32_k});
+    expect(!outcome.message, outcome.message);
+    if (ordinal < written)
+        memcpy(row, (char const*)vectors.data + ordinal * vectors.stride, neighborhood_dimensions_k * sizeof(float));
+    return written;
+}
+
+/** Every draw of @p sampled names an entry of its key, as @c get orders them, once; never a key of
+ *  @p shown; hangs from a key of @p shown or an earlier draw; and lies at finite coordinates. */
+void expect_draws(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                  sampled_t const* sampled, sampled_t const* shown) {
+    float row[neighborhood_dimensions_k];
+    size_t const shown_count = shown ? shown->written : 0;
+    for (size_t draw = 0; draw != sampled->written; ++draw) {
+        usearch_key_t const key = sampled->keys[draw];
+        expect(sampled->ordinals[draw] < get_entry(index, executor, arena, key, 0, row),
+               "A draw names an entry of its key, as get counts them");
+        expect(!drew(sampled, draw, key, sampled->ordinals[draw]), "An entry is drawn once");
+        expect(!shown || !drew_key(shown, shown_count, key), "A shown key is never drawn again");
+        expect(!sampled->parented[draw] || drew_key(sampled, draw, sampled->parents[draw]) ||
+                   (shown && drew_key(shown, shown_count, sampled->parents[draw])),
+               "A draw hangs from a shown or an earlier draw");
+        for (size_t axis = 0; axis != 3; ++axis)
+            expect(isfinite(sampled->coordinates[draw * 3 + axis]), "A draw lies at finite coordinates");
+    }
+}
+
+/** Draw @p counter of the SplitMix64 stream @p seed starts. */
+uint64_t splitmix64_at(uint64_t seed, uint64_t counter) {
+    uint64_t word = seed + (counter + 1) * 0x9E3779B97F4A7C15ull;
+    word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
+    word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
+    return word ^ (word >> 31);
+}
+
+/** Where a sample with nothing shown places @p row under @p seed: its product with the Gaussian
+ *  matrix whose entry for dimension d and axis c is the Box-Muller cosine of draws 2n and 2n+1,
+ *  with n = 3d+c, each mapped into (0, 1], over the square root of the dimensions, accumulated in
+ *  f64 and rounded once. */
+void project(float const* row, uint64_t seed, float* coordinates) {
+    for (size_t axis = 0; axis != 3; ++axis) {
+        double sum = 0;
+        for (size_t dimension = 0; dimension != neighborhood_dimensions_k; ++dimension) {
+            uint64_t const counter = 2 * (3 * dimension + axis);
+            double const radial = ((double)(splitmix64_at(seed, counter) >> 11) + 1) * 0x1p-53;
+            double const angular = ((double)(splitmix64_at(seed, counter + 1) >> 11) + 1) * 0x1p-53;
+            sum += (double)row[dimension] * sqrt(-2 * log(radial)) * cos(6.283185307179586 * angular);
+        }
+        coordinates[axis] = (float)(sum / sqrt((double)neighborhood_dimensions_k));
+    }
+}
+
+/** A sample draws entries and places them: an equal seed repeats it bit for bit; a smaller one
+ *  draws a subset, so zoom levels nest; every draw names an entry as @c get orders its key's, once,
+ *  hangs from a shown or earlier draw, and lies at finite coordinates; shown keys are never drawn
+ *  again and keep their coordinates. A golden cell over small integer rows, focused on every key,
+ *  draws every entry where the projection places it, bit for bit. An implementation that cannot
+ *  sample says so, and the test skips. */
 void test_sample(void) {
     printf("Test: Sample\n");
-    usearch_outcome_t outcome = {0};
     usearch_executor_t const executor = create_executor(0);
     usearch_arena_t const arena = create_arena(executor);
     float* const rows = create_vectors(neighborhood_rows_k, neighborhood_dimensions_k);
+    // Small integers survive bf16 exactly, so the golden projection reads the rows as inserted.
+    for (size_t value = 0; value != neighborhood_rows_k * neighborhood_dimensions_k; ++value)
+        rows[value] = floorf(rows[value] * 8);
     usearch_dense_index_t const index = create_neighborhood(rows, executor);
+    sampled_t* const samples = (sampled_t*)calloc(5, sizeof(sampled_t));
+    sampled_t *const whole = samples, *const repeated = samples + 1, *const nested = samples + 2;
+    sampled_t *const around = samples + 3, *const golden = samples + 4;
 
-    sampled_t once = {0}, joined = {0}, repeated = {0};
-    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k, &once);
+    usearch_outcome_t outcome = sample_draws(index, executor, arena, NULL, NULL, 0, sampled_wanted_k, 42, whole);
     if (outcome.status == usearch_status_unsupported_k) {
         printf("Test: Sample - SKIPPED: %s\n", outcome.message);
+        free(samples);
         usearch_dense_free(index);
         free(rows);
         usearch_arena_free(arena);
@@ -1451,56 +1535,44 @@ void test_sample(void) {
         return;
     }
     expect(!outcome.message, outcome.message);
-    expect_eq(once.written, sampled_wanted_k, "A sample of the whole index draws all it wants");
-    outcome = sample_more(index, executor, arena, 42, 20, &joined);
+    expect_eq(whole->written, sampled_wanted_k, "A sample of the whole index draws all it wants");
+    expect_draws(index, executor, arena, whole, NULL);
+    outcome = sample_draws(index, executor, arena, NULL, NULL, 0, sampled_wanted_k, 42, repeated);
     expect(!outcome.message, outcome.message);
-    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k - 20, &joined);
+    expect(same_samples(whole, repeated), "An equal seed, shown keys and focus must draw alike, bit for bit");
+    outcome = sample_draws(index, executor, arena, NULL, NULL, 0, sampled_wanted_k / 3, 42, nested);
     expect(!outcome.message, outcome.message);
-    expect(same_samples(&once, &joined), "Two calls joined by their offset must draw what one call does");
-    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k, &repeated);
-    expect(!outcome.message, outcome.message);
-    expect(same_samples(&once, &repeated), "An equal seed must repeat the sequence");
+    for (size_t draw = 0; draw != nested->written; ++draw)
+        expect(drew(whole, whole->written, nested->keys[draw], nested->ordinals[draw]),
+               "A smaller sample must draw a subset of a larger one, so zoom levels nest");
 
-    for (size_t draw = 0; draw != once.written; ++draw) {
-        size_t const links = once.offsets[draw + 1] - once.offsets[draw];
-        expect(draw ? links >= 1 && links <= sampled_links_k : links == 0,
-               "Every draw after the first, and only those, links to earlier draws");
-        for (size_t link = once.offsets[draw]; link != once.offsets[draw + 1]; ++link) {
-            bool earlier = false;
-            for (size_t previous = 0; previous != draw; ++previous)
-                earlier = earlier ||
-                          memcmp(once.linked[link].bytes, once.keys[previous].bytes, sizeof(usearch_key_t)) == 0;
-            expect(earlier, "A link must name an earlier draw");
-        }
+    // Zooming in shows the nested draws and looks around one key.
+    float shown_coordinates[sampled_wanted_k * 3];
+    memcpy(shown_coordinates, nested->coordinates, sizeof(shown_coordinates));
+    usearch_key_t const focus = key_of(5);
+    outcome = sample_draws(index, executor, arena, nested, &focus, 1, sampled_wanted_k, 42, around);
+    expect(!outcome.message, outcome.message);
+    expect(around->written > 0, "A sample around a key draws");
+    expect_draws(index, executor, arena, around, nested);
+    expect(!memcmp(shown_coordinates, nested->coordinates, sizeof(shown_coordinates)), "Shown points keep theirs");
+
+    // Every key in focus and nothing shown: every entry is drawn, placed by the projection.
+    usearch_key_t every_key[neighborhood_rows_k - 1];
+    for (size_t key = 0; key != neighborhood_rows_k - 1; ++key) every_key[key] = key_of(key ? key + 1 : 0);
+    outcome = sample_draws(index, executor, arena, NULL, every_key, neighborhood_rows_k - 1, neighborhood_rows_k, 7,
+                           golden);
+    expect(!outcome.message, outcome.message);
+    expect_eq(golden->written, neighborhood_rows_k, "A focus on every key draws every entry");
+    expect_draws(index, executor, arena, golden, NULL);
+    for (size_t draw = 0; draw != golden->written; ++draw) {
+        float row[neighborhood_dimensions_k], projected[3];
+        get_entry(index, executor, arena, golden->keys[draw], golden->ordinals[draw], row);
+        project(row, 7, projected);
+        expect(!memcmp(projected, golden->coordinates + draw * 3, sizeof(projected)),
+               "A draw with nothing shown lies where the projection of its row places it, bit for bit");
     }
 
-    // The mean distance from row 0 splits the index, so its region is neither empty nor whole.
-    double radius = 0;
-    for (size_t row = 0; row != neighborhood_rows_k; ++row) radius += row_distance(rows, 0, row);
-    radius /= neighborhood_rows_k;
-    usearch_keys_view_t drawn = {0};
-    usearch_matches_tape_view_t links = {0};
-    size_t written = 0;
-    usearch_dense_sample(&(usearch_dense_sample_t) {
-        .index = index,
-        .executor = executor,
-        .outcome = &outcome,
-        .anchors_count = 1,
-        .anchors = {rows, neighborhood_dimensions_k * sizeof(float), neighborhood_dimensions_k, usearch_scalar_f32_k},
-        .keys = &drawn,
-        .links = &links,
-        .written = &written,
-        .arena = arena,
-        .wanted = neighborhood_rows_k,
-        .links_per_draw = 1,
-        .seed = 7,
-        .radius = radius});
-    expect(!outcome.message, outcome.message);
-    expect(written >= 1 && written < neighborhood_rows_k, "A radius must bound the region drawn from");
-    for (size_t draw = 0; draw != written; ++draw)
-        expect(row_distance(rows, 0, value_of(drawn.data[draw])) <= radius * (1 + 1e-6),
-               "No draw may lie outside the radius");
-
+    free(samples);
     usearch_dense_free(index);
     free(rows);
     usearch_arena_free(arena);
@@ -1549,7 +1621,7 @@ void test_cursor_steps(void) {
 
     size_t yielded[neighborhood_rows_k] = {0};
     usearch_dense_cursor_t cursor = NULL;
-    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = index, .outcome = &outcome, .cursor = &cursor});
     expect(!outcome.message, outcome.message);
     expect_eq(pull_to_end(index, executor, arena, cursor, yielded), neighborhood_rows_k,
               "A plain scan must yield every row");
@@ -1557,11 +1629,11 @@ void test_cursor_steps(void) {
         expect(yielded[row] == (row == 0 ? 2u : row == 1 ? 0u : 1u), "A plain scan must yield every row once");
 
     usearch_key_t const start = key_of(0);
-    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor,
-                                                              .index = index,
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = index,
                                                               .outcome = &outcome,
                                                               .starts_count = 1,
-                                                              .starts = &start});
+                                                              .starts = &start,
+                                                              .cursor = &cursor});
     if (outcome.status == usearch_status_unsupported_k)
         printf("Test: Cursor Steps - SKIPPED the step: %s\n", outcome.message);
     else {
@@ -1573,11 +1645,11 @@ void test_cursor_steps(void) {
             expect(yielded[row] <= 1, "A walk must yield each linked entry once");
 
         usearch_key_t const absent = key_of(neighborhood_rows_k);
-        usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor,
-                                                                  .index = index,
+        usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = index,
                                                                   .outcome = &outcome,
                                                                   .starts_count = 1,
-                                                                  .starts = &absent});
+                                                                  .starts = &absent,
+                                                                  .cursor = &cursor});
         expect(!outcome.message, outcome.message);
         expect_eq(pull_to_end(index, executor, arena, cursor, yielded), 0, "An absent key must step nowhere");
     }
@@ -1731,7 +1803,7 @@ void test_sequence_round_trip(void) {
         expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refines nothing");
         usearch_sequence_cursor_t cursor = NULL;
         usearch_sequence_cursor_init(
-            &(usearch_sequence_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+            &(usearch_sequence_cursor_init_t) {.index = viewed, .outcome = &outcome, .cursor = &cursor});
         expect(!outcome.message, outcome.message);
         size_t pulled[2] = {0};
         for (size_t pull = 0; pull != 2; ++pull) {
@@ -1838,7 +1910,7 @@ void test_sequence_shards(void) {
 
     usearch_sequence_cursor_t cursor = NULL;
     usearch_sequence_cursor_init(
-        &(usearch_sequence_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+        &(usearch_sequence_cursor_init_t) {.index = index, .outcome = &outcome, .cursor = &cursor});
     expect(!outcome.message, outcome.message);
     bool pulled[reads_count] = {false};
     size_t pulled_count = 0;
@@ -2242,7 +2314,7 @@ void test_shapes_round_trip(void) {
                    "A view from storage hands the stored pose back");
         usearch_shapes_cursor_t cursor = NULL;
         usearch_shapes_cursor_init(
-            &(usearch_shapes_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+            &(usearch_shapes_cursor_init_t) {.index = viewed, .outcome = &outcome, .cursor = &cursor});
         expect(!outcome.message, outcome.message);
         usearch_keys_view_t cursor_keys = {0};
         size_t pulled = 0;
@@ -2567,7 +2639,7 @@ void test_geospatial_round_trip(void) {
 
         usearch_geospatial_cursor_t cursor = NULL;
         usearch_geospatial_cursor_init(
-            &(usearch_geospatial_cursor_init_t) {.cursor = &cursor, .index = viewed, .outcome = &outcome});
+            &(usearch_geospatial_cursor_init_t) {.index = viewed, .outcome = &outcome, .cursor = &cursor});
         expect(!outcome.message, outcome.message);
         usearch_keys_view_t cursor_keys = {0};
         size_t pulled = 0;
@@ -2677,21 +2749,19 @@ void test_shapes_and_geospatial_absorb(void) {
                                                       .donors = shapes + 2});
     expect_eq(outcome.status, usearch_status_config_mismatch_k, "A donor of another point count is refused");
     expect(shapes[2] != NULL, "A refused donor stays the caller's");
-    usearch_reachability_t reachability = {0};
+    usearch_refine_report_t report = {0};
     usearch_shapes_absorb(&(usearch_shapes_absorb_t) {.index = shapes[0],
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .count = 1,
                                                       .donors = shapes + 1,
-                                                      .reachability = &reachability});
+                                                      .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(shapes[1] == NULL && reachability.audited == 2 * entries_per_index, "The donor's shapes must land");
-    usearch_shapes_refine(&(usearch_shapes_refine_t) {.index = shapes[0],
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .reachability = &reachability});
+    expect(shapes[1] == NULL && report.reachability.audited == 2 * entries_per_index, "The donor's shapes must land");
+    usearch_shapes_refine(
+        &(usearch_shapes_refine_t) {.index = shapes[0], .executor = executor, .outcome = &outcome, .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(reachability.reachable == 2 * entries_per_index, "Every absorbed shape must stay reachable");
+    expect(report.reachability.reachable == 2 * entries_per_index, "Every absorbed shape must stay reachable");
     usearch_shapes_index_description_t shapes_description = {0};
     usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = shapes[0],
                                                           .executor = executor,
@@ -2730,10 +2800,11 @@ void test_shapes_and_geospatial_absorb(void) {
     usearch_geospatial_refine(&(usearch_geospatial_refine_t) {.index = places[0],
                                                               .executor = executor,
                                                               .outcome = &outcome,
-                                                              .reachability = &reachability});
+                                                              .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(reachability.audited == 2 * entries_per_index && reachability.reachable == 2 * entries_per_index,
-           "Every absorbed observation must stay reachable");
+    expect(
+        report.reachability.audited == 2 * entries_per_index && report.reachability.reachable == 2 * entries_per_index,
+        "Every absorbed observation must stay reachable");
     usearch_geospatial_free(places[0]);
     usearch_executor_free(executor);
     printf("Test: Shapes & Geospatial Absorb - PASSED\n");
@@ -3011,8 +3082,8 @@ void test_attend(void) {
                                      .queries = {queries, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
                                      .value_lookup = attend_value_rows,
                                      .value_lookup_state = &values,
-                                     .outputs = &outputs,
                                      .carry = carry,
+                                     .outputs = &outputs,
                                      .arena = arena,
                                      .score_scale = 0.69314718f};
     for (size_t head_count = 1; head_count <= heads; ++head_count) {
@@ -3078,7 +3149,7 @@ void test_attend(void) {
     printf("Test: Attend - PASSED\n");
 }
 
-/** Every landed run of @p matches against @p exact, <tt>[query][document]</tt> totals: as many keys
+/** Every written run of @p matches against @p exact, <tt>[query][document]</tt> totals: as many keys
  *  as @p expected_count per query, largest first, each at its exact total, even keys alone when
  *  @p even_only. */
 static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t written, size_t queries, size_t documents,
@@ -3090,10 +3161,10 @@ static void expect_maxsim_tape(usearch_matches_tape_view_t matches, size_t writt
         expect_eq(end - first, expected_count[query], "Every query lands as many keys as it kept");
         for (size_t entry = first; entry != end; ++entry) {
             uint64_t const document = value_of(matches.keys[entry]);
-            expect(document < documents, "A landed key names a document");
-            expect(!even_only || document % 2 == 0, "A predicate narrows the landed keys");
+            expect(document < documents, "A written key names a document");
+            expect(!even_only || document % 2 == 0, "A predicate narrows the written keys");
             expect(fabs(matches.scores[entry] - exact[query * documents + document]) < 1e-3,
-                   "A landed key scores its exact summed maxima");
+                   "A written key scores its exact summed maxima");
             expect(entry == first || matches.scores[entry] <= matches.scores[entry - 1], "Keys land largest first");
         }
     }
@@ -3344,7 +3415,7 @@ void test_nvme_view(size_t const dimensions) {
                "A bf16 view must return rows within its 7-bit mantissa");
 
     usearch_dense_cursor_t cursor = NULL;
-    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = view, .outcome = &outcome});
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = view, .outcome = &outcome, .cursor = &cursor});
     expect(!outcome.message, outcome.message);
     usearch_keys_view_t walked = {0};
     usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = view,
@@ -3757,7 +3828,7 @@ typedef struct search_outputs_t {
     usearch_outcome_t outcome;
 } search_outputs_t;
 
-/** Whether two searches of every row landed the same matches. */
+/** Whether two searches of every row wrote the same matches. */
 bool same_matches(usearch_matches_view_t const* first, usearch_matches_view_t const* second) {
     size_t const cells = deferred_rows * deferred_wanted;
     return memcmp(first->keys, second->keys, cells * sizeof(usearch_key_t)) == 0 &&

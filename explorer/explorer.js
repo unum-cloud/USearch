@@ -5,9 +5,10 @@
  *  @brief The scaffolding around the projection core: the key-to-ordinal map, what to draw next, gestures, hover arcs,
  *      selection, hubs, landmarks, glyphs and the readout strip, for every modality alike.
  *
- *  Layout edges always carry distances, from `sample` links or from `search`. Graph links are topology, so they appear
- *  only as hover arcs, and a long link never drags two remote clusters together. What differs per modality lives in
- *  `modalities.js`, and only `worker.js` touches the C ABI.
+ *  Sampled nodes stay pinned where the engine placed them, so the edges between them - each draw's
+ *  parent, and the links a cursor reads - never drag them; only the nodes `search` brings settle
+ *  along its distances. What differs per modality lives in `modalities.js`, and only `worker.js`
+ *  touches the C ABI.
  */
 
 import { NeighborhoodProjection, alongView, emptySlot, project, rotationOf } from "./projection.js";
@@ -18,20 +19,19 @@ import { modalities } from "./modalities.js";
 /** @typedef {import('./modalities.js').Payload} Payload */
 /** @typedef {import('./modalities.js').Palette} Palette */
 /** @typedef {import('./modalities.js').GlyphItem} GlyphItem */
-/** @typedef {{seed: number, offset: number, anchors: Payload[] | null, radius: number, seen: Map<string, number>, beside: number, remaining: number, exhausted: boolean}} SampleSequence */
+/** @typedef {{seed: number, focus: Uint8Array | null, remaining: number, exhausted: boolean}}
+ *      SampleSequence */
 
 const nodesBudget = 2 << 20;
 const edgesPerNode = 12;
 // Zooms and selections keep adding edges among nodes already drawn, so a small index still gets room for them.
 const edgesFloor = 1 << 20;
-const linksPerDraw = 8;
 const drawsPerCall = 8192;
 // Sample calls are sized to finish near this, so a hover never queues behind a long one.
 const sampleCallMilliseconds = 40;
 const overviewDraws = 2048;
 const zoomDraws = 1024;
-const zoomAnchors = 16;
-const zoomViewNodes = 256;
+const zoomFocus = 16;
 const zoomStep = 1.6;
 const searchWanted = 16;
 const dwellMilliseconds = 150;
@@ -227,8 +227,21 @@ export async function explore(elements, parameters) {
   projection.device.lost.then((information) => showStatus(`The GPU device was lost: ${information.message}`));
 
   const ordinalsByKey = /** @type {Map<string, number[]>} */ (new Map());
+  const nodeOfEntry = /** @type {Map<string, number>} */ (new Map());
   const keyBytes = new Uint8Array(capacity * 16);
-  const linkReach = new Float32Array(capacity);
+  const entryOf = new Uint32Array(capacity);
+  // Where the engine placed each sampled node, NaN for the nodes `search` brought.
+  const engineCoordinates = new Float32Array(capacity * 3).fill(NaN);
+  // The shown keys, once each, as every sample passes them.
+  const shownKeys = new Uint8Array(capacity * 16);
+  const shownCoordinates = new Float32Array(capacity * 3);
+  let shownCount = 0;
+  const shownNames = /** @type {Set<string>} */ (new Set());
+  // Nodes whose cursor links are already drawn as edges.
+  const cursorLinked = /** @type {Set<number>} */ (new Set());
+  // The radial `s · log(1 + r/s)` around the first sample's centroid, `s` its median distance
+  // to it.
+  const hull = { centre: [0, 0, 0], scale: 0 };
   const payloadCache = /** @type {Map<string, Payload>} */ (new Map());
   const hubCounts = /** @type {Map<number, number>} */ (new Map());
   const pinned = /** @type {Set<number>} */ (new Set());
@@ -248,17 +261,21 @@ export async function explore(elements, parameters) {
     return text.startsWith("#") && title !== undefined ? title : text;
   };
 
-  /** @param {string} name @param {Uint8Array} bytes @param {number} offset */
-  function register(name, bytes, offset) {
+  /** @param {string} name @param {number} entry */
+  const entryName = (name, entry) => `${name}:${entry}`;
+
+  /** @param {string} name @param {Uint8Array} bytes @param {number} offset @param {number} entry */
+  function register(name, bytes, offset, entry) {
     const ordinal = nodes++;
     keyBytes.set(bytes.subarray(offset, offset + 16), ordinal * 16);
+    entryOf[ordinal] = entry;
+    nodeOfEntry.set(entryName(name, entry), ordinal);
     const known = ordinalsByKey.get(name);
     if (known) known.push(ordinal);
     else ordinalsByKey.set(name, [ordinal]);
     return ordinal;
   }
 
-  /** Appends edges and keeps each node's longest link, the scale a zoom samples around. */
   function appendEdges(
     /** @type {number[]} */ sources,
     /** @type {number[]} */ targets,
@@ -272,10 +289,6 @@ export async function explore(elements, parameters) {
       Uint32Array.from(targets.slice(0, count)),
       Float32Array.from(distances.slice(0, count)),
     );
-    for (let edge = 0; edge < count; edge++) {
-      linkReach[sources[edge]] = Math.max(linkReach[sources[edge]], distances[edge]);
-      linkReach[targets[edge]] = Math.max(linkReach[targets[edge]], distances[edge]);
-    }
     edges += count;
   }
 
@@ -284,31 +297,72 @@ export async function explore(elements, parameters) {
     if (beside.length === 0) return;
     projection.appendNodes(Uint32Array.from(beside), [0, 0, 0]);
     layoutEpochsLeft = layoutEpochsAfterChange;
-    if (modality.place) pinToPlane(Array.from(beside, (_, index) => nodes - beside.length + index));
+    pinPlaced(Array.from(beside, (_, index) => nodes - beside.length + index));
   }
 
-  /** Holds `ordinals` where the modality's plane puts their entries, once `get` brings them. @param {number[]} ordinals */
-  async function pinToPlane(ordinals) {
-    const place = modality.place;
-    if (!place) return;
-    const payloads = await payloadsOf(ordinals.map(bytesOf));
-    /** @type {number[]} */ const kept = [];
-    /** @type {number[]} */ const coordinates = [];
-    ordinals.forEach((ordinal, index) => {
-      const payload = payloads[index];
-      if (!payload?.count) return;
-      // Nodes under one key take its entries in turn, which `get` may list in another order than they were drawn.
-      const entry = Math.min(
-        payload.count - 1,
-        Math.max(0, (ordinalsByKey.get(nameOf(ordinal)) ?? []).indexOf(ordinal)),
-      );
-      kept.push(ordinal);
-      coordinates.push(...place(payload, entry));
-    });
-    if (kept.length > 0) projection.pin(Uint32Array.from(kept), Float32Array.from(coordinates));
+  /**
+   *  Where engine coordinates show: on the modality's own surface, else through the hull's radial
+   *  compression.
+   *  @param {ArrayLike<number>} point
+   */
+  function shownAt(point) {
+    if (modality.place) return modality.place(point);
+    const offset = [0, 1, 2].map((axis) => point[axis] - hull.centre[axis]);
+    const radius = Math.hypot(...offset);
+    const shrink = radius > 0 && hull.scale > 0 ? (hull.scale * Math.log1p(radius / hull.scale)) / radius : 1;
+    return offset.map((value, axis) => hull.centre[axis] + value * shrink);
+  }
+
+  /** Calibrates the hull on the first sample's `ordinals`, once. @param {number[]} ordinals */
+  function calibrateHull(ordinals) {
+    if (hull.scale > 0 || ordinals.length === 0) return;
+    const at = (/** @type {number} */ ordinal, /** @type {number} */ axis) => engineCoordinates[ordinal * 3 + axis];
+    hull.centre = [0, 1, 2].map(
+      (axis) => ordinals.reduce((sum, ordinal) => sum + at(ordinal, axis), 0) / ordinals.length,
+    );
+    const radii = ordinals
+      .map((ordinal) => Math.hypot(...[0, 1, 2].map((axis) => at(ordinal, axis) - hull.centre[axis])))
+      .sort((left, right) => left - right);
+    hull.scale = radii[Math.floor(radii.length / 2)] || 1;
+  }
+
+  /** Holds the sampled among `ordinals` where the engine placed them. @param {number[]} ordinals */
+  function pinPlaced(ordinals) {
+    const kept = ordinals.filter((ordinal) => !Number.isNaN(engineCoordinates[ordinal * 3]));
+    if (kept.length === 0) return;
+    const coordinates = new Float32Array(kept.length * 3);
+    kept.forEach((ordinal, index) =>
+      coordinates.set(shownAt(engineCoordinates.subarray(ordinal * 3, ordinal * 3 + 3)), index * 3),
+    );
+    projection.pin(Uint32Array.from(kept), coordinates);
     // A placement is no layout motion for the view to follow.
     followedCentre = null;
-    if (!userMoved) fit();
+  }
+
+  /**
+   *  Draws the links a cursor read from `node` as edges, once per node, measured between engine
+   *  coordinates.
+   *  @param {number} node @param {number[]} linked
+   */
+  function linkEdges(node, linked) {
+    if (cursorLinked.has(node)) return;
+    cursorLinked.add(node);
+    /** @type {number[]} */ const targets = [];
+    /** @type {number[]} */ const distances = [];
+    const from = engineCoordinates.subarray(node * 3, node * 3 + 3);
+    for (const target of new Set(linked)) {
+      const to = engineCoordinates.subarray(target * 3, target * 3 + 3);
+      const distance = Math.hypot(from[0] - to[0], from[1] - to[1], from[2] - to[2]);
+      if (target === node || Number.isNaN(distance)) continue;
+      targets.push(target);
+      distances.push(distance);
+    }
+    appendEdges(
+      targets.map(() => node),
+      targets,
+      distances,
+    );
+    dirty = true;
   }
 
   const style = {
@@ -397,14 +451,11 @@ export async function explore(elements, parameters) {
   }
 
   // Sampling: the overview sequence, then one sequence per zoom, each extended a call at a time when the worker idles.
+  // Every call passes the shown keys, so it draws only new ones and places them beside the shown.
   /** @type {SampleSequence} */
   const overview = {
     seed: overviewSeed,
-    offset: 0,
-    anchors: null,
-    radius: 0,
-    seen: new Map(),
-    beside: emptySlot,
+    focus: null,
     remaining: Number(parameters.get("overview") ?? overviewDraws),
     exhausted: false,
   };
@@ -418,45 +469,40 @@ export async function explore(elements, parameters) {
   /** @param {SampleSequence} sequence @param {any} response */
   function integrate(sequence, response) {
     const count = response.written;
-    /** @type {number[]} */
-    const beside = [];
-    const ordinals = new Uint32Array(count);
-    let landed = 0;
-    for (; landed < count; landed++) {
-      const name = keyName(response.keys, landed * 16);
-      const occurrence = sequence.seen.get(name) ?? 0;
-      const known = ordinalsByKey.get(name);
-      if (known && occurrence < known.length) {
-        ordinals[landed] = known[occurrence];
-      } else {
-        if (nodes >= capacity) break;
-        const linkStart = response.linkOffsets[landed];
-        const first =
-          linkStart < response.linkOffsets[landed + 1]
-            ? firstOrdinal(keyName(response.linkKeys, linkStart * 16))
-            : undefined;
-        beside.push(first ?? sequence.beside);
-        ordinals[landed] = register(name, response.keys, landed * 16);
-      }
-      sequence.seen.set(name, occurrence + 1);
-    }
-    appendNodes(beside);
+    /** @type {number[]} */ const fresh = [];
     /** @type {number[]} */ const sources = [];
     /** @type {number[]} */ const targets = [];
     /** @type {number[]} */ const distances = [];
-    for (let draw = 0; draw < landed; draw++) {
-      for (let link = response.linkOffsets[draw]; link < response.linkOffsets[draw + 1]; link++) {
-        const target = firstOrdinal(keyName(response.linkKeys, link * 16));
-        if (target === undefined || target === ordinals[draw]) continue;
-        sources.push(ordinals[draw]);
-        targets.push(target);
-        distances.push(response.linkDistances[link]);
+    let taken = 0;
+    for (; taken < count; taken++) {
+      const name = keyName(response.keys, taken * 16);
+      const entry = response.entryOrdinals[taken];
+      const placed = response.coordinates.subarray(taken * 3, taken * 3 + 3);
+      const known = nodeOfEntry.get(entryName(name, entry));
+      if (known !== undefined && !Number.isNaN(engineCoordinates[known * 3])) continue;
+      if (known === undefined && nodes >= capacity) break;
+      const node = known ?? register(name, response.keys, taken * 16, entry);
+      engineCoordinates.set(placed, node * 3);
+      // A node `search` brought pins now; fresh ones pin as they are appended.
+      if (known === undefined) fresh.push(node);
+      else pinPlaced([node]);
+      if (!shownNames.has(name)) {
+        shownNames.add(name);
+        shownKeys.set(response.keys.subarray(taken * 16, taken * 16 + 16), shownCount * 16);
+        shownCoordinates.set(placed, shownCount * 3);
+        shownCount++;
       }
+      const parent = response.parentCounts[taken] ? firstOrdinal(keyName(response.parentKeys, taken * 16)) : undefined;
+      if (parent === undefined || parent === node) continue;
+      sources.push(node);
+      targets.push(parent);
+      distances.push(response.parentDistances[taken]);
     }
+    calibrateHull(fresh);
+    appendNodes(fresh.map(() => emptySlot));
     appendEdges(sources, targets, distances);
-    sequence.offset += landed;
-    sequence.remaining -= landed;
-    if (landed < count || response.written < response.wanted || nodes >= capacity) sequence.exhausted = true;
+    sequence.remaining -= taken;
+    if (taken < count || count < response.wanted || fresh.length === 0 || nodes >= capacity) sequence.exhausted = true;
   }
 
   async function sampleTick() {
@@ -467,14 +513,14 @@ export async function explore(elements, parameters) {
     const wanted = Math.max(16, Math.min(drawsPerCall, drawsWanted, sequence.remaining, capacity - nodes));
     const response = await channel.request({
       verb: "sample",
-      anchors: sequence.anchors,
-      options: {
-        seed: sequence.seed,
-        radius: sequence.radius,
-        wanted,
-        offset: sequence.offset,
-        links_per_draw: linksPerDraw,
-      },
+      shown: shownCount
+        ? {
+            keys: shownKeys.slice(0, shownCount * 16),
+            coordinates: shownCoordinates.slice(0, shownCount * 3),
+          }
+        : null,
+      focus: sequence.focus,
+      options: { seed: sequence.seed, wanted },
     });
     sampling = false;
     if (response.status !== 0) {
@@ -526,24 +572,12 @@ export async function explore(elements, parameters) {
   async function zoomTick() {
     if (camera.scale < lastSampledScale || nodes >= capacity || nodes === 0) return;
     lastSampledScale = camera.scale * zoomStep;
-    const nearby = await projection.nearest(camera, cssWidth() / 2, cssHeight() / 2, zoomViewNodes);
-    if (nearby.nodes.length === 0) return;
-    const anchors = Array.from(nearby.nodes.subarray(0, zoomAnchors));
-    const uniqueAnchors = [...new Map(anchors.map((ordinal) => [nameOf(ordinal), ordinal])).values()];
-    const payloads = (await payloadsOf(uniqueAnchors.map(bytesOf))).filter((payload) => payload?.count);
-    if (payloads.length === 0) return;
-    let radius = 0;
-    for (const ordinal of nearby.nodes) radius = Math.max(radius, linkReach[ordinal]);
-    zooms.push({
-      seed: overviewSeed + zooms.length + 1,
-      offset: 0,
-      anchors: /** @type {Payload[]} */ (payloads),
-      radius,
-      seen: new Map(),
-      beside: anchors[0],
-      remaining: zoomDraws,
-      exhausted: false,
-    });
+    const nearby = await projection.nearest(camera, cssWidth() / 2, cssHeight() / 2, zoomFocus);
+    const names = [...new Map(Array.from(nearby.nodes, (ordinal) => [nameOf(ordinal), ordinal])).values()];
+    if (names.length === 0) return;
+    const focus = new Uint8Array(names.length * 16);
+    names.forEach((ordinal, index) => focus.set(bytesOf(ordinal), index * 16));
+    zooms.push({ seed: overviewSeed + zooms.length + 1, focus, remaining: zoomDraws, exhausted: false });
   }
 
   // Hover: the newest pointer wins, one request in flight; the first hop at once, the second after a dwell.
@@ -589,6 +623,10 @@ export async function explore(elements, parameters) {
       for (const hop of hover.hops)
         if (hop.ordinal !== undefined) hubCounts.set(hop.ordinal, (hubCounts.get(hop.ordinal) ?? 0) + 1);
       if (hubsShown) showHubs();
+      linkEdges(
+        node,
+        hover.hops.flatMap((hop) => (hop.ordinal === undefined ? [] : [hop.ordinal])),
+      );
       await refreshPositions();
       drawOverlay();
       latencies.first.push(performance.now() - current.time);
@@ -627,15 +665,20 @@ export async function explore(elements, parameters) {
     const name = nameOf(node);
     const [payload] = await payloadsOf([bytes]);
     const count = payload?.count ?? 0;
-    const known = ordinalsByKey.get(name) ?? [];
     /** @type {number[]} */
     const beside = [];
-    for (let entry = known.length; entry < count && nodes < capacity; entry++) {
-      beside.push(node);
-      register(name, bytes, 0);
+    /** @type {number[]} */
+    const entries = [];
+    for (let entry = 0; entry < count; entry++) {
+      let known = nodeOfEntry.get(entryName(name, entry));
+      if (known === undefined && nodes < capacity) {
+        beside.push(node);
+        known = register(name, bytes, 0, entry);
+      }
+      if (known !== undefined) entries.push(known);
     }
     appendNodes(beside);
-    const entries = (ordinalsByKey.get(name) ?? [node]).slice(0, Math.max(1, count));
+    if (entries.length === 0) entries.push(node);
     if (payload && count > 0) {
       interactive++;
       const found = await channel.request({
@@ -658,7 +701,7 @@ export async function explore(elements, parameters) {
             if (target === undefined) {
               if (nodes >= capacity) continue;
               newcomers.push(entries[query] ?? node);
-              target = register(matchName, found.keys, match * 16);
+              target = register(matchName, found.keys, match * 16, 0);
             }
             sources.push(entries[query] ?? node);
             targets.push(target);
@@ -674,6 +717,7 @@ export async function explore(elements, parameters) {
     const drawn = (/** @type {Uint8Array[]} */ keys) =>
       keys.map((key) => firstOrdinal(keyName(key, 0))).filter((ordinal) => ordinal !== undefined);
     const first = drawn(firstHop);
+    linkEdges(node, first);
     const second = drawn(secondHop.flat()).filter((ordinal) => !first.includes(ordinal) && !entries.includes(ordinal));
     selection = { name, entries, first, second };
     if (!hubsShown) showSelection();
@@ -1050,7 +1094,7 @@ export async function explore(elements, parameters) {
     if (ordinal !== undefined && pinned.has(ordinal)) {
       pinned.delete(ordinal);
       projection.release(Uint32Array.of(ordinal));
-      pinToPlane([ordinal]);
+      pinPlaced([ordinal]);
       layoutEpochsLeft = layoutEpochsAfterChange;
       dirty = true;
       return;

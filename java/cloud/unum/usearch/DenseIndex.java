@@ -354,6 +354,41 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
+     * What one refine-family call did to the graph: {@link DenseVerbs#refine(DenseRefineConfig)},
+     * {@link DenseVerbs#absorb} and {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)} land it.
+     *
+     * <p>
+     * Mirrors {@code usearch_refine_report_t}.
+     *
+     * @param reselected the entries whose neighbors were selected again, the islands of every heal
+     *     round included.
+     * @param changed of those, the entries whose neighbor set gained a member it lacked; zero means
+     *     the graph has settled.
+     * @param islandsFound the entries the first audit found not reached both ways.
+     * @param islandsReconnected the links written between an island and an entry reached both ways.
+     * @param reachability the audit closing the heal, as a fresh {@link DenseVerbs#health()} right
+     *     after would take it.
+     */
+    public record RefineReport(
+            long reselected,
+            long changed,
+            long islandsFound,
+            long islandsReconnected,
+            DenseReachability reachability) {
+
+        /** Lifts a {@code usearch_refine_report_t}. */
+        static RefineReport lift(MemorySegment report) {
+            long[] fields = report.toArray(ValueLayout.JAVA_LONG);
+            return new RefineReport(
+                    fields[0],
+                    fields[1],
+                    fields[2],
+                    fields[3],
+                    new DenseReachability(fields[4], fields[5], fields[6], fields[7]));
+        }
+    }
+
+    /**
      * The online-softmax carry of one query row - Flash Attention's running maximum and partition,
      * which is what lets one attention call's output fold into another's over the same queries.
      *
@@ -581,6 +616,104 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
         /** Where the traversal telemetry lands, overwritten once the call succeeded. */
         public DenseRefineConfig stats(DenseTraversalStats stats) {
+            this.stats = stats;
+            return this;
+        }
+    }
+
+    /**
+     * The knobs of a split's closing refinements; see
+     * {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)}. Mirrors {@code usearch_dense_split_t}.
+     */
+    public static final class DenseSplitConfig {
+
+        long expansionFactor;
+        long seed;
+
+        @Nullable
+        DenseTraversalStats stats;
+
+        /** Every knob derived, under seed zero. */
+        public DenseSplitConfig() {}
+
+        /**
+         * The breadth of the candidates the closing walks explore; zero derives.
+         *
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
+         */
+        public DenseSplitConfig expansionFactor(long expansionFactor) {
+            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            return this;
+        }
+
+        /** Picks the part roots: equal seeds over an unchanged index split equally. */
+        public DenseSplitConfig seed(long seed) {
+            this.seed = seed;
+            return this;
+        }
+
+        /** Where the traversal telemetry lands, overwritten once the call succeeded. */
+        public DenseSplitConfig stats(DenseTraversalStats stats) {
+            this.stats = stats;
+            return this;
+        }
+    }
+
+    /**
+     * The view a sample grows and how it draws, by default across the whole index with nothing
+     * shown yet; see {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}. Mirrors
+     * {@code usearch_dense_sample_t}.
+     */
+    public static final class DenseSampleConfig {
+
+        Key[] shown = new Key[0];
+        float[] shownCoordinates = new float[0];
+        Key[] focus = new Key[0];
+        long seed;
+        long expansionFactor;
+
+        @Nullable
+        DenseTraversalStats stats;
+
+        /**
+         * The keys already shown, never drawn again, and where each sits, three values apiece - the
+         * points later draws are placed against.
+         *
+         * @throws USearchException SHAPE_MISMATCH unless the coordinates hold three per key.
+         */
+        public DenseSampleConfig shown(Key[] keys, float[] coordinates) {
+            if ((long) keys.length * 3 != coordinates.length) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "every shown key needs three coordinates");
+            }
+            this.shown = keys;
+            this.shownCoordinates = coordinates;
+            return this;
+        }
+
+        /** The keys to look around, the roots the draws grow from; none looks across the whole index. */
+        public DenseSampleConfig focus(Key... keys) {
+            this.focus = keys;
+            return this;
+        }
+
+        /** The draw: equal seeds, shown keys and focus over an unchanged index draw equally. */
+        public DenseSampleConfig seed(long seed) {
+            this.seed = seed;
+            return this;
+        }
+
+        /**
+         * The breadth of the candidates the walks behind the draws explore; zero derives.
+         *
+         * @throws USearchException INVALID_ARGUMENT on a negative breadth, which no candidates may have.
+         */
+        public DenseSampleConfig expansionFactor(long expansionFactor) {
+            this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            return this;
+        }
+
+        /** Where the traversal telemetry lands, overwritten once the call succeeded. */
+        public DenseSampleConfig stats(DenseTraversalStats stats) {
             this.stats = stats;
             return this;
         }
@@ -946,6 +1079,107 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
+     * The draws of one {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}, written into its arena:
+     * the keys drawn, which of its key's entries each is, the shown or earlier draw each hangs from,
+     * and where each is placed. Valid until the arena's next call or its close.
+     */
+    public static final class Sample {
+
+        private final Arena arena;
+        private final MemorySegment keys;
+        private final MemorySegment entryOrdinals;
+        private final Matches parents;
+        private final MemorySegment coordinates;
+        private final long written;
+
+        private Sample(
+                Arena arena,
+                MemorySegment keys,
+                MemorySegment entryOrdinals,
+                Matches parents,
+                MemorySegment coordinates,
+                long written) {
+            this.arena = arena;
+            this.keys = keys;
+            this.entryOrdinals = entryOrdinals;
+            this.parents = parents;
+            this.coordinates = coordinates;
+            this.written = written;
+        }
+
+        /** Lifts the outputs of a {@code usearch_dense_sample} that wrote {@code written} draws. */
+        static Sample lift(
+                Call call,
+                MemorySegment keys,
+                MemorySegment entryOrdinals,
+                MemorySegment parents,
+                MemorySegment coordinates,
+                long written) {
+            return new Sample(
+                    call.arena(),
+                    call.reach(keys.get(Library.POINTER, 0), Types.Extents.product(written, Key.BYTES, "the keys")),
+                    call.reach(
+                            entryOrdinals.get(Library.POINTER, 0),
+                            Types.Extents.product(written, Long.BYTES, "the entry ordinals")),
+                    Matches.lift(call, parents, written),
+                    call.reach(
+                            coordinates.get(Library.POINTER, 0),
+                            Types.Extents.product(written, 3 * Float.BYTES, "the coordinates")),
+                    written);
+        }
+
+        /** How many draws the call wrote; fewer than wanted only once the region is exhausted. */
+        public long written() {
+            return written;
+        }
+
+        /**
+         * The key of one draw.
+         *
+         * @throws USearchException SHAPE_MISMATCH when the draw is past the sample, and DEVICE when the
+         *     arena holds device memory.
+         */
+        public Key key(long draw) {
+            return Key.read(keys, checked(draw) * Key.BYTES);
+        }
+
+        /**
+         * Which of its key's entries one draw is, in the order {@link DenseVerbs#get} writes them.
+         *
+         * @throws USearchException the statuses {@link #key(long)} names.
+         */
+        public long entryOrdinal(long draw) {
+            return entryOrdinals.getAtIndex(ValueLayout.JAVA_LONG, checked(draw));
+        }
+
+        /** The one shown or earlier draw each draw hangs from and its distance, one query per draw. */
+        public Matches parents() {
+            return parents;
+        }
+
+        /**
+         * One coordinate of where a draw is placed, {@code axis} below three.
+         *
+         * @throws USearchException the statuses {@link #key(long)} names, and SHAPE_MISMATCH on an axis
+         *     past the third.
+         */
+        public float coordinate(long draw, int axis) {
+            if (axis < 0 || axis >= 3) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "a draw is placed in three dimensions");
+            }
+            return coordinates.getAtIndex(ValueLayout.JAVA_FLOAT, checked(draw) * 3 + axis);
+        }
+
+        private long checked(long draw) {
+            arena.host();
+            if (draw < 0 || draw >= written) {
+                throw new USearchException(Status.SHAPE_MISMATCH, "the sample holds " + written + " draws");
+            }
+            return draw;
+        }
+    }
+
+    /**
      * One pull of a {@link DenseCursor}, written into its arena: the keys of the entries passed, and
      * the keys each links to when asked for. Valid until the arena's next call or its close.
      */
@@ -1239,12 +1473,12 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /** Submits {@link DenseVerbs#refine()}. Calls {@code usearch_dense_refine}. */
-        public Deferred<Long> refine() {
+        public Deferred<RefineReport> refine() {
             return submit(DenseVerbs.refining(new DenseRefineConfig()));
         }
 
         /** Submits {@link DenseVerbs#refine(DenseRefineConfig)}. Calls {@code usearch_dense_refine}. */
-        public Deferred<Long> refine(DenseRefineConfig config) {
+        public Deferred<RefineReport> refine(DenseRefineConfig config) {
             return submit(DenseVerbs.refining(config));
         }
 
@@ -1308,8 +1542,21 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /** Submits {@link DenseVerbs#absorb}, surrendering the donors at once. Calls {@code usearch_dense_absorb}. */
-        public Deferred<Void> absorb(DenseIndex... donors) {
+        public Deferred<RefineReport> absorb(DenseIndex... donors) {
             return submit(DenseVerbs.absorbing(donors));
+        }
+
+        /**
+         * Submits {@link DenseVerbs#split(DenseSplitConfig, DenseIndex...)}. Calls
+         * {@code usearch_dense_split}.
+         */
+        public Deferred<RefineReport> split(DenseSplitConfig config, DenseIndex... receivers) {
+            return submit(DenseVerbs.splitting(config, receivers));
+        }
+
+        /** Submits {@link DenseVerbs#sample(long, Arena, DenseSampleConfig)}. Calls {@code usearch_dense_sample}. */
+        public Deferred<Sample> sample(long wanted, Arena arena, DenseSampleConfig config) {
+            return submit(DenseVerbs.sampling(wanted, arena, config));
         }
 
         /** Submits {@link DenseVerbs#save}. Calls {@code usearch_dense_save}. */
@@ -1636,7 +1883,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         });
     }
 
-    private static long nonNegative(long value, String message) {
+    static long nonNegative(long value, String message) {
         if (value < 0) {
             throw new USearchException(Status.INVALID_ARGUMENT, message);
         }
@@ -1684,6 +1931,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.SIZE.withName("reachable"),
             Library.SIZE.withName("sweeps"),
             Library.SIZE.withName("back_sweeps"));
+
+    /** {@code usearch_refine_report_t}. */
+    static final StructLayout REFINE_REPORT = MemoryLayout.structLayout(
+            Library.SIZE.withName("reselected"),
+            Library.SIZE.withName("changed"),
+            Library.SIZE.withName("islands_found"),
+            Library.SIZE.withName("islands_reconnected"),
+            REACHABILITY.withName("reachability"));
 
     /** {@code usearch_dense_softmax_state_t}. */
     static final StructLayout SOFTMAX_STATE = MemoryLayout.structLayout(
@@ -1765,8 +2020,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             "usearch_dense_refine",
             Library.opening(
                     Library.padding(),
-                    Library.POINTER.withName("changed"),
-                    Library.POINTER.withName("reachability"),
+                    Library.POINTER.withName("report"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
                     STATS));
@@ -1812,8 +2066,40 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.SIZE.withName("count"),
                     Library.POINTER.withName("donors"),
-                    Library.POINTER.withName("changed"),
-                    Library.POINTER.withName("reachability"),
+                    Library.POINTER.withName("report"),
+                    Library.SIZE.withName("expansion_factor"),
+                    PROGRESS,
+                    STATS));
+
+    static final Verb SPLIT = new Verb(
+            "usearch_dense_split",
+            Library.opening(
+                    Library.padding(),
+                    Library.SIZE.withName("count"),
+                    Library.POINTER.withName("receivers"),
+                    Library.POINTER.withName("report"),
+                    Library.SIZE.withName("expansion_factor"),
+                    ValueLayout.JAVA_LONG.withName("seed"),
+                    PROGRESS,
+                    STATS));
+
+    static final Verb SAMPLE = new Verb(
+            "usearch_dense_sample",
+            Library.opening(
+                    Library.padding(),
+                    Library.SIZE.withName("shown_count"),
+                    Library.KEYS_VIEW.withName("shown"),
+                    Library.ROWS_VIEW.withName("shown_coordinates"),
+                    Library.SIZE.withName("focus_count"),
+                    Library.KEYS_VIEW.withName("focus"),
+                    Library.POINTER.withName("keys"),
+                    Library.POINTER.withName("entry_ordinals"),
+                    Library.POINTER.withName("parents"),
+                    Library.POINTER.withName("coordinates"),
+                    Library.POINTER.withName("written"),
+                    Library.POINTER.withName("arena"),
+                    Library.SIZE.withName("wanted"),
+                    ValueLayout.JAVA_LONG.withName("seed"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
                     STATS));
@@ -1821,11 +2107,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     static final Verb CURSOR_INIT = new Verb(
             "usearch_dense_cursor_init",
             MemoryLayout.structLayout(
-                    Library.POINTER.withName("cursor"),
                     Library.POINTER.withName("index"),
                     Library.POINTER.withName("outcome"),
                     Library.SIZE.withName("starts_count"),
-                    Library.POINTER.withName("starts")));
+                    Library.POINTER.withName("starts"),
+                    Library.POINTER.withName("cursor")));
 
     static final Verb CURSOR_NEXT = new Verb(
             "usearch_dense_cursor_next",
@@ -1883,11 +2169,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
-                    PROGRESS,
-                    STATS,
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE));
+                    PREDICATE,
+                    PROGRESS,
+                    STATS));
 
     static final Verb ATTEND = new Verb(
             "usearch_dense_attend",
@@ -1905,12 +2191,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.SIZE.withName("expansion_factor"),
                     ValueLayout.JAVA_FLOAT.withName("score_scale"),
-                    Library.padding(),
-                    PROGRESS,
-                    STATS,
                     Library.ENUM.withName("traversal"),
-                    Library.padding(),
-                    PREDICATE));
+                    PREDICATE,
+                    PROGRESS,
+                    STATS));
 
     static final Verb MAXSIM = new Verb(
             "usearch_dense_maxsim",
@@ -1926,11 +2210,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
-                    PROGRESS,
-                    STATS,
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    PREDICATE));
+                    PREDICATE,
+                    PROGRESS,
+                    STATS));
 
     /** {@code usearch_value_lookup_t}. */
     private static final FunctionDescriptor LOOKUP = FunctionDescriptor.ofVoid(

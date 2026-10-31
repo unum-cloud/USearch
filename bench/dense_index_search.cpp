@@ -102,12 +102,14 @@ inline double seconds_since(std::chrono::steady_clock::time_point started) noexc
 inline bool refine_passes(handle<dense_verbs_t>& index, std::size_t passes) {
     for (std::size_t pass = 0; pass != passes; ++pass) {
         std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
-        std::size_t changed = 0;
+        usearch_refine_report_t report {};
         usearch_outcome_t outcome {};
-        dense_verbs_t::refine(index.get(), index.executor(), &changed, &outcome);
+        dense_verbs_t::refine(index.get(), index.executor(), &report, &outcome);
         if (report_failure(outcome, "Refining")) return false;
-        fmt::println("- Refine pass {}: {} changed in {:.2f} s", pass + 1, humanized(changed), seconds_since(started));
-        if (!changed) break;
+        fmt::println("- Refine pass {}: {} of {} re-selected changed, {} islands in {:.2f} s", pass + 1,
+                     humanized(report.changed), humanized(report.reselected), report.islands_found,
+                     seconds_since(started));
+        if (!report.changed) break;
     }
     return true;
 }
@@ -175,7 +177,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
     usearch_outcome_t const inserted = insert_entries(index, vectors, rows, first_row, search.batch.value,
                                                       search.expansion_add.value, built,
-                                                      [&](std::size_t landed) { building.tick(landed); });
+                                                      [&](std::size_t inserted) { building.tick(inserted); });
     building.finish();
     if (report_failure(inserted, "Inserting")) return 1;
     double const build_seconds = seconds_since(build_start);
@@ -215,7 +217,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         queries = query_file.view(0, query_file.rows()), queries_count = query_file.rows();
     }
 
-    landed_matches_t oracle;
+    copied_matches_t oracle;
     std::size_t const top_k = search.top_k.value;
     if (search.self_search == switch_t::present_k) {
         // Every stored row is its own nearest neighbor.

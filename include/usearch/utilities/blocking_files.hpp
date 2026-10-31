@@ -353,7 +353,7 @@ inline status_t seekable_file_t::close() noexcept {
 
 inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode,
                                                             u64_t byte_base) noexcept {
-    // A part past byte zero lands in a medium that exists, and the bytes before it stay.
+    // A part past byte zero is written into a medium that exists, and the bytes before it stay.
     int const created = byte_base ? 0 : O_CREAT | O_TRUNC;
     int const flags = mode == file_mode_t::read_k ? O_RDONLY : (O_RDWR | created);
     return ::open(path, flags | O_CLOEXEC, 0644);

@@ -109,11 +109,11 @@ void wait_for_calls_using(void const* handle) {
             lock.lock();
         }
         else if (std::any_of(calls.running.begin(), calls.running.end(), uses_handle)) {
-            u32_t const seen = calls.finished;
+            u32_t const finished_before = calls.finished;
             lock.unlock();
             fu::standard_atomic_ref<u32_t const> const finished {calls.finished};
-            while (finished.load(std::memory_order_acquire) == seen)
-                fu::standard_yield_t {}(&calls.finished, seen, 0u, fu::wait_capped_t {});
+            while (finished.load(std::memory_order_acquire) == finished_before)
+                fu::standard_yield_t {}(&calls.finished, finished_before, 0u, fu::wait_capped_t {});
             lock.lock();
         }
         else return;
@@ -191,7 +191,21 @@ void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
 void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    propagate_error(usearch_status_unsupported_k, outcome, "This build carries no NVMe residency");
+    if (reject_if(arguments->nvme.paths_count && !arguments->nvme.paths, usearch_status_invalid_argument_k,
+                  "The paths must name storage", outcome))
+        return;
+    if (reject_if(static_cast<unsigned>(arguments->nvme_class) > usearch_nvme_class_windows_ioring_k,
+                  usearch_status_invalid_argument_k, "The NVMe class is unknown", outcome))
+        return;
+    if (reject_if(arguments->nvme_class == usearch_nvme_class_linux_spdk_k, usearch_status_unsupported_k,
+                  "This build carries no SPDK", outcome))
+        return;
+    // A checkpoint from storage is mapped and read on the host, so this executor is the RAM one.
+    usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
+    if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    if (arguments->threads) executor->threads = arguments->threads;
+    if (arguments->deferred_limit) executor->deferred_limit = arguments->deferred_limit;
+    *arguments->executor = executor;
 }
 
 void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {

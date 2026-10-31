@@ -10,11 +10,13 @@ import {
   CompiledBatch,
   CompiledCursor,
   CompiledDeferred,
+  CompiledDraws,
   CompiledIndex,
   CompiledLinks,
   CompiledMatches,
   CompiledMetadata,
   CompiledProducts,
+  CompiledRefineReport,
   CompiledSearchStream,
   CompiledVectors,
   compiled,
@@ -95,6 +97,30 @@ export interface DenseRefineConfig {
   expansionFactor?: number;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
+}
+
+/** Optional per-call settings of a split. Mirrors `usearch_dense_split_t`. */
+export interface DenseSplitConfig {
+  /** Picks the part roots: equal seeds over an unchanged index split equally. */
+  seed?: number | bigint;
+  /** Breadth of the candidates of the closing refines' walks; absent lets the engine derive it. */
+  expansionFactor?: number;
+}
+
+/** Optional per-call settings of a sample; absent ones draw across the whole index with nothing
+ *  shown. Mirrors `usearch_dense_sample_t`. */
+export interface DenseSampleConfig {
+  /** The keys already shown: never drawn again, and the paths reach toward them; read in place,
+   *  never copied. */
+  shown?: KeysLike;
+  /** Where each `shown` key sits, three values apiece, end to end; read in place. */
+  shownCoordinates?: Float32Array;
+  /** The keys to look around; absent looks around the whole index. */
+  focus?: KeysLike;
+  /** Equal seeds, shown keys and focus over an unchanged index draw equally. */
+  seed?: number | bigint;
+  /** Breadth of the candidates of the walks behind the draws; absent lets the engine derive it. */
+  expansionFactor?: number;
 }
 
 /** Optional per-call settings of a search. Mirrors `usearch_dense_search_t`. */
@@ -282,6 +308,20 @@ export interface DenseReachability {
   backSweeps: number;
 }
 
+/** What one `refine`, `absorb` or `split` did to the graph. Mirrors `usearch_refine_report_t`. */
+export interface DenseRefineReport {
+  /** Entries whose neighbors were selected again, the islands of every heal round included. */
+  reselected: number;
+  /** Of those, the entries whose neighbor set gained a member it lacked; zero means settled. */
+  changed: number;
+  /** Entries the first audit found not reached both ways. */
+  islandsFound: number;
+  /** Links written between an island and an entry the audit reached both ways. */
+  islandsReconnected: number;
+  /** The audit closing the heal, as a fresh `health` right after would take it. */
+  reachability: DenseReachability;
+}
+
 /** The geometry every dense index freezes at initialization, whatever its residency. */
 export interface DenseOptions {
   /** Scalars per row, fixed for the life of the index. */
@@ -318,13 +358,12 @@ function metadataOf(read: CompiledMetadata): DenseMetadata {
   };
 }
 
-/**
- *  Rows a call landed in its arena: the entries `get` exported, or the rows `attend` attended. Mirrors a `usearch_rows_view_t` output.
+/** Rows a call wrote into its arena: the entries `get` exported, or the rows `attend` attended.
+ *  Mirrors a `usearch_rows_view_t` output.
  *
  *  `data` is a `Float64Array`, `Float32Array`, `Float16Array` or `Int8Array` for the kinds
  *  JavaScript spells, a `Uint16Array` for `bf16` and for `f16` on a runtime without `Float16Array`,
- *  and the raw bytes in a `Uint8Array` for the rest.
- */
+ *  and the raw bytes in a `Uint8Array` for the rest. */
 export class DenseVectors extends ArenaView {
   /** Rows written; zero when `get` found no entry under the key. */
   readonly rows: number;
@@ -337,12 +376,12 @@ export class DenseVectors extends ArenaView {
   readonly #data: Vector | null;
 
   /** Made by a verb, never directly. */
-  constructor(landed: CompiledVectors, scalar: Scalar) {
+  constructor(outputs: CompiledVectors, scalar: Scalar) {
     super();
-    this.#data = landed.data as Vector | null;
-    this.rows = landed.rows;
-    this.columns = landed.columns;
-    this.stride = landed.stride;
+    this.#data = outputs.data as Vector | null;
+    this.rows = outputs.rows;
+    this.columns = outputs.columns;
+    this.stride = outputs.stride;
     this.scalar = scalar;
   }
 
@@ -362,29 +401,29 @@ export class DenseProducts extends ArenaView {
   readonly queries: number;
   /** Pairs scored across every left row, or documents across every query, before `wanted` cut any. */
   readonly required: number;
-  readonly #landed: CompiledProducts;
+  readonly #outputs: CompiledProducts;
 
   /** Made by `multiply` and `maxsim`, never directly. */
-  constructor(landed: CompiledProducts, queries: number) {
+  constructor(outputs: CompiledProducts, queries: number) {
     super();
-    this.#landed = landed;
+    this.#outputs = outputs;
     this.queries = queries;
-    this.required = landed.required;
+    this.required = outputs.required;
   }
 
   /** One more offset than there are queries, non-decreasing. */
   get offsets(): BigUint64Array {
-    return this.live(this.#landed.offsets);
+    return this.live(this.#outputs.offsets);
   }
 
   /** Sixteen bytes per pair, naming each pair's indexed entry. */
   get keys(): Uint8Array {
-    return this.live(this.#landed.keys);
+    return this.live(this.#outputs.keys);
   }
 
   /** One product per pair, positionally paired with `keys`. */
   get scores(): Float64Array {
-    return this.live(this.#landed.scores);
+    return this.live(this.#outputs.scores);
   }
 
   /**
@@ -409,23 +448,23 @@ export class DenseProducts extends ArenaView {
 export class DenseCursorLinks extends ArenaView {
   /** Entries the pull covers. */
   readonly entries: number;
-  readonly #landed: CompiledLinks;
+  readonly #outputs: CompiledLinks;
 
   /** Made by `DenseCursor.next`, never directly. */
-  constructor(landed: CompiledLinks, entries: number) {
+  constructor(outputs: CompiledLinks, entries: number) {
     super();
-    this.#landed = landed;
+    this.#outputs = outputs;
     this.entries = entries;
   }
 
   /** One more entry than there are pulled entries, non-decreasing. */
   get offsets(): BigUint64Array {
-    return this.live(this.#landed.offsets);
+    return this.live(this.#outputs.offsets);
   }
 
   /** Sixteen bytes per link, end to end. */
   get keys(): Uint8Array {
-    return this.live(this.#landed.keys);
+    return this.live(this.#outputs.keys);
   }
 
   /**
@@ -443,6 +482,39 @@ export class DenseCursorLinks extends ArenaView {
   }
 }
 
+/** The draws a sample wrote, viewed inside its arena: each draw's key, which of that key's entries
+ *  it is, the shown or earlier draw it hangs from, and where it is placed. */
+export class DenseDraws extends ArenaView {
+  /** Draws written; fewer than wanted only once the region is exhausted. */
+  readonly draws: number;
+  /** Each draw's parent and its distance, one column per draw, a root holding none. */
+  readonly parents: Matches;
+  /** Where each draw is placed, one row of three `f32` values apiece. */
+  readonly coordinates: DenseVectors;
+  readonly #keys: Uint8Array | null;
+  readonly #entryOrdinals: BigUint64Array | null;
+
+  /** Made by `sample`, never directly. */
+  constructor(outputs: CompiledDraws) {
+    super();
+    this.draws = outputs.draws;
+    this.parents = new Matches(outputs.parents, outputs.draws);
+    this.coordinates = new DenseVectors(outputs.coordinates, Scalar.F32);
+    this.#keys = outputs.keys;
+    this.#entryOrdinals = outputs.entryOrdinals;
+  }
+
+  /** Sixteen bytes per draw. */
+  get keys(): Uint8Array {
+    return this.live(this.#keys);
+  }
+
+  /** Which of its key's entries each draw is, in the order `get` writes them. */
+  get entryOrdinals(): BigUint64Array {
+    return this.live(this.#entryOrdinals);
+  }
+}
+
 /** One cursor pull, viewed inside its arena: the keys, and the keys they link to when those were asked for. */
 export class DenseCursorBatch extends ArenaView {
   /** Entries pulled; zero once the walk is exhausted. */
@@ -452,11 +524,11 @@ export class DenseCursorBatch extends ArenaView {
   readonly #keys: Uint8Array | null;
 
   /** Made by `DenseCursor.next`, never directly. */
-  constructor(landed: CompiledBatch) {
+  constructor(outputs: CompiledBatch) {
     super();
-    this.#keys = landed.keys;
-    this.entries = landed.entries;
-    this.links = landed.links ? new DenseCursorLinks(landed.links, landed.entries) : undefined;
+    this.#keys = outputs.keys;
+    this.entries = outputs.entries;
+    this.links = outputs.links ? new DenseCursorLinks(outputs.links, outputs.entries) : undefined;
   }
 
   /** Sixteen bytes per entry pulled. */
@@ -663,12 +735,13 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
    *  time, than a single expensive insertion pass - so a wide breadth belongs here.
    *
    *  @param config - Per-call breadth and telemetry sink.
-   *  @returns Nodes whose edges changed; zero means the graph has settled.
+   *  @returns The entries re-selected and changed, and the islands healed; zero `changed` means
+   *      settled.
    */
-  refine(config: DenseRefineConfig = {}): Answer<Receiving, number> {
+  refine(config: DenseRefineConfig = {}): Answer<Receiving, DenseRefineReport> {
     return this.submit(
       (completion) => this.compiled.refine(this.executor, completion, config.expansionFactor, config.stats),
-      (changed: number) => changed,
+      (report: CompiledRefineReport) => report,
     );
   }
 
@@ -704,7 +777,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
           config.traversal,
           config.stats,
         ),
-      (landed: CompiledMatches) => new Matches(landed, rows[1]),
+      (outputs: CompiledMatches) => new Matches(outputs, rows[1]),
     );
   }
 
@@ -745,7 +818,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
           config.expansionFactor,
           config.stats,
         ),
-      (landed: CompiledProducts) => new DenseProducts(landed, queriesCount),
+      (outputs: CompiledProducts) => new DenseProducts(outputs, queriesCount),
     );
   }
 
@@ -765,7 +838,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
     const scalar = config.scalar ?? Scalar.F32;
     return this.submit(
       (completion) => this.compiled.get(this.executor, completion, normalized, scalarCodes[scalar], arena),
-      (landed: CompiledVectors) => new DenseVectors(landed, scalar),
+      (outputs: CompiledVectors) => new DenseVectors(outputs, scalar),
     );
   }
 
@@ -795,7 +868,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
           config.expansionFactor,
           config.stats,
         ),
-      (landed: CompiledProducts) => new DenseProducts(landed, rows[1]),
+      (outputs: CompiledProducts) => new DenseProducts(outputs, rows[1]),
     );
   }
 
@@ -805,16 +878,73 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
    *
    *  A donor the library consumed refuses every later verb with {@link Status.Uninitialized}; one it
    *  did not absorb, like a donor of another scalar refused with {@link Status.ConfigMismatch}, stays
-   *  a live index the caller still owns, though its entries may already have landed here. Until a
+   *  a live index the caller still owns, though its entries may already have moved here. Until a
    *  deferred absorb is final, every donor it names refuses every verb, and no other absorb can name it.
    *
    *  @param donors - The indexes to absorb.
+   *  @returns What the closing refine did to the graph.
    */
-  absorb(donors: DenseIndex[]): Answer<Receiving, void> {
+  absorb(donors: DenseIndex[]): Answer<Receiving, DenseRefineReport> {
     const handles = donors.map((donor) => donor.compiled);
     return this.submit(
       (completion) => this.compiled.absorb(this.executor, completion, handles),
-      () => undefined,
+      (report: CompiledRefineReport) => report,
+    );
+  }
+
+  /**
+   *  Splits this index into the receivers, the inverse of `absorb`: graph-local parts keeping their
+   *  edges, one per receiver, leaving this index empty but live. Calls `usearch_dense_split`.
+   *
+   *  Receivers must be empty and share the index's residency, scalar, class, metric, geometry and
+   *  shard count, or the call refuses with {@link Status.ConfigMismatch}, moving nothing.
+   *
+   *  @param receivers - Two or more empty indexes, each receiving one part.
+   *  @param config - The seed and breadth.
+   *  @returns What the receivers' closing refines did to their graphs.
+   */
+  split(receivers: DenseIndex[], config: DenseSplitConfig = {}): Answer<Receiving, DenseRefineReport> {
+    const handles = receivers.map((receiver) => receiver.compiled);
+    return this.submit(
+      (completion) => this.compiled.split(this.executor, completion, handles, config.seed, config.expansionFactor),
+      (report: CompiledRefineReport) => report,
+    );
+  }
+
+  /**
+   *  Draws keys around `config.focus`, or across the whole index, each hanging from a shown or
+   *  earlier draw and placed in three dimensions beside the shown ones. Calls
+   *  `usearch_dense_sample`.
+   *
+   *  A larger `wanted` draws a superset, so a view grows one connected sample as it zooms. Only RAM
+   *  samples yet.
+   *
+   *  @param wanted - The upper bound on draws.
+   *  @param arena - The memory the draws land in, rewound by the call.
+   *  @param config - The shown keys and their coordinates, the focus, the seed and the breadth.
+   *  @returns The draws, viewed inside `arena`.
+   */
+  sample(wanted: number, arena: Arena, config: DenseSampleConfig = {}): Answer<Receiving, DenseDraws> {
+    const shown = config.shown === undefined ? undefined : normalizeKeys(config.shown);
+    const places =
+      config.shownCoordinates === undefined
+        ? ([undefined, undefined, undefined, undefined, undefined] as const)
+        : crossing(RowsView.of(config.shownCoordinates, 3));
+    const focus = config.focus === undefined ? undefined : normalizeKeys(config.focus);
+    return this.submit(
+      (completion) =>
+        this.compiled.sample(
+          this.executor,
+          completion,
+          arena,
+          wanted,
+          shown,
+          ...places,
+          focus,
+          config.seed,
+          config.expansionFactor,
+        ),
+      (outputs: CompiledDraws) => new DenseDraws(outputs),
     );
   }
 
@@ -956,7 +1086,8 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
 
   /**
    *  Softmax attention of every query row over every key its graph walk scores, folded as Flash
-   *  Attention folds key tiles, landing one attended row per query in `arena`. Calls `usearch_dense_attend`.
+   *  Attention folds key tiles, writing one attended row per query in `arena`. Calls
+   *  `usearch_dense_attend`.
    *
    *  The index stores no values: every key a walk scores resolves through `rowOf` to a row of
    *  `values`, borrowed for the call, so only the keys a walk scores are ever resolved. The values
@@ -985,7 +1116,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
     arena: Arena,
     config: DenseAttendConfig = {},
   ): DenseVectors {
-    const landed = this.compiled.attend(
+    const outputs = this.compiled.attend(
       ...crossing(queries),
       ...crossing(values),
       rowOf,
@@ -997,7 +1128,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
       config.scoreScale,
       config.stats,
     );
-    return new DenseVectors(landed, config.scalar ?? rowsOf(queries).scalar);
+    return new DenseVectors(outputs, config.scalar ?? rowsOf(queries).scalar);
   }
 
   /** Releases the handle now, waiting for every deferred call naming it; a freed index refuses every later call, and a second `free` does nothing. Calls `usearch_dense_free`. */
@@ -1056,7 +1187,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Copies a checkpoint into a new, mutable index in host memory, part `p` landing on shard `p`
+   *  Copies a checkpoint into a new, mutable index in host memory, part `p` loading into shard `p`
    *  modulo the shard count. The geometry and metric come from the checkpoint itself.
    *  Calls `usearch_dense_load_ram`.
    *

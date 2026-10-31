@@ -8,4 +8,4 @@
 
 #include "dense_specializations.cuh"
 
-template struct dense_class_tables<dense_home_t::ram_k, cpu_class_t::monoversioned_k>;
+template struct dense_class_tables<vendored_residency_t::ram_k, cpu_class_t::monoversioned_k>;

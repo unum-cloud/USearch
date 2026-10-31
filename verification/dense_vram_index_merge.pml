@@ -9,7 +9,7 @@
  *  live row, slot zero included and never the sentinel, with relaxed stores in any order, so a walk
  *  reads each slot old or new. A refine closes the shard's `claimed_rows_` before its pass and
  *  reopens it after, refused while a batch is in flight, and a batch's claim is refused while it is
- *  closed, so an insertion's back-links never land in a row the merge rewrites.
+ *  closed, so an insertion's back-links never arrive in a row the merge rewrites.
  *
  *  - Slot zero reads the sentinel only while a lock holder has the row.
  *  - Every ID the reader admits names a node whose payload it sees whole, the row old, new or mixed.

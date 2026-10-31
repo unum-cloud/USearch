@@ -73,6 +73,13 @@ static void fill_cyclic(nk::vector_span<scalar_> vec, std::size_t rotation) noex
             universally_representable_values[(dimension_index + rotation) % universally_representable_values.size()]);
 }
 
+/** The family a kernel's distances compare in: Hamming counts bits exactly, every other kernel
+ *  finalizes in floats. */
+template <nk_kernel_kind_t kernel_>
+constexpr comparison_family_t dense_comparison_family() noexcept {
+    return kernel_ == nk_kernel_hamming_k ? comparison_family_t::exact_k : comparison_family_t::approximate_k;
+}
+
 /** Computes the reference distance via NumKong's monolithic 1-to-1 API, adjusted so the value
  *  matches USearch's convention - dot returns (1-inner), angular returns (1-cos_sim) clamped to
  *  [0,2], euclidean is sqrt'd via @c nk::euclidean. */
@@ -167,21 +174,24 @@ static int check_quads(std::size_t dim) noexcept {
                                                         fourth_candidate_view, //
                                                         fourth_candidate_norms);
 
-    std::size_t failures = 0;
-    failures += expect_near(first_measured, first_reference);
-    failures += expect_near(second_measured, second_reference);
-    failures += expect_near(third_measured, third_reference);
-    failures += expect_near(fourth_measured, fourth_reference);
+    error_stats_t single_errors, quad_errors;
+    single_errors.add(first_measured, first_reference);
+    single_errors.add(second_measured, second_reference);
+    single_errors.add(third_measured, third_reference);
+    single_errors.add(fourth_measured, fourth_reference);
 
     auto distances_array = distances<quads_kit_t>(
         kernel_, query_view, query_norms,
         {first_candidate_view, second_candidate_view, third_candidate_view, fourth_candidate_view},
         {first_candidate_norms, second_candidate_norms, third_candidate_norms, fourth_candidate_norms});
-    failures += expect_near(distances_array[0], first_reference);
-    failures += expect_near(distances_array[1], second_reference);
-    failures += expect_near(distances_array[2], third_reference);
-    failures += expect_near(distances_array[3], fourth_reference);
-    return failures;
+    quad_errors.add(distances_array[0], first_reference);
+    quad_errors.add(distances_array[1], second_reference);
+    quad_errors.add(distances_array[2], third_reference);
+    quad_errors.add(distances_array[3], fourth_reference);
+    std::size_t const failures = expect_errors("one-to-one distances", dense_comparison_family<kernel_>(),
+                                               comparison_verdict_t::assert_k, single_errors, 0);
+    return failures + expect_errors("one-to-four distances", dense_comparison_family<kernel_>(),
+                                    comparison_verdict_t::assert_k, quad_errors, 0);
 }
 
 /** No-op sibling picked when no tile engine exists for the tuple. */
@@ -225,6 +235,7 @@ static int check_tiles() noexcept {
                                                 dimensions_k, stride, queries_k * sizeof(raw_dot_t), nullptr, 0,
                                                 nullptr) == nk_success_k);
 
+    error_stats_t tile_errors;
     for (std::size_t row = 0; row != rows_k; ++row) {
         auto const row_vector = rows.row(row).as_vector();
         auto const row_norms = norms<quads_kit_t>(row_vector);
@@ -238,12 +249,13 @@ static int check_tiles() noexcept {
                                                                                  lane_sumsqs);
             for (std::size_t lane = 0; lane != lanes; ++lane) {
                 auto const query_vector = queries.row(first + lane).as_vector();
-                failures += expect_near(tiled[lane], distance<quads_kit_t>(kernel_, row_vector, row_norms, query_vector,
-                                                                           norms<quads_kit_t>(query_vector)));
+                tile_errors.add(tiled[lane], distance<quads_kit_t>(kernel_, row_vector, row_norms, query_vector,
+                                                                   norms<quads_kit_t>(query_vector)));
             }
         }
     }
-    return failures;
+    return failures + expect_errors("tiled distances", dense_comparison_family<kernel_>(),
+                                    comparison_verdict_t::assert_k, tile_errors, 0);
 }
 
 template <nk_kernel_kind_t kernel_, typename scalar_>

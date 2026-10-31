@@ -5,12 +5,12 @@ Its RAM tier needs the standard library and the OS headers only, so together wit
 The sequence, shapes and geospatial modalities are instantiations of it: `sequence::ram_index` over StringZilla strings, `shapes::ram_index` over NumKong shape packs, and `geospatial::ram_index` over Earth-fixed positions.
 Specialized optimizations, like lock-free readers and SIMD kernel kits, belong to the dense family instead.
 
-## Standalone Use
+## One Mono-Index
 
 A single `basic::ram_index` is a complete index on its own.
-It needs no SafeGraphs files, no plural of shards and no UUIDs.
+It needs no SafeGraphs files, no sharded index around it and no UUIDs.
 Keys may be any hashable type, node IDs may be 32 or 64 bits wide, and every record keeps its own key.
-The plurals in `ram_indexes.hpp` and `vram_nvidia_indexes.hpp` are what the compiled library builds on top.
+The sharded indexes in `ram_indexes.hpp` and `vram_nvidia_indexes.hpp` are what the compiled library builds on top.
 Only they narrow the choice, to 32-bit shards whose nodes a shard table locates in 8 bytes.
 
 ## Residency
@@ -18,7 +18,7 @@ Only they narrow the choice, to 32-bit shards whose nodes a shard table locates 
 - `ram_index.hpp`: the in-memory index, with the metric contract, the selectors, the codec and the plans described below.
 - `nvme_index.hpp`: the read-only index of one saved part on block storage, opened from its `persisted_columns_t` and walked through the same storage engines as the dense tier.
 - `nvme_indexes.hpp`: the read-only view of a saved checkpoint, one part per shard; both walk their parts through `nvme_parts_catalog`, a component over spans of the media and parts each owns.
-- `vram_nvidia_index.hpp` and `vram_nvidia_index.cuh`: the NVIDIA base every modality's face derives from, in plain C++, and the kernel body every modality's kernels run with the kit their ladder picks.
+- `vram_nvidia_index.hpp` and `vram_nvidia_index.cuh`: `basic::vram_ragged_graph`, the NVIDIA component every modality's face owns as a member and forwards its verbs to, in plain C++, and the kernel body every modality's kernels run with the kit their ladder picks.
 - `vram_index.cuh`: the vendor-neutral device bodies for the walk, the diversity selection, insertion and re-selection, which NVCC and HIP-Clang share.
   Only the NVIDIA host face exists so far, and AMD and Apple have no basic index yet.
 
@@ -92,8 +92,8 @@ for (std::size_t i = 0; i != found.count; ++i) {
 ```
 
 - `insert` moves a batch of payloads in under their keys and is all-or-nothing: capacity and scratch for the whole batch are secured before the first value moves.
-- `plan_insert` spreads one batch over threads: it claims, covers and dispenses the whole ID range, each thread lands a disjoint slice through the plan's own `insert` with a context `reserve_traversal` sized, and `finish` publishes the batch at once.
-  Nothing can fail past the dispense, so every position of a plan must land, and a refused fan-out lands on the calling thread.
+- `plan_insert` spreads one batch over threads: it claims, covers and dispenses the whole ID range, each thread places a disjoint slice through the plan's own `insert` with a context `reserve_traversal` sized, and `finish` publishes the batch at once.
+  Nothing can fail past the dispense, so every position of a plan must be placed, and a refused fan-out places on the calling thread.
 - The selector decides which candidates become neighbors, and carries the neighbors-per-node budget: `basic::keep_diverse_t` prunes by diversity, `basic::keep_closest_t` keeps the nearest.
   Both are per-call values, so heuristics and budgets can change between batches.
 - `search` leaves its matches in `context.results`, nearest first, and `key_of`, `value_of`, `find` and `count` translate between node IDs and keys.
@@ -133,7 +133,7 @@ Compressed row-group formats like Parquet do not, since every hop of a walk read
 Take a deliberately odd format, `graph.odd`, that no other tool reads.
 It opens with a 64-byte header of its own offsets, then stores the neighbor IDs, the keys and the value bytes, in that order.
 It narrows both prefix-sum columns from `u64` to `u32`, halving them, since its graphs hold fewer than four billion links and payload bytes.
-The RAM index of the example above fills the five columns, the tool writes them in its own order, and an NVMe view walks the file knowing only where each column landed:
+The RAM index of the example above fills the five columns, the tool writes them in its own order, and an NVMe view walks the file knowing only where each column was written:
 
 ```cpp
 #include <usearch/basic/nvme_index.hpp>
@@ -176,5 +176,5 @@ It reaches ForkUnion through `utilities/nvme_device.hpp` and SmashTable for the 
 
 - `nvme_index::open(path, columns)` opens one part as its `persisted_columns_t` locates its rows.
 - `nvme_indexes::view(path, paths, metric, executor)` opens a monolith or a manifest, building the directories on the executor's threads.
-- `search(count, make_metric, query_of, executor, config, keys, distances, counts)` keeps one metric per query slot, built by the caller's factory on the slot's arena, and hands it every landed value as the codec's borrowed `view`.
+- `search(count, make_metric, query_of, keys, distances, counts, config, executor)` keeps one metric per query slot, built by the caller's factory on the slot's arena, and hands it every fetched value as the codec's borrowed `view`.
 - `count`, `contains` and `get` scan the key columns, and `get` reads the value rows of the keys it found.

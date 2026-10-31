@@ -100,15 +100,60 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
         vram_reachability_sweep<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
                                         graph.frontier, graph.next_frontier, graph.counter, graph.previous_counter,
                                         graph.levels);
+    else if constexpr (kernel_ == vram_kernel_t::reachability_back_sweep_k)
+        vram_reachability_back_sweep<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reaches_back,
+                                             graph.back_settled, graph.counter, graph.previous_counter, graph.levels,
+                                             graph.sweep_number);
     else if constexpr (kernel_ == vram_kernel_t::reachability_islands_k)
-        vram_reachability_islands<warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
+        // The unreached and island counters lie back to back.
+        vram_reachability_islands<warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter + 1,
+                                          graph.reaches_back, graph.counter);
     else if constexpr (kernel_ == vram_kernel_t::reached_in_links_k)
         vram_reached_in_links<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
                                       graph.in_links);
     else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
         vram_reconnect_island<warp_t>(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count,
                                       graph.reached, graph.rows_count, graph.seed_count, graph.in_links,
-                                      graph.reconnected);
+                                      graph.reconnected, graph.reaches_back, graph.shadow_neighbors);
+    else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, warp_t>(graph);
+    else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<warp_t>(arguments.gather);
+    else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)
+        vram_sum_counts<warp_t>(arguments.counts.counts, arguments.counts.queries_count, arguments.counts.total);
+    else if constexpr (kernel_ == vram_kernel_t::resolve_products_k) {
+        vram_multiply_t const& products = arguments.products;
+        vram_resolve_products<warp_t>(products.ids, reinterpret_cast<typename kit_t::dot_t const*>(products.products),
+                                      products.scored, products.keys, products.ids_stride, products.queries_count,
+                                      vram_view(products.ranking));
+    }
+    else if constexpr (kernel_ == vram_kernel_t::compact_products_k) {
+        vram_multiply_t const& products = arguments.products;
+        vram_compact_products<warp_t>(vram_view(products.ranking), products.block_bytes, products.shards_count,
+                                      products.queries_count, products.tape, products.totals);
+    }
+    else if constexpr (kernel_ == vram_kernel_t::nominate_keys_k) {
+        vram_maxsim_t const& maxsim = arguments.maxsim;
+        vram_nominate_keys<warp_t>(vram_view(maxsim.gathered), maxsim.block_bytes, maxsim.shards_count,
+                                   maxsim.query_offsets, maxsim.queries_count, vram_view(maxsim.nominees));
+    }
+    else if constexpr (kernel_ == vram_kernel_t::maxsim_rescore_k) {
+        vram_maxsim_t const& maxsim = arguments.maxsim;
+        vram_maxsim_rescore<kit_t, warp_t>(
+            vram_view<kit_t>(maxsim.storage), reinterpret_cast<typename kit_t::fragment_t const*>(maxsim.queries),
+            maxsim.query_offsets, maxsim.queries_count, maxsim.nominee_offsets, maxsim.nominees_count, maxsim.entries,
+            maxsim.entries_count, reinterpret_cast<typename kit_t::dot_t*>(maxsim.partials), maxsim.rows_stride);
+    }
+    else if constexpr (kernel_ == vram_kernel_t::maxsim_fold_k) {
+        vram_maxsim_t const& maxsim = arguments.maxsim;
+        vram_maxsim_fold<kit_t, warp_t>(reinterpret_cast<typename kit_t::dot_t const*>(maxsim.partials),
+                                        maxsim.block_bytes, maxsim.shards_count, maxsim.rows_stride,
+                                        maxsim.query_offsets, maxsim.queries_count, maxsim.nominee_offsets,
+                                        maxsim.nominees_count, maxsim.totals);
+    }
+    else if constexpr (kernel_ == vram_kernel_t::top_k_k) {
+        vram_maxsim_t const& maxsim = arguments.maxsim;
+        vram_top_k<warp_t>(maxsim.totals, maxsim.nominated, maxsim.queries_count, maxsim.wanted, maxsim.key_bytes,
+                           maxsim.tape, maxsim.scored);
+    }
 }
 
 /** Every AMD kernel only dense indexes launch, alike in its arguments to @c amd_kernel, with

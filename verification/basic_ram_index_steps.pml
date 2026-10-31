@@ -14,7 +14,7 @@
  *
  *  @verify pass sc,rc11,far
  *  @verify fail rc11,far covered_order=order_relaxed: relaxed, the finisher reads no key, and under
- *      `far` the add is posted and lands carrying nothing
+ *      `far` the add is posted and arrives carrying nothing
  *  @verify fail rc11 counters_before_watermark=false: reversed, the reader finds the dispenser
  *      behind the watermark, and `watermark_` reports a settled load contended
  */
@@ -32,7 +32,7 @@
 #define last_visible_id 4
 #define key(id) (5 + (id))
 
-// The values: a key word holds the record's key or nothing yet, and the steps land one row each.
+// The values: a key word holds the record's key or nothing yet, and the steps place one row each.
 #define keyed(id) (10 + (id))
 #define step_count 2
 

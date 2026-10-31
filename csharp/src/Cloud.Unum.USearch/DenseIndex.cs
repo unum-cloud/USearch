@@ -190,6 +190,47 @@ public readonly struct DenseReachability
 }
 
 /// <summary>
+/// What one refine-family call did to the graph: <see cref="DenseIndex.Refine"/>,
+/// <see cref="DenseIndex.Absorb"/> and <see cref="DenseIndex.Split"/> land it. Mirrors
+/// <c>usearch_refine_report_t</c>.
+/// </summary>
+public readonly struct RefineReport
+{
+    /// <summary>The entries whose neighbors were selected again, the islands of every heal round
+    /// included.</summary>
+    public ulong Reselected { get; init; }
+
+    /// <summary>Of those, the entries whose neighbor set gained a member it lacked; zero means the
+    /// graph has settled.</summary>
+    public ulong Changed { get; init; }
+
+    /// <summary>The entries the first audit found not reached both ways.</summary>
+    public ulong IslandsFound { get; init; }
+
+    /// <summary>The links written between an island and an entry reached both ways.</summary>
+    public ulong IslandsReconnected { get; init; }
+
+    /// <summary>The audit closing the heal, as a fresh <see cref="DenseIndex.Health"/> right after
+    /// would take it.</summary>
+    public DenseReachability Reachability { get; init; }
+
+    internal static unsafe RefineReport Lift(NativeRefineReport* report) => new()
+    {
+        Reselected = report->Reselected, Changed = report->Changed, IslandsFound = report->IslandsFound,
+        IslandsReconnected = report->IslandsReconnected,
+        Reachability = new DenseReachability
+        {
+            Audited = report->Reachability.Audited, Reachable = report->Reachability.Reachable,
+            Sweeps = report->Reachability.Sweeps, BackSweeps = report->Reachability.BackSweeps,
+        },
+    };
+
+    /// <summary>Where a refine-family call writes its report, past the traversal telemetry.</summary>
+    internal static unsafe NativeRefineReport* In(CallOutputs* outputs) =>
+        (NativeRefineReport*)((byte*)outputs->Report + sizeof(NativeDenseTraversalStats));
+}
+
+/// <summary>
 /// The online-softmax carry of one query row - Flash Attention's running maximum and partition,
 /// which folds one attention call into another over the same queries. Mirrors
 /// <c>usearch_dense_softmax_state_t</c>.
@@ -706,10 +747,10 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="expansionFactor">The breadth of the candidates the re-selection walk explores; zero
     /// derives it from the geometry.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
-    /// <returns>The number of nodes whose edges changed; zero means the graph has settled, so a
-    /// caller under a time budget loops until the return falls below whatever rate it considers
-    /// settled.</returns>
-    public ulong Refine(ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
+    /// <returns>The nodes re-selected and changed, the islands found and reconnected, and the audit
+    /// closing the heal; <see cref="RefineReport.Changed"/> at zero means the graph has settled, so a
+    /// caller loops until it falls below whatever rate it considers settled.</returns>
+    public RefineReport Refine(ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
         Calls.Block(new DenseRefineCall(new(this._handle, null), expansionFactor, stats)).Result;
 
     /// <summary>
@@ -847,10 +888,41 @@ public sealed unsafe class DenseIndex : IDisposable
     /// An absorbed donor is consumed and refuses every later verb with <see cref="Status.Uninitialized"/>;
     /// one the call did not absorb, such as a donor of another residency, scalar, metric or geometry,
     /// which refuses with <see cref="Status.ConfigMismatch"/>, stays a live index the caller still
-    /// owns, though its entries may already have landed here.
+    /// owns, though its entries may already have moved here.
     /// </remarks>
     /// <param name="donors">The indexes to absorb.</param>
-    public void Absorb(params DenseIndex[] donors) => Calls.Block(new DenseAbsorbCall(new(this._handle, null), donors));
+    /// <returns>What the closing refinement did to the graph.</returns>
+    public RefineReport Absorb(params DenseIndex[] donors) =>
+        Calls.Block(new DenseAbsorbCall(new(this._handle, null), donors)).Result;
+
+    /// <summary>
+    /// Splits this index into the empty receivers, the inverse of <see cref="Absorb"/>: the entries
+    /// are partitioned along the graph, each part lands in one receiver with its edges kept, and a
+    /// closing refinement re-links every receiver, leaving this index empty and live. Calls
+    /// <c>usearch_dense_split</c>.
+    /// </summary>
+    /// <param name="receivers">At least two empty indexes of this one's residency, scalar, metric,
+    /// geometry and shard count.</param>
+    /// <param name="seed">Picks the part roots: equal seeds over an unchanged index split equally.</param>
+    /// <param name="expansionFactor">The breadth of the closing walks; zero derives it.</param>
+    /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <returns>What the closing refinements did, across the receivers.</returns>
+    public RefineReport Split(
+        DenseIndex[] receivers, ulong seed = 0, ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
+        Calls.Block(new DenseSplitCall(new(this._handle, null), receivers, seed, expansionFactor, stats)).Result;
+
+    /// <summary>
+    /// Draws keys around the focus, or across the whole index, each hanging from a shown or earlier
+    /// draw and placed in three dimensions beside the shown ones - so a view grows one connected
+    /// sample as it zooms. A larger <paramref name="wanted"/> under the same seed draws a superset;
+    /// only a RAM index samples yet. Calls <c>usearch_dense_sample</c>.
+    /// </summary>
+    /// <param name="wanted">The upper bound on draws.</param>
+    /// <param name="arena">Where the draws are written, rewound by the call.</param>
+    /// <param name="config">The keys shown and their coordinates, the focus, the seed and the walk.</param>
+    /// <returns>The draws, readable until the arena's next call.</returns>
+    public Sample Sample(int wanted, Arena arena, DenseSampleConfig config = default) =>
+        Calls.Block(new DenseSampleCall(new(this._handle, null), wanted, arena, config)).Result;
 
     /// <summary>
     /// Writes the index under a path, in the layout its extension picks - one <c>.safegraphs</c>
@@ -996,11 +1068,12 @@ public static class DenseVerbs
         Calls.Defer(new DenseInsertCall(Of(on), keys, vectors, expansionFactor, stats));
 
     /// <inheritdoc cref="DenseIndex.Refine"/>
-    public static ulong Refine(this DenseIndexOn on, ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
+    public static RefineReport Refine(
+        this DenseIndexOn on, ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
         Calls.Block(new DenseRefineCall(Of(on), expansionFactor, stats)).Result;
 
     /// <inheritdoc cref="DenseIndex.Refine"/>
-    public static Deferred<ulong> Refine(
+    public static Deferred<RefineReport> Refine(
         this DenseIndexDeferredOn on, ulong expansionFactor = 0, DenseTraversalStats? stats = null) =>
         Calls.Defer(new DenseRefineCall(Of(on), expansionFactor, stats));
 
@@ -1067,12 +1140,33 @@ public static class DenseVerbs
             stats));
 
     /// <inheritdoc cref="DenseIndex.Absorb"/>
-    public static void Absorb(this DenseIndexOn on, params DenseIndex[] donors) =>
-        Calls.Block(new DenseAbsorbCall(Of(on), donors));
+    public static RefineReport Absorb(this DenseIndexOn on, params DenseIndex[] donors) =>
+        Calls.Block(new DenseAbsorbCall(Of(on), donors)).Result;
 
     /// <inheritdoc cref="DenseIndex.Absorb"/>
-    public static Deferred Absorb(this DenseIndexDeferredOn on, params DenseIndex[] donors) =>
+    public static Deferred<RefineReport> Absorb(this DenseIndexDeferredOn on, params DenseIndex[] donors) =>
         Calls.Defer(new DenseAbsorbCall(Of(on), donors));
+
+    /// <inheritdoc cref="DenseIndex.Split"/>
+    public static RefineReport Split(
+        this DenseIndexOn on, DenseIndex[] receivers, ulong seed = 0, ulong expansionFactor = 0,
+        DenseTraversalStats? stats = null) =>
+        Calls.Block(new DenseSplitCall(Of(on), receivers, seed, expansionFactor, stats)).Result;
+
+    /// <inheritdoc cref="DenseIndex.Split"/>
+    public static Deferred<RefineReport> Split(
+        this DenseIndexDeferredOn on, DenseIndex[] receivers, ulong seed = 0, ulong expansionFactor = 0,
+        DenseTraversalStats? stats = null) =>
+        Calls.Defer(new DenseSplitCall(Of(on), receivers, seed, expansionFactor, stats));
+
+    /// <inheritdoc cref="DenseIndex.Sample"/>
+    public static Sample Sample(this DenseIndexOn on, int wanted, Arena arena, DenseSampleConfig config = default) =>
+        Calls.Block(new DenseSampleCall(Of(on), wanted, arena, config)).Result;
+
+    /// <inheritdoc cref="DenseIndex.Sample"/>
+    public static Deferred<Sample> Sample(
+        this DenseIndexDeferredOn on, int wanted, Arena arena, DenseSampleConfig config = default) =>
+        Calls.Defer(new DenseSampleCall(Of(on), wanted, arena, config));
 
     /// <inheritdoc cref="DenseIndex.Save"/>
     public static void Save(this DenseIndexOn on, string path) => Calls.Block(new DenseSaveCall(Of(on), path));
@@ -1120,42 +1214,42 @@ public static class DenseVerbs
 internal unsafe struct DenseReserveCall(CallHandles handles, ulong capacity) : ICall
 {
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseReserve arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
             Completion = completion, Capacity = (nuint)capacity,
         };
         usearch_dense_reserve(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public readonly void Finish(Landing* landing) => landing->Outcome.ThrowIfFailed();
+    public readonly void Finish(CallOutputs* outputs) => outputs->Outcome.ThrowIfFailed();
 }
 
 /// <summary>An erasure; see <see cref="DenseIndex.Clear"/>.</summary>
 internal unsafe struct DenseClearCall(CallHandles handles) : ICall
 {
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseClear arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
             Completion = completion,
         };
         usearch_dense_clear(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public readonly void Finish(Landing* landing) => landing->Outcome.ThrowIfFailed();
+    public readonly void Finish(CallOutputs* outputs) => outputs->Outcome.ThrowIfFailed();
 }
 
 /// <summary>A description; see <see cref="DenseIndex.Describe"/>.</summary>
@@ -1164,24 +1258,24 @@ internal unsafe struct DenseDescribeCall(CallHandles handles) : ICall<DenseIndex
 
     public DenseIndexDescription Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseDescribe arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
-            Completion = completion, Description = (NativeDenseDescription*)landing->Report,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
+            Completion = completion, Description = (NativeDenseDescription*)outputs->Report,
         };
         usearch_dense_describe(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        NativeDenseDescription* lowered = (NativeDenseDescription*)landing->Report;
+        outputs->Outcome.ThrowIfFailed();
+        NativeDenseDescription* lowered = (NativeDenseDescription*)outputs->Report;
         this.Result = new DenseIndexDescription
         {
             Metadata = DenseMetadata.Lift(lowered->Metadata),
@@ -1201,24 +1295,24 @@ internal unsafe struct DenseCountCall(CallHandles handles, Key key) : ICall<ulon
 
     public ulong Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseCount arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
-            Completion = completion, Key = key, Entries = &landing->Written,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
+            Completion = completion, Key = key, Entries = &outputs->Written,
         };
         usearch_dense_count(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        this.Result = landing->Written;
+        outputs->Outcome.ThrowIfFailed();
+        this.Result = outputs->Written;
     }
 }
 
@@ -1230,27 +1324,27 @@ internal unsafe struct DenseGetCall(CallHandles handles, Key key, Arena arena, S
 
     public DenseVectors Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         using Lease lent = Arena.Lend(arena);
         NativeDenseGet arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
-            Key = key, Vectors = (NativeRowsView*)landing->View, Written = &landing->Written, Arena = lent.Pointer,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
+            Key = key, Vectors = (NativeRowsView*)outputs->View, Written = &outputs->Written, Arena = lent.Pointer,
             OutputsScalar = outputsScalar,
         };
         usearch_dense_get(&arguments);
-        this._generation = Arena.Rewound(arena, &landing->Outcome);
+        this._generation = Arena.Rewound(arena, &outputs->Outcome);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        this.Result = new DenseVectors(arena, this._generation, *(NativeRowsView*)landing->View, (int)landing->Written);
+        outputs->Outcome.ThrowIfFailed();
+        this.Result = new DenseVectors(arena, this._generation, *(NativeRowsView*)outputs->View, (int)outputs->Written);
     }
 }
 
@@ -1262,7 +1356,7 @@ internal unsafe struct DenseInsertCall(
     private MemoryHandle _keys;
     private MemoryHandle _vectors;
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         // The library reads as many keys as rows, so only this side sees the two disagree.
         if (keys.Length != vectors.Rows)
@@ -1284,56 +1378,56 @@ internal unsafe struct DenseInsertCall(
             using Lease executor = handles.LendExecutor();
             NativeDenseInsert arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
                 Completion = completion, Count = (nuint)keys.Length,
                 Keys = new NativeKeysView { Data = (IntPtr)keyRun, Stride = (nuint)sizeof(Key) },
                 Vectors = vectors.AsView(rows), ExpansionFactor = (nuint)expansionFactor,
-                Stats = (NativeDenseTraversalStats*)landing->Report,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_insert(&arguments);
         }
     }
 
-    public void Release(Landing* landing)
+    public void Release(CallOutputs* outputs)
     {
         this._keys.Dispose();
         this._vectors.Dispose();
     }
 
-    public readonly void Finish(Landing* landing)
+    public readonly void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
     }
 }
 
 /// <summary>A refinement; see <see cref="DenseIndex.Refine"/>.</summary>
 internal unsafe struct DenseRefineCall(CallHandles handles, ulong expansionFactor, DenseTraversalStats? stats)
-    : ICall<ulong>
+    : ICall<RefineReport>
 {
 
-    public ulong Result { get; private set; }
+    public RefineReport Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseRefine arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
-            Completion = completion, Changed = &landing->Written, ExpansionFactor = (nuint)expansionFactor,
-            Stats = (NativeDenseTraversalStats*)landing->Report,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
+            Completion = completion, Report = RefineReport.In(outputs), ExpansionFactor = (nuint)expansionFactor,
+            Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
         usearch_dense_refine(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
-        this.Result = landing->Written;
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
+        this.Result = RefineReport.Lift(RefineReport.In(outputs));
     }
 }
 
@@ -1343,24 +1437,24 @@ internal unsafe struct DenseHealthCall(CallHandles handles) : ICall<DenseReachab
 
     public DenseReachability Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         NativeDenseHealth arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
-            Completion = completion, Reachability = (NativeDenseReachability*)landing->Report,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
+            Completion = completion, Reachability = (NativeDenseReachability*)outputs->Report,
         };
         usearch_dense_health(&arguments);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        NativeDenseReachability* audit = (NativeDenseReachability*)landing->Report;
+        outputs->Outcome.ThrowIfFailed();
+        NativeDenseReachability* audit = (NativeDenseReachability*)outputs->Report;
         this.Result = new DenseReachability
         {
             Audited = audit->Audited, Reachable = audit->Reachable, Sweeps = audit->Sweeps,
@@ -1381,7 +1475,7 @@ internal unsafe struct DenseSearchCall(
 
     public Matches Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         nuint bound = Calls.Bound(wanted);
         fixed (byte* rows = queries.Bytes)
@@ -1401,21 +1495,21 @@ internal unsafe struct DenseSearchCall(
             using Lease lent = Arena.Lend(arena);
             NativeDenseSearch arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
                 Count = (nuint)queries.Rows, Queries = queries.AsView(rows),
-                Matches = (NativeMatchesView*)landing->View, Arena = lent.Pointer, Wanted = bound,
+                Matches = (NativeMatchesView*)outputs->View, Arena = lent.Pointer, Wanted = bound,
                 ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
                 Predicate = this._admitting is null
                     ? default
                     : new NativePredicate { Callback = &Admitting.Admits, State = GCHandle.ToIntPtr(this._registration) },
-                Stats = (NativeDenseTraversalStats*)landing->Report,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_search(&arguments);
-            this._generation = Arena.Rewound(arena, &landing->Outcome);
+            this._generation = Arena.Rewound(arena, &outputs->Outcome);
         }
     }
 
-    public void Release(Landing* landing)
+    public void Release(CallOutputs* outputs)
     {
         if (this._registration.IsAllocated)
         {
@@ -1425,12 +1519,12 @@ internal unsafe struct DenseSearchCall(
         this._queries.Dispose();
     }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
         this._admitting?.Rethrow();
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
-        this.Result = new Matches(arena, this._generation, *(NativeMatchesView*)landing->View, queries.Rows);
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
+        this.Result = new Matches(arena, this._generation, *(NativeMatchesView*)outputs->View, queries.Rows);
     }
 }
 
@@ -1444,7 +1538,7 @@ internal unsafe struct DenseMaxsimCall(
 
     public DenseProducts Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         // The library reads count times rows-per-query rows, so only this side sees them overrun the slab.
         if (rowsPerQuery <= 0 || queries.Rows % rowsPerQuery != 0)
@@ -1466,27 +1560,27 @@ internal unsafe struct DenseMaxsimCall(
             using Lease lent = Arena.Lend(arena);
             NativeDenseMaxsim arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
                 Count = (nuint)(queries.Rows / rowsPerQuery), Queries = queries.AsView(rows),
-                RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesTapeView*)landing->View,
-                Written = &landing->Written, Required = &landing->Required, Arena = lent.Pointer, Wanted = bound,
+                RowsPerQuery = (nuint)rowsPerQuery, Matches = (NativeMatchesTapeView*)outputs->View,
+                Written = &outputs->Written, Required = &outputs->Required, Arena = lent.Pointer, Wanted = bound,
                 ExpansionFactor = (nuint)expansionFactor,
-                Stats = (NativeDenseTraversalStats*)landing->Report,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_maxsim(&arguments);
-            this._generation = Arena.Rewound(arena, &landing->Outcome);
+            this._generation = Arena.Rewound(arena, &outputs->Outcome);
         }
     }
 
-    public void Release(Landing* landing) => this._queries.Dispose();
+    public void Release(CallOutputs* outputs) => this._queries.Dispose();
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
         this.Result = new DenseProducts(
-            arena, this._generation, *(NativeMatchesTapeView*)landing->View, queries.Rows / rowsPerQuery,
-            landing->Required);
+            arena, this._generation, *(NativeMatchesTapeView*)outputs->View, queries.Rows / rowsPerQuery,
+            outputs->Required);
     }
 }
 
@@ -1500,7 +1594,7 @@ internal unsafe struct DenseMultiplyCall(
 
     public DenseProducts Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         fixed (byte* rows = left.Bytes)
         {
@@ -1514,25 +1608,25 @@ internal unsafe struct DenseMultiplyCall(
             using Lease lent = Arena.Lend(arena);
             NativeDenseMultiply arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
-                Count = (nuint)left.Rows, Left = left.AsView(rows), Products = (NativeMatchesTapeView*)landing->View,
-                Written = &landing->Written, Required = &landing->Required, Arena = lent.Pointer,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
+                Count = (nuint)left.Rows, Left = left.AsView(rows), Products = (NativeMatchesTapeView*)outputs->View,
+                Written = &outputs->Written, Required = &outputs->Required, Arena = lent.Pointer,
                 Wanted = (nuint)wanted, ExpansionFactor = (nuint)expansionFactor,
-                Stats = (NativeDenseTraversalStats*)landing->Report,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_multiply(&arguments);
-            this._generation = Arena.Rewound(arena, &landing->Outcome);
+            this._generation = Arena.Rewound(arena, &outputs->Outcome);
         }
     }
 
-    public void Release(Landing* landing) => this._left.Dispose();
+    public void Release(CallOutputs* outputs) => this._left.Dispose();
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
         this.Result = new DenseProducts(
-            arena, this._generation, *(NativeMatchesTapeView*)landing->View, left.Rows, landing->Required);
+            arena, this._generation, *(NativeMatchesTapeView*)outputs->View, left.Rows, outputs->Required);
     }
 }
 
@@ -1552,7 +1646,7 @@ internal unsafe struct DenseAttendCall(
 
     public DenseVectors Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         // The carry pointer has no length, so only this side can see it fall short.
         if (!carry.IsEmpty && carry.Length < queries.Rows)
@@ -1585,19 +1679,19 @@ internal unsafe struct DenseAttendCall(
             using Lease lent = Arena.Lend(arena);
             NativeDenseAttend arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
                 Count = (nuint)queries.Rows, Queries = queries.AsView(queryRows), HeadCount = (nuint)headCount,
                 ValueLookup = &ValueRows.Resolve, ValueLookupState = GCHandle.ToIntPtr(this._registration),
-                Carry = carried, Outputs = (NativeRowsView*)landing->View, Arena = lent.Pointer,
+                Carry = carried, Outputs = (NativeRowsView*)outputs->View, Arena = lent.Pointer,
                 OutputsScalar = outputsScalar, ExpansionFactor = (nuint)expansionFactor, ScoreScale = scoreScale,
-                Stats = (NativeDenseTraversalStats*)landing->Report,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_attend(&arguments);
-            this._generation = Arena.Rewound(arena, &landing->Outcome);
+            this._generation = Arena.Rewound(arena, &outputs->Outcome);
         }
     }
 
-    public void Release(Landing* landing)
+    public void Release(CallOutputs* outputs)
     {
         if (this._registration.IsAllocated)
         {
@@ -1609,24 +1703,26 @@ internal unsafe struct DenseAttendCall(
         this._carry.Dispose();
     }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
         this._lookup.Rethrow();
-        landing->Outcome.ThrowIfFailed();
-        stats?.Adopt(*(NativeDenseTraversalStats*)landing->Report);
-        this.Result = new DenseVectors(arena, this._generation, *(NativeRowsView*)landing->View, queries.Rows);
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
+        this.Result = new DenseVectors(arena, this._generation, *(NativeRowsView*)outputs->View, queries.Rows);
     }
 }
 
 /// <summary>An absorb; see <see cref="DenseIndex.Absorb"/>.</summary>
-internal unsafe struct DenseAbsorbCall(CallHandles handles, DenseIndex[] donors) : ICall
+internal unsafe struct DenseAbsorbCall(CallHandles handles, DenseIndex[] donors) : ICall<RefineReport>
 {
     private readonly DenseIndex[] _donors = donors;
     private readonly IntPtr[] _slots = new IntPtr[donors.Length];
     private readonly Lease[] _leases = new Lease[donors.Length];
     private MemoryHandle _pinnedSlots;
 
-    public void Submit(Landing* landing, Completion completion)
+    public RefineReport Result { get; private set; }
+
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         for (int position = 0; position < this._donors.Length; position++)
         {
@@ -1645,14 +1741,15 @@ internal unsafe struct DenseAbsorbCall(CallHandles handles, DenseIndex[] donors)
             using Lease executor = handles.LendExecutor();
             NativeDenseAbsorb arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
                 Completion = completion, Count = (nuint)this._donors.Length, Donors = slots,
+                Report = RefineReport.In(outputs),
             };
             usearch_dense_absorb(&arguments);
         }
     }
 
-    public void Release(Landing* landing)
+    public void Release(CallOutputs* outputs)
     {
         for (int position = 0; position < this._donors.Length; position++)
         {
@@ -1668,7 +1765,155 @@ internal unsafe struct DenseAbsorbCall(CallHandles handles, DenseIndex[] donors)
         this._pinnedSlots.Dispose();
     }
 
-    public readonly void Finish(Landing* landing) => landing->Outcome.ThrowIfFailed();
+    public void Finish(CallOutputs* outputs)
+    {
+        outputs->Outcome.ThrowIfFailed();
+        this.Result = RefineReport.Lift(RefineReport.In(outputs));
+    }
+}
+
+/// <summary>A split; see <see cref="DenseIndex.Split"/>.</summary>
+internal unsafe struct DenseSplitCall(
+    CallHandles handles, DenseIndex[] receivers, ulong seed, ulong expansionFactor, DenseTraversalStats? stats)
+    : ICall<RefineReport>
+{
+    private readonly IntPtr[] _slots = new IntPtr[receivers.Length];
+    private readonly Lease[] _leases = new Lease[receivers.Length];
+    private MemoryHandle _pinnedSlots;
+
+    public RefineReport Result { get; private set; }
+
+    public void Submit(CallOutputs* outputs, Completion completion)
+    {
+        for (int position = 0; position < receivers.Length; position++)
+        {
+            this._leases[position] = Lease.Of(receivers[position].Handle, "receiver");
+            this._slots[position] = this._leases[position].Pointer;
+        }
+
+        fixed (IntPtr* slots = this._slots)
+        {
+            if (completion == Completion.Deferred)
+            {
+                this._pinnedSlots = this._slots.AsMemory().Pin();
+            }
+
+            using Lease index = handles.LendIndex();
+            using Lease executor = handles.LendExecutor();
+            NativeDenseSplit arguments = new()
+            {
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
+                Completion = completion, Count = (nuint)receivers.Length, Receivers = slots,
+                Report = RefineReport.In(outputs), ExpansionFactor = (nuint)expansionFactor, Seed = seed,
+                Stats = (NativeDenseTraversalStats*)outputs->Report,
+            };
+            usearch_dense_split(&arguments);
+        }
+    }
+
+    public void Release(CallOutputs* outputs)
+    {
+        for (int position = 0; position < this._leases.Length; position++)
+        {
+            this._leases[position].Dispose();
+        }
+
+        this._pinnedSlots.Dispose();
+    }
+
+    public void Finish(CallOutputs* outputs)
+    {
+        outputs->Outcome.ThrowIfFailed();
+        stats?.Adopt(*(NativeDenseTraversalStats*)outputs->Report);
+        this.Result = RefineReport.Lift(RefineReport.In(outputs));
+    }
+}
+
+/// <summary>A sample; see <see cref="DenseIndex.Sample"/>.</summary>
+internal unsafe struct DenseSampleCall(CallHandles handles, int wanted, Arena arena, DenseSampleConfig config)
+    : ICall<Sample>
+{
+    private MemoryHandle _shown;
+    private MemoryHandle _shownCoordinates;
+    private MemoryHandle _focus;
+    private int _generation;
+
+    public Sample Result { get; private set; }
+
+    public void Submit(CallOutputs* outputs, Completion completion)
+    {
+        ReadOnlyMemory<Key> shown = config.Shown, focus = config.Focus;
+        ReadOnlyMemory<float> shownCoordinates = config.ShownCoordinates;
+        // The library reads three coordinates per shown key, so only this side sees the two disagree.
+        if (shownCoordinates.Length != shown.Length * 3)
+        {
+            throw new USearchException(Status.ShapeMismatch, "every shown key needs three coordinates");
+        }
+
+        nuint bound = Calls.Bound(wanted);
+        SampleReports* reports = (SampleReports*)outputs->Report;
+        fixed (Key* shownRun = shown.Span)
+        fixed (float* coordinates = shownCoordinates.Span)
+        fixed (Key* focusRun = focus.Span)
+        {
+            if (completion == Completion.Deferred)
+            {
+                this._shown = shown.Pin();
+                this._shownCoordinates = shownCoordinates.Pin();
+                this._focus = focus.Pin();
+            }
+
+            using Lease index = handles.LendIndex();
+            using Lease executor = handles.LendExecutor();
+            using Lease lent = Arena.Lend(arena);
+            NativeDenseSample arguments = new()
+            {
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
+                ShownCount = (nuint)shown.Length,
+                Shown = new NativeKeysView { Data = (IntPtr)shownRun, Stride = (nuint)sizeof(Key) },
+                ShownCoordinates = new NativeRowsView
+                {
+                    Data = (IntPtr)coordinates, Stride = (nuint)(3 * sizeof(float)), Columns = 3, Scalar = Scalar.F32,
+                },
+                FocusCount = (nuint)focus.Length,
+                Focus = new NativeKeysView { Data = (IntPtr)focusRun, Stride = (nuint)sizeof(Key) },
+                Keys = &reports->Keys, EntryOrdinals = &reports->EntryOrdinals,
+                Parents = (NativeMatchesView*)outputs->View, Coordinates = &reports->Coordinates,
+                Written = &outputs->Written, Arena = lent.Pointer, Wanted = bound, Seed = config.Seed,
+                ExpansionFactor = (nuint)config.ExpansionFactor, Stats = &reports->Stats,
+            };
+            usearch_dense_sample(&arguments);
+            this._generation = Arena.Rewound(arena, &outputs->Outcome);
+        }
+    }
+
+    public void Release(CallOutputs* outputs)
+    {
+        this._shown.Dispose();
+        this._shownCoordinates.Dispose();
+        this._focus.Dispose();
+    }
+
+    public void Finish(CallOutputs* outputs)
+    {
+        outputs->Outcome.ThrowIfFailed();
+        SampleReports* reports = (SampleReports*)outputs->Report;
+        config.Stats?.Adopt(reports->Stats);
+        this.Result = new Sample(
+            arena, this._generation, reports->Keys, reports->EntryOrdinals, *(NativeMatchesView*)outputs->View,
+            reports->Coordinates, (int)outputs->Written);
+    }
+}
+
+/// <summary>What a sample writes into <see cref="CallOutputs.Report"/>: its telemetry, then the views of
+/// its keys, entry ordinals and coordinates.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct SampleReports
+{
+    public NativeDenseTraversalStats Stats;
+    public NativeKeysView Keys;
+    public nuint* EntryOrdinals;
+    public NativeRowsView Coordinates;
 }
 
 /// <summary>A checkpoint write; see <see cref="DenseIndex.Save"/>.</summary>
@@ -1677,7 +1922,7 @@ internal unsafe struct DenseSaveCall(CallHandles handles, string path) : ICall
     private readonly byte[] _path = Paths.Encode(path);
     private MemoryHandle _pinnedPath;
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         fixed (byte* path = this._path)
         {
@@ -1690,7 +1935,7 @@ internal unsafe struct DenseSaveCall(CallHandles handles, string path) : ICall
             using Lease executor = handles.LendExecutor();
             NativeDenseSave arguments = new()
             {
-                Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
+                Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
                 Completion = completion,
                 Path = new NativeBytesView { Data = (IntPtr)path, Length = (nuint)this._path.Length },
             };
@@ -1698,9 +1943,9 @@ internal unsafe struct DenseSaveCall(CallHandles handles, string path) : ICall
         }
     }
 
-    public void Release(Landing* landing) => this._pinnedPath.Dispose();
+    public void Release(CallOutputs* outputs) => this._pinnedPath.Dispose();
 
-    public readonly void Finish(Landing* landing) => landing->Outcome.ThrowIfFailed();
+    public readonly void Finish(CallOutputs* outputs) => outputs->Outcome.ThrowIfFailed();
 }
 
 /// <summary>A monolith write; see <see cref="DenseIndex.SaveBuffer"/>.</summary>
@@ -1710,26 +1955,26 @@ internal unsafe struct DenseSaveBufferCall(CallHandles handles, Arena arena) : I
 
     public Monolith Result { get; private set; }
 
-    public void Submit(Landing* landing, Completion completion)
+    public void Submit(CallOutputs* outputs, Completion completion)
     {
         using Lease index = handles.LendIndex();
         using Lease executor = handles.LendExecutor();
         using Lease lent = Arena.Lend(arena);
         NativeDenseSaveBuffer arguments = new()
         {
-            Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
-            Monolith = (NativeBytesView*)landing->View, Arena = lent.Pointer,
+            Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome, Completion = completion,
+            Monolith = (NativeBytesView*)outputs->View, Arena = lent.Pointer,
         };
         usearch_dense_save_buffer(&arguments);
-        this._generation = Arena.Rewound(arena, &landing->Outcome);
+        this._generation = Arena.Rewound(arena, &outputs->Outcome);
     }
 
-    public readonly void Release(Landing* landing) { }
+    public readonly void Release(CallOutputs* outputs) { }
 
-    public void Finish(Landing* landing)
+    public void Finish(CallOutputs* outputs)
     {
-        landing->Outcome.ThrowIfFailed();
-        this.Result = new Monolith(arena, this._generation, *(NativeBytesView*)landing->View);
+        outputs->Outcome.ThrowIfFailed();
+        this.Result = new Monolith(arena, this._generation, *(NativeBytesView*)outputs->View);
     }
 }
 
@@ -1980,6 +2225,98 @@ public readonly unsafe struct Monolith
             return this.Length <= int.MaxValue
                 ? new ReadOnlySpan<byte>(this._data, (int)this.Length)
                 : throw new USearchException(Status.Overflow, "the monolith exceeds what one span can address");
+        }
+    }
+}
+
+/// <summary>
+/// The view a <see cref="DenseIndex.Sample"/> grows and how it draws; the default draws across the
+/// whole index with nothing shown yet. Mirrors the inputs and knobs of <c>usearch_dense_sample_t</c>.
+/// </summary>
+public readonly record struct DenseSampleConfig
+{
+    /// <summary>The keys already shown: never drawn again, and the paths reach toward them.</summary>
+    public ReadOnlyMemory<Key> Shown { get; init; }
+
+    /// <summary>Where each of <see cref="Shown"/> sits, three values apiece, the points later draws
+    /// are placed against.</summary>
+    public ReadOnlyMemory<float> ShownCoordinates { get; init; }
+
+    /// <summary>The keys to look around; empty looks across the whole index.</summary>
+    public ReadOnlyMemory<Key> Focus { get; init; }
+
+    /// <summary>The draw: equal seeds, shown keys and focus over an unchanged index draw equally.</summary>
+    public ulong Seed { get; init; }
+
+    /// <summary>The breadth of the walks behind the draws; zero derives it.</summary>
+    public ulong ExpansionFactor { get; init; }
+
+    /// <summary>The traversal telemetry to fill, when the caller wants any.</summary>
+    public DenseTraversalStats? Stats { get; init; }
+}
+
+/// <summary>The draws one <see cref="DenseIndex.Sample"/> wrote into its <see cref="Arena"/>: the keys
+/// drawn, which of its key's entries each is, the shown or earlier draw each hangs from, and where
+/// each is placed.</summary>
+/// <remarks>A view by value, readable until the arena's next call or disposal, as
+/// <see cref="Matches"/> is.</remarks>
+public readonly unsafe struct Sample
+{
+    private readonly Arena _arena;
+    private readonly int _generation;
+    private readonly Key* _keys;
+    private readonly nuint* _entryOrdinals;
+    private readonly NativeMatchesView _parents;
+    private readonly float* _coordinates;
+
+    internal Sample(
+        Arena arena, int generation, NativeKeysView keys, nuint* entryOrdinals, NativeMatchesView parents,
+        NativeRowsView coordinates, int count)
+    {
+        this._arena = arena;
+        this._generation = generation;
+        this._keys = (Key*)keys.Data;
+        this._entryOrdinals = entryOrdinals;
+        this._parents = parents;
+        this._coordinates = (float*)coordinates.Data;
+        this.Count = count;
+    }
+
+    /// <summary>How many draws the call wrote; fewer than wanted only once the region is exhausted.</summary>
+    public int Count { get; }
+
+    /// <summary>The keys drawn.</summary>
+    public ReadOnlySpan<Key> Keys
+    {
+        get
+        {
+            Arena.Readable(this._arena, this._generation);
+            return new ReadOnlySpan<Key>(this._keys, this.Count);
+        }
+    }
+
+    /// <summary>Which of its key's entries each draw is, in the order <see cref="DenseIndex.Get"/>
+    /// writes them.</summary>
+    public ReadOnlySpan<nuint> EntryOrdinals
+    {
+        get
+        {
+            Arena.Readable(this._arena, this._generation);
+            return new ReadOnlySpan<nuint>(this._entryOrdinals, this.Count);
+        }
+    }
+
+    /// <summary>The one shown or earlier draw each draw hangs from and its distance, one query per
+    /// draw.</summary>
+    public Matches Parents => new(this._arena, this._generation, this._parents, this.Count);
+
+    /// <summary>Where each draw is placed, three values apiece.</summary>
+    public ReadOnlySpan<float> Coordinates
+    {
+        get
+        {
+            Arena.Readable(this._arena, this._generation);
+            return new ReadOnlySpan<float>(this._coordinates, this.Count * 3);
         }
     }
 }
@@ -2281,6 +2618,17 @@ internal struct NativeDenseReachability
     public nuint BackSweeps;
 }
 
+/// <summary>What one refine-family call did to the graph, laid out as <c>usearch_refine_report_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeRefineReport
+{
+    public nuint Reselected;
+    public nuint Changed;
+    public nuint IslandsFound;
+    public nuint IslandsReconnected;
+    public NativeDenseReachability Reachability;
+}
+
 /// <summary>The arguments of <c>usearch_dense_init_ram</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeDenseInitRam
@@ -2431,8 +2779,7 @@ internal unsafe struct NativeDenseRefine
     public IntPtr Executor;
     public NativeOutcome* Outcome;
     public Completion Completion;
-    public nuint* Changed;
-    public NativeDenseReachability* Reachability;
+    public NativeRefineReport* Report;
     public nuint ExpansionFactor;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
@@ -2506,8 +2853,50 @@ internal unsafe struct NativeDenseAbsorb
     public Completion Completion;
     public nuint Count;
     public IntPtr* Donors;
-    public nuint* Changed;
-    public NativeDenseReachability* Reachability;
+    public NativeRefineReport* Report;
+    public nuint ExpansionFactor;
+    public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
+}
+
+/// <summary>The arguments of <c>usearch_dense_split</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeDenseSplit
+{
+    public IntPtr Index;
+    public IntPtr Executor;
+    public NativeOutcome* Outcome;
+    public Completion Completion;
+    public nuint Count;
+    public IntPtr* Receivers;
+    public NativeRefineReport* Report;
+    public nuint ExpansionFactor;
+    public ulong Seed;
+    public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
+}
+
+/// <summary>The arguments of <c>usearch_dense_sample</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeDenseSample
+{
+    public IntPtr Index;
+    public IntPtr Executor;
+    public NativeOutcome* Outcome;
+    public Completion Completion;
+    public nuint ShownCount;
+    public NativeKeysView Shown;
+    public NativeRowsView ShownCoordinates;
+    public nuint FocusCount;
+    public NativeKeysView Focus;
+    public NativeKeysView* Keys;
+    public nuint** EntryOrdinals;
+    public NativeMatchesView* Parents;
+    public NativeRowsView* Coordinates;
+    public nuint* Written;
+    public IntPtr Arena;
+    public nuint Wanted;
+    public ulong Seed;
     public nuint ExpansionFactor;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
@@ -2517,11 +2906,11 @@ internal unsafe struct NativeDenseAbsorb
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeDenseCursorInit
 {
-    public IntPtr* Cursor;
     public IntPtr Index;
     public NativeOutcome* Outcome;
     public nuint StartsCount;
     public Key* Starts;
+    public IntPtr* Cursor;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_next</c>.</summary>
@@ -2639,10 +3028,10 @@ internal unsafe struct NativeDenseMultiply
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public NativeProgress Progress;
-    public NativeDenseTraversalStats* Stats;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
 }
 
 /// <summary>The arguments of <c>usearch_dense_attend</c>.</summary>
@@ -2664,10 +3053,10 @@ internal unsafe struct NativeDenseAttend
     public Scalar OutputsScalar;
     public nuint ExpansionFactor;
     public float ScoreScale;
-    public NativeProgress Progress;
-    public NativeDenseTraversalStats* Stats;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
 }
 
 /// <summary>The arguments of <c>usearch_dense_maxsim</c>.</summary>
@@ -2688,10 +3077,10 @@ internal unsafe struct NativeDenseMaxsim
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public NativeProgress Progress;
-    public NativeDenseTraversalStats* Stats;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeProgress Progress;
+    public NativeDenseTraversalStats* Stats;
 }
 
 #endregion Native Vocabulary
@@ -2791,6 +3180,14 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_dense_absorb(NativeDenseAbsorb* arguments);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void usearch_dense_split(NativeDenseSplit* arguments);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void usearch_dense_sample(NativeDenseSample* arguments);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

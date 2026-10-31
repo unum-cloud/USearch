@@ -284,8 +284,8 @@ inline follow(t, staged, visible_count, seen) {
     fi
 }
 
-// a row the load path lands: the tail and slot zero relaxed, published by the release that follows
-inline land_row(t, id) {
+// a row the load path places: the tail and slot zero relaxed, published by the release that follows
+inline copy_loaded_row(t, id) {
     store(t, row_tail(id), order_relaxed, published(id));
     atomic {
         store(t, row_lock(id), order_relaxed, published(id));

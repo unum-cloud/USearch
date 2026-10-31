@@ -2,7 +2,7 @@
  *  @file verification/dense_ram_index_watermark/steps.pml
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief The load path's fan-out: two steps land one row each and tally it on `covered`, and the
+ *  @brief The load path's fan-out: two steps place one row each and tally it on `covered`, and the
  *      finisher publishes once the tally is whole.
  *
  *  `covered` stands for the `covered_vectors` and `covered_neighbors` each `load_plan_t::load` step
@@ -21,9 +21,9 @@
 #define refined_rows false
 #include <dense_ram_index_watermark/protocol.pml>
 
-// a step lands its row as the loader does, then tallies it on the plan
+// a step places its row as the loader does, then tallies it on the plan
 proctype step(byte t; byte row) {
-    land_row(t, row);
+    copy_loaded_row(t, row);
     add_no_return(t, covered, covered_order, 1)
 }
 

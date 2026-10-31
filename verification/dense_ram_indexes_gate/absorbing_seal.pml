@@ -7,14 +7,14 @@
  *
  *  The donor's one shard holds its one row. The absorber closes the donor at plan time under its
  *  unique side, through the claim-aware `close` over every shard the count publishes and then the
- *  seal on the count, packs its landings against the count and the watermarks, and at `run` finds
+ *  seal on the count, packs its moves against the count and the watermarks, and at `run` finds
  *  every row the donor holds among them. The inserter, holding the donor's gate shared, is refused
  *  for room, opens the next generation unless the count is sealed, and inserts there.
  *
  *  @verify pass sc
  *  @verify fail sc seal=false: unsealed, an insert arriving after the packing finds the closed shard
- *      full, opens a fresh generation whose shard is open, and lands a row on a donor shard the
- *      landings never packed
+ *      full, opens a fresh generation whose shard is open, and places a row on a donor shard the
+ *      moves never packed
  */
 #define thread_count 2
 #define location_count 5

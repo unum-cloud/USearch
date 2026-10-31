@@ -15,6 +15,19 @@ if (USEARCH_BUILD_TEST AND USEARCH_BUILD_SHARED)
     set_target_properties(usearch_test_c PROPERTIES ENABLE_EXPORTS ON)
 endif ()
 
+# The same suite against the brute-force stand-in in `src_stub/`, so a verb the stand-in answers differently from the
+# headers fails here rather than in the binding a bisect points it at.
+if (USEARCH_BUILD_TEST AND USEARCH_BUILD_STUB)
+    add_executable(usearch_test_c_stub test.c)
+    usearch_setup_target(usearch_test_c_stub)
+    # The engine's test reaches libm through the punned libraries; the stand-in links none of them.
+    target_link_libraries(usearch_test_c_stub PRIVATE usearch_shared_stub $<$<PLATFORM_ID:Linux,FreeBSD>:m>)
+    include(CTest)
+    enable_testing()
+    add_test(NAME usearch_test_c_stub COMMAND usearch_test_c_stub)
+    set_target_properties(usearch_test_c_stub PROPERTIES ENABLE_EXPORTS ON)
+endif ()
+
 # Both libraries are always declared and build only for the targets that link them; `USEARCH_BUILD_SHARED` puts them in
 # the default build and the install.
 if (NOT USEARCH_BUILD_SHARED)

@@ -29,8 +29,8 @@
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
  *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
- *  each receiver keeping the source's storage order, and a sample links each draw to its exact
- *  nearest earlier draws.
+ *  each receiver keeping the source's storage order, and a sample walks them as the library's plan
+ *  walks its graph, placing its draws as the library does.
  */
 #include <cmath> // `std::sqrt`
 
@@ -39,7 +39,7 @@
 #include <memory>    // `std::unique_ptr` - a finished refinement's handle
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
-#include <utility>   // `std::exchange` - a landed donor's slot
+#include <utility>   // `std::exchange` - a consumed donor's slot
 #include <vector>    // `std::vector`
 
 #include "usearch/types.h"
@@ -161,28 +161,28 @@ static void read_shape(usearch_tape_view_t tape, std::size_t entry, std::vector<
                  std::span<double>(values).subspan(point * coordinates_k, coordinates_k));
 }
 
-/** The output twin of @c read_shape: lands the entries at @p entries into @p arena as one tape of
- *  @p scalar_kind points, writing @p tape only once every point landed, and answers false once
+/** The output twin of @c read_shape: writes the entries at @p entries into @p arena as one tape of
+ *  @p scalar_kind points, writing @p tape only once every point is read, and answers false once
  *  @p outcome records why not. */
-static bool land_entries(shapes_index_t const& index, std::span<std::size_t const> entries,
+static bool copy_entries(shapes_index_t const& index, std::span<std::size_t const> entries,
                          usearch_scalar_t scalar_kind, usearch_arena_handle_t& arena, usearch_tape_view_t& tape,
                          usearch_outcome_t* outcome) {
     std::size_t const point_bytes = row_extent(scalar_kind, coordinates_k);
     std::size_t total_points = 0;
     for (std::size_t entry : entries) total_points += points_of(index.entries[entry]);
     std::size_t* const offsets = carve<std::size_t>(arena, entries.size() + 1, outcome);
-    std::byte* const landing = offsets ? carve<std::byte>(arena, total_points * point_bytes, outcome) : nullptr;
-    if (!landing) return false;
+    std::byte* const written = offsets ? carve<std::byte>(arena, total_points * point_bytes, outcome) : nullptr;
+    if (!written) return false;
     offsets[0] = 0;
     for (std::size_t found = 0; found != entries.size(); ++found) {
         shapes_entry_t const& entry = index.entries[entries[found]];
         std::size_t const points = points_of(entry);
         for (std::size_t point = 0; point != points; ++point)
-            write_row(row_at<std::byte>(landing, offsets[found] + point, point_bytes, point_bytes), scalar_kind,
+            write_row(row_at<std::byte>(written, offsets[found] + point, point_bytes, point_bytes), scalar_kind,
                       std::span<double const>(entry.payload).subspan(point * coordinates_k, coordinates_k));
         offsets[found + 1] = offsets[found] + points;
     }
-    tape = {landing, offsets, scalar_kind};
+    tape = {written, offsets, scalar_kind};
     return true;
 }
 
@@ -191,7 +191,7 @@ static bool land_entries(shapes_index_t const& index, std::span<std::size_t cons
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
 static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t queries, std::size_t count,
-                               ranked_landing_t const& landing, std::size_t expansion_factor,
+                               matches_outputs_t const& outputs, std::size_t expansion_factor,
                                usearch_traversal_stats_t* stats, usearch_predicate_t predicate,
                                usearch_progress_t progress) {
     std::size_t const entries = index.entries.size();
@@ -204,7 +204,7 @@ static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t querie
         rank<shapes_payload_t>(
             std::span<shapes_entry_t const>(index.entries).first(entries), predicate,
             [&](shapes_payload_t const& payload) { return distance(index, query_shape, payload); }, ranked);
-        landing.write(query, ranked);
+        outputs.write(query, ranked);
         if (stats) {
             stats->visited_members += entries;
             stats->computed_distances += ranked.size();
@@ -345,6 +345,17 @@ static bool read_from(shapes_index_t& index, bytes_view_t blob, usearch_outcome_
     return true;
 }
 
+/** Writes @p shard's whole image into @p blob; false once @p outcome records why not. */
+static bool serialize_shard(shapes_index_t const& shard, std::vector<std::byte>& blob, usearch_outcome_t* outcome) {
+    std::size_t const entries = shard.entries.size();
+    std::optional<std::size_t> const length = serialized_bytes(shard, entries);
+    if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
+        return false;
+    blob.resize(*length);
+    write_into(shard, entries, blob);
+    return true;
+}
+
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
 template <typename index_type_>
 static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
@@ -380,6 +391,7 @@ void usearch_shapes_init_ram(usearch_shapes_init_ram_t* arguments) {
     index->options = {arguments->metric, arguments->quantization, arguments->points,
                       arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
                       arguments->values_per_key};
+    index->shard_capacity = arguments->ram.shard_capacity;
     *arguments->index = index;
 }
 
@@ -397,7 +409,9 @@ void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
-    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(blob, outcome);
+    usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
+        blob, arguments->path,
+        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, 1, 1);
@@ -418,7 +432,9 @@ void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
     if (!served) return;
     // Entries are still copied out of the mapping, so only the view's refusals are mirrored, not
     // its zero cost.
-    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(served.view(), outcome);
+    usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
+        served.view(), arguments->path,
+        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
     if (!index) return;
     index->served = std::move(served);
     *arguments->index = index;
@@ -431,7 +447,9 @@ void usearch_shapes_view_nvme(usearch_shapes_view_nvme_t* arguments) {
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
-    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(served.view(), outcome);
+    usearch_shapes_index_handle_t* const index = open_parts<usearch_shapes_index_handle_t>(
+        served.view(), arguments->path,
+        [&](bytes_view_t part) { return open_checkpoint<usearch_shapes_index_handle_t>(part, outcome); }, outcome);
     if (!index) return;
     index->served = std::move(served);
     index->residency = usearch_residency_nvme_k;
@@ -459,6 +477,7 @@ void usearch_shapes_clear(usearch_shapes_clear_t* arguments) {
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
+    if (reject_refining(index, outcome)) return;
     index.reset();
 }
 
@@ -480,7 +499,7 @@ void usearch_shapes_describe(usearch_shapes_describe_t* arguments) {
         payload_extent(index, index.entries.size()),
         usearch_cpu_class_serial_k,
         usearch_gpu_class_unknown_k,
-        1,
+        index.shards(),
     };
 }
 
@@ -504,6 +523,7 @@ void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
                 return;
 
     std::unique_lock writers(index.mutex);
+    if (reject_refining(index, outcome)) return;
     if (reject_oversubscribed(index, arguments->keys, count, index.options.values_per_key, outcome)) return;
     if (reject_if(!index.accommodate(index.entries.size() + count), usearch_status_out_of_memory_k,
                   "The batch could not be accommodated", outcome))
@@ -535,10 +555,11 @@ void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
     if (through_executor<usearch_shapes_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
-    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->report) *arguments->report = {};
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
+    if (reject_refining(index, outcome)) return;
     std::size_t const entries = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     bool cancelled = false;
@@ -546,8 +567,19 @@ void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
         cancelled = !keep_going(arguments->progress, entry + 1, entries);
     if (arguments->stats) arguments->stats->visited_members = entries;
     // An exact scan reaches every entry it holds in one level.
-    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
+    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+}
+
+void usearch_shapes_health(usearch_shapes_health_t* arguments) {
+    if (through_executor<usearch_shapes_health>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->reachability = {};
+    usearch_shapes_index_handle_t& index = *arguments->index;
+    std::shared_lock readers(index.mutex);
+    // An exact scan reaches every entry it holds in one level.
+    std::size_t const entries = index.entries.size();
+    *arguments->reachability = {entries, entries, entries ? 1u : 0u};
 }
 
 void usearch_shapes_search(usearch_shapes_search_t* arguments) {
@@ -564,14 +596,14 @@ void usearch_shapes_search(usearch_shapes_search_t* arguments) {
     if (reject_traversal(arguments->traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                       {queries.data, queries.offsets}, outcome);
-    ranked_landing_t landing {};
-    if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
+    matches_outputs_t outputs {};
+    if (!arena || !carve_ranked(*arena, count, arguments->wanted, outputs, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
+    std::size_t const answered = search_tape(index, queries, count, outputs, arguments->expansion_factor,
                                              arguments->stats, arguments->predicate, arguments->progress);
     if (reject_cancelled(answered, count, outcome)) return;
-    *arguments->matches = landing.view();
+    *arguments->matches = outputs.view();
 }
 
 void usearch_shapes_count(usearch_shapes_count_t* arguments) {
@@ -580,7 +612,7 @@ void usearch_shapes_count(usearch_shapes_count_t* arguments) {
     *arguments->key_stats = {};
     usearch_shapes_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    auto const range = index.by_key.equal_range(keyed(arguments->key));
+    auto const range = index.by_key.equal_range(uuid_of(arguments->key));
     std::size_t entries = 0, total_points = 0, largest_points = 0;
     for (auto position = range.first; position != range.second; ++position, ++entries) {
         std::size_t const points = points_of(index.entries[position->second]);
@@ -600,9 +632,9 @@ void usearch_shapes_get(usearch_shapes_get_t* arguments) {
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const entries = entries_under(index, arguments->key);
+    std::vector<std::size_t> const entries = nodes_of(index, arguments->key);
     if (entries.empty()) return;
-    if (!land_entries(index, entries, arguments->outputs_scalar, *arena, *arguments->shapes, outcome)) return;
+    if (!copy_entries(index, entries, arguments->outputs_scalar, *arena, *arguments->shapes, outcome)) return;
     if (arguments->written) *arguments->written = entries.size();
 }
 
@@ -610,16 +642,22 @@ void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
     if (through_executor<usearch_shapes_absorb>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
-    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->report) *arguments->report = {};
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
     std::size_t const donors_count = arguments->count;
     usearch_shapes_index_t* const donors = arguments->donors;
+    for (std::size_t position = 0; position != donors_count; ++position)
+        if (reject_if(!donors[position], usearch_status_invalid_argument_k, "A donor must not be null", outcome) ||
+            reject_if(!same_kind(index.options, donors[position]->options), usearch_status_config_mismatch_k,
+                      "A donor of another kind or geometry is refused", outcome))
+            return;
     bool accommodated = true;
     std::unique_lock writers(index.mutex);
-    // Each donor lands whole and is consumed at once, its slot nulled, so a failure leaves it and
-    // every later one live handles the caller still owns and must free.
+    if (reject_refining(index, outcome)) return;
+    // Each donor moves in whole and is consumed at once, its slot nulled, so a failure leaves it
+    // and every later one live handles the caller still owns and must free.
     for (std::size_t position = 0; accommodated && position != donors_count; ++position) {
         usearch_shapes_index_handle_t& donor = *donors[position];
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
@@ -637,31 +675,34 @@ void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
     for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
         cancelled = !keep_going(arguments->progress, entry + 1, entries);
     if (arguments->stats) arguments->stats->visited_members = entries;
-    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
+    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
-/** The stand-in's refinement: the donors it still lands, and how far its sweep got. It closes
- *  nothing, so insertions and saves meanwhile proceed. */
+/** The stand-in's refinement: the donors it still absorbs, and how far its sweep got. Its index
+ *  admits no insertion, save or other refinement until it finishes. */
 struct usearch_shapes_refinement_handle_t {
 
     /** The handle the refinement was opened on, only ever compared with the one each call
      *  passes. */
     usearch_shapes_index_handle_t const* opened_on;
 
-    /** The caller's donor slots, each nulled once landed. */
+    /** The caller's donor slots, each nulled once consumed. */
     usearch_shapes_index_t* donors;
     std::size_t count;
 
-    /** Donors landed so far, and entries the sweep visited so far. */
-    std::size_t landed;
+    /** Donors consumed so far, and entries the sweep visited so far. */
+    std::size_t consumed;
     std::size_t swept;
 
-    /** The receivers a split lands in, the seed picking its roots, and the parts landed so far. */
+    /** The receivers a split fills, the seed picking its roots, and those split off so far. */
     usearch_shapes_index_t const* receivers;
     std::size_t receivers_count;
     us::utilities::u64_t seed;
-    std::size_t parted;
+    std::size_t split_receivers_count;
+
+    /** Entries the absorbed donors moved in, each one a node whose links changed. */
+    std::size_t moved = 0;
 };
 
 void usearch_shapes_refinement_init(usearch_shapes_refinement_init_t* arguments) {
@@ -677,16 +718,21 @@ void usearch_shapes_refinement_init(usearch_shapes_refinement_init_t* arguments)
         if (reject_if(!arguments->donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
                       outcome) ||
             reject_if(arguments->donors[position] == arguments->index, usearch_status_config_mismatch_k,
-                      "An index cannot absorb itself", outcome))
+                      "An index cannot absorb itself", outcome) ||
+            reject_if(!same_kind(index.options, arguments->donors[position]->options), usearch_status_config_mismatch_k,
+                      "A donor of another kind or geometry is refused", outcome))
             return;
     }
     if (reject_receivers(*arguments, outcome)) return;
+    std::unique_lock writers(index.mutex);
+    if (reject_refining(index, outcome)) return;
     usearch_shapes_refinement_t const refinement = new (std::nothrow)
         usearch_shapes_refinement_handle_t {&index, arguments->donors,    arguments->count,           0,
                                             0,      arguments->receivers, arguments->receivers_count, arguments->seed,
                                             0};
     if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
         return;
+    index.refinement = refinement;
     *arguments->refinement = refinement;
 }
 
@@ -694,7 +740,7 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
     if (through_executor<usearch_shapes_refinement_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
-    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->reselected) *arguments->reselected = 0;
     if (arguments->changed) *arguments->changed = 0;
     usearch_shapes_refinement_handle_t& refinement = *arguments->refinement;
     if (reject_if(arguments->index != refinement.opened_on, usearch_status_invalid_argument_k,
@@ -702,15 +748,16 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
         return;
     usearch_shapes_index_handle_t& index = *arguments->index;
     std::unique_lock writers(index.mutex);
-    for (; refinement.landed != refinement.count; ++refinement.landed) {
-        usearch_shapes_index_handle_t& donor = *refinement.donors[refinement.landed];
+    for (; refinement.consumed != refinement.count; ++refinement.consumed) {
+        usearch_shapes_index_handle_t& donor = *refinement.donors[refinement.consumed];
         if (reject_if(!index.accommodate(index.entries.size() + donor.entries.size()), usearch_status_out_of_memory_k,
                       "The donor's entries could not be accommodated", outcome))
             return;
         for (shapes_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        delete std::exchange(refinement.donors[refinement.landed], nullptr);
+        refinement.moved += donor.entries.size();
+        delete std::exchange(refinement.donors[refinement.consumed], nullptr);
     }
-    if (refinement.parted != refinement.receivers_count) {
+    if (refinement.split_receivers_count != refinement.receivers_count) {
         auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
             return distance(index, first, second);
         };
@@ -718,7 +765,7 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
         std::span<usearch_shapes_index_handle_t* const> const receivers {refinement.receivers,
                                                                          refinement.receivers_count};
         if (!split_into(index, receivers, refinement.seed, score, same_kind, outcome)) return;
-        refinement.parted = refinement.receivers_count;
+        refinement.split_receivers_count = refinement.receivers_count;
         writers.lock();
     }
     // Each call continues the sweep where the last one stopped.
@@ -727,8 +774,10 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
     while (refinement.swept < entries && !cancelled)
         cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
-    if (arguments->visited) *arguments->visited = refinement.swept;
-    if (arguments->stats) arguments->stats->visited_members = refinement.swept;
+    if (arguments->reselected) *arguments->reselected = refinement.swept;
+    if (arguments->changed) *arguments->changed = std::min(refinement.moved, refinement.swept);
+    if (arguments->stats)
+        arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
     reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
               "The caller's handler stopped the sweep", outcome);
 }
@@ -737,16 +786,22 @@ void usearch_shapes_refinement_finish(usearch_shapes_refinement_finish_t* argume
     if (through_executor<usearch_shapes_refinement_finish>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
-    if (arguments->changed) *arguments->changed = 0;
+    if (arguments->report) *arguments->report = {};
     std::unique_ptr<usearch_shapes_refinement_handle_t> const refinement {arguments->refinement};
     if (reject_if(arguments->index != refinement->opened_on, usearch_status_invalid_argument_k,
                   "The refinement was opened on another index", outcome))
         return;
     usearch_shapes_index_handle_t& index = *arguments->index;
-    std::shared_lock readers(index.mutex);
+    std::unique_lock writers(index.mutex);
+    index.refinement = nullptr;
     std::size_t const entries = index.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    if (arguments->reachability) *arguments->reachability = {entries, entries, entries ? 1u : 0u};
+    if (arguments->stats)
+        arguments->stats->visited_members = entries, arguments->stats->computed_distances = refinement->swept;
+    if (arguments->report) {
+        arguments->report->reselected = refinement->swept;
+        arguments->report->changed = refinement->moved;
+        arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
+    }
 }
 
 void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments) {
@@ -797,42 +852,25 @@ void usearch_shapes_cursor_free(usearch_shapes_cursor_t handle) {
 void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
     if (through_executor<usearch_shapes_sample>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
-    reset(arguments->stats);
-    *arguments->keys = {};
-    *arguments->links = {};
-    *arguments->written = 0;
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_metric(index, outcome)) return;
-    std::size_t const anchors_count = arguments->anchors_count;
-    usearch_tape_view_t const& anchors = arguments->anchors;
-    if (anchors_count && (reject_scalar(anchors.scalar, outcome) || reject_tape(anchors, anchors_count, outcome)))
-        return;
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                      {anchors.data, anchors.offsets}, outcome);
-    if (!arena) return;
-
-    std::vector<shapes_payload_t> anchor_shapes(anchors_count);
-    for (std::size_t anchor = 0; anchor != anchors_count; ++anchor) read_shape(anchors, anchor, anchor_shapes[anchor]);
     auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
         return distance(index, first, second);
     };
-    std::shared_lock readers(index.mutex);
-    land_sample(*arguments, std::span<shapes_entry_t const>(index.entries),
-                std::span<shapes_payload_t const>(anchor_shapes), score, *arena, outcome);
+    draw_sample(*arguments, index, score, no_fixed_coordinates_t {}, outcome);
 }
 
 void usearch_shapes_split(usearch_shapes_split_t* arguments) {
     if (through_executor<usearch_shapes_split>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
-    if (arguments->changed) *arguments->changed = 0;
-    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->report) *arguments->report = {};
     usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_metric(index, outcome)) return;
     auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
         return distance(index, first, second);
     };
-    land_split(*arguments, index, score, same_kind, outcome);
+    split_and_report(*arguments, index, score, same_kind, outcome);
 }
 
 void usearch_shapes_save(usearch_shapes_save_t* arguments) {
@@ -843,16 +881,8 @@ void usearch_shapes_save(usearch_shapes_save_t* arguments) {
                   "An NVMe view already is its checkpoint", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const entries = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, entries);
-    if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
-        return;
-    if (!keep_going(arguments->progress, 0, 1))
-        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
-    std::vector<std::byte> blob(*length);
-    write_into(index, entries, blob);
-    if (!write_file(arguments->path, blob, outcome)) return;
-    keep_going(arguments->progress, 1, 1);
+    if (reject_refining(index, outcome)) return;
+    save_parts(index, arguments->path, arguments->progress, serialize_shard, outcome);
 }
 
 void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
@@ -860,7 +890,7 @@ void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
-    if (!read_file(arguments->path, blob, outcome)) return;
+    if (!read_file(arguments->path, blob, outcome) || !read_first_part(blob, arguments->path, outcome)) return;
     shapes_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return;
     shapes_index_options_t options {};

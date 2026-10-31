@@ -37,7 +37,7 @@ const RowsView = types.RowsView;
 const Scalar = types.Scalar;
 const Status = types.Status;
 const Traversal = types.Traversal;
-const landed = types.landed;
+const outputSlice = types.outputSlice;
 const refuse = types.refuse;
 const refuseInto = types.refuseInto;
 const usearch_keys_view_t = types.usearch_keys_view_t;
@@ -207,6 +207,20 @@ pub const DenseReachability = extern struct {
     back_sweeps: usize = 0,
 };
 
+/// What one `refine`, `absorb` or `split` did to the graph. Mirrors `usearch_refine_report_t`.
+pub const DenseRefineReport = extern struct {
+    /// Entries whose neighbors were selected again, the islands of every heal round included.
+    reselected: usize = 0,
+    /// Of those, the entries whose neighbor set gained a member it lacked.
+    changed: usize = 0,
+    /// Entries the first audit found not reached both ways.
+    islands_found: usize = 0,
+    /// Links written between an island and an entry the audit reached both ways.
+    islands_reconnected: usize = 0,
+    /// The audit closing the heal, as a fresh `health` right after would take it.
+    reachability: DenseReachability = .{},
+};
+
 /// The online-softmax carry of one query row - Flash Attention's running maximum and partition.
 /// Mirrors `usearch_dense_softmax_state_t`.
 ///
@@ -354,6 +368,37 @@ pub const DenseAbsorbConfig = struct {
     progress_steps: usize = 0,
 };
 
+/// Optional settings of `DenseIndex.split`.
+pub const DenseSplitConfig = struct {
+    /// Picks the part roots: equal seeds over an unchanged index split equally.
+    seed: u64 = 0,
+    /// The breadth of the candidates of the closing refines' walks; zero derives.
+    expansion_factor: usize = 0,
+    /// Called with nodes the closing refines re-selected; a stop never undoes a move.
+    progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
+    stats: ?*DenseTraversalStats = null,
+};
+
+/// Optional settings of `DenseIndex.sample`.
+pub const DenseSampleConfig = struct {
+    /// The keys already shown: never drawn again, and the paths reach toward them.
+    shown: []const Key = &.{},
+    /// Where each `shown` key sits, one point apiece.
+    shown_coordinates: []const [3]f32 = &.{},
+    /// The keys to look around; empty looks around the whole index.
+    focus: []const Key = &.{},
+    /// Equal seeds, shown keys and focus over an unchanged index draw equally.
+    seed: u64 = 0,
+    /// The breadth of the candidates of the walks behind the draws; zero derives.
+    expansion_factor: usize = 0,
+    progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
+    stats: ?*DenseTraversalStats = null,
+};
+
 /// Optional settings of `DenseIndex.multiply`.
 pub const DenseMultiplyConfig = struct {
     /// Bound on pairs kept per left row, the first ones its walk scored; zero keeps every pair.
@@ -371,7 +416,7 @@ pub const DenseAttendConfig = struct {
     /// The query heads sharing the index's key-value head, and with it one walk per token: row
     /// `t · head_count + h` is head `h` of token `t`. It must divide the rows; zero means one.
     head_count: usize = 0,
-    /// The softmax state, one per query row, lent rather than landed in the arena; null skips it.
+    /// The softmax state, one per query row, lent rather than written in the arena; null skips it.
     carry: ?[]DenseSoftmaxState = null,
     /// The scalar type the attended rows land as; `.unknown` takes the queries' own.
     outputs_scalar: Scalar = .unknown,
@@ -534,8 +579,7 @@ const usearch_dense_refine_t = extern struct {
     executor: ?*anyopaque,
     outcome: *Outcome,
     completion: Completion,
-    changed: ?*usize,
-    reachability: ?*DenseReachability,
+    report: ?*DenseRefineReport,
     expansion_factor: usize,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
@@ -594,19 +638,55 @@ const usearch_dense_absorb_t = extern struct {
     completion: Completion,
     count: usize,
     donors: [*]?*anyopaque,
-    changed: ?*usize,
-    reachability: ?*DenseReachability,
+    report: ?*DenseRefineReport,
+    expansion_factor: usize,
+    progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
+};
+
+const usearch_dense_split_t = extern struct {
+    index: ?*anyopaque,
+    executor: ?*anyopaque,
+    outcome: *Outcome,
+    completion: Completion,
+    count: usize,
+    receivers: [*]const ?*anyopaque,
+    report: ?*DenseRefineReport,
+    expansion_factor: usize,
+    seed: u64,
+    progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
+};
+
+const usearch_dense_sample_t = extern struct {
+    index: ?*anyopaque,
+    executor: ?*anyopaque,
+    outcome: *Outcome,
+    completion: Completion,
+    shown_count: usize,
+    shown: usearch_keys_view_t,
+    shown_coordinates: usearch_rows_view_t,
+    focus_count: usize,
+    focus: usearch_keys_view_t,
+    keys: *usearch_keys_view_t,
+    entry_ordinals: *?[*]const usize,
+    parents: *usearch_matches_view_t,
+    coordinates: *usearch_rows_view_t,
+    written: *usize,
+    arena: ?*anyopaque,
+    wanted: usize,
+    seed: u64,
     expansion_factor: usize,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
 const usearch_dense_cursor_init_t = extern struct {
-    cursor: *?*anyopaque,
     index: ?*anyopaque,
     outcome: *Outcome,
     starts_count: usize,
     starts: ?[*]const Key,
+    cursor: *?*anyopaque,
 };
 
 const usearch_dense_cursor_next_t = extern struct {
@@ -707,10 +787,10 @@ const usearch_dense_multiply_t = extern struct {
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
-    progress: usearch_progress_t,
-    stats: ?*DenseTraversalStats,
     traversal: Traversal = .walk,
     predicate: Predicate = .{},
+    progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
 };
 
 const usearch_dense_attend_t = extern struct {
@@ -729,10 +809,10 @@ const usearch_dense_attend_t = extern struct {
     outputs_scalar: Scalar,
     expansion_factor: usize,
     score_scale: f32,
-    progress: usearch_progress_t,
-    stats: ?*DenseTraversalStats,
     traversal: Traversal = .walk,
     predicate: Predicate = .{},
+    progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
 };
 
 const usearch_dense_maxsim_t = extern struct {
@@ -750,10 +830,10 @@ const usearch_dense_maxsim_t = extern struct {
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
-    progress: usearch_progress_t,
-    stats: ?*DenseTraversalStats,
     traversal: Traversal = .walk,
     predicate: Predicate = .{},
+    progress: usearch_progress_t,
+    stats: ?*DenseTraversalStats,
 };
 
 extern fn usearch_dense_init_ram(arguments: *usearch_dense_init_ram_t) void;
@@ -774,6 +854,8 @@ extern fn usearch_dense_search(arguments: *usearch_dense_search_t) void;
 extern fn usearch_dense_count(arguments: *usearch_dense_count_t) void;
 extern fn usearch_dense_get(arguments: *usearch_dense_get_t) void;
 extern fn usearch_dense_absorb(arguments: *usearch_dense_absorb_t) void;
+extern fn usearch_dense_split(arguments: *usearch_dense_split_t) void;
+extern fn usearch_dense_sample(arguments: *usearch_dense_sample_t) void;
 extern fn usearch_dense_cursor_init(arguments: *usearch_dense_cursor_init_t) void;
 extern fn usearch_dense_cursor_next(arguments: *usearch_dense_cursor_next_t) void;
 extern fn usearch_dense_cursor_free(cursor: ?*anyopaque) void;
@@ -1064,7 +1146,7 @@ pub const DenseIndex = extern struct {
     }
 
     /// Every vector stored under `key` as `scalar`, one packed row per entry in insertion order,
-    /// landed in `arena`; an absent key yields no rows. Calls `usearch_dense_get`.
+    /// written in `arena`; an absent key yields no rows. Calls `usearch_dense_get`.
     pub fn get(self: DenseIndex, key: Key, scalar: Scalar, arena: *Arena) Error!DenseVectors {
         return self.here().get(key, scalar, arena);
     }
@@ -1079,14 +1161,14 @@ pub const DenseIndex = extern struct {
         return self.here().insert(keys, vectors, config);
     }
 
-    /// Re-selects the neighbors of every stored entry against the finished graph, returning the
-    /// nodes whose edges changed; zero means the graph has settled.
+    /// Re-selects the neighbors of every stored entry against the finished graph, reporting the
+    /// entries re-selected and changed and the islands healed; zero `changed` means settled.
     ///
     /// A build step rather than a repair: a cheap insertion pass followed by one refinement
     /// reaches a better graph, in less total time, than one expensive insertion pass - so a wide
     /// expansion factor belongs here rather than in `insert`. A stopped sweep leaves the graph
     /// correct and merely less improved, and reports no `Error.Cancelled`. Calls `usearch_dense_refine`.
-    pub fn refine(self: DenseIndex, config: DenseRefineConfig) Error!usize {
+    pub fn refine(self: DenseIndex, config: DenseRefineConfig) Error!DenseRefineReport {
         return self.here().refine(config);
     }
 
@@ -1096,7 +1178,7 @@ pub const DenseIndex = extern struct {
         return self.here().health();
     }
 
-    /// Resolves a run of queries into up to `wanted` matches apiece, landed in `arena` - the native
+    /// Resolves a run of queries into up to `wanted` matches apiece, written in `arena` - the native
     /// batch operation.
     ///
     /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
@@ -1114,8 +1196,23 @@ pub const DenseIndex = extern struct {
     /// Each donor it absorbs is consumed and nulled in place, so `deinit` on every donor afterwards
     /// frees only those a stop between donors or a failure left live. Readers of a RAM index keep
     /// searching throughout; a VRAM one admits no overlapping search. Calls `usearch_dense_absorb`.
-    pub fn absorb(self: DenseIndex, donors: []DenseIndex, config: DenseAbsorbConfig) Error!void {
+    pub fn absorb(self: DenseIndex, donors: []DenseIndex, config: DenseAbsorbConfig) Error!DenseRefineReport {
         return self.here().absorb(donors, config);
+    }
+
+    /// Splits the index into `receivers`, the inverse of `absorb`: graph-local parts keeping their
+    /// edges, one per receiver, leaving this index empty but live. Receivers must be empty and
+    /// share the index's residency, scalar, class, metric, geometry and shard count, or the call
+    /// answers `Error.ConfigMismatch`, and a refusal moves nothing. Calls `usearch_dense_split`.
+    pub fn split(self: DenseIndex, receivers: []const DenseIndex, config: DenseSplitConfig) Error!DenseRefineReport {
+        return self.here().split(receivers, config);
+    }
+
+    /// Draws up to `wanted` keys around `config.focus`, or across the whole index, each hanging
+    /// from a shown or earlier draw and placed in three dimensions beside the shown ones, written
+    /// in `arena`; a larger `wanted` draws a superset. Only RAM samples yet. Calls `usearch_dense_sample`.
+    pub fn sample(self: DenseIndex, wanted: usize, arena: *Arena, config: DenseSampleConfig) Error!DenseDraws {
+        return self.here().sample(wanted, arena, config);
     }
 
     /// Copies up to `wanted` more entries out of `cursor` into `arena` - their keys, and the keys
@@ -1146,13 +1243,13 @@ pub const DenseIndex = extern struct {
     }
 
     /// Saves the index as one monolith - the same bytes `save` writes to a `.safegraphs` path -
-    /// landed in `arena`. Calls `usearch_dense_save_buffer`.
+    /// written in `arena`. Calls `usearch_dense_save_buffer`.
     pub fn saveBuffer(self: DenseIndex, arena: *Arena, config: DenseSaveBufferConfig) Error!Monolith {
         return self.here().saveBuffer(arena, config);
     }
 
     /// Approximate sparse product of the left-hand rows against the indexed vectors, reporting
-    /// every pair the traversal scored instead of only the nearest, as a ragged output landed in
+    /// every pair the traversal scored instead of only the nearest, as a ragged output written in
     /// `arena` with Apache Arrow offsets.
     ///
     /// Pairs arrive in traversal order rather than sorted, and carry no duplicates. Cost is
@@ -1214,7 +1311,7 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             return self.answerIn(call, {});
         }
 
-        /// Runs or submits `call` landing in `arena`, which a verb without outputs passes as `{}`.
+        /// Runs or submits `call` writing into `arena`, which a verb without outputs passes as `{}`.
         fn answerIn(self: Self, call: anytype, arena: anytype) Answer(@TypeOf(call)) {
             var local = call;
             if (@TypeOf(arena) != void) local.stamp.arena = arena;
@@ -1303,6 +1400,18 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
         /// See `DenseIndex.absorb`. Calls `usearch_dense_absorb`.
         pub fn absorb(self: Self, donors: []DenseIndex, config: DenseAbsorbConfig) Answer(DenseAbsorb) {
             return self.answer(DenseAbsorb{ .donors = donors, .config = config });
+        }
+
+        /// See `DenseIndex.split`. Calls `usearch_dense_split`.
+        pub fn split(self: Self, receivers: []const DenseIndex, config: DenseSplitConfig) Answer(DenseSplit) {
+            return self.answer(DenseSplit{ .receivers = receivers, .config = config });
+        }
+
+        /// See `DenseIndex.sample`. Calls `usearch_dense_sample`.
+        pub fn sample(self: Self, wanted: usize, arena: *Arena, config: DenseSampleConfig) Answer(DenseSample) {
+            // C reads one count for both runs, so only the binding sees the two lengths disagree.
+            if (config.shown.len != config.shown_coordinates.len) return self.refused(.shape_mismatch, "The shown keys and coordinates disagree in length");
+            return self.answerIn(DenseSample{ .wanted = wanted, .config = config }, arena);
         }
 
         /// See `DenseIndex.cursorNext`. Calls `usearch_dense_cursor_next`.
@@ -1486,9 +1595,9 @@ pub const DenseInsert = struct {
 
 /// One `DenseIndex.refine`, as a `Deferred` holds it.
 pub const DenseRefine = struct {
-    pub const Result = usize;
+    pub const Result = DenseRefineReport;
     config: DenseRefineConfig,
-    changed: usize = 0,
+    report: DenseRefineReport = .{},
     outcome: Outcome = .{},
 
     pub fn launch(self: *DenseRefine, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
@@ -1497,8 +1606,7 @@ pub const DenseRefine = struct {
             .executor = executor,
             .outcome = &self.outcome,
             .completion = completion,
-            .changed = &self.changed,
-            .reachability = null,
+            .report = &self.report,
             .expansion_factor = self.config.expansion_factor,
             .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
@@ -1506,9 +1614,9 @@ pub const DenseRefine = struct {
         usearch_dense_refine(&arguments);
     }
 
-    pub fn finish(self: *DenseRefine) Error!usize {
+    pub fn finish(self: *DenseRefine) Error!DenseRefineReport {
         try self.outcome.check();
-        return self.changed;
+        return self.report;
     }
 };
 
@@ -1568,9 +1676,10 @@ pub const DenseSearch = struct {
 
 /// One `DenseIndex.absorb`, as a `Deferred` holds it.
 pub const DenseAbsorb = struct {
-    pub const Result = void;
+    pub const Result = DenseRefineReport;
     donors: []DenseIndex,
     config: DenseAbsorbConfig,
+    report: DenseRefineReport = .{},
     outcome: Outcome = .{},
 
     pub fn launch(self: *DenseAbsorb, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
@@ -1581,8 +1690,7 @@ pub const DenseAbsorb = struct {
             .completion = completion,
             .count = self.donors.len,
             .donors = @ptrCast(self.donors.ptr),
-            .changed = null,
-            .reachability = null,
+            .report = &self.report,
             .expansion_factor = 0,
             .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = null,
@@ -1590,8 +1698,94 @@ pub const DenseAbsorb = struct {
         usearch_dense_absorb(&arguments);
     }
 
-    pub fn finish(self: *DenseAbsorb) Error!void {
-        return self.outcome.check();
+    pub fn finish(self: *DenseAbsorb) Error!DenseRefineReport {
+        try self.outcome.check();
+        return self.report;
+    }
+};
+
+/// One `DenseIndex.split`, as a `Deferred` holds it.
+pub const DenseSplit = struct {
+    pub const Result = DenseRefineReport;
+    receivers: []const DenseIndex,
+    config: DenseSplitConfig,
+    report: DenseRefineReport = .{},
+    outcome: Outcome = .{},
+
+    pub fn launch(self: *DenseSplit, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
+        var arguments: usearch_dense_split_t = .{
+            .index = index,
+            .executor = executor,
+            .outcome = &self.outcome,
+            .completion = completion,
+            .count = self.receivers.len,
+            .receivers = @ptrCast(self.receivers.ptr),
+            .report = &self.report,
+            .expansion_factor = self.config.expansion_factor,
+            .seed = self.config.seed,
+            .progress = .of(self.config.progress, self.config.progress_steps),
+            .stats = self.config.stats,
+        };
+        usearch_dense_split(&arguments);
+    }
+
+    pub fn finish(self: *DenseSplit) Error!DenseRefineReport {
+        try self.outcome.check();
+        return self.report;
+    }
+};
+
+/// One `DenseIndex.sample`, as a `Deferred` holds it.
+pub const DenseSample = struct {
+    pub const Result = DenseDraws;
+    wanted: usize,
+    config: DenseSampleConfig,
+    /// The call the borrowed arena serves, which every view over the outputs carries.
+    stamp: Arena.Stamp = undefined,
+    keys: usearch_keys_view_t = .{},
+    entry_ordinals: ?[*]const usize = null,
+    parents: usearch_matches_view_t = .{},
+    coordinates: usearch_rows_view_t = .{},
+    written: usize = 0,
+    outcome: Outcome = .{},
+
+    pub fn launch(self: *DenseSample, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
+        const coordinates = self.config.shown_coordinates;
+        var arguments: usearch_dense_sample_t = .{
+            .index = index,
+            .executor = executor,
+            .outcome = &self.outcome,
+            .completion = completion,
+            .shown_count = self.config.shown.len,
+            .shown = .of(self.config.shown),
+            .shown_coordinates = .{ .data = coordinates.ptr, .stride = @sizeOf([3]f32), .columns = 3, .scalar = .f32 },
+            .focus_count = self.config.focus.len,
+            .focus = .of(self.config.focus),
+            .keys = &self.keys,
+            .entry_ordinals = &self.entry_ordinals,
+            .parents = &self.parents,
+            .coordinates = &self.coordinates,
+            .written = &self.written,
+            .arena = self.stamp.arena.handle,
+            .wanted = self.wanted,
+            .seed = self.config.seed,
+            .expansion_factor = self.config.expansion_factor,
+            .progress = .of(self.config.progress, self.config.progress_steps),
+            .stats = self.config.stats,
+        };
+        usearch_dense_sample(&arguments);
+    }
+
+    pub fn finish(self: *DenseSample) Error!DenseDraws {
+        try self.outcome.check();
+        return .{
+            .stamp = self.stamp,
+            .written = self.written,
+            .keys_data = self.keys.data,
+            .entry_ordinals_data = self.entry_ordinals,
+            .parents = .{ .stamp = self.stamp, .view = self.parents, .queries = self.written },
+            .coordinates = .of(self.stamp, self.coordinates, self.written),
+        };
     }
 };
 
@@ -1877,7 +2071,7 @@ pub const DenseVectors = struct {
     /// Every row, back to back, refused as `row` refuses a stale view or device memory.
     pub fn bytes(self: DenseVectors) Error![]const u8 {
         try self.stamp.check();
-        return landed(u8, self.data, 0, self.rows * self.stride);
+        return outputSlice(u8, self.data, 0, self.rows * self.stride);
     }
 
     /// Where the rows live, which the host reads only as `.ram` or `.nvme`.
@@ -1896,7 +2090,7 @@ pub const Monolith = struct {
     /// The serialized bytes, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
     pub fn bytes(self: Monolith) Error![]const u8 {
         try self.stamp.check();
-        return landed(u8, self.view.data, 0, self.view.length);
+        return outputSlice(u8, self.view.data, 0, self.view.length);
     }
 
     /// Where the bytes live, which the host reads only as `.ram` or `.nvme`.
@@ -1930,25 +2124,25 @@ pub const DenseProducts = struct {
         if (position >= self.queries) return refuse(.invalid_argument);
         const begin = self.view.offsets.?[position];
         const length = self.view.offsets.?[position + 1] - begin;
-        return .{ .keys = landed(Key, self.view.keys, begin, length), .scores = landed(Distance, self.view.scores, begin, length) };
+        return .{ .keys = outputSlice(Key, self.view.keys, begin, length), .scores = outputSlice(Distance, self.view.scores, begin, length) };
     }
 
     /// The `queries + 1` offsets, refused as `query` refuses a stale view or device memory.
     pub fn offsets(self: DenseProducts) Error![]const usize {
         try self.stamp.check();
-        return landed(usize, self.view.offsets, 0, self.queries + 1);
+        return outputSlice(usize, self.view.offsets, 0, self.queries + 1);
     }
 
     /// Every pair's indexed key, end to end, refused as `query` refuses a stale view or device memory.
     pub fn keys(self: DenseProducts) Error![]const Key {
         try self.stamp.check();
-        return landed(Key, self.view.keys, 0, self.written);
+        return outputSlice(Key, self.view.keys, 0, self.written);
     }
 
     /// Every pair's product, positionally paired with `keys`, refused as `keys` is.
     pub fn scores(self: DenseProducts) Error![]const Distance {
         try self.stamp.check();
-        return landed(Distance, self.view.scores, 0, self.written);
+        return outputSlice(Distance, self.view.scores, 0, self.written);
     }
 
     /// Where the pairs live, which the host reads only as `.ram` or `.nvme`.
@@ -1972,7 +2166,7 @@ pub const DenseCursorBatch = struct {
     /// The keys, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
     pub fn keys(self: DenseCursorBatch) Error![]const Key {
         try self.stamp.check();
-        return landed(Key, self.data, 0, self.written);
+        return outputSlice(Key, self.data, 0, self.written);
     }
 
     /// The keys one entry links to, refusing a `position` past `written` or a pull that exported
@@ -1982,7 +2176,35 @@ pub const DenseCursorBatch = struct {
         const tape = self.linked orelse return refuse(.invalid_argument);
         if (position >= self.written) return refuse(.invalid_argument);
         const begin = tape.offsets.?[position];
-        return landed(Key, tape.keys, begin, tape.offsets.?[position + 1] - begin);
+        return outputSlice(Key, tape.keys, begin, tape.offsets.?[position + 1] - begin);
+    }
+};
+
+/// The draws `DenseIndex.sample` wrote in an arena, one per draw: its key, which of that key's
+/// entries it is, the shown or earlier draw it hangs from, and where it is placed.
+///
+/// It reads the arena, so every read is refused once that arena serves another call or is freed.
+pub const DenseDraws = struct {
+    stamp: Arena.Stamp,
+    /// Draws written; fewer than `wanted` only once the region is exhausted.
+    written: usize,
+    keys_data: ?[*]const Key,
+    entry_ordinals_data: ?[*]const usize,
+    /// Each draw's parent and its distance, as a one-column run per draw; a root holds none.
+    parents: Matches,
+    /// Where each draw is placed, one row of three `f32` apiece.
+    coordinates: DenseVectors,
+
+    /// The keys drawn, refusing a stale view with `Error.Uninitialized` and device memory with `Error.Device`.
+    pub fn keys(self: DenseDraws) Error![]const Key {
+        try self.stamp.check();
+        return outputSlice(Key, self.keys_data, 0, self.written);
+    }
+
+    /// Which of its key's entries each draw is, in the order `get` writes them, refused as `keys` is.
+    pub fn entryOrdinals(self: DenseDraws) Error![]const usize {
+        try self.stamp.check();
+        return outputSlice(usize, self.entry_ordinals_data, 0, self.written);
     }
 };
 
@@ -2001,11 +2223,11 @@ pub const DenseCursor = struct {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
         var arguments: usearch_dense_cursor_init_t = .{
-            .cursor = &handle,
             .index = index.handle,
             .outcome = &outcome,
             .starts_count = starts.len,
             .starts = starts.ptr,
+            .cursor = &handle,
         };
         usearch_dense_cursor_init(&arguments);
         errdefer usearch_dense_cursor_free(handle);
@@ -2160,13 +2382,15 @@ test { // analyze every declaration, the methods on each handle included
     inline for (.{
         DenseReserve,  DenseClear,  DenseDescribe, DenseCount,      DenseGet,              DenseInsert,
         DenseRefine,   DenseHealth, DenseSearch,   DenseAbsorb,     DenseSave,             DenseSaveBuffer,
-        DenseMultiply, DenseAttend, DenseMaxsim,   DenseCursorNext, DenseSearchStreamNext,
+        DenseMultiply, DenseAttend, DenseMaxsim,   DenseCursorNext, DenseSearchStreamNext, DenseSplit,
+        DenseSample,
     }) |Call| std.testing.refAllDecls(Deferred(Call));
     std.testing.refAllDecls(DenseCursor);
     std.testing.refAllDecls(DenseSearchStream);
     std.testing.refAllDecls(DenseProducts);
     std.testing.refAllDecls(DenseVectors);
     std.testing.refAllDecls(DenseCursorBatch);
+    std.testing.refAllDecls(DenseDraws);
     std.testing.refAllDecls(Monolith);
     std.testing.refAllDecls(Matches);
     std.testing.refAllDecls(RowsView);
@@ -2320,6 +2544,26 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
 
     const reachability = try index.on(executor).health();
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
+
+    // A refine reports what it did, and closes on the audit a fresh `health` would take.
+    const report = try copy.on(executor).refine(.{});
+    try std.testing.expect(report.changed <= report.reselected);
+    try std.testing.expectEqual(@as(usize, 9), report.reachability.audited);
+
+    // A split hands every entry to the receivers and leaves the source empty but live.
+    var receivers = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
+    defer for (&receivers) |*receiver| receiver.deinit();
+    for (receivers) |receiver| try receiver.clear();
+    _ = try copy.on(executor).split(&receivers, .{ .seed = 7 });
+    try std.testing.expectEqual(@as(usize, 0), (try copy.describe()).size);
+    try std.testing.expectEqual(@as(usize, 9), (try receivers[0].describe()).size + (try receivers[1].describe()).size);
+
+    // A sample draws held keys, each placed in three dimensions, and refuses shown keys without places.
+    const draws = try index.on(executor).sample(2, &arena, .{ .seed = 42 });
+    try std.testing.expect(draws.written <= 2);
+    for (try draws.keys()) |drawn| try std.testing.expect(drawn.asInteger().? >= 1 and drawn.asInteger().? <= 3);
+    if (draws.written != 0) try std.testing.expectEqual(@as(usize, 3), (try draws.coordinates.row(f32, 0)).len);
+    try std.testing.expectError(Error.ShapeMismatch, index.sample(2, &arena, .{ .shown = keys[0..1] }));
 }
 
 test "a scan scores every entry, so every query finds itself first" {
@@ -2487,8 +2731,8 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
                 for (&mixed, 0..) |*column, position| column.* += weight * values[key * dimensions + position];
             }
             const attended = try outputs.row(f32, query);
-            for (mixed, attended) |column, landed_column|
-                try std.testing.expectApproxEqAbs(column / partition, landed_column, 1e-3 * @max(@abs(column / partition), 1));
+            for (mixed, attended) |column, attended_column|
+                try std.testing.expectApproxEqAbs(column / partition, attended_column, 1e-3 * @max(@abs(column / partition), 1));
             try std.testing.expectApproxEqAbs(maximum, carry[query].maximum_score, 1e-3 * @max(@abs(maximum), 1));
             try std.testing.expectApproxEqAbs(partition, carry[query].partition, 1e-3 * @max(@abs(partition), 1));
         }

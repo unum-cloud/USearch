@@ -25,4 +25,5 @@ template struct us::geospatial::vram_nvidia_kits<u32_t, geospatial_nvidia_capabi
 
 template __device__ void us::geospatial::cuda_instantiate<geospatial_nvidia_capabilities_k, u32_t>();
 
-template struct basic_class_tables<geospatial_traits_t, dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k>;
+template struct basic_class_tables<geospatial_traits_t, vendored_residency_t::vram_nvidia_k,
+                                   gpu_class_t::nvidia_ampere_k>;

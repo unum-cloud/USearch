@@ -35,7 +35,7 @@ The number of live shards picks the layout, whatever the path's extension says.
 | several     | parts, then a manifest  | a manifest, then parts  |
 
 Each part is a monolith of one shard's graph with that shard's own node IDs, so no edge crosses parts.
-A path's parts are named `<stem>-0000k-of-0000N.safegraphs`, and its manifest lists them by `path`, `bytes` and `nodes`, landing last as the commit record.
+A path's parts are named `<stem>-0000k-of-0000N.safegraphs`, and its manifest lists them by `path`, `bytes` and `nodes`, written last as the commit record.
 A buffer's manifest lists them by `offset` from the buffer's start instead, ends at the first zero byte, and every part follows on the header's `alignment` boundary.
 Several shards never pack into one monolith: only compaction merges graphs.
 

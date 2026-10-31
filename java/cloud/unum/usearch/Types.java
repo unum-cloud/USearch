@@ -350,7 +350,7 @@ public final class Types {
      *
      * <p>
      * The enumerators are ordered by shrinking dynamic range, and their codes carry the numbering gaps
-     * the C enum reserves for kinds that have not landed yet.
+     * the C enum reserves for kinds not yet implemented.
      */
     public enum Scalar {
 
@@ -1585,7 +1585,7 @@ public final class Types {
         private final List<Object> lent = new ArrayList<>();
 
         /** Copies of fixed-size reports into the caller's objects, run once the call succeeded. */
-        private final List<Runnable> landings = new ArrayList<>();
+        private final List<Runnable> reportCopies = new ArrayList<>();
 
         /** Runs once the call is final, joined or not, like handing back the donors an absorb left. */
         private final List<Runnable> settles = new ArrayList<>();
@@ -1624,7 +1624,7 @@ public final class Types {
                     call.invoke();
                     call.raise();
                     Library.check(call.outcome);
-                    call.landings.forEach(Runnable::run);
+                    call.reportCopies.forEach(Runnable::run);
                 } finally {
                     call.settle();
                 }
@@ -1646,7 +1646,7 @@ public final class Types {
                 throw refused;
             }
             Deferred<Result> deferred = new Deferred<>(call, () -> {
-                call.landings.forEach(Runnable::run);
+                call.reportCopies.forEach(Runnable::run);
                 return finish.get();
             });
             return deferred;
@@ -1906,7 +1906,7 @@ public final class Types {
         void stats(String field, DenseIndex.@Nullable DenseTraversalStats stats) {
             if (stats != null) {
                 MemorySegment reported = output(field, Library.TRAVERSAL_STATS);
-                landings.add(() -> stats.read(reported));
+                reportCopies.add(() -> stats.read(reported));
             }
         }
     }

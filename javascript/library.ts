@@ -55,6 +55,24 @@ export interface CompiledReachability {
   backSweeps: number;
 }
 
+/** What a refine, absorb or split did to the graph. */
+export interface CompiledRefineReport {
+  reselected: number;
+  changed: number;
+  islandsFound: number;
+  islandsReconnected: number;
+  reachability: CompiledReachability;
+}
+
+/** The draws a sample wrote, viewed inside its arena. */
+export interface CompiledDraws {
+  keys: Uint8Array | null;
+  entryOrdinals: BigUint64Array | null;
+  parents: CompiledMatches;
+  coordinates: CompiledVectors;
+  draws: number;
+}
+
 /** The geometry and metric a checkpoint froze, in the canonical spellings. */
 export interface CompiledMetadata {
   metric: string;
@@ -82,7 +100,7 @@ export interface CompiledMatches {
   columns: number;
 }
 
-/** Rows a call landed inside its arena. */
+/** Rows a call wrote inside its arena. */
 export interface CompiledVectors {
   data: ArrayBufferView | null;
   rows: number;
@@ -145,7 +163,7 @@ export interface CompiledIndex {
   ): undefined | CompiledDeferred;
   refine(
     ...arguments_: [...On, expansion: number | undefined, stats: CompiledStats | undefined]
-  ): number | CompiledDeferred;
+  ): CompiledRefineReport | CompiledDeferred;
   search(
     ...arguments_: [
       ...On,
@@ -181,7 +199,22 @@ export interface CompiledIndex {
       stats: CompiledStats | undefined,
     ]
   ): CompiledProducts | CompiledDeferred;
-  absorb(...arguments_: [...On, donors: CompiledIndex[]]): undefined | CompiledDeferred;
+  absorb(...arguments_: [...On, donors: CompiledIndex[]]): CompiledRefineReport | CompiledDeferred;
+  split(
+    ...arguments_: [...On, receivers: CompiledIndex[], seed: number | bigint | undefined, expansion: number | undefined]
+  ): CompiledRefineReport | CompiledDeferred;
+  sample(
+    ...arguments_: [
+      ...On,
+      arena: CompiledArena,
+      wanted: number,
+      shown: Uint8Array | BigUint64Array | undefined,
+      ...shownCoordinates: CompiledRows | [undefined, undefined, undefined, undefined, undefined],
+      focus: Uint8Array | BigUint64Array | undefined,
+      seed: number | bigint | undefined,
+      expansion: number | undefined,
+    ]
+  ): CompiledDraws | CompiledDeferred;
   save(...arguments_: [...On, path: string]): undefined | CompiledDeferred;
   saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | null | CompiledDeferred;
   attend(

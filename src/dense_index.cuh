@@ -2,21 +2,21 @@
  *  @file src/dense_index.cuh
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief The dense modality's C surface: the handle owning one picked variant through its home's
- *      verb table, the ladders that pick it, and every exported entry point as one visit over five
- *      homes apiece.
+ *  @brief The dense modality's C surface: the handle owning one picked variant through its
+ *      residency's verb table, the ladders that pick it, and every exported entry point as one
+ *      visit over five residencies apiece.
  *
  *  Compiled once, as @c dense_index.cpp by the host compiler at the baseline, with
  *  @c USEARCH_TARGET_<CLASS> naming the class units the build compiled. It includes no tower: each
- *  class unit compiles its variants into home tables, and a ladder walks the classes newest first,
- *  asking each one's table for the dtype, the serial floor last. The variants' bodies compile in
- *  the class units, never here.
+ *  class unit compiles its variants into residency tables, and a ladder walks the classes newest
+ *  first, asking each one's table for the dtype, the serial floor last. The variants' bodies
+ *  compile in the class units, never here.
  */
 #pragma once
 
 #include <cassert> // `assert` - the CPU casts never refuse
 #include <cmath>   // `std::sqrt` - attention's default logit scale
-#include <cstring> // `std::memcpy`, `std::memmove` - landing rows and device names
+#include <cstring> // `std::memcpy`, `std::memmove` - output rows and device names
 
 #include <bit>              // `std::bit_cast` - the softmax carry crossing the ABI
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
@@ -25,7 +25,7 @@
 #include <new>              // `std::nothrow`
 #include <span>             // `std::span` - key batches crossing the ABI
 #include <string_view>      // `std::string_view` - checkpoint paths
-#include <type_traits>      // `std::is_same_v` - the placements' host allocator
+#include <type_traits>      // `std::is_same_v` - the residency options' host allocator
 #include <utility>          // `std::exchange` - nulling each donor slot an absorb consumes
 #include <variant>          // `std::variant`, `std::visit`
 
@@ -39,13 +39,14 @@
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator`, `no_memory_domain_k` - the handles' host tables
 #include "usearch/utilities/vram_device.hpp" // `gpu_devices`, `gpu_executor_t`, `gpu_arena_t`
 
-#pragma region Multi Index
+#pragma region Sharded Index
 
-/** The verb table of every home, one of which a handle holds. */
-using dense_home_tables_t =
-    std::variant<dense_verbs<dense_home_t::ram_k> const*, dense_verbs<dense_home_t::nvme_k> const*,
-                 dense_verbs<dense_home_t::vram_nvidia_k> const*, dense_verbs<dense_home_t::vram_amd_k> const*,
-                 dense_verbs<dense_home_t::vram_apple_k> const*>;
+/** The verb table of every residency, one of which a handle holds. */
+using dense_variant_tables_t =
+    std::variant<dense_verbs<vendored_residency_t::ram_k> const*, dense_verbs<vendored_residency_t::nvme_k> const*,
+                 dense_verbs<vendored_residency_t::vram_nvidia_k> const*,
+                 dense_verbs<vendored_residency_t::vram_amd_k> const*,
+                 dense_verbs<vendored_residency_t::vram_apple_k> const*>;
 
 /**
  *  @brief The one dynamically-typed dense index every binding consumes: the variant picked once at
@@ -53,17 +54,18 @@ using dense_home_tables_t =
  *
  *  Variants exist per wired @c (dtype,class) pair whose kits a class unit compiles, never the full
  *  cross product; each keeps its metric as a runtime field, since only the distance epilogue reads
- *  it. The VRAM homes join per GPU vendor the build carries, and the read-only NVMe home wherever a
- *  CPU class picks a kit of its own.
+ *  it. The VRAM residencies come per GPU vendor the build carries, and the read-only NVMe
+ *  residency wherever a CPU class picks a kit of its own.
  */
 struct usearch_dense_index_handle_t {
 
-    /** The variant picked once at construction: its home's verb table, and the index it serves,
-     *  which only that table's entries cast back to their type. */
-    dense_home_tables_t tables;
+    /** The variant picked once at construction: its residency's verb table, and the index it
+     *  serves, which only that table's entries cast back to their type. */
+    dense_variant_tables_t tables;
     void* index = nullptr;
 
-    usearch_dense_index_handle_t(dense_home_tables_t picked, void* created) noexcept : tables(picked), index(created) {}
+    usearch_dense_index_handle_t(dense_variant_tables_t picked, void* created) noexcept
+        : tables(picked), index(created) {}
     usearch_dense_index_handle_t(usearch_dense_index_handle_t const&) = delete;
     usearch_dense_index_handle_t& operator=(usearch_dense_index_handle_t const&) = delete;
     ~usearch_dense_index_handle_t() noexcept {
@@ -72,36 +74,36 @@ struct usearch_dense_index_handle_t {
 };
 
 /** Applies @p visitor to the variant @p handle picked, as
- *  <tt>visitor(punned_dense_index<home>)</tt>. */
+ *  <tt>visitor(punned_dense_index<residency>)</tt>. */
 template <typename visitor_type_>
 static void visit_punned(usearch_dense_index_handle_t const& handle, visitor_type_&& visitor) noexcept {
     std::visit(
-        [&]<dense_home_t home_>(dense_verbs<home_> const* verbs) noexcept {
-            visitor(punned_dense_index<home_> {*verbs, handle.index});
+        [&]<vendored_residency_t residency_>(dense_verbs<residency_> const* verbs) noexcept {
+            visitor(punned_dense_index<residency_> {*verbs, handle.index});
         },
         handle.tables);
 }
 
-/** The variant of @p other when it shares the home table of @p punned, so both are one dtype, class
- *  and residency; null otherwise. */
-template <dense_home_t home_>
-static void* same_punned_index(punned_dense_index<home_> const& punned,
+/** The variant of @p other when it shares the residency table of @p punned, so both are one dtype,
+ *  class and residency; null otherwise. */
+template <vendored_residency_t residency_>
+static void* same_punned_index(punned_dense_index<residency_> const& punned,
                                usearch_dense_index_handle_t const& other) noexcept {
-    dense_verbs<home_> const* const* const verbs = std::get_if<dense_verbs<home_> const*>(&other.tables);
+    dense_verbs<residency_> const* const* const verbs = std::get_if<dense_verbs<residency_> const*>(&other.tables);
     return verbs && *verbs == &punned.verbs ? other.index : nullptr;
 }
 
-#pragma endregion Multi Index
+#pragma endregion Sharded Index
 
 #pragma region Construction
 
 /** Appends one RAM shard per named memory domain - or one per allocatable domain of a transient
  *  topology when the list is empty, so a bare init still spans the machine. */
-template <dense_home_t home_>
-static status_t place_shards(punned_dense_index<home_> const& punned, usearch_ram_options_t const& ram) noexcept {
+template <vendored_residency_t residency_>
+static status_t place_shards(punned_dense_index<residency_> const& punned, usearch_ram_options_t const& ram) noexcept {
     punned.verbs.bound_shards(punned.index, ram.shard_capacity);
     auto const emplace = [&](fu_memory_domain_id_t domain) noexcept {
-        return punned.verbs.emplace(punned.index, static_cast<int>(domain));
+        return punned.verbs.emplace(punned.index, ram_residency(domain));
     };
     if (!ram.memory_domains || !ram.memory_domains_count) return emplace_on_every_domain(emplace);
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
@@ -122,21 +124,21 @@ struct nvme_placement_t {
 };
 
 /** Opens every part of the checkpoint @p nvme names, served in place. */
-template <dense_home_t home_>
-static status_t place_shards(punned_dense_index<home_> const& punned, nvme_placement_t const& nvme) noexcept {
+template <vendored_residency_t residency_>
+static status_t place_shards(punned_dense_index<residency_> const& punned, nvme_placement_t const& nvme) noexcept {
     return punned.verbs.view(punned.index, nvme.path, nvme.paths);
 }
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
-template <dense_home_t home_>
-static status_t place_shards(punned_dense_index<home_> const& punned, usearch_vram_options_t const& vram) noexcept {
+template <vendored_residency_t residency_>
+static status_t place_shards(punned_dense_index<residency_> const& punned,
+                             usearch_vram_options_t const& vram) noexcept {
     punned.verbs.bound_shards(punned.index, vram.shard_capacity);
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
         std::size_t const ordinal = named_ordinal(vram, shard);
         if (ordinal >= devices.size()) return status_t::device_error_k;
-        if (status_t const placed = punned.verbs.emplace(punned.index,
-                                                         static_cast<int>(devices[ordinal].vendor_ordinal));
+        if (status_t const placed = punned.verbs.emplace(punned.index, vram_residency(devices[ordinal].vendor_ordinal));
             failed(placed))
             return placed;
     }
@@ -145,24 +147,25 @@ static status_t place_shards(punned_dense_index<home_> const& punned, usearch_vr
 
 /** The host allocator a variant keeps its tables on: the first named memory domain on RAM, the
  *  heap's domain otherwise. */
-template <typename placement_type_>
-static forkunion_allocator_t host_allocator_of(placement_type_ const& placement) noexcept {
-    if constexpr (std::is_same_v<placement_type_, usearch_ram_options_t>)
-        if (placement.memory_domains && placement.memory_domains_count)
-            return forkunion_allocator_t {static_cast<fu_memory_domain_id_t>(placement.memory_domains[0])};
+template <typename residency_options_type_>
+static forkunion_allocator_t host_allocator_of(residency_options_type_ const& options) noexcept {
+    if constexpr (std::is_same_v<residency_options_type_, usearch_ram_options_t>)
+        if (options.memory_domains && options.memory_domains_count)
+            return forkunion_allocator_t {static_cast<fu_memory_domain_id_t>(options.memory_domains[0])};
     return forkunion_allocator_t {no_memory_domain_k};
 }
 
 /** Creates the index of the variant @p verbs, scoring under @p kernel, and places its shards where
- *  @p placement names. The constructors below finish @p outcome only on failure, since a load still
+ *  @p options name. The constructors below finish @p outcome only on failure, since a load still
  *  has work to do on success. */
-template <dense_home_t home_, typename placement_type_>
+template <vendored_residency_t residency_, typename residency_options_type_>
 static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& geometry,
-                                               placement_type_ const& placement, dense_verbs<home_> const& verbs,
-                                               nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
+                                               residency_options_type_ const& options,
+                                               dense_verbs<residency_> const& verbs, nk_kernel_kind_t kernel,
+                                               usearch_outcome_t* outcome) noexcept {
     connectivity_t const connectivity = geometry.connectivity ? static_cast<connectivity_t>(geometry.connectivity)
                                                               : connectivity_32_k;
-    void* const created = verbs.create(kernel, geometry.dimensions, connectivity, host_allocator_of(placement));
+    void* const created = verbs.create(kernel, {geometry.dimensions, connectivity}, host_allocator_of(options));
     if (!created)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     usearch_dense_index_t const handle = new (std::nothrow) usearch_dense_index_handle_t(&verbs, created);
@@ -170,28 +173,28 @@ static usearch_dense_index_t make_dense_handle(usearch_dense_metadata_t const& g
         return verbs.destroy(created),
                propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
     // Placement is init's job, so a bad domain fails here rather than at the first reservation.
-    punned_dense_index<home_> const punned {verbs, created};
-    if (status_t const placed = place_shards(punned, placement); failed(placed))
+    punned_dense_index<residency_> const punned {verbs, created};
+    if (status_t const placed = place_shards(punned, options); failed(placed))
         return delete handle, propagate_error(placed, outcome), nullptr;
     return handle;
 }
 
-/** Whether @p home_ compiled a unit for the CPU class @p cpu_class. */
-template <dense_home_t home_>
-static constexpr bool cpu_home_compiled(cpu_class_t cpu_class) noexcept {
-    return home_ == dense_home_t::nvme_k ? nvme_class_compiled(cpu_class) : cpu_class_compiled(cpu_class);
+/** Whether @p residency_ compiled a unit for the CPU class @p cpu_class. */
+template <vendored_residency_t residency_>
+static constexpr bool cpu_residency_compiled(cpu_class_t cpu_class) noexcept {
+    return residency_ == vendored_residency_t::nvme_k ? nvme_class_compiled(cpu_class) : cpu_class_compiled(cpu_class);
 }
 
 /** The RAM or NVMe variant of @p dtype on the newest rung of @p ladder that fits under @p ceiling,
  *  the serial floor last. A rung whose table holds no variant of the dtype picks nothing its parent
  *  does not, so the walk goes on. */
-template <dense_home_t home_, cpu_class_t... classes_>
-static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype,
-                                                  cpu_ceiling_t ceiling) noexcept {
-    dense_verbs<home_> const* picked = nullptr;
+template <vendored_residency_t residency_, cpu_class_t... classes_>
+static dense_verbs<residency_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dtype_t dtype,
+                                                       cpu_ceiling_t ceiling) noexcept {
+    dense_verbs<residency_> const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
-        if constexpr (cpu_home_compiled<home_>(class_))
-            if (!picked && cpu_rung_fits(class_, ceiling)) picked = dense_class_tables<home_, class_>::find(dtype);
+        if constexpr (cpu_residency_compiled<residency_>(class_))
+            if (!picked && cpu_rung_fits(class_, ceiling)) picked = dense_class_tables<residency_, class_>::find(dtype);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -199,13 +202,14 @@ static dense_verbs<home_> const* pick_cpu_variant(cpu_ladder<classes_...>, nk_dt
 
 /** The device variant of @p dtype on the newest rung of @p ladder the build compiled and the
  *  devices' @p available capabilities admit, whose unit alone carries kernels for them. */
-template <dense_home_t home_, gpu_class_t... classes_>
-static dense_verbs<home_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dtype_t dtype,
-                                                  nk_capability_t available) noexcept {
-    dense_verbs<home_> const* picked = nullptr;
+template <vendored_residency_t residency_, gpu_class_t... classes_>
+static dense_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, nk_dtype_t dtype,
+                                                       nk_capability_t available) noexcept {
+    dense_verbs<residency_> const* picked = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
         if constexpr (gpu_class_compiled(class_))
-            if (!picked && numkong_admits(available, class_)) picked = dense_class_tables<home_, class_>::find(dtype);
+            if (!picked && numkong_admits(available, class_))
+                picked = dense_class_tables<residency_, class_>::find(dtype);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -220,8 +224,8 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
-    dense_verbs<dense_home_t::ram_k> const* const verbs = pick_cpu_variant<dense_home_t::ram_k>(cpu_ladder_t {}, dtype,
-                                                                                                ceiling);
+    dense_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant<vendored_residency_t::ram_k>(
+        cpu_ladder_t {}, dtype, ceiling);
     return make_dense_handle(geometry, ram, *verbs, kernel, outcome);
 }
 
@@ -235,8 +239,8 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
-    dense_verbs<dense_home_t::nvme_k> const* const verbs = pick_cpu_variant<dense_home_t::nvme_k>(cpu_ladder_t {},
-                                                                                                  dtype, ceiling);
+    dense_verbs<vendored_residency_t::nvme_k> const* const verbs = pick_cpu_variant<vendored_residency_t::nvme_k>(
+        cpu_ladder_t {}, dtype, ceiling);
     return make_dense_handle(geometry, nvme, *verbs, kernel, outcome);
 }
 
@@ -273,18 +277,21 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
         return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
                nullptr;
     if (available & nk_cap_cuda_k)
-        if (dense_verbs<dense_home_t::vram_nvidia_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_nvidia_k>(
+        if (dense_verbs<vendored_residency_t::vram_nvidia_k> const* const verbs = pick_gpu_variant<
+                vendored_residency_t::vram_nvidia_k>(
                 gpu_ladder<gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k,
                            gpu_class_t::nvidia_hopper_k, gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k> {},
                 dtype, available))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     if (available & nk_cap_rocm_k)
-        if (dense_verbs<dense_home_t::vram_amd_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_amd_k>(
-                gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k> {}, dtype,
-                available))
+        if (dense_verbs<vendored_residency_t::vram_amd_k> const* const verbs =
+                pick_gpu_variant<vendored_residency_t::vram_amd_k>(
+                    gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k> {}, dtype,
+                    available))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
     if (available & nk_cap_metal_k)
-        if (dense_verbs<dense_home_t::vram_apple_k> const* const verbs = pick_gpu_variant<dense_home_t::vram_apple_k>(
+        if (dense_verbs<vendored_residency_t::vram_apple_k> const* const verbs = pick_gpu_variant<
+                vendored_residency_t::vram_apple_k>(
                 gpu_ladder<gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k> {},
                 dtype, available))
             return make_dense_handle(geometry, vram, *verbs, kernel, outcome);
@@ -300,7 +307,7 @@ static bool refuses_geometry(usearch_dense_metadata_t const& geometry, usearch_o
     nk_dtype_t const dtype = nk_dtype_of(geometry.quantization);
     std::size_t const connectivity = geometry.connectivity;
     // A dtype the build leaves out is refused by `with_variant`, so its packing is never read here.
-    bool const stored = dense_dtypes_t::position_of(dtype) != dense_dtypes_t::size_k;
+    bool const stored = dense_dtypes_t::index_of(dtype) != dense_dtypes_t::size_k;
     bool const filled = !stored || geometry.dimensions % nk_dimensions_per_value(dtype) == 0;
     bool const shaped = !connectivity || (std::has_single_bit(connectivity) &&
                                           connectivity == static_cast<connectivity_t>(connectivity));
@@ -309,14 +316,14 @@ static bool refuses_geometry(usearch_dense_metadata_t const& geometry, usearch_o
                             "The dimensions or connectivity cannot shape a graph");
 }
 
-/** Routes the geometry onto its variant, built where @p placement names: every numeric dtype speaks
+/** Routes the geometry onto its variant, built where @p options name: every numeric dtype speaks
  *  inner, angular & euclidean; the bit dtype speaks inner, hamming & jaccard. A storage dtype the
  *  build's @c USEARCH_DENSE_DTYPES left out is unsupported rather than unknown. */
-template <typename placement_type_>
-static usearch_dense_index_t with_variant(usearch_dense_metadata_t const& geometry, placement_type_ const& placement,
-                                          usearch_outcome_t* outcome) noexcept {
+template <typename residency_options_type_>
+static usearch_dense_index_t with_variant(usearch_dense_metadata_t const& geometry,
+                                          residency_options_type_ const& options, usearch_outcome_t* outcome) noexcept {
     nk_dtype_t const dtype = nk_dtype_of(geometry.quantization);
-    if (dense_dtypes_t::position_of(dtype) == dense_dtypes_t::size_k) {
+    if (dense_dtypes_t::index_of(dtype) == dense_dtypes_t::size_k) {
         // Only f32, f64 & the geospatial i32 cross the boundary without ever being stored as rows,
         // so any other scalar the table knows was left out.
         if (dtype == nk_dtype_unknown_k || dtype == nk_f32_k || dtype == nk_f64_k || dtype == nk_i32_k)
@@ -327,19 +334,19 @@ static usearch_dense_index_t with_variant(usearch_dense_metadata_t const& geomet
     }
     bool const bits = dtype == nk_u1_k;
     switch (geometry.metric) {
-    case usearch_dense_metric_inner_k: return make_index(geometry, placement, dtype, nk_kernel_dot_k, outcome);
+    case usearch_dense_metric_inner_k: return make_index(geometry, options, dtype, nk_kernel_dot_k, outcome);
     case usearch_dense_metric_angular_k:
-        if (!bits) return make_index(geometry, placement, dtype, nk_kernel_angular_k, outcome);
+        if (!bits) return make_index(geometry, options, dtype, nk_kernel_angular_k, outcome);
         break;
     case usearch_dense_metric_euclidean_k:
-        if (!bits) return make_index(geometry, placement, dtype, nk_kernel_euclidean_k, outcome);
+        if (!bits) return make_index(geometry, options, dtype, nk_kernel_euclidean_k, outcome);
         break;
     case usearch_dense_metric_hamming_k:
-        if (bits) return make_index(geometry, placement, dtype, nk_kernel_hamming_k, outcome);
+        if (bits) return make_index(geometry, options, dtype, nk_kernel_hamming_k, outcome);
         return propagate_error(usearch_status_unknown_kind_k, outcome, "This metric needs a bit-packed quantization"),
                nullptr;
     case usearch_dense_metric_jaccard_k:
-        if (bits) return make_index(geometry, placement, dtype, nk_kernel_jaccard_k, outcome);
+        if (bits) return make_index(geometry, options, dtype, nk_kernel_jaccard_k, outcome);
         return propagate_error(usearch_status_unknown_kind_k, outcome, "This metric needs a bit-packed quantization"),
                nullptr;
     default: break;
@@ -379,12 +386,12 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
  *  chunk is one call of the verb, so the variant rewinds its arenas once per chunk. Finishes
  *  @p outcome only on failure, leaving the success to the verb once its last output is written.
  */
-template <dense_home_t home_, typename sink_type_>
-static bool for_each_dense_chunk(punned_dense_index<home_> punned, usearch_executor_t executor_handle, //
-                                 std::size_t rows_count, usearch_rows_view_t const& rows,              //
-                                 std::size_t rows_per_query, std::size_t expansion_factor,             //
-                                 usearch_progress_t progress,                                          //
-                                 usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,         //
+template <vendored_residency_t residency_, typename sink_type_>
+static bool for_each_dense_chunk(punned_dense_index<residency_> punned, usearch_executor_t executor_handle, //
+                                 std::size_t rows_count, usearch_rows_view_t const& rows,                   //
+                                 std::size_t rows_per_query, search_config_t config,                        //
+                                 usearch_progress_t progress,                                               //
+                                 usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,              //
                                  sink_type_&& sink) noexcept {
     if (stats) *stats = {};
     if (!rows_count) return true;
@@ -392,11 +399,9 @@ static bool for_each_dense_chunk(punned_dense_index<home_> punned, usearch_execu
     nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
     if (source_dtype == nk_dtype_unknown_k) return false;
     usearch_executor_handle_t call_executor;
-    typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, executor_handle, call_executor,
-                                                                                 outcome);
+    typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, executor_handle,
+                                                                                      call_executor, outcome);
     if (!executor) return false;
-    dense_walk_config_t walk {};
-    walk.expansion_factor = static_cast<u32_t>(expansion_factor);
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
@@ -406,8 +411,8 @@ static bool for_each_dense_chunk(punned_dense_index<home_> punned, usearch_execu
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
-        expected<usearch_traversal_stats_t> const found = sink(all.slice(resolved, taking), *executor, walk, resolved,
-                                                               taking);
+        expected<traversal_stats_t> const found = sink(all.slice(resolved, taking), *executor, config, resolved,
+                                                       taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
         if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
@@ -416,30 +421,31 @@ static bool for_each_dense_chunk(punned_dense_index<home_> punned, usearch_execu
     return true;
 }
 
-/** The matching verbs' sink on one serving variant: keys and scores land in @p landing as the walk
+/** The matching verbs' sink on one serving variant: keys and scores go to @p outputs as the walk
  *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
  *  one output row, and @p count output rows land. */
-template <dense_home_t home_, typename verb_type_>
-static bool match_dense_rows(punned_dense_index<home_> punned, usearch_executor_t executor, //
-                             std::size_t count, usearch_rows_view_t const& rows,            //
-                             std::size_t rows_per_query, matches_landing_t const& landing,  //
-                             std::size_t expansion_factor, usearch_progress_t progress,     //
-                             usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,  //
+template <vendored_residency_t residency_, typename verb_type_>
+static bool match_dense_rows(punned_dense_index<residency_> punned, usearch_executor_t executor, //
+                             std::size_t count, usearch_rows_view_t const& rows,                 //
+                             std::size_t rows_per_query, matches_outputs_t const& outputs,       //
+                             search_config_t config, usearch_progress_t progress,                //
+                             usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,       //
                              verb_type_&& verb) noexcept {
-    using key_t = typename dense_verbs<home_>::key_t;
+    using key_t = typename dense_verbs<residency_>::key_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-    std::size_t const wanted = landing.wanted;
-    nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
-    nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
-    auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
-                    dense_walk_config_t walk, std::size_t resolved, std::size_t taking) noexcept {
+    std::size_t const wanted = outputs.wanted;
+    nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys), count, wanted};
+    nk::matrix_span<f64_t> const scores {outputs.scores, count, wanted};
+    auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<residency_>::executor_t& executor,
+                    search_config_t chunk_config, std::size_t resolved, std::size_t taking) noexcept {
         std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
         nk::range_t const chunk_range = nk::range(first, first + matched);
-        return verb(chunk_rows, executor, walk, keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
-                    std::span<std::size_t> {landing.counts + first, matched});
+        ranked_matches_span_t const matches {keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
+                                             std::span<std::size_t> {outputs.counts + first, matched}};
+        return verb(chunk_rows, matches, chunk_config, executor);
     };
-    return for_each_dense_chunk(punned, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
-                                progress, stats, outcome, sink);
+    return for_each_dense_chunk(punned, executor, count * rows_per_query, rows, rows_per_query, config, progress, stats,
+                                outcome, sink);
 }
 
 /** Whether every query @p query_offsets cuts holds rows; false once @p outcome records why not. */
@@ -450,91 +456,12 @@ static bool accepts_query_offsets(std::span<std::size_t const> query_offsets, us
     return true;
 }
 
-/** The late-interaction sink on one serving variant: chunks of whole queries, one per step of the
- *  progress handler, each query's rows cut by @p query_offsets. A chunk's queries rank into one run
- *  per executor thread, and the runs then count, prefix-sum and scatter into @p keys, @p scores and
- *  @p offsets growing in @p arena, as geospatial @c within lands, while @p required sums the keys
- *  every query scored; @p predicate narrows the nominations once it names a callback. */
-template <dense_home_t home_>
-static bool maxsim_queries(punned_dense_index<home_> punned, usearch_dense_maxsim_t const& arguments,
-                           std::span<std::size_t const> query_offsets, predicate_t& predicate,
-                           usearch_arena_handle_t& arena, usearch_key_t*& landed_keys,
-                           usearch_distance_t*& landed_scores, std::size_t*& landed_offsets, std::size_t& required,
-                           usearch_outcome_t* outcome) noexcept {
-    using run_t = growing_buffer<maxsim_match_t, thread_allocator_t>;
-    usearch_rows_view_t const& rows = arguments.queries;
-    std::size_t const count = query_offsets.size() - 1;
-    if (!rows.data) return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage");
-    nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
-    if (source_dtype == nk_dtype_unknown_k) return false;
-    if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
-        return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
-    usearch_executor_handle_t call_executor;
-    typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments.executor,
-                                                                                 call_executor, outcome);
-    if (!executor) return false;
-    dense_walk_config_t walk {};
-    walk.expansion_factor = static_cast<u32_t>(arguments.expansion_factor);
-    walk.traversal = arguments.traversal == usearch_traversal_scan_k ? traversal_t::scan_k : traversal_t::walk_k;
-
-    // The runs' headers and the tape sit in the call's arena, which no engine rewinds.
-    thread_allocator_t const staging {arena.memory};
-    growing_buffer<run_t, thread_allocator_t> runs {staging};
-    growing_buffer<std::size_t, thread_allocator_t> offsets {staging}, cursors {staging}, scored {staging};
-    growing_buffer<usearch_key_t, thread_allocator_t> keys {staging};
-    growing_buffer<usearch_distance_t, thread_allocator_t> scores {staging};
-    if (failed(open_maxsim_runs(runs, *executor, staging)) || failed(offsets.resize(count + 1)) ||
-        failed(scored.resize_uninitialized(count)))
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-
-    us::dense::rows_view_t const all = rows_of(rows, query_offsets.back());
-    progress_ticks_t ticks {arguments.progress, count};
-    std::size_t const step = ticks.slice();
-    for (std::size_t first = 0; first != count;) {
-        std::size_t const taking = min_of(step, count - first);
-        std::span<std::size_t const> const chunk_offsets = query_offsets.subspan(first, taking + 1);
-        // Each chunk is one call of the verb, which rewinds the arenas once, so the runs restart
-        // empty and first allocate after it.
-        for (run_t& run : runs) run.reset();
-        maxsim_landing_t const landing {to_writable_span(runs), staging};
-        std::span<std::size_t> const chunk_scored = to_writable_span(scored).subspan(first, taking);
-        expected<usearch_traversal_stats_t> const found =
-            predicate.predicate.callback ? punned.verbs.maxsim_if(punned.index, all, chunk_offsets, *executor, walk,
-                                                                  arguments.wanted, chunk_scored, landing, predicate)
-                                         : punned.verbs.maxsim(punned.index, all, chunk_offsets, *executor, walk,
-                                                               arguments.wanted, chunk_scored, landing);
-        if (!crossed(found, arguments.stats, outcome)) return false;
-        for (std::size_t const query_scored : chunk_scored) required += query_scored;
-
-        // Each query landed whole on one thread in rank order, so per-query counts place every key.
-        for (run_t const& run : runs)
-            for (maxsim_match_t const& match : run) ++offsets[first + match.query + 1];
-        for (std::size_t query = first; query != first + taking; ++query) offsets[query + 1] += offsets[query];
-        std::size_t const landed = offsets[first + taking];
-        if (failed(keys.reserve(landed)) || failed(scores.reserve(landed)) ||
-            failed(cursors.resize_uninitialized(taking)))
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-        keys.extend_uninitialized(landed), scores.extend_uninitialized(landed);
-        for (std::size_t query = 0; query != taking; ++query) cursors[query] = offsets[first + query];
-        for (run_t const& run : runs)
-            for (maxsim_match_t const& match : run) {
-                std::size_t const slot = cursors[match.query]++;
-                keys[slot] = match.key, scores[slot] = match.score;
-            }
-        first += taking;
-        if (ticks(first, count) == continuation_t::cancel_k)
-            return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
-    }
-    landed_keys = keys.data(), landed_scores = scores.data(), landed_offsets = offsets.data();
-    return true;
-}
-
 #pragma endregion Multi Verbs
 
 /** What @c usearch_dense_cursor_t owns: the walk state of one variant, with no hold on its index,
  *  and the table whose entries step and free it, which outlives every index. */
 struct usearch_dense_cursor_handle_t {
-    dense_home_tables_t tables;
+    dense_variant_tables_t tables;
     void* walk = nullptr;
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
@@ -543,7 +470,7 @@ struct usearch_dense_cursor_handle_t {
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     u32_t busy = 0;
 
-    usearch_dense_cursor_handle_t(dense_home_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
+    usearch_dense_cursor_handle_t(dense_variant_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
         : tables(picked), opened_on(index) {}
     usearch_dense_cursor_handle_t(usearch_dense_cursor_handle_t const&) = delete;
     usearch_dense_cursor_handle_t& operator=(usearch_dense_cursor_handle_t const&) = delete;
@@ -552,11 +479,11 @@ struct usearch_dense_cursor_handle_t {
     }
 };
 
-/** What @c usearch_dense_refinement_t owns: one variant's plan with the donors it lands, which
+/** What @c usearch_dense_refinement_t owns: one variant's plan with the donors it absorbs, which
  *  keeps its index closed until it dies, and the caller's donor slots it nulls. */
 struct usearch_dense_refinement_handle_t {
-    dense_home_tables_t tables;
-    void* refining = nullptr;
+    dense_variant_tables_t tables;
+    void* refinement = nullptr;
 
     /** The handle and executor the refinement was opened with, only ever compared with the ones
      *  each call passes. */
@@ -567,14 +494,14 @@ struct usearch_dense_refinement_handle_t {
     usearch_dense_index_t* donors = nullptr;
     std::size_t count = 0;
 
-    usearch_dense_refinement_handle_t(dense_home_tables_t picked, usearch_dense_index_handle_t const* index,
+    usearch_dense_refinement_handle_t(dense_variant_tables_t picked, usearch_dense_index_handle_t const* index,
                                       usearch_executor_t executor, usearch_dense_index_t* slots,
                                       std::size_t slots_count) noexcept
         : tables(picked), opened_on(index), opened_with(executor), donors(slots), count(slots_count) {}
     usearch_dense_refinement_handle_t(usearch_dense_refinement_handle_t const&) = delete;
     usearch_dense_refinement_handle_t& operator=(usearch_dense_refinement_handle_t const&) = delete;
     ~usearch_dense_refinement_handle_t() noexcept {
-        if (refining) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refining); }, tables);
+        if (refinement) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refinement); }, tables);
     }
 };
 
@@ -587,39 +514,47 @@ static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_me
     metadata->metric = usearch_metric_of(nk_kernel_named(metric.data(), metric.size()));
 }
 
-/** Builds a handle from the geometry @p source holds, placed where @p placement names, and copies
+/** Builds a handle from the geometry @p source holds, placed where @p options name, and copies
  *  @p source into it; a failed or cancelled load frees the handle and leaves @c *index null. */
-template <typename source_type_, typename placement_type_>
-static void load_dense_index(source_type_ source, placement_type_ const& placement, usearch_executor_t executor,
+template <typename source_type_, typename residency_options_type_>
+static void load_dense_index(source_type_ source, residency_options_type_ const& options, usearch_executor_t executor,
                              usearch_progress_t progress, usearch_dense_index_t* index,
                              usearch_outcome_t* outcome) noexcept {
     *index = nullptr;
-    if (source.empty())
+    constexpr bool from_path_k = std::is_same_v<source_type_, std::string_view>;
+    bool const empty = [&]() noexcept {
+        if constexpr (from_path_k) return source.empty();
+        else return source.bytes.empty();
+    }();
+    if (empty)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
-    auto const [checkpoint, read_status] = safegraphs_read_metadata(source);
+    auto const [checkpoint, read_status] = [&]() noexcept {
+        if constexpr (from_path_k) return safegraphs_read_metadata(source);
+        else return safegraphs_read_metadata(source, copy_off_device);
+    }();
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
     // More parts than named devices keep a shard each, part `p` on device `p` modulo their count.
-    placement_type_ placed = placement;
+    residency_options_type_ placed = options;
     growing_buffer<int32_t> part_devices {global_allocator};
-    if constexpr (std::is_same_v<placement_type_, usearch_vram_options_t>)
-        if (checkpoint.parts > named_count(placement)) {
+    if constexpr (std::is_same_v<residency_options_type_, usearch_vram_options_t>)
+        if (checkpoint.parts > named_count(options)) {
             if (failed(part_devices.resize(checkpoint.parts)))
                 return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the parts' devices"),
                        void();
             for (std::size_t part = 0; part != part_devices.size(); ++part)
-                part_devices[part] = static_cast<int32_t>(named_ordinal(placement, part));
+                part_devices[part] = static_cast<int32_t>(named_ordinal(options, part));
             placed.devices = part_devices.data();
             placed.devices_count = checkpoint.parts;
         }
     usearch_dense_index_t const loaded = with_variant(geometry, placed, outcome);
     if (!loaded) return;
     bool filled = false;
-    visit_punned(*loaded, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(*loaded, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const typed = executor_of(punned, executor, call_executor,
-                                                                                  outcome);
+        typename punned_dense_index<residency_>::executor_t* const typed = executor_of(punned, executor, call_executor,
+                                                                                       outcome);
         if (!typed) return;
         progress_ticks_t ticks {progress, punned.verbs.shards_count(punned.index)};
         status_t const status = [&]() noexcept {
@@ -634,14 +569,13 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Collects the indexes of the @p count handles @p others names into @p indexes, each of the very
- *  variant @p punned is, waiting out the calls naming them first; false once @p outcome records why
- *  not. The handle @p self appears among them only when no @p refusal is named. */
-template <dense_home_t home_>
-static bool collect_variants(punned_dense_index<home_> const& punned, usearch_dense_index_t const* others,
-                             std::size_t count, usearch_dense_index_t self, char const* refusal,
-                             growing_buffer<void*>& indexes, usearch_outcome_t* outcome) noexcept {
-    if (failed(indexes.reserve_exactly(count))) return propagate_error(status_t::bad_alloc_k, outcome);
+/** Whether each of the @p count handles @p others names is of the very variant @p punned is,
+ *  waiting out the calls naming them first; false once @p outcome records why not. The handle
+ *  @p self appears among them only when no @p refusal is named. */
+template <vendored_residency_t residency_>
+static bool accepts_dense_variants(punned_dense_index<residency_> const& punned, usearch_dense_index_t const* others,
+                                   std::size_t count, usearch_dense_index_t self, char const* refusal,
+                                   usearch_outcome_t* outcome) noexcept {
     for (std::size_t position = 0; position != count; ++position) {
         usearch_dense_index_t const other = others[position];
         if (!other) return propagate_error(usearch_status_invalid_argument_k, outcome, "A handle must not be null");
@@ -649,14 +583,74 @@ static bool collect_variants(punned_dense_index<home_> const& punned, usearch_de
         if (other == self && refusal) return propagate_error(usearch_status_config_mismatch_k, outcome, refusal);
         // Every scalar, class and residency is a variant of its own, so another shape is another
         // table.
-        void* const index = same_punned_index(punned, *other);
-        if (!index)
+        if (!same_punned_index(punned, *other))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Every handle must share the index's residency, scalar and class");
         if (other != self) finish_calls_using(other);
-        indexes.push_back_reserved(index);
     }
     return true;
+}
+
+/** Collects the indexes of the @p count handles @p others names into @p indexes, once
+ *  @ref accepts_dense_variants admits them; false once @p outcome records why not. */
+template <vendored_residency_t residency_>
+static bool collect_variants(punned_dense_index<residency_> const& punned, usearch_dense_index_t const* others,
+                             std::size_t count, usearch_dense_index_t self, char const* refusal,
+                             growing_buffer<void*>& indexes, usearch_outcome_t* outcome) noexcept {
+    if (!accepts_dense_variants(punned, others, count, self, refusal, outcome)) return false;
+    if (failed(indexes.reserve_exactly(count))) return propagate_error(status_t::bad_alloc_k, outcome);
+    for (std::size_t position = 0; position != count; ++position) indexes.push_back_reserved(others[position]->index);
+    return true;
+}
+
+/** The variants behind the @p count handles @p others names, read in place. */
+inline variants_view_t view_dense_variants(usearch_dense_index_t const* others, std::size_t count) noexcept {
+    return {others, others ? count : 0, [](void const* handles, std::size_t position) noexcept -> void* {
+                usearch_dense_index_t const* const typed = static_cast<usearch_dense_index_t const*>(handles);
+                return typed[position]->index;
+            }};
+}
+
+/** The tape of @p count queries, @p stride pairs of room each, carved where @p arena hands outputs
+ *  out, on its device when it has one and on its host pages otherwise, its first offset zeroed
+ *  there; the verbs hand every window of it the whole keys and scores with its own offsets. */
+static expected<products_tape_t> carve_products_tape(usearch_arena_handle_t& arena, std::size_t count,
+                                                     std::size_t stride) noexcept {
+    using key_t = us::utilities::uuid_t;
+    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
+    std::size_t const room = count * stride;
+    products_tape_t tape;
+    tape.stride = stride;
+    std::size_t const base = 0;
+    std::size_t* offsets = nullptr;
+    key_t* keys = nullptr;
+    usearch_distance_t* scores = nullptr;
+    if (arena.device_memory) {
+        offsets = carve<std::size_t>(arena.device_memory, count + 1);
+        keys = carve<key_t>(arena.device_memory, room);
+        scores = carve<usearch_distance_t>(arena.device_memory, room);
+    }
+    else {
+        offsets = carve<std::size_t>(arena.memory, count + 1);
+        keys = carve<key_t>(arena.memory, room);
+        scores = carve<usearch_distance_t>(arena.memory, room);
+    }
+    if (!offsets || (room && (!keys || !scores))) return {tape, status_t::bad_alloc_k};
+    tape.offsets = {offsets, count + 1};
+    tape.keys = {keys, room};
+    tape.scores = {scores, room};
+    if (!arena.device_memory) {
+        tape.offsets.front() = base;
+        return {tape, status_t::success_k};
+    }
+    return {tape, drained(arena, arena.device_memory.upload(offsets, &base, sizeof(base)))};
+}
+
+/** The C tape over @p tape once every query published: the pairs @p written across the queries,
+ *  no keys or scores for none. */
+static usearch_matches_tape_view_t tape_view_of(products_tape_t const& tape, std::size_t written) noexcept {
+    return {written ? reinterpret_cast<usearch_key_t const*>(tape.keys.data()) : nullptr,
+            written ? tape.scores.data() : nullptr, tape.offsets.data()};
 }
 
 /** The one registry and resuming slot @c lib.hpp declares for every modality's calls, defined
@@ -781,11 +775,12 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
     if (submitted<usearch_dense_describe>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t const& handle = *arguments->index;
-    visit_punned(handle, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(handle, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
         usearch_dense_index_description_t& description = *arguments->description;
+        us::dense::geometry_t const geometry = punned.verbs.geometry(punned.index);
         description.metadata = {usearch_metric_of(punned.verbs.kernel(punned.index)),
-                                usearch_scalar_of(punned.verbs.dtype), punned.verbs.dimensions(punned.index),
-                                punned.verbs.connectivity(punned.index)};
+                                usearch_scalar_of(punned.verbs.dtype), geometry.dimensions,
+                                static_cast<std::size_t>(geometry.connectivity)};
         description.size = punned.verbs.size(punned.index);
         description.capacity = punned.verbs.capacity(punned.index);
         description.memory_usage = punned.verbs.memory_usage(punned.index);
@@ -801,15 +796,16 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     us::utilities::uuid_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        // The single key rides the batched lookup, which an NVMe view answers with one scan of its
-        // key columns.
-        propagate_error(punned.verbs.count(punned.index, {&key, 1}, {arguments->entries, 1}, *executor), outcome);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            // The single key rides the batched lookup, which an NVMe view answers with one scan of
+            // its key columns.
+            propagate_error(punned.verbs.count(punned.index, {&key, 1}, {arguments->entries, 1}, *executor), outcome);
+        });
 }
 
 #pragma endregion Introspection
@@ -821,7 +817,7 @@ USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
 static bool rejects_columns(usearch_dense_index_handle_t const& index, std::size_t count, std::size_t columns,
                             usearch_outcome_t* outcome) noexcept {
     std::size_t dimensions = 0;
-    std::visit([&](auto const* verbs) noexcept { dimensions = verbs->dimensions(index.index); }, index.tables);
+    std::visit([&](auto const* verbs) noexcept { dimensions = verbs->geometry(index.index).dimensions; }, index.tables);
     return count && columns != dimensions &&
            !propagate_error(usearch_status_shape_mismatch_k, outcome, "The rows' width differs from the index's");
 }
@@ -841,23 +837,24 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
                void();
     if (rejects_columns(*arguments->index, count, vectors.columns, outcome)) return;
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
         nk_dtype_t const source_dtype = rows_dtype_of(vectors.scalar, vectors.columns, outcome);
         if (source_dtype == nk_dtype_unknown_k) return;
         usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
         if (!executor) return;
-        using key_t = typename dense_verbs<home_>::key_t;
+        using key_t = typename dense_verbs<residency_>::key_t;
         static_assert(sizeof(key_t) == sizeof(usearch_key_t), "The engine reads the caller's keys in place");
         if (vectors.stride && vectors.stride < us::dense::packed_bytes(source_dtype, vectors.columns))
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
         nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
         progress_ticks_t ticks {arguments->progress, count};
-        expected<usearch_traversal_stats_t> const inserted = punned.verbs.insert(
-            punned.index, uuids, rows_of(vectors, count), ticks, *executor,
-            static_cast<u32_t>(arguments->expansion_factor));
+        insert_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+        expected<traversal_stats_t> const inserted = punned.verbs.insert(punned.index, uuids, rows_of(vectors, count),
+                                                                         config, *executor, ticks);
         if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -867,41 +864,41 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     usearch_traversal_stats_t* const stats = arguments->stats;
     if (stats) *stats = {};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
-        auto const [refined, refined_status] = punned.verbs.refine(
-            punned.index, *executor, static_cast<u32_t>(arguments->expansion_factor), ticks);
-        accumulate_stats(stats, refined);
-        // A stopped pass still healed, so its report stands beside the cancel.
-        if (failed(refined_status) && refined_status != status_t::cancelled_k)
-            return propagate_error(refined_status, outcome), void();
-        if (arguments->changed) *arguments->changed = refined.changed_nodes;
-        if (arguments->reachability)
-            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps, refined.health.back_sweeps};
-        if (failed(refined_status)) return propagate_error(refined_status, outcome), void();
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    if (arguments->report) *arguments->report = {};
+    visit_punned(*arguments->index,
+                 [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+                     usearch_executor_handle_t call_executor;
+                     typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                         punned, arguments->executor, call_executor, outcome);
+                     if (!executor) return;
+                     progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
+                     refine_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+                     auto const [refined, refined_status] = punned.verbs.refine(punned.index, config, *executor, ticks);
+                     accumulate_stats(stats, refined);
+                     // A stopped pass still healed, so its report stands beside the cancel.
+                     if (failed(refined_status) && refined_status != status_t::cancelled_k)
+                         return propagate_error(refined_status, outcome), void();
+                     write_refine_report(arguments->report, refined);
+                     if (failed(refined_status)) return propagate_error(refined_status, outcome), void();
+                     propagate_error(usearch_status_success_k, outcome, nullptr);
+                 });
 }
 
 USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
     if (submitted<usearch_dense_health>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->reachability = {};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        auto const [audit, status] = punned.verbs.health(punned.index, *executor);
-        if (failed(status)) return propagate_error(status, outcome), void();
-        *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            auto const [audit, status] = punned.verbs.health(punned.index, *executor);
+            if (failed(status)) return propagate_error(status, outcome), void();
+            *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
@@ -911,12 +908,13 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
-    predicate_t keyed {arguments->predicate};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        int const device = punned.verbs.device(punned.index, 0);
-        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+    predicate_t const predicate = predicate_of(arguments->predicate);
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
+        arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
+        if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          device, {arguments->queries.data}, outcome);
+                                                          residency, {arguments->queries.data}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         if (!wanted || !punned.verbs.size(punned.index)) {
@@ -932,25 +930,17 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
         }
         // A VRAM arena's matches are carved on its device, where the shards' rankings merge in
         // place.
-        auto [landing, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
+        auto [outputs, carve_status] = arena->device_memory ? carve_matches(arena->device_memory, count, wanted)
                                                             : carve_matches(arena->memory, count, wanted);
         if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
         bool const searched = match_dense_rows(
-            punned, arguments->executor, count, arguments->queries, 1, landing, arguments->expansion_factor,
-            arguments->progress, arguments->stats, outcome,
-            [&](auto rows, auto& executor, dense_walk_config_t walk, auto keys, auto distances, auto counts) noexcept {
-                walk.traversal = arguments->traversal == usearch_traversal_scan_k ? traversal_t::scan_k
-                                                                                  : traversal_t::walk_k;
-                if (!keyed.predicate.callback)
-                    return punned.verbs.search(punned.index, rows, executor, walk, keys, distances, counts);
-                // An expensive one stays the C struct, from which each call builds its own family.
-                if (keyed.predicate.cost == usearch_predicate_cost_expensive_k)
-                    return punned.verbs.search_if_expensive(punned.index, rows, executor, walk, keys, distances, counts,
-                                                            keyed.predicate);
-                return punned.verbs.search_if(punned.index, rows, executor, walk, keys, distances, counts, keyed);
+            punned, arguments->executor, count, arguments->queries, 1, outputs,
+            search_config_of(arguments->expansion_factor, arguments->traversal), arguments->progress, arguments->stats,
+            outcome, [&](auto rows, ranked_matches_span_t matches, search_config_t config, auto& executor) noexcept {
+                return punned.verbs.search(punned.index, rows, matches, config, predicate, executor);
             });
         if (!searched) return;
-        *arguments->matches = landing.view();
+        *arguments->matches = outputs.view();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -962,49 +952,39 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        std::size_t const dimensions = punned.verbs.dimensions(punned.index);
-        nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
-        if (target_dtype == nk_dtype_unknown_k) return;
-        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          punned.verbs.device(punned.index, 0), {}, outcome);
-        if (!arena) return;
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        // The single key rides the batched lookups, which size the landing first and fill it
-        // second.
-        std::size_t entries = 0;
-        if (status_t const counted = punned.verbs.count(punned.index, {&key, 1}, {&entries, 1}, *executor);
-            failed(counted))
-            return propagate_error(counted, outcome), void();
-        if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
-        std::byte* rows = carve<std::byte>(arena->memory, entries * row_bytes);
-        if (!rows) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        std::size_t total = 0;
-        us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
-        // Rows in another scalar than the stored one are read in the stored one first.
-        nk_dtype_t const stored_dtype = punned.verbs.dtype;
-        std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
-        std::byte* const stored = stored_dtype == target_dtype
-                                      ? rows
-                                      : carve<std::byte>(arena->memory, entries * stored_bytes);
-        if (!stored)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        if (status_t const got = punned.verbs.get(punned.index, {&key, 1},
-                                                  {stored, entries, dimensions, stored_bytes, stored_dtype}, target,
-                                                  entries, {&total, 1}, *executor);
-            failed(got))
-            return propagate_error(got, outcome, "Failed to export the rows"), void();
-        auto const [published, publish_status] = publish(*arena, rows, entries * row_bytes);
-        if (status_t const landed = drained(*arena, publish_status); failed(landed))
-            return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
-        *arguments->vectors = {published, row_bytes, dimensions, scalar};
-        if (arguments->written) *arguments->written = min_of(total, entries);
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            std::size_t const dimensions = punned.verbs.geometry(punned.index).dimensions;
+            nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
+            if (target_dtype == nk_dtype_unknown_k) return;
+            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                              punned.verbs.residency(punned.index, 0), {}, outcome);
+            if (!arena) return;
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            // The single key rides the batched lookups: they size the outputs, then fill them.
+            std::size_t entries = 0;
+            if (status_t const counted = punned.verbs.count(punned.index, {&key, 1}, {&entries, 1}, *executor);
+                failed(counted))
+                return propagate_error(counted, outcome), void();
+            if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+            std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
+            // Every residency casts into the rows itself, a device gathering into its arena.
+            std::byte* const rows = arena->device_memory ? carve<std::byte>(arena->device_memory, entries * row_bytes)
+                                                         : carve<std::byte>(arena->memory, entries * row_bytes);
+            if (!rows)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            std::size_t total = 0;
+            us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
+            if (status_t const got = punned.verbs.get(punned.index, {&key, 1}, target, {&total, 1}, entries, *executor);
+                failed(got))
+                return propagate_error(got, outcome, "Failed to export the rows"), void();
+            *arguments->vectors = {rows, row_bytes, dimensions, scalar};
+            if (arguments->written) *arguments->written = min_of(total, entries);
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
@@ -1033,16 +1013,17 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
     *arguments->cursor = nullptr;
     if (arguments->starts_count && !arguments->starts)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
-    if (arguments->starts_count)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
-               void();
     usearch_dense_index_handle_t const& handle = *arguments->index;
     usearch_dense_cursor_t const opened = new (std::nothrow) usearch_dense_cursor_handle_t(handle.tables, &handle);
     if (!opened)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     status_t const placed = std::visit(
         [&](auto const* verbs) noexcept {
-            auto const [walk, status] = verbs->cursor_open(handle.index);
+            using key_t = us::utilities::uuid_t;
+            static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Start keys cross as the walk reads them");
+            std::span<key_t const> const starts {reinterpret_cast<key_t const*>(arguments->starts),
+                                                 arguments->starts_count};
+            auto const [walk, status] = verbs->cursor_init(handle.index, starts);
             opened->walk = walk;
             return status;
         },
@@ -1064,36 +1045,40 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    if (arguments->links)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency pulls graph links yet"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {}, outcome);
+                                                      ram_residency_k, {}, outcome);
     if (!arena) return;
     fu::standard_atomic_ref<u32_t> const busy {arguments->cursor->busy};
     if (busy.fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
                void();
     // A handle never changes its variant, so it is still the one the cursor opened on.
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        using key_t = typename dense_verbs<home_>::key_t;
-        static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
-        if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
-        if (!keys) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
-        expected<std::size_t> const read = punned.verbs.cursor_next(punned.index, arguments->cursor->walk, identities,
-                                                                    *executor);
-        if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
-        if (read.value) {
-            *arguments->keys = {keys, sizeof(usearch_key_t)};
-            *arguments->written = read.value;
-        }
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            using key_t = typename dense_verbs<residency_>::key_t;
+            static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
+            if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
+            if (!keys)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
+            links_outputs_t links {arena->memory};
+            if (arguments->links && failed(links.open()))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            expected<std::size_t> const read = punned.verbs.cursor_next(
+                punned.index, arguments->cursor->walk, identities, arguments->links ? &links : nullptr, *executor);
+            if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
+            if (arguments->links) *arguments->links = links.tape();
+            if (read.value) {
+                *arguments->keys = {keys, sizeof(usearch_key_t)};
+                *arguments->written = read.value;
+            }
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
     busy.clear_bits(1, std::memory_order_release);
 }
 
@@ -1106,35 +1091,36 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     if (submitted<usearch_dense_absorb>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     if (arguments->stats) *arguments->stats = {};
+    if (arguments->report) *arguments->report = {};
     if (arguments->count && !arguments->donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        growing_buffer<void*> donors {global_allocator};
-        if (!collect_variants(punned, arguments->donors, arguments->count, arguments->index,
-                              "An index cannot absorb itself", donors, outcome))
-            return;
-        std::size_t population = punned.verbs.size(punned.index);
-        for (void* const donor : donors) population += punned.verbs.size(donor);
-        progress_ticks_t ticks {arguments->progress, population};
-        auto const [refined, status] = punned.verbs.absorb(punned.index, to_writable_span(donors), *executor,
-                                                           static_cast<u32_t>(arguments->expansion_factor), ticks);
-        // The engine nulls every donor it consumed; their handles go with them.
-        for (std::size_t position = 0; position != arguments->count; ++position)
-            if (!donors[position]) delete std::exchange(arguments->donors[position], nullptr);
-        accumulate_stats(arguments->stats, refined);
-        // A stopped closing refine still healed, so its report stands beside the cancel.
-        if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
-        if (arguments->changed) *arguments->changed = refined.changed_nodes;
-        if (arguments->reachability)
-            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps, refined.health.back_sweeps};
-        if (failed(status)) return propagate_error(status, outcome), void();
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(*arguments->index,
+                 [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+                     usearch_executor_handle_t call_executor;
+                     typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                         punned, arguments->executor, call_executor, outcome);
+                     if (!executor) return;
+                     growing_buffer<void*> donors {global_allocator};
+                     if (!collect_variants(punned, arguments->donors, arguments->count, arguments->index,
+                                           "An index cannot absorb itself", donors, outcome))
+                         return;
+                     std::size_t population = punned.verbs.size(punned.index);
+                     for (void* const donor : donors) population += punned.verbs.size(donor);
+                     progress_ticks_t ticks {arguments->progress, population};
+                     refine_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+                     auto const [refined, status] = punned.verbs.absorb(punned.index, to_writable_span(donors), config,
+                                                                        *executor, ticks);
+                     // The engine nulls every donor it consumed; their handles go with them.
+                     for (std::size_t position = 0; position != arguments->count; ++position)
+                         if (!donors[position]) delete std::exchange(arguments->donors[position], nullptr);
+                     accumulate_stats(arguments->stats, refined);
+                     // A stopped closing refine still healed: its report stands beside the cancel.
+                     if (failed(status) && status != status_t::cancelled_k)
+                         return propagate_error(status, outcome), void();
+                     write_refine_report(arguments->report, refined);
+                     if (failed(status)) return propagate_error(status, outcome), void();
+                     propagate_error(usearch_status_success_k, outcome, nullptr);
+                 });
 }
 
 USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
@@ -1143,12 +1129,14 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
     if (arguments->executor) run_held(*arguments->executor, ~std::size_t {0});
     call_outcome_t outcome(arguments->outcome);
     if (arguments->stats) *arguments->stats = {};
+    if (arguments->report) *arguments->report = {};
     if (arguments->count && !arguments->sources)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The sources must name handles"), void();
-    visit_punned(*arguments->target, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(*arguments->target, [&]<vendored_residency_t residency_>(
+                                         punned_dense_index<residency_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
         if (!executor) return;
         growing_buffer<void*> sources {global_allocator};
         if (!collect_variants(punned, arguments->sources, arguments->count, arguments->target, nullptr, sources,
@@ -1160,7 +1148,7 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
         config.shard_capacity = arguments->shard_capacity;
         config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
         progress_ticks_t ticks {arguments->progress, population};
-        auto const [compacted, status] = punned.verbs.compact(punned.index, to_span(sources), *executor, config, ticks);
+        auto const [compacted, status] = punned.verbs.compact(punned.index, to_span(sources), config, *executor, ticks);
         // Only a whole compaction consumed every other source; a failure frees none of them.
         if (succeeded(status) || status == status_t::cancelled_k)
             for (std::size_t position = 0; position != arguments->count; ++position)
@@ -1168,10 +1156,7 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
                     delete std::exchange(arguments->sources[position], nullptr);
         accumulate_stats(arguments->stats, compacted.graph);
         if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
-        if (arguments->changed) *arguments->changed = compacted.graph.changed_nodes;
-        if (arguments->reachability)
-            *arguments->reachability = {compacted.graph.health.audited_nodes, compacted.graph.health.reachable_nodes,
-                                        compacted.graph.health.sweeps, compacted.graph.health.back_sweeps};
+        write_refine_report(arguments->report, compacted.graph);
         if (failed(status)) return propagate_error(status, outcome), void();
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -1194,26 +1179,28 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
     if (arguments->receivers_count && (arguments->receivers_count < 2 || !arguments->receivers))
         return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
                void();
-    if (arguments->receivers_count)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet"), void();
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
         if (!executor) return;
-        growing_buffer<void*> donors {global_allocator};
-        if (!collect_variants(punned, arguments->donors, arguments->count, arguments->index,
-                              "An index cannot absorb itself", donors, outcome))
+        if (!accepts_dense_variants(punned, arguments->donors, arguments->count, arguments->index,
+                                    "An index cannot absorb itself", outcome) ||
+            !accepts_dense_variants(punned, arguments->receivers, arguments->receivers_count, arguments->index,
+                                    "An index cannot split into itself", outcome))
             return;
         usearch_dense_refinement_t const opened = new (std::nothrow) usearch_dense_refinement_handle_t(
             arguments->index->tables, arguments->index, arguments->executor, arguments->donors, arguments->count);
         if (!opened)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
                    void();
-        auto const [refining, status] = punned.verbs.refinement_open(punned.index, to_span(donors), *executor,
-                                                                     static_cast<u32_t>(arguments->expansion_factor));
+        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        auto const [refinement, status] = punned.verbs.refinement_init(
+            punned.index, view_dense_variants(arguments->donors, arguments->count),
+            view_dense_variants(arguments->receivers, arguments->receivers_count), config, *executor);
         if (failed(status)) return delete opened, propagate_error(status, outcome), void();
-        opened->refining = refining;
+        opened->refinement = refinement;
         *arguments->refinement = opened;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -1222,7 +1209,7 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
 USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
     if (submitted<usearch_dense_refinement_next>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->reselected) *arguments->reselected = 0;
     if (arguments->changed) *arguments->changed = 0;
     if (arguments->stats) *arguments->stats = {};
     usearch_dense_refinement_t const refinement = arguments->refinement;
@@ -1232,31 +1219,33 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
-        status_t const ran = punned.verbs.refinement_run(punned.index, refinement->refining, *executor, ticks);
-        // The plan nulls every donor it landed; their handles go with them.
-        for (std::size_t position = 0; position != refinement->count; ++position)
-            if (refinement->donors[position] && punned.verbs.refinement_landed(refinement->refining, position))
-                delete std::exchange(refinement->donors[position], nullptr);
-        // Running totals, so a cancelled or failed call still says how far the pass got.
-        us::dense::refine_result_t const refined = punned.verbs.refinement_running(refinement->refining);
-        if (arguments->visited) *arguments->visited = refined.reselected_nodes;
-        if (arguments->changed) *arguments->changed = refined.changed_nodes;
-        accumulate_stats(arguments->stats, refined);
-        if (failed(ran)) return propagate_error(ran, outcome), void();
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
+            status_t const ran = punned.verbs.refinement_next(punned.index, refinement->refinement, *executor, ticks);
+            // The plan nulls every donor it consumed; their handles go with them.
+            for (std::size_t position = 0; position != refinement->count; ++position)
+                if (refinement->donors[position] && punned.verbs.refinement_consumed(refinement->refinement, position))
+                    delete std::exchange(refinement->donors[position], nullptr);
+            // Running totals, so a cancelled or failed call still says how far the pass got.
+            refine_report_t const refined = punned.verbs.refinement_running(refinement->refinement);
+            if (arguments->reselected) *arguments->reselected = refined.reselected_nodes;
+            if (arguments->changed) *arguments->changed = refined.changed_nodes;
+            accumulate_stats(arguments->stats, refined);
+            if (failed(ran)) return propagate_error(ran, outcome), void();
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments) {
     if (submitted<usearch_dense_refinement_finish>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     if (arguments->stats) *arguments->stats = {};
+    if (arguments->report) *arguments->report = {};
     // Freed whatever the call answers; a plan dying unfinished reopens its index.
     std::unique_ptr<usearch_dense_refinement_handle_t> const refinement {arguments->refinement};
     if (!refinement)
@@ -1265,18 +1254,16 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The refinement was opened on another index or executor"),
                void();
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
         usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
         if (!executor) return;
-        auto const [refined, status] = punned.verbs.refinement_finish(punned.index, refinement->refining, *executor);
+        auto const [refined, status] = punned.verbs.refinement_finish(punned.index, refinement->refinement, *executor);
         accumulate_stats(arguments->stats, refined);
         if (failed(status)) return propagate_error(status, outcome), void();
-        if (arguments->changed) *arguments->changed = refined.changed_nodes;
-        if (arguments->reachability)
-            *arguments->reachability = {refined.health.audited_nodes, refined.health.reachable_nodes,
-                                        refined.health.sweeps, refined.health.back_sweeps};
+        write_refine_report(arguments->report, refined);
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -1284,23 +1271,66 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
 USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     if (submitted<usearch_dense_sample>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->keys = {};
-    *arguments->links = {};
-    *arguments->written = 0;
-    if (arguments->stats) *arguments->stats = {};
-    propagate_error(usearch_status_unsupported_k, outcome, "No residency samples yet");
+    reset_sample(*arguments);
+    if (!accepts_sample(*arguments, outcome)) return;
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            using key_t = typename dense_verbs<residency_>::key_t;
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            // The draws land on the arena's host pages wherever it lives; a device index
+            // refuses them below.
+            usearch_arena_handle_t* const arena = claim_arena(
+                arguments->arena, arguments->outcome, arguments->executor, punned.verbs.residency(punned.index, 0),
+                {arguments->shown.data, arguments->shown_coordinates.data, arguments->focus.data}, outcome);
+            if (!arena) return;
+            auto const [inputs, view_status] = view_sample<key_t>(*arguments, arena->memory);
+            auto const [staging, carve_status] = carve_sample(arena->memory, arguments->wanted);
+            if (failed(view_status) || failed(carve_status))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            sample_config_t const config {arguments->seed, arguments->expansion_factor};
+            auto const [sampled, status] = punned.verbs.sample(punned.index, inputs, staging.template outputs<key_t>(),
+                                                               config, *executor);
+            if (failed(status)) return propagate_error(status, outcome), void();
+            progress_ticks_t ticks {arguments->progress, arguments->wanted};
+            if (sampled.written && ticks(sampled.written, arguments->wanted) == continuation_t::cancel_k)
+                return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the work"),
+                       void();
+            publish_sample(*arguments, staging, sampled);
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments) {
     if (submitted<usearch_dense_split>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    if (arguments->changed) *arguments->changed = 0;
-    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->report) *arguments->report = {};
     if (arguments->stats) *arguments->stats = {};
     if (arguments->count < 2 || !arguments->receivers)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
                void();
-    propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet");
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
+        if (!executor) return;
+        if (!accepts_dense_variants(punned, arguments->receivers, arguments->count, arguments->index,
+                                    "An index cannot split into itself", outcome))
+            return;
+        progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
+        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        auto const [refined, status] = punned.verbs.split(
+            punned.index, view_dense_variants(arguments->receivers, arguments->count), config, *executor, ticks);
+        accumulate_stats(arguments->stats, refined);
+        // A stopped closing refine still healed, so its report stands beside the cancel.
+        if (failed(status) && status != status_t::cancelled_k) return propagate_error(status, outcome), void();
+        write_refine_report(arguments->report, refined);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 #pragma endregion Cursors and Absorbing
@@ -1316,81 +1346,60 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
     if (arguments->required) *arguments->required = 0;
     if (arguments->stats) *arguments->stats = {};
     if (rejects_columns(*arguments->index, count, arguments->left.columns, outcome)) return;
-    predicate_t keyed {arguments->predicate};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        int const device = punned.verbs.device(punned.index, 0);
-        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
-        if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
-            return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                   "A product is a dot, so the kind must be inner product"),
-                   void();
-        if (arguments->traversal == usearch_traversal_scan_k)
-            return propagate_error(usearch_status_unsupported_k, outcome,
-                                   "No residency multiplies by an exact scan yet"),
-                   void();
-        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          device, {arguments->left.data}, outcome);
-        if (!arena) return;
-        if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        using key_t = typename dense_verbs<home_>::key_t;
-        static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-        // A query's scored count lands one past its offset, which it becomes once compacted.
-        std::size_t* offsets = carve<std::size_t>(arena->memory, count + 1);
-        if (!offsets)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        std::span<std::size_t> const scored {offsets + 1, count};
-        usearch_key_t* keys = nullptr;
-        usearch_distance_t* scores = nullptr;
-        // Every query keeps the pairs its walks scored until `width` of them fill its row,
-        // compacted once the counts are known.
-        auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
-            keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
-            scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
-            if (width && (!keys || !scores))
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-            nk::matrix_span<key_t> const kept_keys {reinterpret_cast<key_t*>(keys), count, width};
-            nk::matrix_span<f64_t> const kept_scores {scores, count, width};
-            auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
-                            dense_walk_config_t config, std::size_t resolved, std::size_t taking) noexcept {
-                nk::range_t const chunk = nk::range(resolved, resolved + taking);
-                if (keyed.predicate.callback)
-                    return punned.verbs.multiply_if(punned.index, chunk_rows, executor, config,
-                                                    kept_keys(chunk, nk::slice), kept_scores(chunk, nk::slice),
-                                                    scored.subspan(resolved, taking), keyed);
-                return punned.verbs.multiply(punned.index, chunk_rows, executor, config, kept_keys(chunk, nk::slice),
-                                             kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
+    predicate_t const predicate = predicate_of(arguments->predicate);
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
+            if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
+            if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
+                return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                       "A product is a dot, so the kind must be inner product"),
+                       void();
+            if (residency != ram_residency_k && arguments->traversal == usearch_traversal_scan_k)
+                return propagate_error(usearch_status_unsupported_k, outcome,
+                                       "No device residency multiplies by an exact scan yet"),
+                       void();
+            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                              residency, {arguments->left.data}, outcome);
+            if (!arena) return;
+            if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+            // The scored counts stay on the host, where the written and required totals sum.
+            std::size_t* const scored = carve<std::size_t>(arena->memory, count);
+            if (!scored)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            products_tape_t tape;
+            // Every query keeps up to `width` of the pairs its walks scored, from its offset.
+            auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
+                auto const [carved, carve_status] = carve_products_tape(*arena, count, width);
+                if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena");
+                tape = carved;
+                auto sink = [&](us::dense::rows_view_t chunk_rows,
+                                typename punned_dense_index<residency_>::executor_t& executor, search_config_t config,
+                                std::size_t resolved, std::size_t taking) noexcept {
+                    products_tape_t const window {tape.keys, tape.scores, tape.offsets.subspan(resolved, taking + 1),
+                                                  width};
+                    return punned.verbs.multiply(punned.index, chunk_rows, window, {scored + resolved, taking}, config,
+                                                 predicate, executor);
+                };
+                return for_each_dense_chunk(punned, arguments->executor, count, arguments->left, 1,
+                                            search_config_of(arguments->expansion_factor, arguments->traversal),
+                                            progress, arguments->stats, outcome, sink);
             };
-            return for_each_dense_chunk(punned, arguments->executor, count, arguments->left, 1,
-                                        arguments->expansion_factor, progress, arguments->stats, outcome, sink);
-        };
-        // Keeping every pair needs the widest query first, which only a counting walk can tell.
-        std::size_t width = arguments->wanted;
-        if (!width) {
-            if (!walk(0, usearch_progress_t {})) return;
-            for (std::size_t const query_scored : scored) width = max_of(width, query_scored);
-        }
-        if (!walk(width, arguments->progress)) return;
-
-        std::size_t required = 0;
-        offsets[0] = 0;
-        for (std::size_t query = 0; query != count; ++query) {
-            std::size_t const query_scored = offsets[query + 1], kept = min_of(query_scored, width);
-            required += query_scored;
-            offsets[query + 1] = offsets[query] + kept;
-            if (!kept) continue;
-            // A run starts no later than its own row, so moving rows in order overwrites only rows
-            // already moved.
-            std::memmove(keys + offsets[query], keys + query * width, kept * sizeof(usearch_key_t));
-            std::memmove(scores + offsets[query], scores + query * width, kept * sizeof(usearch_distance_t));
-        }
-        auto const [products, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
-        if (failed(publish_status))
-            return propagate_error(publish_status, outcome, "Failed to land the products on the device"), void();
-        *arguments->products = products;
-        if (arguments->written) *arguments->written = offsets[count];
-        if (arguments->required) *arguments->required = required;
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+            // Keeping every pair needs the widest query first, which only a counting walk can tell.
+            std::size_t width = arguments->wanted;
+            if (!width) {
+                if (!walk(0, usearch_progress_t {})) return;
+                for (std::size_t const query_scored : std::span {scored, count}) width = max_of(width, query_scored);
+            }
+            if (!walk(width, arguments->progress)) return;
+            std::size_t written = 0, required = 0;
+            for (std::size_t const query_scored : std::span {scored, count})
+                written += min_of(query_scored, width), required += query_scored;
+            *arguments->products = tape_view_of(tape, written);
+            if (arguments->written) *arguments->written = written;
+            if (arguments->required) *arguments->required = required;
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 static_assert(sizeof(us::dense::softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
@@ -1414,54 +1423,55 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (rejects_columns(*arguments->index, count, columns, outcome)) return;
     std::size_t const row_bytes = us::dense::packed_bytes(outputs_dtype, columns);
     f32_t const requested_scale = arguments->score_scale;
-    predicate_t keyed {arguments->predicate};
+    predicate_t const predicate = predicate_of(arguments->predicate);
 
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        int const device = punned.verbs.device(punned.index, 0);
-        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
+        arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
+        if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
         if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "A softmax weighs logits, so the kind must be inner product"),
                    void();
-        if (arguments->traversal == usearch_traversal_scan_k)
-            return propagate_error(usearch_status_unsupported_k, outcome, "No residency attends by an exact scan yet"),
-                   void();
+        if constexpr (residency_ != vendored_residency_t::ram_k && residency_ != vendored_residency_t::nvme_k)
+            if (arguments->traversal == usearch_traversal_scan_k)
+                return propagate_error(usearch_status_unsupported_k, outcome,
+                                       "No device residency attends by an exact scan yet"),
+                       void();
         if (!arguments->value_lookup)
             return propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set"), void();
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          device, {arguments->queries.data, carry}, outcome);
+                                                          residency, {arguments->queries.data, carry}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        // A VRAM arena's outputs are carved on its device, where the shards' merge lands them in
+        // A VRAM arena's outputs are carved on its device, where the shards' merge writes them in
         // place.
-        std::byte* const landing = arena->device_memory ? carve<std::byte>(arena->device_memory, count * row_bytes)
-                                                        : carve<std::byte>(arena->memory, count * row_bytes);
-        if (!landing)
+        std::byte* const output_bytes = arena->device_memory ? carve<std::byte>(arena->device_memory, count * row_bytes)
+                                                             : carve<std::byte>(arena->memory, count * row_bytes);
+        if (!output_bytes)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
         value_lookup_t const value_lookup {arguments->value_lookup, arguments->value_lookup_state,
                                            usearch_scalar_of(punned.verbs.dtype), columns};
-        us::dense::rows_span_t const outputs {landing, count, columns, row_bytes, outputs_dtype};
+        us::dense::rows_span_t const outputs {output_bytes, count, columns, row_bytes, outputs_dtype};
         // The engine's carry mirrors the C one, so it writes the caller's states in place.
         std::span<us::dense::softmax_state_t> const carried {reinterpret_cast<us::dense::softmax_state_t*>(carry),
                                                              carry ? count : 0};
-        f32_t const score_scale = requested_scale > 0
-                                      ? requested_scale
-                                      : 1 / std::sqrt(static_cast<f32_t>(punned.verbs.dimensions(punned.index)));
-        auto sink = [&](us::dense::rows_view_t chunk_rows, typename punned_dense_index<home_>::executor_t& executor,
-                        dense_walk_config_t config, std::size_t resolved, std::size_t taking) noexcept {
-            std::span<us::dense::softmax_state_t> const chunk_carry = carried.empty()
-                                                                          ? carried
-                                                                          : carried.subspan(resolved, taking);
-            if (keyed.predicate.callback)
-                return punned.verbs.attend_if(punned.index, chunk_rows, head_count, value_lookup, score_scale,
-                                              outputs.slice(resolved, taking), chunk_carry, executor, config, keyed);
-            return punned.verbs.attend(punned.index, chunk_rows, head_count, value_lookup, score_scale,
-                                       outputs.slice(resolved, taking), chunk_carry, executor, config);
+        f32_t const score_scale =
+            requested_scale > 0 ? requested_scale
+                                : 1 / std::sqrt(static_cast<f32_t>(punned.verbs.geometry(punned.index).dimensions));
+        auto sink = [&](us::dense::rows_view_t chunk_rows,
+                        typename punned_dense_index<residency_>::executor_t& executor, search_config_t config,
+                        std::size_t resolved, std::size_t taking) noexcept {
+            attention_arguments_t const attention {head_count, value_lookup, score_scale,
+                                                   outputs.slice(resolved, taking),
+                                                   carried.empty() ? carried : carried.subspan(resolved, taking)};
+            return punned.verbs.attend(punned.index, chunk_rows, attention, config, predicate, executor);
         };
         if (!for_each_dense_chunk(punned, arguments->executor, count, arguments->queries, head_count,
-                                  arguments->expansion_factor, arguments->progress, arguments->stats, outcome, sink))
+                                  search_config_of(arguments->expansion_factor, arguments->traversal),
+                                  arguments->progress, arguments->stats, outcome, sink))
             return;
-        *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
+        *arguments->outputs = {output_bytes, row_bytes, columns, outputs_scalar};
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -1476,16 +1486,17 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (arguments->required) *arguments->required = 0;
     if (!arguments->query_offsets && !rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
-    predicate_t keyed {arguments->predicate};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        int const device = punned.verbs.device(punned.index, 0);
-        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
+    predicate_t const predicate = predicate_of(arguments->predicate);
+    visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
+                                        punned_dense_index<residency_> punned) noexcept {
+        arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
+        if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
         if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Late interaction sums maxima over logits, so the kind must be inner product"),
                    void();
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          device, {arguments->queries.data}, outcome);
+                                                          residency, {arguments->queries.data}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         // Uniform queries become offsets in the arena, so every residency reads one layout.
@@ -1497,17 +1508,60 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                                                           count + 1};
         if (!accepts_query_offsets(query_offsets, outcome)) return;
         if (rejects_columns(*arguments->index, query_offsets.back(), arguments->queries.columns, outcome)) return;
-        usearch_key_t* keys = nullptr;
-        usearch_distance_t* scores = nullptr;
-        std::size_t* offsets = nullptr;
-        std::size_t required = 0;
-        if (!maxsim_queries(punned, *arguments, query_offsets, keyed, *arena, keys, scores, offsets, required, outcome))
-            return;
-        auto const [matches, publish_status] = publish_matches(*arena, keys, scores, offsets, count);
-        if (failed(publish_status))
-            return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
-        *arguments->matches = matches;
-        if (arguments->written) *arguments->written = offsets[count];
+        usearch_rows_view_t const& rows = arguments->queries;
+        if (!rows.data)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage"), void();
+        nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
+        if (source_dtype == nk_dtype_unknown_k) return;
+        if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
+            return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
+                   void();
+        usearch_executor_handle_t call_executor;
+        typename punned_dense_index<residency_>::executor_t* const executor = executor_of(punned, arguments->executor,
+                                                                                          call_executor, outcome);
+        if (!executor) return;
+        // A zero `wanted` keeps every key a query scores, which the tape holds room for: every key
+        // under a scan, else every row's breadth on every shard, of the longest query.
+        std::size_t const wanted = arguments->wanted;
+        std::size_t stride = wanted;
+        if (!wanted && arguments->traversal == usearch_traversal_scan_k) stride = punned.verbs.size(punned.index);
+        else if (!wanted) {
+            std::size_t const connectivity = punned.verbs.geometry(punned.index).connectivity;
+            std::size_t const breadth = arguments->expansion_factor ? arguments->expansion_factor
+                                                                    : default_expansion_factor(connectivity);
+            std::size_t longest = 0;
+            for (std::size_t query = 0; query != count; ++query)
+                longest = max_of(longest, query_offsets[query + 1] - query_offsets[query]);
+            stride = longest * punned.verbs.shards_count(punned.index) * breadth;
+        }
+        auto const [tape, carve_status] = carve_products_tape(*arena, count, stride);
+        // The scored counts and each chunk's rebased offsets stay on the host.
+        std::size_t* const scored = carve<std::size_t>(arena->memory, count);
+        std::size_t* const rebased = carve<std::size_t>(arena->memory, count + 1);
+        if (failed(carve_status) || !scored || !rebased)
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        search_config_t const config = search_config_of(arguments->expansion_factor, arguments->traversal);
+        us::dense::rows_view_t const all = rows_of(rows, query_offsets.back());
+        progress_ticks_t ticks {arguments->progress, count};
+        std::size_t const step = ticks.slice();
+        for (std::size_t first = 0; first != count;) {
+            std::size_t const taking = min_of(step, count - first), first_row = query_offsets[first];
+            for (std::size_t query = 0; query <= taking; ++query)
+                rebased[query] = query_offsets[first + query] - first_row;
+            products_tape_t const window {tape.keys, tape.scores, tape.offsets.subspan(first, taking + 1), stride};
+            expected<traversal_stats_t> const found = punned.verbs.maxsim(
+                punned.index, maxsim_queries_view_t {all.slice(first_row, rebased[taking]), {rebased, taking + 1}},
+                window, {scored + first, taking}, wanted, config, predicate, *executor);
+            if (!crossed(found, arguments->stats, outcome)) return;
+            first += taking;
+            if (ticks(first, count) == continuation_t::cancel_k)
+                return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call"), void();
+        }
+        std::size_t written = 0, required = 0;
+        for (std::size_t const query_scored : std::span {scored, count})
+            written += min_of(query_scored, stride), required += query_scored;
+        *arguments->matches = tape_view_of(tape, written);
+        if (arguments->written) *arguments->written = written;
         if (arguments->required) *arguments->required = required;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
@@ -1534,21 +1588,16 @@ USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    load_dense_index(as_bytes(arguments->buffer), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->index, outcome);
+    load_dense_index(checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->executor,
+                     arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    // The headers parse on the host, so a checkpoint on an NVIDIA or AMD device, where a VRAM
-    // `usearch_dense_save_buffer` lands it, is read back first; Apple's unified memory is read in
-    // place.
-    bytes_view_t source = as_bytes(arguments->buffer);
-    growing_buffer<byte_t> staged {global_allocator};
-    if (status_t const read = stage_on_host(source, staged); failed(read))
-        return propagate_error(read, outcome, "Failed to read the buffer off its device"), void();
-    load_dense_index(source, arguments->vram, arguments->executor, arguments->progress, arguments->index, outcome);
+    // A VRAM `usearch_dense_save_buffer` leaves its checkpoint on the device, where it is read.
+    load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, arguments->executor,
+                     arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
@@ -1556,44 +1605,46 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
-        propagate_error(punned.verbs.save(punned.index, as_text(arguments->path), *executor, ticks), outcome);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
+            propagate_error(punned.verbs.save(punned.index, as_text(arguments->path), *executor, ticks), outcome);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
     if (submitted<usearch_dense_save_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->monolith = {};
-    visit_punned(*arguments->index, [&]<dense_home_t home_>(punned_dense_index<home_> punned) noexcept {
-        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          punned.verbs.device(punned.index, 0), {}, outcome);
-        if (!arena) return;
-        usearch_executor_handle_t call_executor;
-        typename punned_dense_index<home_>::executor_t* const executor = executor_of(punned, arguments->executor,
-                                                                                     call_executor, outcome);
-        if (!executor) return;
-        auto const [length, status] = punned.verbs.storage_requirements(punned.index);
-        if (failed(status)) return propagate_error(status, outcome), void();
-        std::byte* checkpoint = carve<std::byte>(arena->memory, length);
-        if (!checkpoint)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-        progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
-        status_t const saved = punned.verbs.save_buffer(punned.index, bytes_span_t {checkpoint, length}, *executor,
-                                                        ticks);
-        if (failed(saved)) return propagate_error(saved, outcome), void();
-        // A VRAM checkpoint is written on the host, then lands on the arena's device in one upload.
-        auto const [published, publish_status] = publish(*arena, checkpoint, length);
-        if (status_t const landed = drained(*arena, publish_status); failed(landed))
-            return propagate_error(landed, outcome, "Failed to land the checkpoint on the device"), void();
-        *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    visit_punned(
+        *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
+            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                              punned.verbs.residency(punned.index, 0), {}, outcome);
+            if (!arena) return;
+            usearch_executor_handle_t call_executor;
+            typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            auto const [length, status] = punned.verbs.storage_requirements(punned.index);
+            if (failed(status)) return propagate_error(status, outcome), void();
+            std::byte* checkpoint = carve<std::byte>(arena->memory, length);
+            if (!checkpoint)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
+            status_t const saved = punned.verbs.save_buffer(punned.index, bytes_span_t {checkpoint, length}, *executor,
+                                                            ticks);
+            if (failed(saved)) return propagate_error(saved, outcome), void();
+            // A VRAM checkpoint is written on the host, then uploaded to the arena's device.
+            auto const [published, publish_status] = publish(*arena, checkpoint, length);
+            if (status_t const published = drained(*arena, publish_status); failed(published))
+                return propagate_error(published, outcome, "Failed to copy the checkpoint to the device"), void();
+            *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        });
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
@@ -1636,12 +1687,12 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     *arguments->arena = nullptr;
     usearch_arena_t const arena = new (std::nothrow) usearch_arena_handle_t {};
     if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
-    // A VRAM executor lands its outputs on its vendor's first stream; every other executor computes
-    // on the host.
+    // A VRAM executor writes its outputs on its vendor's first stream; every other executor
+    // computes on the host.
     if (arguments->executor)
         if (gpu_executor_t* const devices = std::get_if<gpu_executor_t>(&arguments->executor->executor)) {
             arena->device_memory = gpu_arena_t::on(*devices);
-            arena->device = arena->device_memory.device();
+            arena->residency = vram_residency(static_cast<std::size_t>(arena->device_memory.device()));
             arena->executor = arguments->executor;
         }
     *arguments->arena = arena;
@@ -1713,14 +1764,14 @@ USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
     std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
     for (std::size_t position = 0; position != copied; ++position) {
         gpu_device_t const& device = listed[position];
-        usearch_gpu_device_t& landed = arguments->devices[position];
-        landed = {static_cast<usearch_gpu_vendor_t>(device.vendor),
-                  device.vendor_ordinal,
-                  static_cast<usearch_gpu_class_t>(gpu_class_of(device)),
-                  device.compute_units,
-                  device.memory_bytes,
-                  {}};
-        std::memcpy(landed.name, device.name, sizeof(landed.name));
+        usearch_gpu_device_t& entry = arguments->devices[position];
+        entry = {static_cast<usearch_gpu_vendor_t>(device.vendor),
+                 device.vendor_ordinal,
+                 static_cast<usearch_gpu_class_t>(gpu_class_of(device)),
+                 device.compute_units,
+                 device.memory_bytes,
+                 {}};
+        std::memcpy(entry.name, device.name, sizeof(entry.name));
     }
     if (arguments->devices_count) *arguments->devices_count = listed.size();
     propagate_error(usearch_status_success_k, outcome, nullptr);

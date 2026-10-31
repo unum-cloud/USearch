@@ -58,7 +58,7 @@ u32_t claim_capacity(std::size_t count) noexcept {
             atomic_ref<std::ptrdiff_t>(remaining_capacity).fetch_sub(count, std::memory_order_acquire);
         std::ptrdiff_t const new_remaining = old_remaining - static_cast<std::ptrdiff_t>(count);
         if (old_remaining >= 0 && new_remaining < 0) {
-            // Elected: the one grower until its release lands.
+            // Elected: the one grower until its release arrives.
             chunks_count += 1;
             u32_t const first = atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acq_rel);
             verify(first + count <= chunks_count * rows_per_chunk_k);

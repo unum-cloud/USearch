@@ -344,22 +344,25 @@ let mut before_the_deadline = move |_finished: usize, _total: usize| match Insta
     true => ControlFlow::Continue(()),
     false => ControlFlow::Break(()),
 };
-index.on(&executor).refine(DenseRefineConfig {
+let refined = index.on(&executor).refine(DenseRefineConfig {
     expansion_factor: 128,
     progress: Some(&mut before_the_deadline),
     ..DenseRefineConfig::default()
-})?;
+});
+if let Err(failure) = refined {
+    assert_eq!(failure.status, Status::Cancelled, "only the deadline stops it");
+}
 ```
 
 The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
 A panic inside it is read as a stop.
-Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, donors for an absorb, shards for a checkpoint, and bytes for a buffer.
+Reports are denominated in whatever the verb consumes: entries for an insertion, queries for a search, re-selected nodes for a refine, an absorb or a split, draws for a sample, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
 What a stop leaves behind is each verb's own contract.
 An `insert` cannot be stopped: it claims every entry before its first report, ignores a `Break`, and publishes the whole batch at once.
 A stopped search reports `Status::Cancelled` and leaves no matches.
-A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under - re-selection claims no identity, so the graph stays correct and merely less improved.
+A stopped `refine` is the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, and the call still re-links its islands, so the graph stays correct and merely less improved, and it reports `Status::Cancelled`.
 A stopped load creates no index, and a stopped `save_buffer` leaves no monolith.
 
 ### Retrieval and Streaming
@@ -407,13 +410,13 @@ let mut stream = index.on(&executor).search_stream(rows(&query, 768)?)?;
 
 ### Refinement
 
-`refine` re-runs the neighbor selection over entries already in the graph and returns how many nodes had their neighbors changed, so a batch built at a low expansion factor reaches the quality of a slower build afterwards.
-The count reaching zero is what settled looks like.
+`refine` re-runs the neighbor selection over entries already in the graph and returns a `RefineReport` of the nodes re-selected, those whose neighbors `changed`, the islands found and reconnected, and the `reachability` audit closing the heal, so a batch built at a low expansion factor reaches the quality of a slower build afterwards.
+`changed` reaching zero is what settled looks like.
 On a RAM handle searches may run throughout, on a VRAM one they may not, and insertions never may.
 
 ```rust
 let receiver = index.on(&executor);
-while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineConfig::default() })? != 0 {}
+while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineConfig::default() })?.changed != 0 {}
 ```
 
 ### Absorbing & Splitting
@@ -423,10 +426,24 @@ Readers of a RAM index may keep searching throughout, while a VRAM one admits no
 
 ```rust
 index.on(&executor).absorb([first_shard, second_shard])?;
+index.on(&executor).split(&[&left, &right][..])?; // two empty receivers take a part each
 ```
 
-A stopped `absorb` keeps the donors it already absorbed, and the count its progress handler last saw is the only way to learn where the boundary fell; the donors past it are freed for you.
-Splitting is not in the C library yet.
+A stopped `absorb` cuts only its closing refinement, every donor already moved, and reports `Status::Cancelled`.
+`split` is its inverse, leaving the source empty and live; both answer a `RefineReport`.
+
+### Sampling
+
+`sample` draws keys around a focus, each hanging from a shown or earlier draw, and places them in three dimensions beside the keys already shown, so a view grows one connected sample as it zooms.
+
+```rust
+let drawn = index.on(&executor).sample(
+    256,
+    &mut arena,
+    DenseSampleConfig { shown: &shown, shown_coordinates: &xyz, focus: &near, seed: 42, ..Default::default() },
+)?;
+let (keys, places) = (drawn.keys()?, drawn.coordinates()?);
+```
 
 ### Sparse Multiplication
 

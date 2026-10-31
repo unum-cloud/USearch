@@ -45,7 +45,7 @@ static f32_t angular_distance(embedding_t const& first, embedding_t const& secon
     return 1.0f - dot / std::sqrt(first_norm * second_norm);
 }
 
-/** The batched metric over stored embeddings, staged by value - a fixed row of floats
+/** The batched metric over stored embeddings, staged by value - a fixed run of floats
  *  is cheaper copied than chased. */
 struct angular_metric_t {
     embedding_t query_ {};
@@ -62,7 +62,7 @@ struct angular_metric_t {
     }
 };
 
-/** The embedding's own bytes: one fixed row of sixteen @c f32, a regular column. */
+/** The embedding's own bytes: one fixed entry of sixteen @c f32, a regular column. */
 struct embedding_codec_t {
     inline static constexpr dtype_t value_dtype_k = dtype_t::f32_k;
     inline static constexpr column_shape_t value_shape_k = vector_shape_t {std::tuple_size_v<embedding_t>};
@@ -172,13 +172,14 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
     serial_executor_t serial;
     // A query ranks alike when its distances agree within noise and every key nearer than the
     // query's last distance is one the saved index ranked there too: ties at the cut may swap keys.
+    error_stats_t distance_errors;
     auto ranked_alike = [&](std::size_t query, std::span<uuid_t const> keys, std::span<f32_t const> distances) {
         std::size_t mismatches = 0;
         std::span<uuid_t const> const wanted_keys = std::span<uuid_t const> {expected_keys}.subspan(query * wanted_k,
                                                                                                     wanted_k);
         f32_t const last = expected_distances[query * wanted_k + wanted_k - 1];
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
-            mismatches += expect_near(distances[rank], expected_distances[query * wanted_k + rank]);
+            distance_errors.add(distances[rank], expected_distances[query * wanted_k + rank]);
             bool const before_cut = distances[rank] < last * (1 - 1e-3f);
             mismatches += before_cut &&
                           std::find(wanted_keys.begin(), wanted_keys.end(), keys[rank]) == wanted_keys.end();
@@ -194,7 +195,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         failures += expect(bool(source.reserve(nodes_k)));
         failures += basic_build<fixture_type_>(source, metric, values, assigned_ids, context, keep_diverse_t {4});
         for (std::size_t query = 0; query != nodes_k; ++query) {
-            failures += expect_eq(source.search(values[query], metric, context, {nodes_k}).status, status_t::success_k);
+            failures += expect_eq(source.search(values[query], {nodes_k}, metric, context).status, status_t::success_k);
             for (std::size_t rank = 0; rank != wanted_k && rank < context.results.size(); ++rank) {
                 auto const key = source.key_of(context.results[rank].node_id);
                 expected_keys[query * wanted_k + rank] = uuid_of(static_cast<u64_t>(key.value));
@@ -218,7 +219,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         angular_metric_t metric;
         widened_index_t::traversal_context_t context {stream_key(seed, label), counting_allocator_t {ledger}};
         for (std::size_t query = 0; query != nodes_k; ++query) {
-            failures += expect_eq(widened.search(values[query], metric, context, {nodes_k}).status,
+            failures += expect_eq(widened.search(values[query], {nodes_k}, metric, context).status,
                                   status_t::success_k);
             failures += expect(context.results.size() >= wanted_k);
             if (context.results.size() < wanted_k) continue;
@@ -267,6 +268,8 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
     }
     fu_topology_delete(topology);
     std::remove(path);
+    failures += expect_errors("widened distances", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                              distance_errors, 0);
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
@@ -320,10 +323,121 @@ static std::size_t expect_wide_nodes_refused(u64_t seed) {
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
- *  column, which no modality unit has: monolith, hostile header battery, and the
- *  distributed form, each at every alignment and executor the scenarios cover - then the
- *  narrower key columns widening into UUIDs and the wider node IDs refused. */
+/**
+ *  @brief A checkpoint read as if a device held it crosses into host memory only through the
+ *      caller's copy, and only as its manifest and headers, while every part keeps viewing the
+ *      source; a column then copies through the same callback.
+ *
+ *  The copy records what it read, from the source's start: a monolith reads nothing past its
+ *  data offset, and a two-part buffer nothing but its manifest and each part's header.
+ */
+static std::size_t expect_view_reads_headers_alone(u64_t seed) {
+    using index_t = embeddings_fixture_t::index_t;
+    constexpr std::size_t nodes_k = 24, parts_k = 2;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    std::vector<byte_t> monolith;
+    {
+        serial_executor_t serial;
+        std::unique_ptr<index_t> const index = embeddings_fixture_t::make_index(ledger);
+        angular_metric_t metric;
+        index_t::traversal_context_t context {stream_key(seed, "header alone"), counting_allocator_t {ledger}};
+        std::vector<embedding_t> values = embeddings_fixture_t::make_values(nodes_k, stream_key(seed, "header alone"),
+                                                                            counting_allocator_t {ledger});
+        std::vector<u32_t> assigned_ids;
+        failures += expect(bool(index->reserve(nodes_k)));
+        failures += basic_build<embeddings_fixture_t>(*index, metric, values, assigned_ids, context,
+                                                      keep_diverse_t {4});
+        auto const [bytes, measure_status] = safegraphs_storage_requirements(
+            *index, embedding_codec_t {}, save_config_t {}, embeddings_fixture_t::metric_k);
+        failures += expect(succeeded(measure_status));
+        monolith.resize(bytes);
+        failures += expect_eq(safegraphs_write_index(bytes_span_t {monolith}, *index, embedding_codec_t {}, serial,
+                                                     save_config_t {}, embeddings_fixture_t::metric_k),
+                              status_t::success_k);
+    }
+
+    byte_t const* origin = nullptr;
+    std::vector<iota_view<std::size_t>> crossed;
+    auto device_copy = [&](bytes_span_t host, bytes_view_t device) noexcept {
+        std::size_t const first = static_cast<std::size_t>(device.data() - origin);
+        crossed.push_back({first, first + device.size()});
+        return copy_bytes(host, device);
+    };
+    using parts_t = growing_buffer<safegraphs_catalog_part_t, counting_allocator_t>;
+    using extra_columns_t = growing_buffer<safegraphs_named_column_t, counting_allocator_t>;
+
+    // A monolith: its header alone crosses, then its key column copies through the callback.
+    origin = monolith.data();
+    {
+        checkpoint_source_t const source {bytes_view_t {monolith}, 0};
+        parts_t parts {counting_allocator_t {ledger}};
+        extra_columns_t extra_columns {counting_allocator_t {ledger}};
+        failures += expect_eq(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
+                              status_t::success_k);
+        failures += expect_eq(parts.size(), 1u);
+        if (parts.size() != 1) return failures;
+        safegraphs_header_t const& header = parts[0].header;
+        failures += expect_eq(parts[0].nodes, nodes_k);
+        failures += expect(parts[0].monolith.data() == monolith.data());
+        failures += expect(parts[0].metric.view() == embeddings_fixture_t::metric_k);
+        for (iota_view<std::size_t> const range : crossed) failures += expect(range.bound <= header.data_offset);
+
+        crossed.clear();
+        std::vector<byte_t> keys(nodes_k * header.key.row_bytes()), host_keys(keys.size());
+        failures += expect_eq(source.copy_column(header, header.key, {0, nodes_k}, bytes_span_t {keys}, device_copy),
+                              status_t::success_k);
+        failures += expect_eq(crossed.size(), 1u);
+        // Host bytes copy without the callback, which this one would refuse.
+        checkpoint_source_t const in_place {bytes_view_t {monolith}};
+        failures += expect_eq(
+            in_place.copy_column(header, header.key, {0, nodes_k}, bytes_span_t {host_keys}, no_device_copy_t {}),
+            status_t::success_k);
+        failures += expect(keys == host_keys);
+    }
+
+    // Two copies of it behind a manifest leading one buffer: the manifest and each header cross.
+    std::array<std::size_t, parts_k> offsets {};
+    auto part_at = [&](std::size_t part) noexcept {
+        return safegraphs_part_t {{}, monolith.size(), nodes_k, offsets[part]};
+    };
+    auto const [buffer_bytes, layout_status] = safegraphs_buffer_layout(
+        parts_k, part_at, safegraphs_alignment_default_k, std::span<std::size_t> {offsets});
+    failures += expect_eq(layout_status, status_t::success_k);
+    std::vector<byte_t> buffer(buffer_bytes);
+    failures += expect_eq(safegraphs_write_manifest(bytes_span_t {buffer}, parts_k, part_at), status_t::success_k);
+    for (std::size_t const offset : offsets) std::copy(monolith.begin(), monolith.end(), buffer.begin() + offset);
+    origin = buffer.data();
+    crossed.clear();
+    {
+        checkpoint_source_t const source {bytes_view_t {buffer}, 0};
+        parts_t parts {counting_allocator_t {ledger}};
+        extra_columns_t extra_columns {counting_allocator_t {ledger}};
+        failures += expect_eq(source.read_header(parts, extra_columns, device_copy, counting_allocator_t {ledger}),
+                              status_t::success_k);
+        failures += expect_eq(parts.size(), parts_k);
+        if (parts.size() != parts_k) return failures;
+        for (std::size_t part = 0; part != parts_k; ++part)
+            failures += expect(parts[part].monolith.data() == buffer.data() + offsets[part]);
+        for (iota_view<std::size_t> const range : crossed) {
+            bool inside = range.bound <= offsets[0];
+            for (std::size_t part = 0; part != parts_k; ++part)
+                inside |= range.first >= offsets[part] && range.bound <= offsets[part] + parts[part].header.data_offset;
+            failures += expect(inside);
+        }
+        auto const [metadata, metadata_status] = safegraphs_read_metadata(source, device_copy,
+                                                                          counting_allocator_t {ledger});
+        failures += expect_eq(metadata_status, status_t::success_k);
+        failures += expect_eq(metadata.parts, parts_k);
+        failures += expect_eq(metadata.nodes, parts_k * nodes_k);
+    }
+    return failures + expect_eq(ledger.live_bytes, 0);
+}
+
+/** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value column, which
+ *  no modality unit has: monolith, hostile header battery, and the distributed form, each at every
+ *  alignment and executor the scenarios cover - then the narrower key columns widening into UUIDs,
+ *  the wider node IDs refused, and a device's checkpoint read through its headers alone. */
 std::size_t test::utilities::check_safegraphs_format(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_safegraphs_roundtrip<embeddings_fixture_t>(settings.seed, "u64",
@@ -333,6 +447,7 @@ std::size_t test::utilities::check_safegraphs_format(settings_t const& settings)
     failures += expect_keys_widen<embeddings_fixture_t>(settings.seed, "u64 keys");
     failures += expect_keys_widen<embeddings_fixture<u32_t, u32_t>>(settings.seed, "u32 keys");
     failures += expect_wide_nodes_refused(settings.seed);
+    failures += expect_view_reads_headers_alone(settings.seed);
     return report("safegraphs format", failures);
 }
 

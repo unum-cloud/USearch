@@ -1677,16 +1677,16 @@ def _block[C: Call](library: Library, var call: C, index: Address, executor: Add
     """Runs one call to its final status, its slots on the stack, and answers its result or raises."""
     var slots = stack_allocation[1, CallSlots[C.Outputs]]()
     slots[unsafe_offset=0] = CallSlots[C.Outputs]()
-    var landed = slots.unsafe_origin_cast[MutAnyOrigin]()
+    var mutable_slots = slots.unsafe_origin_cast[MutAnyOrigin]()
     call.submit(
         library,
         index,
         executor,
         Completion.BLOCKING,
-        Int(Pointer(to=landed[unsafe_offset=0].outcome)),
-        Int(Pointer(to=landed[unsafe_offset=0].outputs)),
+        Int(Pointer(to=mutable_slots[unsafe_offset=0].outcome)),
+        Int(Pointer(to=mutable_slots[unsafe_offset=0].outputs)),
     )
-    var written = landed[unsafe_offset=0]
+    var written = mutable_slots[unsafe_offset=0]
     var generation = call.served(Status.of(written.outcome.status))
     var result = call^.conclude(written.outputs, generation)
     library._check(written.outcome, C.symbol)

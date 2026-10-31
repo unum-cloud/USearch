@@ -679,25 +679,21 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
 
 template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
           typename kernels_type_>
-status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::load_kernels_(cuda_api_t const& api,
-                                                                                             int device) noexcept {
+void vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+    vram_kernel_symbol_t& symbol, std::size_t rung, basic::cuda_rung_t instantiated) noexcept {
+    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
+    vram_kernel_symbol(symbol, "sequence", "cuda_kernel", {"vram_arguments", 4, itanium_scope_t::basic_k},
+                       instantiated.kernel, capability_, metric_, rungs[rung], itanium_type<node_id_type_> {},
+                       instantiated.slots);
+}
+
+template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
+          typename kernels_type_>
+status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::upload_parameters_(
+    cuda_api_t const& api) noexcept {
     bool const parametrized = metric_ == usearch_sequence_metric_overlap_k ||
                               metric_ == usearch_sequence_metric_needleman_wunsch_k;
     if (parametrized && host_parameters_.empty()) return status_t::uninitialized_k;
-    auto [module, status] = cuda_module_t::load(api, device, kernels_type_::bytes());
-    if (failed(status)) return status;
-    module_ = std::move(module);
-    vram_kernel_symbol_t symbol;
-    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-    for (std::size_t rung = 0; rung != rungs_k; ++rung)
-        for (basic::cuda_rung_t const instantiated : basic::cuda_rungs) {
-            vram_kernel_symbol(symbol, "sequence", "cuda_kernel", {"vram_arguments", 4, itanium_scope_t::basic_k},
-                               instantiated.kernel, capability_, metric_, rungs[rung], itanium_type<node_id_type_> {},
-                               instantiated.slots);
-            cuda_function_handle_t& function =
-                kernels_[rung][static_cast<u32_t>(instantiated.kernel)][gpu_rung_index(instantiated.slots)];
-            if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
-        }
     if (host_parameters_.empty()) return status_t::success_k;
     device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {api}, host_parameters_.size());
     if (!device_parameters_) return status_t::bad_alloc_k;

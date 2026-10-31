@@ -280,9 +280,9 @@ std::size_t check_multimap_reader_during_writers() noexcept {
 
     failures += expect_eq(torn_observations, 0u);
     failures += expect_eq(shrinking_counts, 0u);
-    std::size_t landed = 0;
-    for (u64_t key = 0; key != keys_alphabet_k; ++key) landed += multimap.count(key, all_visible_k);
-    failures += expect_eq(landed, nodes);
+    std::size_t placed = 0;
+    for (u64_t key = 0; key != keys_alphabet_k; ++key) placed += multimap.count(key, all_visible_k);
+    failures += expect_eq(placed, nodes);
     return failures;
 }
 
@@ -351,7 +351,7 @@ std::size_t check_multimap_uncovered_slots() noexcept {
 using keyed_nodes_t = keyed_nodes<u64_t, u32_t, chunk_schedule<10, 20>, std::size_t {1} << 32, std::allocator<byte_t>,
                                   standard_atomic_ref>;
 
-/** Keys land from an empty table with no reserve first, duplicates spread across nodes, and a
+/** Keys file from an empty table with no reserve first, duplicates spread across nodes, and a
  *  reader sees only the nodes below the watermark it passes. */
 std::size_t check_keyed_nodes_visible() noexcept {
     constexpr u32_t nodes_k = 3000; // Past the first chunk, so the nodes span two map chunks.

@@ -152,7 +152,7 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     if (failures) return failures;
     failures += expect_gets(index, sizes.sequences);
     failures += expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
-    failures += expect_refined(index, usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-sequence-{:016x}", stream_key(seed, name));
     failures += expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8,
                                    stem, saved_bytes_t::identical_k, 0.0);

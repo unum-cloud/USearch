@@ -11,7 +11,7 @@
  *  @verify fail sc keyed_cover=false: the grower covers the rows alone, and a claimer's rows lie past
  *      the chunks of the key column
  *  @verify fail far deflation_order=order_relaxed: relaxed, the subtract is posted under Intel's
- *      RAO-INT rule and still in flight when the release lands, and a claimer takes rows past the
+ *      RAO-INT rule and still in flight when the release arrives, and a claimer takes rows past the
  *      end of the only chunk
  */
 #define thread_count 2

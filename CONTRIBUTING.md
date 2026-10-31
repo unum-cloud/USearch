@@ -224,7 +224,7 @@ A buffer every step writes before reading is carved without a fill, a resize wit
 
 Every behavior follows from the inputs, the index's own geometry and the hardware it runs on, never from a hyper-parameter someone tuned.
 Don't add a flag, a constant or a heuristic whose value was searched until a benchmark looked good: such values fit one dataset and one machine, and they multiply into combinations nobody can test.
-When a choice has no derivation yet, derive it before landing it, from a cost model, a hardware property or a bound the algorithm guarantees, and state that derivation where the value is defined.
+When a choice has no derivation yet, derive it before committing it, from a cost model, a hardware property or a bound the algorithm guarantees, and state that derivation where the value is defined.
 A value that can only be measured, like an empirical wave width, says so in its docstring, names what was measured, and lives in one definition every backend reads.
 
 ### Numeric Precision
@@ -258,6 +258,12 @@ An operation is a plan only when its work crosses a barrier between phases, runs
 A plan owns only what crosses its barriers: scratch belongs to the context, results land in the caller's outputs, named at planning, and whatever follows from other members is computed rather than stored.
 `run`, `advance` and `finish` never allocate.
 
+A member of a plan, cursor or walk names what it holds and when it holds it, like `picked_this_round_` or `visited_`.
+A pair that trades places shares one stem and differs in one word, like `picked_this_round_` and `picked_next_round_`, and the verb moving between them is named for the barrier it runs at, like `advance_round_`.
+No member is `bits`, `current`, `state`, `data`, `flags`, `tmp` or `scratch` alone, and none is named by its type.
+Sizes come from the owner, never from a helper on the state.
+Two bit runs are two `growing_bitset_t` members, never one buffer with an index.
+
 ### Components
 
 Logic is never shared through inheritance: no base classes, CRTP or mixins.
@@ -279,6 +285,38 @@ New code never names or sizes a type through `decltype`, `decltype(auto)` includ
 Spell the type, or export it as a member alias where it is defined and read it from there, as `typename codec_t::view_t` names what a codec's `view` returns.
 A `decltype` makes every reader evaluate an expression to learn a type its author already knew.
 Templates carry no `_t` or `_k` suffix, whether class, alias or variable templates or concepts, while concrete types end in `_t` and constants in `_k`.
+
+### Vocabulary
+
+| Concept | Word | Refused |
+| :- | :- | :- |
+| `*_index` in prose | mono-index | singular, mono, standalone, single |
+| `*_indexes` in prose | sharded index | plural, group, collection, multi |
+| a mono-index inside a sharded index | shard | … |
+| one shard's graph in one file; several | monolith; parts under a manifest | … |
+| RAM, VRAM or NVMe | residency | home, memory side |
+| which device or NUMA domain a shard sits on | placement | … |
+| a residency split by the vendor its VRAM needs, one compiled variant each | vendored residency | home, tower |
+| a stored item; its ID inside a shard; its ordinal in a batch | entry; node; offset | row, value, member, item |
+| a horizontal slice of a physical matrix | row | … |
+| one query and its results | query | row |
+| a dedicated per-residency or per-vendor implementation; its C-facing side | tower; face | backend, engine class |
+| a compiled alternative per class, dtype or residency | variant | arm, cell |
+| a per-capability kernel bundle | kit | trait |
+| an exported operation and its table entry | verb; trampoline | … |
+| a fixed-shape collection a verb fills | outputs | landing, lander |
+| a callback consuming intermediate results | sink | landing |
+| the device fan-out's wait | await | join |
+| the nodes a refinement round re-selects | picked | dirty, seam, marked |
+| the nodes a walk has met and the ones it still has to expand | visited, frontier | met, seen, queue |
+| the reachability sweep: its verb and plan; what it returns; the step inside a refine | health; reachability; audit | check, scan, sweep |
+| one step of a plan | the same word in every plan: partition, picking, scatter, copy, reselect, merge, audit, heal, done | sweeping, copying, reconnect, land |
+| what a sample returns; the points it starts from; the ones it keeps near; a region's start | draws; shown; focus; root | pick, anchor, landmark, context, seed |
+| device row storage | flat matrix, flat column | plane |
+| node ID width under `utilities/` and `basic/` | `node_id_type_` | `node_id_t`, `u32_t node` |
+| the candidates a walk keeps | candidates | pool |
+| how a batch's entries are shared among shards | split_batch_into_shards, offsets | seat, deal, landed |
+| a member of a plan, cursor or walk | what it holds and when it holds it | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
 
 ### Cross Compilation
 

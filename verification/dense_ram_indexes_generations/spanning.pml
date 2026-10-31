@@ -10,7 +10,7 @@
  *  one step, and commits them inside the bracket of the commit sequence word. The single-row insert
  *  probes the first shard and, finding it full, opens the next generation and claims there.
  *
- *  - A snapshot holds the batch on every shard it landed in or on none.
+ *  - A snapshot holds the batch on every shard it placed in or on none.
  *
  *  @verify pass sc,rc11
  *  @verify fail sc,rc11 count_inside_sequence=false: reading the count first, the snapshot counts
@@ -74,7 +74,7 @@ retry:
     }
 }
 
-// once both adders are done: the generation open, and every shard's claims landed
+// once both adders are done: the generation open, and every shard's claims placed
 proctype checker() {
     byte shard;
     (done == 2);

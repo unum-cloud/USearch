@@ -19,6 +19,7 @@ from usearch import (
     DenseMetric,
     DenseMultiplyConfig,
     DenseOptions,
+    DenseSampleConfig,
     DenseSearchConfig,
     DenseSoftmaxState,
     DenseTraversalStats,
@@ -305,7 +306,7 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
     var first = index.get[DType.float32](Key(integer=0), arena)
     var second = index.get[DType.float32](Key(integer=1), other)
     assert_equal(first[0][0], Float32(1), "the first result survives a later call")
-    assert_equal(second[0][1], Float32(1), "which landed in an arena of its own")
+    assert_equal(second[0][1], Float32(1), "which was written in an arena of its own")
 
     var reused = index.get[DType.float32](Key(integer=1), arena)
     assert_equal(reused[0][1], Float32(1), "the third call refilled the first arena")
@@ -471,9 +472,38 @@ def test_absorb_consumes_its_donors() raises:
     donor.insert(keys, RowsView.of(rows, 2))
     var donors = List[DenseIndex]()
     donors.append(donor^)
-    index.absorb(donors^)
+    var report = index.absorb(donors^)
     assert_equal(Int(index.describe().size), 3, "the donor's entry joined")
     assert_equal(index.count(Key(integer=3)), 1, "under its own key")
+    assert_true(report.changed <= report.reselected, "the closing refine changes only what it re-selected")
+
+
+def test_split_and_sample() raises:
+    """A split empties the source into its receivers, and a sample draws held keys, each placed in 3D."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = _basis(library)
+    var arena = Arena(library)
+    var shown = List[Key]()
+    var places = List[Float32]()
+    var focus = List[Key]()
+    var draws = index.sample(2, arena, DenseSampleConfig(shown=shown, shown_coordinates=places, focus=focus, seed=42))
+    assert_true(len(draws) <= 2, "no more draws than wanted")
+    for key in draws.keys():
+        assert_true(key == Key(integer=0) or key == Key(integer=1), "every draw is a held key")
+    if len(draws) != 0:
+        assert_equal(Int(draws.coordinates().view.columns), 3, "each draw is placed in three dimensions")
+
+    var receivers = List[DenseIndex]()
+    for _ in range(2):
+        var receiver = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
+        receiver.reserve(2)
+        receivers.append(receiver^)
+    _ = index.split(receivers, seed=7)
+    assert_equal(Int(index.describe().size), 0, "the source is left empty")
+    assert_equal(Int(receivers[0].describe().size + receivers[1].describe().size), 2, "and live in the receivers")
 
 
 def test_mutating_a_view_is_refused_as_read_only() raises:
@@ -774,6 +804,7 @@ def main() raises:
     suite.test[test_cursor_walks_every_row_once]()
     suite.test[test_health_audits_every_entry]()
     suite.test[test_absorb_consumes_its_donors]()
+    suite.test[test_split_and_sample]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
     suite.test[test_scans_find_every_query_itself]()
     suite.test[test_deferred_calls_wait_until_final]()

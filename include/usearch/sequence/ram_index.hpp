@@ -50,11 +50,11 @@ namespace unum::usearch::sequence {
 #pragma region Serialization
 
 /**
- *  USearch's reading of a StringZilla status, the one crossing between the two vocabularies.
+ *  @brief USearch's reading of a StringZilla status, the one crossing between the two vocabularies.
  *
  *  @par Statuses:
  *  - @c overflow_k StringZilla risked an overflow.
- *  - @c shape_mismatch_k StringZilla met unexpected dimensions.
+ *  - @c shape_mismatch_k StringZilla found unexpected dimensions.
  */
 inline status_t status_of(sz::status_t status) noexcept {
     switch (status) {

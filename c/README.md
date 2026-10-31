@@ -137,7 +137,7 @@ Every `*_free` waits until each deferred call naming its handle is final, so a h
 
 An executor owns the threads or device streams that run calls, the traversal scratch they walk with, and the pinned bounce buffer staging passes through.
 One executor serves any number of indexes, of any quantization and metric, since its scratch is sized from geometry, grown to the widest asked of it, and kept between calls.
-A VRAM executor's `scratch_limit` caps that growth per stream, and a call needing more, a refinement's scratch included, reports `usearch_status_out_of_memory_k`.
+A VRAM executor's `scratch_limit` caps each stream's run, which every call's walk scratch and outputs carve from, and a call needing more reports `usearch_status_out_of_memory_k`.
 Calls on one executor start in submission order, while a handle admits any number of concurrent callers: the executor orders, never the index.
 
 ```c
@@ -250,7 +250,7 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
-- RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init`, `usearch_dense_sample` and `usearch_dense_split`, and a cursor answers neither `starts` nor `links` yet.
+- RAM answers every verb but `usearch_dense_view_ram` and `usearch_dense_search_stream_init`, and exact scans serve `multiply` and `attend` too.
 - VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
   NVIDIA devices answer exact scans, while AMD and Apple ones refuse them with `usearch_status_unsupported_k`.
   Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
@@ -332,7 +332,7 @@ Free a device arena once your own device work on its outputs has finished, and b
 ## Serialization
 
 Checkpoints ride the SafeGraphs interchange format, and the path's extension picks the layout: a `.safegraphs` path is one monolith of every shard, a `.safegraphs.json` path is a manifest beside one monolith per shard.
-Loading reads the content, never the extension, so either form loads into any shard count, part `p` landing on shard `p` modulo the shard count.
+Loading reads the content, never the extension, so either form loads into any shard count, part `p` loading into shard `p` modulo the shard count.
 
 ```c
 usearch_bytes_view_t path = {(uint8_t const*)"index.safegraphs", 16};
@@ -441,7 +441,7 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
 The predicate judges a batch of candidates per call, a quad of them at a time during a walk, so a handler backed by an external store answers each batch in one round trip.
 
 Rejected entries still route the walk, so recall holds at low selectivity, and the predicate judges every scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
-An exact scan asks it only about entries closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
+An exact scan asks it only about entries closer than the worst match a query already holds, which makes the scan the fallback for predicates too selective for a walk to cross.
 A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_unsupported_k`.
 
 Long calls take a `usearch_progress_t`: a handler, which is also the only way to stop one, its state, and how many reports it hears:
@@ -466,11 +466,11 @@ An insertion claims every entry before its first report, so its handler only rep
 ### Retrieval and Streaming
 
 `usearch_dense_get` writes every vector stored under one key into an arena, shard by shard and in insertion order within each, as the [Arenas](#arenas) example shows; an absent key leaves `vectors->data` `NULL`.
-A cursor walks the graph, every entry in storage order or breadth-first from `starts`, its keys and, when asked, each entry's `links` landing in an arena batch by batch:
+A cursor walks the graph, every entry in storage order or breadth-first from `starts`, its keys and, when asked, each entry's `links` copied into an arena batch by batch:
 
 ```c
 usearch_dense_cursor_t cursor = NULL;
-usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.index = index, .outcome = &outcome, .cursor = &cursor});
 usearch_keys_view_t batch = {0};
 for (size_t written = 1; written != 0 && outcome.status == usearch_status_success_k;)
     usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = index,
@@ -488,7 +488,7 @@ Each shard's publication watermark is read as the walk enters it, so an entry on
 Opened at `starts`, a cursor yields their own entries first, in the order given, then breadth-first the entries they link to, each entry once, so the first entries pulled carry the starts' immediate links.
 `links` is a `usearch_keys_tape_view_t`, entry `i` spanning `offsets[i]` up to `offsets[i+1]`, and the vectors themselves come from `usearch_dense_get`.
 
-When a filter is selective enough that no `wanted` can be guessed upfront, a search stream keeps pulling matches in distance order:
+When a predicate is selective enough that no `wanted` can be guessed upfront, a search stream keeps pulling matches in distance order:
 
 ```c
 usearch_dense_search_stream_t stream = NULL;
@@ -551,7 +551,7 @@ A VRAM-built donor joins a RAM index through a save and a load.
 `usearch_dense_split` is the inverse, emptying one index into `count` receivers, empty handles of its residency, scalar, class, metric, geometry and shard count.
 It grows one graph-local part per receiver from roots drawn from `seed`, breadth-first over the links and capped at an equal share, lands part `p` of shard `s` in shard `s` of receiver `p` with edges rebased and edges across parts dropped, and refines the nodes that lost an edge.
 `usearch_dense_refinement_init` takes `receivers` in place of `donors` for the resumable form, never both, refusing the pair with `usearch_status_invalid_argument_k`.
-The engine answers splitting with `usearch_status_unsupported_k` for now, while the stand-in partitions by brute force.
+RAM and NVIDIA and AMD VRAM indexes split, Apple and NVMe ones answer `usearch_status_unsupported_k` and `usearch_status_read_only_k`, and the stand-in partitions by brute force.
 
 ### Sparse Multiplication
 
@@ -587,7 +587,7 @@ Queries share one `rows_per_query`, or `query_offsets` gives each its own run of
 
 ```c
 usearch_matches_tape_view_t documents = {0};
-size_t landed = 0;
+size_t written = 0;
 usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
     .index = index,
     .executor = executor,
@@ -596,12 +596,12 @@ usearch_dense_maxsim(&(usearch_dense_maxsim_t) {
     .queries = {query_tokens, 128 * sizeof(float), 128, usearch_scalar_f32_k},
     .rows_per_query = 32,
     .matches = &documents,
-    .written = &landed,
+    .written = &written,
     .arena = arena,
     .wanted = 10});
 ```
 
-Query `i` spans `documents.offsets[i]` up to `documents.offsets[i+1]`, largest first, and `landed` counts every query's documents on the host, even when the arena lives in VRAM.
+Query `i` spans `documents.offsets[i]` up to `documents.offsets[i+1]`, largest first, and `written` counts every query's documents on the host, even when the arena lives in VRAM.
 The walks only nominate keys, and every entry of a nominated key is scored, so a walk may miss a key but never scores one short, and widening the expansion narrows what it misses.
 
 ### Attention
@@ -696,7 +696,7 @@ The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with
 Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves every kind, and answers `view_ram`, `sample`, `split`, a cursor opened at `starts` and a pull asking for `links` with `usearch_status_unsupported_k`; `refine` and `absorb` serve RAM indexes.
+The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine`, `absorb`, `split`, `sample`, `health` and cursors with `starts` and `links` serve RAM indexes.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes

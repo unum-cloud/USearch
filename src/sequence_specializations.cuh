@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 13, 2026
  *  @brief What one sequence variant is spelled with and compiled through: the CPU classes'
- *      StringZilla capabilities, the geometry every sequence variant freezes, and the variants
+ *      StringZilla capabilities, the geometry every sequence variant adopts, and the variants
  *      over the basic indexes.
  *
  *  Every sequence class unit in @c src/sequence/ includes this to instantiate its variants, and
@@ -108,71 +108,90 @@ struct sequence_ram_variant {
     explicit sequence_ram_variant(forkunion_allocator_t const& allocator) noexcept
         : index(allocator, machine_cache_line_bytes()) {}
 
-    status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
-        return index.reserve(arguments.entries).status;
-    }
+    status_t reserve(reserve_capacity_t capacity) noexcept { return index.reserve(capacity.entries).status; }
     status_t clear() noexcept { return index.clear(); }
-    expected<traversal_telemetry_t> insert(usearch_sequence_insert_t const& arguments, progress_ticks_t& ticks,
-                                           executor_t& executor) noexcept;
-    expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
-                                           progress_ticks_t& ticks, executor_t& executor) noexcept;
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, counted_tape_t sequences, insert_config_t config,
+                                       executor_t& executor, progress_ticks_t& ticks) noexcept;
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       predicate_t const& predicate, executor_t& executor,
+                                       progress_ticks_t& ticks) noexcept;
 
     /** Opens a refinement that first moves every shard of each of @p donors into this index, then
      *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
-    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, std::size_t expansion) noexcept {
+    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
+        return index.plan_absorb(donors, {config.expansion_factor}, basic::keep_diverse_t {geometry.connectivity},
+                                 planning);
     }
 
     /** Opens a refinement of every live shard in place, its walks as wide as @p expansion. */
-    expected<refine_plan_t> plan_refine(std::size_t expansion) noexcept {
+    expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_refine(planning, basic::keep_diverse_t {geometry.connectivity}, {expansion});
+        return index.plan_refine({config.expansion_factor}, basic::keep_diverse_t {geometry.connectivity}, planning);
     }
-    status_t refine(refine_plan_t& plan, progress_ticks_t& ticks, executor_t& executor) noexcept;
+
+    /** Opens a split of every live shard into the same shard of each of @p receivers, its part
+     *  roots drawn from the config's seed, then re-links each receiver's picked nodes with walks as
+     *  wide as @p expansion. */
+    expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
+        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
+        return index.plan_split(receivers, {{config.refine.expansion_factor}, config.seed},
+                                basic::keep_diverse_t {geometry.connectivity}, planning);
+    }
+    status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** Serving a checkpoint in place and sampling answer @c unsupported_k until the index serves
-     *  them. */
+    /** Serving a checkpoint in place answers @c unsupported_k until the index serves it. */
     status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
-    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
+    expected<sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                     sample_config_t config, executor_t& executor) noexcept;
 };
 
 template <cpu_class_t cpu_class_>
-expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::insert(usearch_sequence_insert_t const& arguments,
-                                                                         progress_ticks_t& ticks,
-                                                                         executor_t& executor) noexcept {
-    std::size_t const connectivity = geometry.connectivity, expansion = arguments.expansion_factor;
+expected<traversal_stats_t> sequence_ram_variant<cpu_class_>::insert(usearch_keys_view_t keys, counted_tape_t sequences,
+                                                                     insert_config_t config, executor_t& executor,
+                                                                     progress_ticks_t& ticks) noexcept {
+    std::size_t const connectivity = geometry.connectivity, expansion = config.expansion_factor;
     auto with_metric = [&](auto make_metric) noexcept {
         auto build = [&](std::size_t offset, value_t& value, std::size_t) noexcept {
-            return us::sequence::status_of(value.assign(chars_at(arguments.sequences, offset)));
+            return us::sequence::status_of(value.assign(chars_at(sequences.tape, offset)));
         };
-        return insert_entries(index, arguments.keys, arguments.count, connectivity,
-                              expansion ? expansion : connectivity * 2, make_metric, build, ticks, executor);
+        return insert_entries(index, keys, sequences.count, connectivity, expansion ? expansion : connectivity * 2,
+                              make_metric, build, ticks, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
-expected<traversal_telemetry_t> sequence_ram_variant<cpu_class_>::search(usearch_sequence_search_t const& arguments,
-                                                                         matches_landing_t& landing,
-                                                                         progress_ticks_t& ticks,
-                                                                         executor_t& executor) noexcept {
+expected<traversal_stats_t> sequence_ram_variant<cpu_class_>::search(counted_tape_t queries, matches_outputs_t& outputs,
+                                                                     search_config_t config,
+                                                                     predicate_t const& predicate, executor_t& executor,
+                                                                     progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto query_of = [&](std::size_t query_index, std::size_t, auto&& answer) noexcept {
-            return answer(chars_at(arguments.queries, query_index));
+            return answer(chars_at(queries.tape, query_index));
         };
-        return search_entries(index, arguments.count, arguments.wanted, geometry.connectivity,
-                              arguments.expansion_factor, arguments.traversal, arguments.predicate, make_metric,
-                              query_of, landing, ticks, executor);
+        return search_entries(index, queries.count, geometry.connectivity, make_metric, query_of, outputs, config,
+                              predicate, executor, ticks);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
 
 template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, progress_ticks_t& ticks,
-                                                  executor_t& executor) noexcept {
+expected<sample_result_t> sequence_ram_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                   basic_sample_outputs_t outputs,
+                                                                   sample_config_t config,
+                                                                   executor_t& executor) noexcept {
+    auto with_metric = [&](auto make_metric) noexcept {
+        return sample_entries(index, geometry.connectivity, make_metric, inputs, outputs, config, executor);
+    };
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
+}
+
+template <cpu_class_t cpu_class_>
+status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, executor_t& executor,
+                                                  progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto [scratch, prepare_status] = prepare_refinement<shard_t>(plan, geometry.connectivity, make_metric,
                                                                      executor);
@@ -257,26 +276,28 @@ struct sequence_nvme_variant {
         return index.view(path, paths, token_of(geometry.metric), executor);
     }
 
-    expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
-                                           progress_ticks_t& ticks, executor_t& executor) noexcept;
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       predicate_t const& predicate, executor_t& executor,
+                                       progress_ticks_t& ticks) noexcept;
 
     /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
      *  the view serves it. */
     status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
-    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
+    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
+                                     executor_t&) noexcept {
+        return {{}, status_t::unsupported_k};
+    }
 };
 
 template <cpu_class_t cpu_class_>
-expected<traversal_telemetry_t> sequence_nvme_variant<cpu_class_>::search(usearch_sequence_search_t const& arguments,
-                                                                          matches_landing_t& landing,
-                                                                          progress_ticks_t& ticks,
-                                                                          executor_t& executor) noexcept {
+expected<traversal_stats_t> sequence_nvme_variant<cpu_class_>::search(
+    counted_tape_t queries, matches_outputs_t& outputs, search_config_t config, predicate_t const& predicate,
+    executor_t& executor, progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto query_of = [&](std::size_t query_index, thread_allocator_t const&) noexcept {
-            return expected<std::string_view> {chars_at(arguments.queries, query_index), status_t::success_k};
+            return expected<std::string_view> {chars_at(queries.tape, query_index), status_t::success_k};
         };
-        return search_entries(index, arguments.count, arguments.wanted, arguments.expansion_factor, arguments.traversal,
-                              arguments.predicate, make_metric, query_of, landing, ticks, executor);
+        return search_entries(index, queries.count, make_metric, query_of, outputs, config, predicate, executor, ticks);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
@@ -344,7 +365,7 @@ struct sequence_vram_nvidia_variant {
     using build_t = sequence_vram_nvidia_build<metric_>;
     using face_t = typename build_t::face_t;
     using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, build_t>;
-    using refine_plan_t = vram_nvidia_refine_plan_t;
+    using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr usearch_sequence_metric_t metric_k = metric_;
     static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
 
@@ -357,21 +378,21 @@ struct sequence_vram_nvidia_variant {
     sequence_vram_nvidia_variant(int, sequence_geometry_t const&) noexcept
         : index(forkunion_allocator_t {no_memory_domain_k}, build_t {&geometry, &costs}) {}
 
-    status_t reserve(usearch_sequence_reserve_t const& arguments) noexcept {
-        return vram_nvidia_reserve(index, arguments.entries, geometry.connectivity, arguments.payload_bytes);
+    status_t reserve(reserve_capacity_t capacity) noexcept {
+        return vram_nvidia_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
     }
 
-    expected<traversal_telemetry_t> insert(usearch_sequence_insert_t const& arguments, progress_ticks_t& ticks,
-                                           cuda_executor_t& executor) noexcept {
-        return vram_nvidia_insert(index, arguments.keys, bytes_tape_of(arguments.sequences, arguments.count),
-                                  geometry.connectivity, arguments.expansion_factor, ticks, executor);
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, counted_tape_t sequences, insert_config_t config,
+                                       cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return vram_nvidia_insert(index, keys, bytes_tape_of(sequences.tape, sequences.count), geometry.connectivity,
+                                  config.expansion_factor, ticks, executor);
     }
 
     /** A device walk takes no host predicate. */
-    expected<traversal_telemetry_t> search(usearch_sequence_search_t const& arguments, matches_landing_t& landing,
-                                           progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
-        return vram_nvidia_search(index, bytes_tape_of(arguments.queries, arguments.count), arguments.wanted,
-                                  arguments.expansion_factor, landing, ticks, executor);
+    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
+                                       cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return vram_nvidia_search(index, bytes_tape_of(queries.tape, queries.count), outputs.wanted,
+                                  config.expansion_factor, outputs, ticks, executor);
     }
 
     /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
@@ -393,13 +414,11 @@ struct sequence_vram_nvidia_variant {
      *  devices. */
     status_t clear() noexcept { return index.clear(); }
 
-    /** The refinements, which no GPU variant opens yet, each answering @c unsupported_k. */
-    expected<refine_plan_t> plan_absorb(std::span<index_t*>, std::size_t) noexcept {
+    /** Sampling answers @c unsupported_k until the shards sample on their devices. */
+    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
+                                     executor_t&) noexcept {
         return {{}, status_t::unsupported_k};
     }
-    expected<refine_plan_t> plan_refine(std::size_t) noexcept { return {{}, status_t::unsupported_k}; }
-    status_t refine(refine_plan_t&, progress_ticks_t&, executor_t&) noexcept { return status_t::unsupported_k; }
-    status_t sample(usearch_sequence_sample_t const&) noexcept { return status_t::unsupported_k; }
 };
 
 #endif
@@ -411,16 +430,16 @@ struct sequence_vram_nvidia_variant {
 /** The sequence variants each class unit compiles: one per CPU class on the host and on storage,
  *  and one per kind on an NVIDIA GPU. */
 template <auto class_>
-struct sequence_variants_of<dense_home_t::ram_k, class_> {
+struct sequence_variants_of<vendored_residency_t::ram_k, class_> {
     using type = type_list<sequence_ram_variant<class_>>;
 };
 template <auto class_>
-struct sequence_variants_of<dense_home_t::nvme_k, class_> {
+struct sequence_variants_of<vendored_residency_t::nvme_k, class_> {
     using type = type_list<sequence_nvme_variant<class_>>;
 };
 #if USEARCH_ARCH_CUDA_
 template <>
-struct sequence_variants_of<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
+struct sequence_variants_of<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k> {
     using type = type_list<sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_bytes_k>,
                            sequence_vram_nvidia_variant<usearch_sequence_metric_levenshtein_utf8_k>,
                            sequence_vram_nvidia_variant<usearch_sequence_metric_overlap_k>,
@@ -433,13 +452,13 @@ struct sequence_variants_of<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_amp
 template <>
 struct variant_bodies<sequence_traits_t> {
     using geometry_t = sequence_geometry_t;
-    using freeze_t = sequence_traits_t::freeze_t;
+    using geometry_extras_t = sequence_traits_t::geometry_extras_t;
     using costs_t = us::sequence::needleman_wunsch_costs_t;
 
     /** What a view keeps of a string it read, copied into its thread's arena. */
     using kept_t = bytes_view_t;
 
-    /** Whether @p donor lands in @p variant: the same kind, window widths, costs and
+    /** Whether @p donor enters @p variant: the same kind, window widths, costs and
      *  connectivity. */
     template <typename variant_type_, typename donor_type_>
     static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
@@ -455,26 +474,24 @@ struct variant_bodies<sequence_traits_t> {
 
     /** Folds @p named weights into @p costs, the 256×256 scores read as similarities between class
      *  codes, or else unfolds the costs @p geometry recalled, one hexadecimal digit per entry;
-     *  false once @p outcome records why not. */
-    static bool fold(geometry_t const& geometry, freeze_t named, costs_t& costs, usearch_outcome_t* outcome) noexcept {
+     *  @c config_mismatch_k for weights past 32 classes, a negative gap, or a pair above its mean
+     *  self-score, and @c malformed_k for recorded costs no square holds. */
+    static status_t fold(geometry_t const& geometry, geometry_extras_t named, costs_t& costs) noexcept {
         if (named) {
             constexpr std::size_t side_k = us::sequence::needleman_wunsch_byte_alphabet_k;
             usearch_sequence_weights_t const& weights = *named;
             auto const [folded, fold_status] = costs_t::fold(
                 std::span<i8_t const> {weights.substitution_matrix, side_k * side_k}, weights.gap);
-            if (failed(fold_status))
-                return propagate_error(
-                    usearch_status_config_mismatch_k, outcome,
-                    "The weights need at most 32 classes, a non-negative gap, and no pair above " "its mean " "self-" "score");
+            if (failed(fold_status)) return status_t::config_mismatch_k;
             costs = folded;
-            return true;
+            return status_t::success_k;
         }
         std::string_view const recalled = to_string_view(geometry.substitution_costs);
-        if (recalled.empty()) return true;
+        if (recalled.empty()) return status_t::success_k;
         std::size_t classes = 0;
         while (classes * classes < recalled.size()) ++classes;
         if (classes * classes != recalled.size() || classes > us::sequence::needleman_wunsch_classes_k)
-            return propagate_error(usearch_status_malformed_k, outcome, "The recorded costs are malformed");
+            return status_t::malformed_k;
         costs.classes = static_cast<u8_t>(classes);
         costs.code_bits = us::sequence::packed_code_bits(classes);
         costs.gap = static_cast<u8_t>(geometry.gap_cost);
@@ -483,19 +500,18 @@ struct variant_bodies<sequence_traits_t> {
             costs.substitutions[entry / classes][entry % classes] = static_cast<u8_t>(digit <= '9' ? digit - '0'
                                                                                                    : digit - 'a' + 10);
         }
-        return true;
+        return status_t::success_k;
     }
 
     /** Moves @p geometry into @p variant, its weights folded, a zero connectivity taking the
      *  default; a GPU variant's shards take the window widths and the costs from it as they are
      *  built. */
     template <typename variant_type_>
-    static bool freeze(variant_type_& variant, geometry_t& geometry, freeze_t weights,
-                       usearch_outcome_t* outcome) noexcept {
+    static status_t adopt(variant_type_& variant, geometry_t& geometry, geometry_extras_t weights) noexcept {
         if (!geometry.connectivity) geometry.connectivity = connectivity_32_k;
-        if (!fold(geometry, weights, variant.costs, outcome)) return false;
+        if (status_t const folded = fold(geometry, weights, variant.costs); failed(folded)) return folded;
         variant.geometry = std::move(geometry);
-        return true;
+        return status_t::success_k;
     }
 
     template <typename variant_type_>
@@ -503,34 +519,33 @@ struct variant_bodies<sequence_traits_t> {
         description.metadata = sequence_traits_t::metadata_of(variant.geometry);
     }
 
-    template <typename variant_type_>
-    static bool accepts(variant_type_ const&, usearch_sequence_search_t const& arguments,
-                        usearch_outcome_t* outcome) noexcept {
-        return accepts_sequences(arguments.queries, arguments.count, outcome);
-    }
-
     static status_t keep(nvme_executor_t& executor, std::size_t thread, std::string_view value, kept_t& kept) noexcept {
         return keep_entry(executor, thread, bytes_of(value.data(), value.size()), kept);
     }
 
-    /** Lands @p count strings, the @c i th as @p value_at hands it, as one u8 tape in @p memory. */
-    template <typename variant_type_, typename value_at_type_, typename arguments_type_>
-    static bool land(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
-                     growing_arena<forkunion_allocator_t>& memory, arguments_type_ const& arguments,
-                     usearch_outcome_t* outcome) noexcept {
+    /** A device's stored string is its own bytes, kept where the call's arena holds them. */
+    static status_t keep_stored(bytes_view_t stored, kept_t& kept) noexcept {
+        return kept = stored, status_t::success_k;
+    }
+
+    /** Writes @p count strings, the @c i th as @p value_at hands it, as one u8 tape in
+     *  @p memory. */
+    template <typename variant_type_, typename value_at_type_>
+    static status_t write_values(variant_type_ const&, std::size_t count, value_at_type_&& value_at,
+                                 growing_arena<forkunion_allocator_t>& memory,
+                                 usearch_tape_view_t* sequences) noexcept {
         std::size_t* const offsets = carve<std::size_t>(memory, count + 1);
-        if (!offsets) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        if (!offsets) return status_t::bad_alloc_k;
         offsets[0] = 0;
         for (std::size_t entry = 0; entry != count; ++entry)
             offsets[entry + 1] = offsets[entry] + value_at(entry).size();
         byte_t* const bytes = carve<byte_t>(memory, offsets[count]);
-        if (offsets[count] && !bytes)
-            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+        if (offsets[count] && !bytes) return status_t::bad_alloc_k;
         for (std::size_t entry = 0; entry != count; ++entry)
             if (auto const& value = value_at(entry); value.size())
                 std::memcpy(bytes + offsets[entry], value.data(), value.size());
-        *arguments.sequences = {bytes, offsets, usearch_scalar_u8_k};
-        return true;
+        *sequences = {bytes, offsets, usearch_scalar_u8_k};
+        return status_t::success_k;
     }
 
     /** Adds one entry's bytes to a key's statistics, from any thread. */

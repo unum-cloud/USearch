@@ -315,7 +315,7 @@ inline insert_row(t) {
 }
 
 // `plan_absorb` and its `run` for one donor: the donor closed at plan time or at `run`, the
-// landings packed against its count and watermarks, and at `run` every row it holds one they
+// moves packed against its count and watermarks, and at `run` every row it holds one they
 // packed. Its callers' locals are `observed`, `count`, `seen`, `shard`, `succeeded`, `refused`,
 // `packed_count` and `packed_rows`
 inline absorb(t) {

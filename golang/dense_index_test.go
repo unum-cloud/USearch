@@ -1,6 +1,12 @@
-// Tests for the boundary, not for the engine behind it: struct layouts across an anonymous
-// union, sixteen-byte keys reinterpreted in place, stride arithmetic, handle ownership, and the
-// pins and handles a deferred call keeps until it is final.
+// Tests for the boundary, not for the engine behind it.
+//
+// File: golang/dense_index_test.go
+// Author: Ash Vardanian
+// Date: August 16, 2026
+
+// The boundary is struct layouts across an anonymous union, sixteen-byte keys reinterpreted in
+// place, stride arithmetic, handle ownership, and the pins and handles a deferred call keeps
+// until it is final.
 //
 // Run under `go test -race` with `GODEBUG=cgocheck=1`, which covers the memory-safety surface
 // no assertion here can reach.
@@ -1153,8 +1159,8 @@ func TestAttendFoldsTheRowsTheLookupNames(t *testing.T) {
 	}
 }
 
-// A sweep reports the nodes whose edges changed rather than a status, so a caller loops on the
-// number it returns, and an audit reports how much of the result a search reaches.
+// A sweep reports what it did rather than a status, so a caller loops on the changes it reports,
+// and an audit reports how much of the result a search reaches.
 func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -1163,12 +1169,12 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	on := index.On(pool(t))
 
 	var stats DenseTraversalStats
-	changed, err := on.Refine(&DenseRefineConfig{ExpansionFactor: 64, Stats: &stats})
+	report, err := on.Refine(&DenseRefineConfig{ExpansionFactor: 64, Stats: &stats})
 	if err != nil {
 		t.Fatalf("the sweep must run: %v", err)
 	}
-	if changed > count {
-		t.Errorf("a sweep changed %d of %d nodes", changed, count)
+	if report.Changed > report.Reselected || report.Reachability.Audited != count {
+		t.Errorf("a sweep over %d nodes reported %+v", count, report)
 	}
 	if stats.VisitedMembers == 0 {
 		t.Errorf("the sweep reported %+v", stats)
@@ -1206,7 +1212,7 @@ func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
 		donors[position] = donor
 	}
 
-	if err := index.Absorb(donors[:1], nil); err != nil {
+	if _, err := index.Absorb(donors[:1], nil); err != nil {
 		t.Fatalf("the absorb reported %v", err)
 	}
 	if counted, err := index.Count(KeyFromUint64(7)); err != nil || counted != 1 {
@@ -1215,19 +1221,71 @@ func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
 	if _, err := donors[0].Describe(); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a consumed donor described with %v", err)
 	}
-	if err := index.Absorb(donors[:1], nil); !errors.Is(err, StatusUninitialized) {
+	if _, err := index.Absorb(donors[:1], nil); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a consumed donor was absorbed again with %v", err)
 	}
 
 	var seen uint
 	stops := func(completed, _ uint) bool { seen = completed; return completed == 0 }
-	if err := index.Absorb(donors[1:], &DenseAbsorbConfig{Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
+	if _, err := index.Absorb(donors[1:], &DenseAbsorbConfig{Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
 		t.Fatalf("the stopped absorb reported %v", err)
 	}
 	for position, donor := range donors[1:] {
 		if _, err := donor.Describe(); (err == nil) != (uint(position) >= seen) {
 			t.Errorf("donor %d of the %d absorbed described with %v", position, seen, err)
 		}
+	}
+}
+
+// A split hands every entry to the receivers and leaves the source empty but live.
+func TestSplitEmptiesTheSourceIntoItsReceivers(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	const count = 32
+	index, _, _ := populated(t, angularBF16(dimensions), count)
+	receivers := []*DenseIndex{newIndex(t, angularBF16(dimensions), count), newIndex(t, angularBF16(dimensions), count)}
+	if _, err := index.On(pool(t)).Split(receivers, &DenseSplitConfig{Seed: 7}); err != nil {
+		t.Fatalf("the split must run: %v", err)
+	}
+	var moved uint
+	for _, receiver := range receivers {
+		description, err := receiver.Describe()
+		if err != nil {
+			t.Fatalf("a receiver must describe: %v", err)
+		}
+		moved += description.Size
+	}
+	if description, err := index.Describe(); err != nil || description.Size != 0 || moved != count {
+		t.Errorf("the source kept %+v with %v, and the receivers took %d of %d", description, err, moved, count)
+	}
+}
+
+// A sample draws held keys, each placed in three dimensions, refusing shown keys it cannot place.
+func TestSampleDrawsHeldKeysWithPlaces(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	const count = 32
+	index, keys, _ := populated(t, angularBF16(dimensions), count)
+	arena := newArena(t, nil)
+	draws, err := index.Sample(8, arena, &DenseSampleConfig{Seed: 42})
+	if err != nil {
+		t.Fatalf("the sample must run: %v", err)
+	}
+	drawn, err := draws.Keys()
+	if err != nil || draws.Written() > 8 || uint(len(drawn)) != draws.Written() {
+		t.Fatalf("the sample wrote %d keys of %d with %v", len(drawn), draws.Written(), err)
+	}
+	for _, key := range drawn {
+		if !slices.Contains(keys, key) {
+			t.Errorf("the sample drew %v, which the index never held", key)
+		}
+	}
+	if draws.Written() != 0 && draws.Coordinates().Columns() != 3 {
+		t.Errorf("a draw was placed in %d dimensions", draws.Coordinates().Columns())
+	}
+	_, err = index.Sample(8, arena, &DenseSampleConfig{Shown: keys[:1]})
+	if !errors.Is(err, StatusShapeMismatch) {
+		t.Errorf("shown keys without places reported %v", err)
 	}
 }
 

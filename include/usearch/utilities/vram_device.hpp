@@ -89,10 +89,11 @@ inline std::size_t list_gpu_devices(gpu_drivers_t const& drivers, std::span<gpu_
 }
 
 /**
- *  Spawns the executor of the one vendor every device in @p devices belongs to, over that vendor's
- *  driver in @p drivers, one stream per distinct device over their vendor ordinals, which every
- *  shard there shares, its scratch capped at @p scratch_limit bytes per stream, zero for no
- *  ceiling.
+ *  @brief Spawns the executor of the one vendor every device in @p devices belongs to, over that
+ *      vendor's driver in @p drivers.
+ *
+ *  One stream per distinct device over their vendor ordinals, which every shard there shares, its
+ *  run never growing past @p scratch_limit bytes per stream, zero for no ceiling.
  *
  *  @par Statuses:
  *  - @c device_error_k No device is named, or the build drives no executor of their vendor.
@@ -123,7 +124,7 @@ inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::
     return result;
 }
 
-/** Device memory a C-layer call lands its outputs in, on the vendor and first stream of the
+/** Device memory a C-layer call writes its outputs to, on the vendor and first stream of the
  *  executor it was made for, or none for host-resident calls; it serves calls on that executor
  *  alone, and dies before it. */
 struct gpu_arena_t {
@@ -212,6 +213,14 @@ struct gpu_arena_t {
     }
 };
 
+/** One row a gather copies, on any vendor: the node whose stored row it reads, and the row of the
+ *  outputs it writes. */
+struct vram_gathered_row_t {
+    u32_t node = 0;
+    u32_t output_row = 0;
+};
+static_assert(sizeof(vram_gathered_row_t) == 8, "A gather lists its rows in eight bytes each");
+
 #pragma region Kernel Symbols
 
 /** The GPU kernels basic graphs and every design launch, the first template argument of each
@@ -221,6 +230,7 @@ struct gpu_arena_t {
  *  @c count_k. */
 enum class vram_kernel_t : u32_t {
 
+    // Graph Building
     /** Walks the graph for each entry of an insertion wave and selects its forward neighbors. */
     insert_k,
 
@@ -236,21 +246,26 @@ enum class vram_kernel_t : u32_t {
     /** Moves nodes' neighbor IDs between ID spaces, packing the survivors. */
     rebase_links_k,
 
+    // Reachability Audit
     /** Marks the reachability audit's landmark nodes reached and in the first frontier. */
     mark_landmarks_k,
 
     /** Expands the reachability frontier by one level. */
     reachability_sweep_k,
 
-    /** Counts the nodes no sweep reached, collecting their IDs. */
+    /** Marks the nodes reaching back to the landmarks through a node that did a level earlier. */
+    reachability_back_sweep_k,
+
+    /** Counts the nodes no sweep reached, or that reach no landmark back, collecting their IDs. */
     reachability_islands_k,
 
     /** Counts, for every node, the reached nodes that point at it. */
     reached_in_links_k,
 
-    /** Links each unreached island back into the reached graph. */
+    /** Links each island into the graph the audit reached both ways. */
     reconnect_island_k,
 
+    // Partitioning
     /** Places a split's part roots, one node per part, in the first frontier. */
     partition_roots_k,
 
@@ -258,7 +273,7 @@ enum class vram_kernel_t : u32_t {
     partition_propose_k,
 
     /** Counts the nodes a growth round proposed to each part. */
-    partition_tally_k,
+    partition_count_k,
 
     /** Places the proposed nodes of every part with room for the whole round. */
     partition_accept_k,
@@ -270,13 +285,56 @@ enum class vram_kernel_t : u32_t {
     partition_islands_k,
 
     /** Marks the nodes linking into another part. */
-    partition_seams_k,
+    partition_picked_k,
 
+    // Split Moves
     /** Moves every node's neighbors into its part's receiver, rebased through the slots. */
     split_links_k,
 
     /** Moves every node's ragged value into its part's receiver. */
     split_tape_k,
+
+    /** Moves every node's vector, norms and key into its part's receiver. */
+    split_nodes_k,
+
+    // Gathers and Products
+
+    /** Copies listed nodes' rows into a caller's matrix, cast into its scalar. */
+    gather_vectors_k,
+
+    /** Sums a batch's per-query counts into one word. */
+    sum_counts_k,
+
+    /** Resolves one shard's walked products into keys through its device key column. */
+    resolve_products_k,
+
+    /** Packs every query's kept products back to back from its offset. */
+    compact_products_k,
+
+    /** Copies listed nodes' ragged values back to back into a caller's tape. */
+    gather_tape_k,
+
+    // Exact MaxSim
+
+    /** Collects every query's distinct keys across its token rows and the shards. */
+    nominate_keys_k,
+
+    /** Takes one shard's best dot of every nominee per token row of its query. */
+    maxsim_rescore_k,
+
+    /** Takes the best of every shard's dots per token row, summed over the rows. */
+    maxsim_fold_k,
+
+    /** Appends every query's best-scoring nominees to a tape. */
+    top_k_k,
+
+    // Radius Walks
+
+    /** Counts each query's entries within its radius. */
+    within_count_k,
+
+    /** Writes each query's entries within its radius from its scanned offset. */
+    within_write_k,
 
     /** The number of kernels, sizing the tables of loaded kernels. */
     count_k,

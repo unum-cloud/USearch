@@ -539,7 +539,7 @@ pub const Matches = struct {
         if (position >= self.queries) return refuse(.invalid_argument);
         const first = position * self.view.columns;
         const written = self.view.counts.?[position];
-        return .{ .keys = landed(Key, self.view.keys, first, written), .scores = landed(Distance, self.view.scores, first, written) };
+        return .{ .keys = outputSlice(Key, self.view.keys, first, written), .scores = outputSlice(Distance, self.view.scores, first, written) };
     }
 
     /// Where the matches live, which the host reads only as `.ram` or `.nvme`.
@@ -550,7 +550,7 @@ pub const Matches = struct {
 
 /// Borrows `length` elements from `first` on, of a run a call wrote into an arena; a failed or
 /// empty call leaves the run null. Binding-only.
-pub fn landed(comptime Element: type, data: ?[*]const Element, first: usize, length: usize) []const Element {
+pub fn outputSlice(comptime Element: type, data: ?[*]const Element, first: usize, length: usize) []const Element {
     return if (length == 0) &.{} else data.?[first..][0..length];
 }
 
@@ -955,7 +955,7 @@ pub const Executor = struct {
 /// Memory the library writes every output whose length scales with a call into - matches, rows,
 /// products, monoliths and cursor batches - mirroring `usearch_arena_t`.
 ///
-/// Every verb landing such outputs borrows one as `*Arena`, blocking or deferred alike. Each call
+/// Every verb writing such outputs borrows one as `*Arena`, blocking or deferred alike. Each call
 /// rewinds it, so the views of the previous call refuse every read afterwards, and refills it,
 /// growing only past its high-water mark, so a steady loop allocates once. An arena serves one call
 /// at a time: a second use while a call holds it fails with `Error.Contended` and leaves that call's

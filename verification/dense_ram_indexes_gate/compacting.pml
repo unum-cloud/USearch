@@ -3,10 +3,10 @@
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief An in-place compaction moving an entry between shards, beside a looker counting its key:
- *      the landing's `finish` and `forget_moved_` both run inside the window.
+ *      the move's `finish` and `forget_moved_` both run inside the window.
  *
  *  Shard 0 holds key A at row 0 and shard 1 key B at row 0; each shard's map holds B's chain in one
- *  slot. The compactor takes the unique side, closes both shards, lands B onto shard 0 at row 1 and
+ *  slot. The compactor takes the unique side, closes both shards, places B onto shard 0 at row 1 and
  *  files it there, above the watermark. Inside its window and the commit bracket it runs `finish`,
  *  which moves shard 0's watermark past B, then `forget_moved_` on shard 1: the watermark to zero,
  *  then the map cleared. The looker sums both shards' `count` of B under `read_until_settled`, the
@@ -55,7 +55,7 @@ proctype compactor(byte t) {
         close_shards(t, 2, refused);
         if
         :: !refused ->
-            // the landing's steps, then its one publisher filing B above shard 0's watermark
+            // the move's steps, then its one publisher filing B above shard 0's watermark
             store(t, map_slot(0), order_release, filed(key_b, 1));
             begin_window(t, epoch_seen);
             read_modify_write(t, commit_sequence, order_release, opened, opened + 1);

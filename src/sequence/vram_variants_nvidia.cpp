@@ -69,4 +69,5 @@ template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_needleman
                                                sequence_nvidia_capabilities_k,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
-template struct basic_class_tables<sequence_traits_t, dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ampere_k>;
+template struct basic_class_tables<sequence_traits_t, vendored_residency_t::vram_nvidia_k,
+                                   gpu_class_t::nvidia_ampere_k>;

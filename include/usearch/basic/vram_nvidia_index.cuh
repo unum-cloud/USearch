@@ -53,7 +53,7 @@ struct cuda_block_schedule {
     static_assert(cuda_warp_t::width_k % entries_per_block_k == 0, "A block's warps split one warp's entries evenly");
 
     /** The round warp zero posts, a warp's width of entries or two, and the distances the block
-     *  lands for it. */
+     *  writes for it. */
     struct shared_t {
         query_t query;
         node_id_type_ ids[2 * cuda_warp_t::width_k];

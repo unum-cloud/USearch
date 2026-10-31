@@ -6,7 +6,7 @@
  *      every dispense refuses while it is closed, so no insert reuses a loaded ID or loses a
  *      back-link to a rewrite.
  *
- *  `ram_indexes` closes every shard's `next_dispensed_id_` before an absorb lands its rows or a
+ *  `ram_indexes` closes every shard's `next_dispensed_id_` before an absorb places its rows or a
  *  refine rewrites them, and reopens it at the end. In one run the index starts empty and the
  *  closer loads one row. In the other the index rests at one published row and the closer refines
  *  it. Beside either, the inserter dispenses one ID or is refused, wires its row, back-links into
@@ -18,7 +18,7 @@
  *
  *  @verify pass sc,rc11
  *  @verify fail sc dispenser_closes=false: an insert arriving meanwhile dispenses the ID the load is
- *      landing
+ *      moving
  *  @verify fail sc refine_closes=false: without it, an insert appends its back-link into row 0
  *      between the refinement's staging and its rewrite, and the rewrite from the staged copy drops
  *      it, leaving the new row without that in-link
@@ -43,7 +43,7 @@ proctype searcher(byte t) {
     search(t, watermark)
 }
 
-// `plan_load` of one row at the watermark, the row landed, `finish`, and the reopening
+// `plan_load` of one row at the watermark, the row placed, `finish`, and the reopening
 proctype loader(byte t) {
     int visible, dispensed, expected;
     bool closed, moved, reopened;
@@ -66,7 +66,7 @@ proctype loader(byte t) {
         assert(!taken[visible]);
         taken[visible] = true
     };
-    land_row(t, visible);
+    copy_loaded_row(t, visible);
     finish_load(t, visible, visible + 1, expected, moved);
     if
     :: dispenser_closes -> reopen_dispenser(t, visible, expected, reopened)

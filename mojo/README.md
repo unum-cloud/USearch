@@ -262,7 +262,7 @@ This binding installs no progress handler, so an `insert` batch is all-or-nothin
 var stored = index.get[DType.float32](Key(integer=42), arena)  # empty when the key is absent
 ```
 
-A cursor walks the contents, landing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the vectors come from `get`.
+A cursor walks the contents, writing each batch in the arena; `next_keys` walks the key column alone, and `next_links` lands the keys each entry links to beside it, while the vectors come from `get`.
 Without start keys it yields every entry as stored; `cursor(starts)` yields the starts' own entries first, then the entries those link to breadth-first, each once.
 
 ```mojo
@@ -290,23 +290,39 @@ Both borrow the index and the executor, so neither can be released while a curso
 
 ### Refinement
 
-`refine` re-runs the neighbor selection over entries already in the graph, returning how many nodes had their neighbors changed.
-A batch built at a low expansion factor reaches the quality of a slower build afterwards, and the count reaching zero is what settled looks like:
+`refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
+A batch built at a low expansion factor reaches the quality of a slower build afterwards, and `changed` reaching zero is what settled looks like:
 
 ```mojo
-while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)) != 0:
+while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)).changed != 0:
     pass
 ```
 
 ### Absorbing & Splitting
 
 Bigger indexes come from absorbing, never mutating: `absorb` takes its donors by value, appends each one's entries with its graph, then refines across the appended part, and the engine frees each donor it absorbs.
-Splitting is not in the C library yet.
+`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+Both report the closing refines as `refine` does.
 
 ```mojo
 var donors = List[DenseIndex]()
 donors.append(shard^)
-index.on(executor).absorb(donors^)
+_ = index.on(executor).absorb(donors^)
+_ = index.on(executor).split(receivers, seed=42)
+```
+
+### Sampling
+
+`sample` draws keys around `focus`, or across the whole index, each hanging from a shown or earlier draw and placed in three dimensions beside the `shown` keys already on screen, so a view grows one connected sample as it zooms.
+Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a superset.
+
+```mojo
+var config = DenseSampleConfig(shown=shown, shown_coordinates=places, focus=near, seed=42)
+var draws = index.on(executor).sample(256, arena, config)
+var keys = draws.keys()
+var entry_ordinals = draws.entry_ordinals()
+var parents = draws.parents()
+var coordinates = draws.coordinates()
 ```
 
 ### Sparse Multiplication

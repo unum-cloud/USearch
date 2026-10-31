@@ -215,11 +215,11 @@ int main() {
 
     // All three search modes answer, ranked & settled-equal.
     auto const query = make_tag(0);
-    auto const [concurrent_result, concurrent_status] = index.search(query, metric, context);
+    auto const [concurrent_result, concurrent_status] = index.search(query, {}, metric, context);
     auto const [immutable_result, immutable_status] = index.template search<synchronization_t::immutable_k>(
-        query, metric, context);
+        query, {}, metric, context);
     auto const [exclusive_result, exclusive_status] = index.template search<synchronization_t::exclusive_k>(
-        query, metric, context);
+        query, {}, metric, context);
     if (failed(concurrent_status) || failed(immutable_status) || failed(exclusive_status)) return 1;
     if (!concurrent_result.count) return 1;
     if (immutable_result.count != concurrent_result.count || exclusive_result.count != concurrent_result.count)
@@ -274,7 +274,7 @@ int main() {
     if (failed(wide_index.insert({wide_tags}, {wide_keys}, metric, {}, wide_context, basic::keep_diverse_t {2}).status))
         return 1;
     if (!wide_index.find(wide_keys[1]) || wide_index.find(wide_keys[1]).value != 1) return 1;
-    if (failed(wide_index.search(make_tag(1), metric, wide_context).status)) return 1;
+    if (failed(wide_index.search(make_tag(1), {}, metric, wide_context).status)) return 1;
 
     // Clearing forgets the nodes and keys and keeps the covered chunks.
     std::size_t const wide_capacity = wide_index.capacity();

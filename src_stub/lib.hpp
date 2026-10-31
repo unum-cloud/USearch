@@ -27,6 +27,8 @@
 #include <cstdint> // `std::uint8_t`
 #include <cstring> // `std::memcmp`
 
+#include <cstdio> // `std::snprintf` - a part's name and a manifest's entry
+
 #include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`, `std::min`
 #include <array>            // `std::array`
 #include <bit>              // `std::bit_cast`
@@ -35,6 +37,7 @@
 #include <limits>           // `std::numeric_limits`
 #include <mutex>            // `std::unique_lock`
 #include <new>              // `std::bad_alloc`
+#include <numbers>          // `std::numbers::pi` - the sample projection's angles
 #include <optional>         // `std::optional`
 #include <shared_mutex>     // `std::shared_mutex`, `std::shared_lock`
 #include <span>             // `std::span`
@@ -42,6 +45,7 @@
 #include <string_view>      // `std::string_view` - a byte run read as text
 #include <type_traits>      // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
 #include <unordered_map>    // `std::unordered_map`, `std::unordered_multimap`
+#include <unordered_set>    // `std::unordered_set` - a sample region's visits
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
 
@@ -192,7 +196,7 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
                   "The tape must name storage", outcome))
         return true;
     for (std::size_t entry = 0; entry != count; ++entry)
-        if (reject_if(tape.offsets[entry + 1] < tape.offsets[entry], usearch_status_malformed_k,
+        if (reject_if(tape.offsets[entry + 1] < tape.offsets[entry], usearch_status_invalid_argument_k,
                       "The tape's offsets must not decrease", outcome))
             return true;
     return false;
@@ -219,42 +223,55 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_o
 #pragma region Executors and Arenas
 
 /** The copied arguments of any verb that takes an executor; whatever they point to stays the caller's until final. */
-using call_arguments_t = std::variant<                                                                   //
-    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
-    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,       //
-    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
-    usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
-    usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
-    usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
-    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
-    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
-    usearch_sequence_load_ram_t, usearch_sequence_load_vram_t, usearch_sequence_view_nvme_t,             //
-    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
-    usearch_sequence_refine_t, usearch_sequence_absorb_t, usearch_sequence_split_t,                      //
-    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t,                              //
-    usearch_sequence_refinement_finish_t,                                                                //
-    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
-    usearch_sequence_cursor_next_t, usearch_sequence_sample_t,                                           //
-    usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
-    usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
-    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
-    usearch_shapes_refine_t, usearch_shapes_absorb_t, usearch_shapes_split_t,                            //
-    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t,                                  //
-    usearch_shapes_refinement_finish_t,                                                                  //
-    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
-    usearch_shapes_cursor_next_t, usearch_shapes_sample_t,                                               //
-    usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
-    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
-    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
-    usearch_geospatial_refine_t, usearch_geospatial_absorb_t, usearch_geospatial_split_t,                //
-    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                          //
-    usearch_geospatial_refinement_finish_t,                                                              //
-    usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
-    usearch_geospatial_count_t, usearch_geospatial_get_t,                                                //
-    usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                                       //
-    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
+using call_arguments_t = std::variant< //
+
+    /* Loading */
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,          //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                   //
+    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t, usearch_sequence_load_vram_t,       //
+    usearch_shapes_load_ram_t, usearch_shapes_view_nvme_t, usearch_shapes_load_vram_t,             //
+    usearch_geospatial_load_ram_t, usearch_geospatial_view_nvme_t, usearch_geospatial_load_vram_t, //
+
+    /* Building */
+    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
+    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,       //
+    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,             //
+    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t, //
+
+    /* Refining */
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,             //
+    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
+    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
+    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
+    usearch_geospatial_split_t,                                                                                //
+
+    /* Refinements */
+    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t,          //
+    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t, usearch_sequence_refinement_finish_t, //
+    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t, usearch_shapes_refinement_finish_t,       //
+    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                                   //
+    usearch_geospatial_refinement_finish_t,                                                                       //
+
+    /* Reading */
+    usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
+    usearch_dense_cursor_next_t, usearch_dense_sample_t, usearch_dense_describe_t,                               //
+    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t, usearch_sequence_cursor_next_t, //
+    usearch_sequence_sample_t, usearch_sequence_describe_t,                                                      //
+    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t, usearch_shapes_cursor_next_t,         //
+    usearch_shapes_sample_t, usearch_shapes_describe_t,                                                          //
+    usearch_geospatial_search_t, usearch_geospatial_within_t, usearch_geospatial_count_t,                        //
+    usearch_geospatial_get_t, usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                     //
+    usearch_geospatial_describe_t,                                                                               //
+
+    /* Persisting */
+    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, //
+    usearch_dense_metadata_read_buffer_t,                                             //
+    usearch_sequence_save_t, usearch_sequence_metadata_read_t,                        //
+    usearch_shapes_save_t, usearch_shapes_metadata_read_t,                            //
+    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,                    //
+
+    /* Products */
+    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
 
 /** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
  *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */
@@ -367,9 +384,9 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
 /** Carves @p count values of @c value_type_ out of a claimed @p arena; null once @p outcome records why not. */
 template <typename value_type_>
 value_type_* carve(usearch_arena_handle_t& arena, std::size_t count, usearch_outcome_t* outcome) {
-    std::byte* const landing = arena.memory.allocate(count * sizeof(value_type_), default_alignment_k);
-    if (!landing) propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-    return reinterpret_cast<value_type_*>(landing);
+    std::byte* const carved = arena.memory.allocate(count * sizeof(value_type_), default_alignment_k);
+    if (!carved) propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    return reinterpret_cast<value_type_*>(carved);
 }
 
 #pragma endregion Executors and Arenas
@@ -535,7 +552,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
                                  ? ((saturated - 1) << format.mantissa_bits) | (mantissa_span - 1)
                              : format.specials == minifloat_specials_t::nan_only_k ? reserved - 1
                                                                                    : reserved;
-    // A kind reserving no code cannot carry a NaN, so it lands on a zero.
+    // A kind reserving no code cannot carry a NaN, so it falls to zero.
     if (std::isnan(value))
         return static_cast<u8_t>(format.specials == minifloat_specials_t::none_k ? 0u : sign | reserved);
     if (std::isinf(value) && format.specials == minifloat_specials_t::inf_and_nan_k)
@@ -707,7 +724,7 @@ struct entry {
 
 /** The project's own key type, which already knows how to hash and compare itself.
  *  Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation. */
-inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uuid_t>(key); }
+inline uuid_t uuid_of(usearch_key_t const& key) noexcept { return std::bit_cast<uuid_t>(key); }
 
 /**
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
@@ -737,6 +754,23 @@ struct handle {
     /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
     usearch_residency_t residency = usearch_residency_ram_k;
 
+    /** The refinement holding the handle closed to insertions, saves and other refinements until it
+     *  finishes, or null; read and written under @c mutex. */
+    void const* refinement = nullptr;
+
+    /** Entries one shard holds before the next opens; zero means the engine's 2^32 - 2. */
+    std::size_t shard_capacity = 0;
+
+    /** Parts the checkpoint the handle opened from had; zero for a handle built by insertion. */
+    std::size_t parts_opened = 0;
+
+    /** Live shards: the parts a checkpoint opened, or one per @c shard_capacity entries, one at
+     *  the least. */
+    std::size_t shards() const noexcept {
+        std::size_t const capacity = shard_capacity ? shard_capacity : std::numeric_limits<std::size_t>::max();
+        return std::max({std::size_t {1}, parts_opened, divide_round_up(entries.size(), capacity)});
+    }
+
     /** Drops every entry, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }
 
@@ -754,14 +788,14 @@ struct handle {
 
     /** Appends one entry and indexes its key, the only way an entry is ever added. */
     void append(usearch_key_t key, payload_ payload) {
-        by_key.emplace(keyed(key), entries.size());
+        by_key.emplace(uuid_of(key), entries.size());
         entries.push_back({key, std::move(payload)});
     }
 
     /** Drops every entry published past @p watermark, which an unwound batch reverts to. */
     void unwind(std::size_t watermark) {
         for (std::size_t position = entries.size(); position != watermark; --position) {
-            auto const range = by_key.equal_range(keyed(entries[position - 1].key));
+            auto const range = by_key.equal_range(uuid_of(entries[position - 1].key));
             for (auto slot = range.first; slot != range.second; ++slot)
                 if (slot->second == position - 1) {
                     by_key.erase(slot);
@@ -785,7 +819,7 @@ bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::
     std::size_t const bound = values_per_key ? values_per_key : 1;
     std::unordered_map<uuid_t, std::size_t> admitted;
     for (std::size_t offset = 0; offset != count; ++offset) {
-        uuid_t const key = keyed(key_at(keys, offset));
+        uuid_t const key = uuid_of(key_at(keys, offset));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
         if (reject_if(held > bound, usearch_status_overflow_k, "A key would hold more entries than the index admits",
                       outcome))
@@ -801,13 +835,21 @@ bool reject_read_only(handle_ const& index, usearch_outcome_t* outcome) {
                      outcome);
 }
 
+/** Refuses an insertion, a save or another refinement while a refinement holds the handle closed;
+ *  the caller holds the handle's mutex. */
+template <typename handle_>
+bool reject_refining(handle_ const& index, usearch_outcome_t* outcome) {
+    return reject_if(index.refinement != nullptr, usearch_status_contended_k, "A refinement holds the handle closed",
+                     outcome);
+}
+
 /** Entry positions under @p key, ascending - the insertion order every @c get promises.
  *  An unordered multimap keeps equivalent keys adjacent but in no stated order, so the
  *  ascending sort is what restores the contract rather than a tidiness. */
 template <typename handle_>
-std::vector<std::size_t> entries_under(handle_ const& index, usearch_key_t key) {
+std::vector<std::size_t> nodes_of(handle_ const& index, usearch_key_t key) {
     std::vector<std::size_t> entries;
-    auto const range = index.by_key.equal_range(keyed(key));
+    auto const range = index.by_key.equal_range(uuid_of(key));
     for (auto position = range.first; position != range.second; ++position) entries.push_back(position->second);
     std::sort(entries.begin(), entries.end());
     return entries;
@@ -844,13 +886,13 @@ struct match_t {
 
 /** A ranked run's storage inside a claimed arena: @c wanted keys and scores per query, and a count
  *  per query. */
-struct ranked_landing_t {
-    usearch_key_t* keys;
-    usearch_distance_t* scores;
-    std::size_t* counts;
-    std::size_t wanted;
+struct matches_outputs_t {
+    usearch_key_t* keys = nullptr;
+    usearch_distance_t* scores = nullptr;
+    std::size_t* counts = nullptr;
+    std::size_t wanted = 0;
 
-    /** Lands the first @c wanted of @p ranked as the matches of @p query, and their number as its
+    /** Writes the first @c wanted of @p ranked as the matches of @p query, and their number as its
      *  count. */
     void write(std::size_t query, std::span<match_t const> ranked) const noexcept {
         std::size_t const found = std::min(wanted, ranked.size());
@@ -859,23 +901,23 @@ struct ranked_landing_t {
         counts[query] = found;
     }
 
-    /** The view the call publishes once every query landed. */
+    /** The view the call publishes once every query is written. */
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
 /** Carves @p wanted matches for each of @p count queries out of a claimed @p arena; false once
  *  @p outcome records why not. */
 inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
-                         ranked_landing_t& landing, usearch_outcome_t* outcome) {
-    landing.wanted = wanted;
-    return (landing.keys = carve<usearch_key_t>(arena, count * wanted, outcome)) &&
-           (landing.scores = carve<usearch_distance_t>(arena, count * wanted, outcome)) &&
-           (landing.counts = carve<std::size_t>(arena, count, outcome));
+                         matches_outputs_t& outputs, usearch_outcome_t* outcome) {
+    outputs.wanted = wanted;
+    return (outputs.keys = carve<usearch_key_t>(arena, count * wanted, outcome)) &&
+           (outputs.scores = carve<usearch_distance_t>(arena, count * wanted, outcome)) &&
+           (outputs.counts = carve<std::size_t>(arena, count, outcome));
 }
 
-/** Scores the @p entries that @p predicate admits, judged in one call, into @p ranked, nearest
- *  first. The sort is stable because every modality's docblock promises ties fall in insertion
- *  order. */
+/** Scores the @p entries that @p predicate admits, judged a quad at a time as the engine asks, into
+ *  @p ranked, nearest first. The sort is stable because every modality's docblock promises ties
+ *  fall in insertion order. */
 template <typename payload_>
 void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicate,
           std::function<double(payload_ const&)> const& score, std::vector<match_t>& ranked) {
@@ -883,7 +925,9 @@ void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicat
     if (predicate.callback && !entries.empty()) {
         std::vector<usearch_key_t> keys(entries.size());
         for (std::size_t entry = 0; entry != entries.size(); ++entry) keys[entry] = entries[entry].key;
-        predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
+        for (std::size_t first = 0; first < keys.size(); first += 4)
+            predicate.callback(keys.data() + first, admissions.data() + first,
+                               std::min<std::size_t>(4, keys.size() - first), predicate.state);
     }
     ranked.clear();
     ranked.reserve(entries.size());
@@ -894,94 +938,6 @@ void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicat
 }
 
 #pragma endregion Ranking
-
-#pragma region Sampling
-
-/** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
- *  seed's stream, so equal seeds draw a region in one order and distinct seeds in others. */
-inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
-    u64_t mixed = seed + (static_cast<u64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull;
-    mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
-    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
-    return mixed ^ (mixed >> 31);
-}
-
-/** The entries below @p count that @p within admits - a sample's region - in the order @p seed
- *  draws them. */
-template <typename within_>
-std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ const& within) {
-    std::vector<std::size_t> order;
-    for (std::size_t entry = 0; entry != count; ++entry)
-        if (within(entry)) order.push_back(entry);
-    // The slot breaks a tie between equal ranks, so the order is total and repeats exactly.
-    std::sort(order.begin(), order.end(), [seed](std::size_t first, std::size_t second) {
-        u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
-        return first_rank != second_rank ? first_rank < second_rank : first < second;
-    });
-    return order;
-}
-
-/**
- *  @brief The body of every modality's @c sample: lands the draws ranked @c offset onward, at most
- *      @c wanted, each linked to its @c links_per_draw nearest earlier draws.
- *
- *  The region is every entry, or with a nonzero @c radius those within it of some of @p anchors.
- *  Earlier means every draw ranked before it, those an earlier call wrote included, so successive
- *  calls extend one sample. Equidistant draws link in the order they were drawn. The outputs of
- *  @p arguments are written only once every draw landed, so a cancelled call leaves them reset.
- */
-template <typename arguments_, typename payload_, typename anchor_, typename score_>
-void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> entries,
-                 std::span<anchor_ const> anchors, score_ const& score, usearch_arena_handle_t& arena,
-                 usearch_outcome_t* outcome) {
-    // Every kind ranks nearest-first, inner products as `1 - dot` and alignments by their negated
-    // scores, so a radius bounds from above.
-    bool const bounded = !anchors.empty() && arguments.radius != 0;
-    std::vector<std::size_t> const order = drawing_order(entries.size(), arguments.seed, [&](std::size_t entry) {
-        return !bounded || std::any_of(anchors.begin(), anchors.end(), [&](anchor_ const& anchor) {
-            return score(anchor, entries[entry].payload) <= arguments.radius;
-        });
-    });
-    std::size_t const first = std::min(arguments.offset, order.size());
-    std::size_t const drawn = std::min(arguments.wanted, order.size() - first);
-    std::size_t links_count = 0;
-    for (std::size_t rank = first; rank != first + drawn; ++rank)
-        links_count += std::min(arguments.links_per_draw, rank);
-    usearch_key_t* const keys = carve<usearch_key_t>(arena, drawn, outcome);
-    std::size_t* const offsets = keys ? carve<std::size_t>(arena, drawn + 1, outcome) : nullptr;
-    usearch_key_t* const linked = offsets ? carve<usearch_key_t>(arena, links_count, outcome) : nullptr;
-    usearch_distance_t* const distances = linked ? carve<usearch_distance_t>(arena, links_count, outcome) : nullptr;
-    if (!distances) return;
-
-    // Each earlier draw as its distance and rank, so sorting pairs breaks ties by draw order.
-    std::vector<std::pair<double, std::size_t>> earlier;
-    offsets[0] = 0;
-    std::size_t landed = 0;
-    while (landed != drawn) {
-        std::size_t const rank = first + landed;
-        payload_ const& payload = entries[order[rank]].payload;
-        earlier.clear();
-        for (std::size_t previous = 0; previous != rank; ++previous)
-            earlier.push_back({score(payload, entries[order[previous]].payload), previous});
-        std::size_t const kept = std::min(arguments.links_per_draw, rank);
-        std::partial_sort(earlier.begin(), earlier.begin() + kept, earlier.end());
-        for (std::size_t link = 0; link != kept; ++link) {
-            linked[offsets[landed] + link] = entries[order[earlier[link].second]].key;
-            distances[offsets[landed] + link] = earlier[link].first;
-        }
-        offsets[landed + 1] = offsets[landed] + kept;
-        keys[landed] = entries[order[rank]].key;
-        if (arguments.stats) arguments.stats->visited_members += rank, arguments.stats->computed_distances += rank;
-        ++landed;
-        if (!keep_going(arguments.progress, landed, arguments.wanted)) break;
-    }
-    if (reject_cancelled(landed, drawn, outcome)) return;
-    *arguments.keys = {keys, sizeof(usearch_key_t)};
-    *arguments.links = {linked, distances, offsets};
-    *arguments.written = drawn;
-}
-
-#pragma endregion Sampling
 
 #pragma region Graph Walks
 
@@ -1024,7 +980,7 @@ struct graph_cursor {
     std::vector<std::size_t> order;
 
     /** Per node below @c limit, whether @c order holds it; empty for a scan. */
-    std::vector<std::uint8_t> seen;
+    std::vector<std::uint8_t> visited;
 
     /** Nodes of @c order whose links are already queued behind them. */
     std::size_t expanded = 0;
@@ -1044,10 +1000,10 @@ void open_walk(graph_cursor<handle_>& cursor, std::type_identity_t<handle_> cons
     cursor.opened_on = &index;
     cursor.limit = index.entries.size();
     if (!starts_count) return;
-    cursor.seen.assign(cursor.limit, 0);
+    cursor.visited.assign(cursor.limit, 0);
     for (std::size_t start = 0; start != starts_count; ++start)
-        for (std::size_t node : entries_under(index, starts[start]))
-            if (node < cursor.limit && !cursor.seen[node]) cursor.seen[node] = 1, cursor.order.push_back(node);
+        for (std::size_t node : nodes_of(index, starts[start]))
+            if (node < cursor.limit && !cursor.visited[node]) cursor.visited[node] = 1, cursor.order.push_back(node);
 }
 
 /** The links of @p node, computed on first use and kept. */
@@ -1060,7 +1016,7 @@ std::vector<std::size_t> const& walk_links(graph_cursor<handle_>& cursor, std::s
 }
 
 /**
- *  @brief The body of every modality's @c cursor_next: lands the next @c wanted nodes' keys and,
+ *  @brief The body of every modality's @c cursor_next: writes the next @c wanted nodes' keys and,
  *      when asked, their links as a keys tape. A walk expands only as far as the pull needs.
  *
  *  A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
@@ -1071,14 +1027,14 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
     handle_ const& index = *cursor.opened_on;
     std::size_t const wanted = arguments.wanted;
     std::vector<std::size_t> nodes;
-    if (cursor.seen.empty()) {
+    if (cursor.visited.empty()) {
         std::size_t const taking = std::min(wanted, cursor.limit - std::min(cursor.position, cursor.limit));
         for (std::size_t offset = 0; offset != taking; ++offset) nodes.push_back(cursor.position + offset);
     }
     else {
         while (cursor.order.size() < cursor.position + wanted && cursor.expanded < cursor.order.size()) {
             for (std::size_t linked : walk_links(cursor, cursor.order[cursor.expanded], score))
-                if (!cursor.seen[linked]) cursor.seen[linked] = 1, cursor.order.push_back(linked);
+                if (!cursor.visited[linked]) cursor.visited[linked] = 1, cursor.order.push_back(linked);
             ++cursor.expanded;
         }
         std::size_t const end = std::min(cursor.order.size(), cursor.position + wanted);
@@ -1111,11 +1067,628 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
 
 #pragma endregion Graph Walks
 
+#pragma region Sampling
+
+/** Shown points each draw is placed against, at most, as the library's plan keeps them. */
+inline constexpr std::size_t sample_nearest_shown_k = 8;
+
+/** Gauss-Newton steps one draw's coordinates take. */
+inline constexpr std::size_t sample_gauss_newton_steps_k = 8;
+
+/** Draws a classical scaling spans; later draws are placed among them. */
+inline constexpr std::size_t sample_scaling_draws_k = 32;
+
+/** Entries a region visits per draw it may make, when the call names no breadth. */
+inline constexpr std::size_t sample_expansion_factor_k = 16;
+
+/** SplitMix64's output at @p counter of the stream @p seed starts: its state after @p counter + 1
+ *  steps, mixed. */
+constexpr u64_t splitmix64_at(u64_t seed, u64_t counter) noexcept {
+    return mix_bits(seed + (counter + 1) * golden_ratio_u64_k);
+}
+
+/** The top 53 bits of @p bits as a double in (0, 1]: ((bits >> 11) + 1) · 2⁻⁵³. */
+constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t>((bits >> 11) + 1) * 0x1p-53; }
+
+/**
+ *  @brief Projects one row to three coordinates through a dense Gaussian matrix no one stores:
+ *      coordinates[c] = Σ_d vector[d] · G[d][c] / sqrt(dimensions).
+ *
+ *  G[d][c], with n = 3d + c, is the Box-Muller cosine sqrt(−2 ln u₁) · cos(2π u₂) in f64. Its u₁ is
+ *  @ref uniform_unit_f64 of @ref splitmix64_at (seed, 2n) and u₂ the same at 2n + 1. The sums run
+ *  in f64, d ascending then c, each adding (value · sqrt(−2 ln u₁)) · cos(2π u₂); each divides by
+ *  sqrt(dimensions) in f64 and rounds to f32 once. A row of no dimensions sits at the origin.
+ */
+inline void sample_projection(f32_t const* vector, std::size_t dimensions, u64_t seed, f32_t* coordinates) noexcept {
+#pragma float_control(precise, on)
+#pragma clang fp contract(off)
+    std::array<f64_t, 3> sums {0, 0, 0};
+    for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
+        f64_t const value = vector[dimension];
+        for (std::size_t column = 0; column != 3; ++column) {
+            u64_t const counter = 2 * (3 * static_cast<u64_t>(dimension) + column);
+            f64_t const radius = std::sqrt(-2.0 * std::log(uniform_unit_f64(splitmix64_at(seed, counter))));
+            f64_t const angle = 2.0 * std::numbers::pi * uniform_unit_f64(splitmix64_at(seed, counter + 1));
+            sums[column] += value * radius * std::cos(angle);
+        }
+    }
+    f64_t const root = std::sqrt(static_cast<f64_t>(dimensions));
+    for (std::size_t column = 0; column != 3; ++column)
+        coordinates[column] = dimensions ? static_cast<f32_t>(sums[column] / root) : 0.0f;
+}
+
+/**
+ *  @brief Places one entry where its distances to @p references_count anchors best match
+ *      @p distances in relative error, Σ_l (‖p − y_l‖ − d_l)² / d_l², by
+ *      @ref sample_gauss_newton_steps_k damped Gauss-Newton steps.
+ *
+ *  @param[in] anchors @b [references_count,3] the anchors' coordinates.
+ *  @param[in] distances @b [references_count] the entry's distances to them, in coordinate units.
+ *  @param[in] references_count Anchors, at least one.
+ *  @param[in] key_seed The entry's own seed, which nudges the start off the anchors.
+ *  @param[out] coordinates The entry's three coordinates.
+ *
+ *  A distance that is not positive puts the entry on the first such anchor. Otherwise it runs in
+ *  f32, anchors ascending:
+ *  1. p starts at the mean of the anchors weighted by 1 / d_l.
+ *  2. p moves by 0.01 · min_l d_l · (2u_c − 1), u_c = @ref uniform_unit_f64 of @ref splitmix64_at
+ *     over @p key_seed and c, rounded to f32.
+ *  3. Each step sums H = Σ J_lᵀJ_l and g = Σ J_lᵀ e_l over the anchors p is off, with J_l = (p −
+ *     y_l) / (‖p − y_l‖ · d_l) and e_l = (‖p − y_l‖ − d_l) / d_l.
+ *  4. It solves (H + λI) s = −g, λ = 0.001 · trace(H), by Cramer's rule, and moves p by s; a
+ *     determinant that is zero or not finite stops the steps.
+ */
+inline void sample_gauss_newton(f32_t const* anchors, f32_t const* distances, std::size_t references_count,
+                                u64_t key_seed, f32_t* coordinates) noexcept {
+#pragma float_control(precise, on)
+#pragma clang fp contract(off)
+    for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
+        if (distances[anchor] > 0.0f) continue;
+        for (std::size_t column = 0; column != 3; ++column) coordinates[column] = anchors[anchor * 3 + column];
+        return;
+    }
+    f32_t weights = 0.0f, nearest = distances[0];
+    std::array<f32_t, 3> point {0.0f, 0.0f, 0.0f};
+    for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
+        f32_t const weight = 1.0f / distances[anchor];
+        weights += weight;
+        for (std::size_t column = 0; column != 3; ++column) point[column] += weight * anchors[anchor * 3 + column];
+        nearest = min_of(nearest, distances[anchor]);
+    }
+    for (std::size_t column = 0; column != 3; ++column) {
+        f32_t const unit = static_cast<f32_t>(uniform_unit_f64(splitmix64_at(key_seed, column)));
+        point[column] = point[column] / weights + 0.01f * nearest * (2.0f * unit - 1.0f);
+    }
+
+    for (std::size_t step = 0; step != sample_gauss_newton_steps_k; ++step) {
+        f32_t hessian_00 = 0.0f, hessian_01 = 0.0f, hessian_02 = 0.0f, hessian_11 = 0.0f, hessian_12 = 0.0f,
+              hessian_22 = 0.0f;
+        f32_t gradient_0 = 0.0f, gradient_1 = 0.0f, gradient_2 = 0.0f;
+        for (std::size_t anchor = 0; anchor != references_count; ++anchor) {
+            f32_t const offset_0 = point[0] - anchors[anchor * 3 + 0];
+            f32_t const offset_1 = point[1] - anchors[anchor * 3 + 1];
+            f32_t const offset_2 = point[2] - anchors[anchor * 3 + 2];
+            f32_t const reach = std::sqrt(offset_0 * offset_0 + offset_1 * offset_1 + offset_2 * offset_2);
+            if (!(reach > 0.0f)) continue;
+            f32_t const wanted = distances[anchor];
+            f32_t const scale = 1.0f / (reach * wanted);
+            f32_t const jacobian_0 = offset_0 * scale, jacobian_1 = offset_1 * scale, jacobian_2 = offset_2 * scale;
+            f32_t const error = (reach - wanted) / wanted;
+            hessian_00 += jacobian_0 * jacobian_0, hessian_01 += jacobian_0 * jacobian_1,
+                hessian_02 += jacobian_0 * jacobian_2, hessian_11 += jacobian_1 * jacobian_1,
+                hessian_12 += jacobian_1 * jacobian_2, hessian_22 += jacobian_2 * jacobian_2;
+            gradient_0 += jacobian_0 * error, gradient_1 += jacobian_1 * error, gradient_2 += jacobian_2 * error;
+        }
+        f32_t const damping = 0.001f * (hessian_00 + hessian_11 + hessian_22);
+        f32_t const damped_00 = hessian_00 + damping, damped_11 = hessian_11 + damping,
+                    damped_22 = hessian_22 + damping;
+        f32_t const cofactor_0 = damped_11 * damped_22 - hessian_12 * hessian_12,
+                    cofactor_1 = hessian_01 * damped_22 - hessian_12 * hessian_02,
+                    cofactor_2 = hessian_01 * hessian_12 - damped_11 * hessian_02;
+        f32_t const determinant = damped_00 * cofactor_0 - hessian_01 * cofactor_1 + hessian_02 * cofactor_2;
+        if (determinant == 0.0f || !std::isfinite(determinant)) break;
+        f32_t const negative_gradient_0 = -gradient_0, negative_gradient_1 = -gradient_1,
+                    negative_gradient_2 = -gradient_2;
+        f32_t const step_0 = (negative_gradient_0 * cofactor_0 -
+                              hessian_01 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) +
+                              hessian_02 * (negative_gradient_1 * hessian_12 - damped_11 * negative_gradient_2)) /
+                             determinant;
+        f32_t const step_1 = (damped_00 * (negative_gradient_1 * damped_22 - hessian_12 * negative_gradient_2) -
+                              negative_gradient_0 * cofactor_1 +
+                              hessian_02 * (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02)) /
+                             determinant;
+        f32_t const step_2 = (damped_00 * (damped_11 * negative_gradient_2 - negative_gradient_1 * hessian_12) -
+                              hessian_01 * (hessian_01 * negative_gradient_2 - negative_gradient_1 * hessian_02) +
+                              negative_gradient_0 * cofactor_2) /
+                             determinant;
+        point[0] += step_0, point[1] += step_1, point[2] += step_2;
+    }
+    for (std::size_t column = 0; column != 3; ++column) coordinates[column] = point[column];
+}
+
+/** Places draws without shown points by classical scaling among themselves, as sequences and
+ *  shapes do. */
+struct no_fixed_coordinates_t {};
+
+/**
+ *  @brief One SAMPLE call over the stand-in's exhaustive face.
+ *
+ *  Every link is a perfect graph's, every distance computed afresh, and the steps those of the
+ *  library's plan - roots, paths, regions, coordinates - in its order, so equal inputs over an
+ *  equal graph draw and place equally.
+ *
+ *  A node is an entry's position, the stand-in's one shard. A classical scaling takes neither of
+ *  the @p coordinates_kind_ answers: <tt>coordinates_of(payload, coordinates)</tt> for fixed
+ *  coordinates, or <tt>vector_of(payload)</tt> for a projected row.
+ */
+template <typename arguments_, typename handle_, typename score_, typename coordinates_kind_>
+struct sample_plan {
+    inline static constexpr std::size_t none_k = std::numeric_limits<std::size_t>::max();
+
+    arguments_ const& arguments;
+    handle_ const& index;
+    score_ const& score;
+    std::size_t limit;
+    std::size_t wanted;
+    std::size_t visits;
+
+    usearch_key_t* keys;
+    std::size_t* entry_ordinals;
+    usearch_key_t* parents;
+    f32_t* parent_distances;
+    f32_t* coordinates;
+
+    std::vector<std::size_t> drawn {};
+    std::unordered_map<std::size_t, std::size_t> drawn_at {};
+    std::unordered_map<uuid_t, std::size_t> shown_rows {};
+    std::vector<std::size_t> shown_nodes {}, shown_offsets {};
+    std::vector<std::size_t> nearest_shown {};
+    std::vector<f32_t> nearest_shown_distances {};
+    std::vector<std::size_t> roots {}, root_draws {};
+    std::vector<f32_t> root_radii {};
+    std::unordered_set<std::size_t> shown_roots {};
+    std::unordered_map<std::size_t, std::vector<std::size_t>> links {};
+    std::size_t nearest_shown_count = 0;
+    std::size_t visited_members = 0, computed_distances = 0;
+
+    static u64_t key_hash(usearch_key_t const& key) noexcept {
+        return static_cast<u64_t>(std::hash<uuid_t> {}(uuid_of(key)));
+    }
+    usearch_key_t shown_key(std::size_t row) const noexcept {
+        std::span<usearch_key_t const> const keys = row_at<usearch_key_t>(arguments.shown.data, row,
+                                                                          arguments.shown.stride, 1);
+        return keys[0];
+    }
+    f32_t const* shown_coordinates_of(std::size_t row) const noexcept {
+        return row_at<f32_t>(arguments.shown_coordinates.data, row, arguments.shown_coordinates.stride, 3).data();
+    }
+    usearch_key_t focus_key(std::size_t row) const noexcept {
+        std::span<usearch_key_t const> const keys = row_at<usearch_key_t>(arguments.focus.data, row,
+                                                                          arguments.focus.stride, 1);
+        return keys[0];
+    }
+    bool shown(usearch_key_t const& key) const noexcept { return shown_rows.contains(uuid_of(key)); }
+
+    f32_t distance(std::size_t from, std::size_t to) noexcept {
+        ++computed_distances;
+        return static_cast<f32_t>(score(index.entries[from].payload, index.entries[to].payload));
+    }
+    std::vector<std::size_t> const& neighbors(std::size_t node) {
+        auto found = links.find(node);
+        if (found == links.end()) found = links.emplace(node, links_of(index, node, limit, score)).first;
+        return found->second;
+    }
+    std::vector<std::size_t> nodes_of(usearch_key_t const& key) const {
+        std::vector<std::size_t> nodes = stub::nodes_of(index, key);
+        std::erase_if(nodes, [&](std::size_t node) { return node >= limit; });
+        return nodes;
+    }
+
+    /** Steps from @p from to the link nearest @p toward while it comes closer, as the library's
+     *  greedy walk does. */
+    std::vector<std::size_t> walk(std::size_t from, std::size_t toward) {
+        std::vector<std::size_t> chain;
+        std::size_t current = from;
+        f32_t current_distance = static_cast<f32_t>(score(index.entries[toward].payload, index.entries[from].payload));
+        while (current != toward) {
+            std::size_t best = current;
+            f32_t best_distance = current_distance;
+            for (std::size_t next : neighbors(current)) {
+                f32_t const reach = static_cast<f32_t>(
+                    score(index.entries[toward].payload, index.entries[next].payload));
+                if (reach < best_distance) best = next, best_distance = reach;
+            }
+            if (best == current) break;
+            chain.push_back(best);
+            current = best, current_distance = best_distance;
+        }
+        return chain;
+    }
+
+    std::size_t draw(std::size_t node) {
+        if (drawn.size() == wanted) return none_k;
+        usearch_key_t const key = index.entries[node].key;
+        if (shown(key) || drawn_at.contains(node)) return none_k;
+        std::size_t const at = drawn.size();
+        drawn_at.emplace(node, at);
+        drawn.push_back(node);
+        keys[at] = key;
+        std::vector<std::size_t> const entries = nodes_of(key);
+        entry_ordinals[at] = static_cast<std::size_t>(std::find(entries.begin(), entries.end(), node) -
+                                                      entries.begin());
+        if (!nearest_shown_count) return at;
+        f32_t* const kept_distances = nearest_shown_distances.data() + at * sample_nearest_shown_k;
+        std::size_t* const kept_rows = nearest_shown.data() + at * sample_nearest_shown_k;
+        std::size_t kept = 0;
+        for (std::size_t anchor = 0; anchor != shown_nodes.size(); ++anchor) {
+            f32_t const reach = distance(node, shown_nodes[anchor]);
+            if (kept == nearest_shown_count && !(reach < kept_distances[kept - 1])) continue;
+            std::size_t slot = kept == nearest_shown_count ? kept - 1 : kept++;
+            for (; slot && reach < kept_distances[slot - 1]; --slot)
+                kept_distances[slot] = kept_distances[slot - 1], kept_rows[slot] = kept_rows[slot - 1];
+            kept_distances[slot] = reach, kept_rows[slot] = anchor;
+        }
+        return at;
+    }
+
+    std::size_t draw_nearest(std::size_t node) {
+        std::size_t const at = draw(node);
+        if (at == none_k) return none_k;
+        usearch_key_t parent = keys[at];
+        f32_t parent_distance = 0, best = std::numeric_limits<f32_t>::infinity();
+        if (nearest_shown_count) {
+            best = parent_distance = nearest_shown_distances[at * sample_nearest_shown_k];
+            parent = shown_key(shown_offsets[nearest_shown[at * sample_nearest_shown_k]]);
+        }
+        for (std::size_t earlier = 0; earlier != at; ++earlier)
+            if (f32_t const reach = distance(node, drawn[earlier]); reach < best)
+                best = parent_distance = reach, parent = keys[earlier];
+        parents[at] = parent;
+        parent_distances[at] = parent_distance;
+        return at;
+    }
+
+    void walk_between(std::size_t from, std::size_t toward) {
+        std::size_t previous = from;
+        for (std::size_t step : walk(from, toward)) {
+            if (drawn.size() == wanted) break;
+            if (std::size_t const at = draw(step); at != none_k)
+                parents[at] = index.entries[previous].key, parent_distances[at] = distance(previous, step);
+            previous = step;
+        }
+    }
+
+    void file_root(std::size_t node, std::size_t at) {
+        roots.push_back(node);
+        root_draws.push_back(at);
+        root_radii.push_back(std::numeric_limits<f32_t>::infinity());
+    }
+
+    /** Attaches root @p root to its nearest earlier one, lowest first on ties, exactly as the
+     *  library itself does. */
+    void attach_root(std::size_t root) {
+        if (!root) return;
+        std::vector<f32_t> reach(root);
+        for (std::size_t earlier = 0; earlier != root; ++earlier)
+            reach[earlier] = distance(roots[root], roots[earlier]);
+        std::size_t nearest = 0;
+        for (std::size_t earlier = 1; earlier != root; ++earlier)
+            if (reach[earlier] < reach[nearest]) nearest = earlier;
+        root_radii[root] = std::min(root_radii[root], reach[nearest]);
+        root_radii[nearest] = std::min(root_radii[nearest], reach[nearest]);
+        walk_between(roots[nearest], roots[root]);
+    }
+
+    /** The library's passes: roots, the walks attaching and leaving them, then the regions around
+     *  them, under a doubling quota that never reads @c wanted but to stop. */
+    void draw_passes() {
+        for (std::size_t row = 0; row != arguments.shown_count; ++row) {
+            if (!shown_rows.emplace(uuid_of(shown_key(row)), row).second) continue;
+            std::vector<std::size_t> const entries = nodes_of(shown_key(row));
+            if (entries.empty()) continue;
+            shown_nodes.push_back(entries.front());
+            shown_offsets.push_back(row);
+        }
+        nearest_shown_count = std::min(sample_nearest_shown_k, shown_nodes.size());
+        nearest_shown.resize(wanted * sample_nearest_shown_k);
+        nearest_shown_distances.resize(wanted * sample_nearest_shown_k);
+        if (!wanted) return;
+        for (std::size_t row = 0; row != arguments.focus_count; ++row) {
+            usearch_key_t const key = focus_key(row);
+            std::vector<std::size_t> const entries = nodes_of(key);
+            if (auto const found = shown_rows.find(uuid_of(key)); found != shown_rows.end()) {
+                if (!entries.empty() && shown_roots.insert(found->second).second) file_root(entries.front(), none_k);
+                continue;
+            }
+            for (std::size_t node : entries)
+                if (std::size_t const at = draw_nearest(node); at != none_k) file_root(node, at);
+        }
+        std::size_t position = 0;
+        for (std::size_t quota = 1, attached = 0;;) {
+            std::size_t const before = drawn.size();
+            if (!arguments.focus_count)
+                while (roots.size() != quota && position != limit && drawn.size() != wanted) {
+                    std::size_t const node = static_cast<std::size_t>(
+                        seeded_bijection(position++, limit, arguments.seed));
+                    if (std::size_t const at = draw_nearest(node); at != none_k) file_root(node, at);
+                }
+            std::size_t const first_new = attached;
+            for (; attached != roots.size(); ++attached) attach_root(attached);
+            if (nearest_shown_count)
+                for (std::size_t root = first_new; root != roots.size(); ++root)
+                    if (root_draws[root] != none_k)
+                        walk_between(roots[root],
+                                     shown_nodes[nearest_shown[root_draws[root] * sample_nearest_shown_k]]);
+            for (std::size_t root = 0; root != roots.size() && drawn.size() != wanted; ++root)
+                draw_region(roots[root], root_radii[root], quota);
+            if (drawn.size() == wanted) break;
+            std::size_t const next = std::min(2 * quota, drawn.size() + 1);
+            if (drawn.size() == before && next == quota) break;
+            quota = next;
+        }
+    }
+
+    void draw_region(std::size_t root, f32_t radius, std::size_t quota) {
+        std::size_t const room = std::min(visits, quota * (visits / wanted));
+        std::vector<std::size_t> visited {root};
+        std::vector<f32_t> visited_distances {0};
+        std::unordered_set<std::size_t> reached {root};
+        for (std::size_t head = 0; head != visited.size(); ++head) {
+            if (visited_distances[head] > radius) continue;
+            ++visited_members;
+            for (std::size_t next : neighbors(visited[head]))
+                if (visited.size() != room && reached.insert(next).second) {
+                    visited.push_back(next);
+                    visited_distances.push_back(distance(root, next));
+                }
+        }
+        // Rank, then node: the library's order, its one shard leaving the node to break ties.
+        std::vector<std::pair<u64_t, std::size_t>> candidates;
+        for (std::size_t visit = 1; visit != visited.size(); ++visit) {
+            std::size_t const node = visited[visit];
+            if (!(visited_distances[visit] <= radius) || drawn_at.contains(node)) continue;
+            usearch_key_t const& key = index.entries[node].key;
+            if (!shown(key)) candidates.push_back({splitmix64_at(arguments.seed, key_hash(key)), node});
+        }
+        std::size_t const kept = std::min(candidates.size(), quota);
+        std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(kept), candidates.end());
+        for (std::size_t candidate = 0; candidate != kept; ++candidate) draw_nearest(candidates[candidate].second);
+    }
+
+    u64_t coordinates_seed(std::size_t at) const noexcept {
+        return splitmix64_at(splitmix64_at(arguments.seed, key_hash(keys[at])), entry_ordinals[at]);
+    }
+
+    f32_t shown_scale() {
+        std::size_t const pairs = std::min(shown_nodes.size(), sample_scaling_draws_k + 1) - 1;
+        f64_t shown_sum = 0, measured = 0;
+        for (std::size_t pair = 0; pair != pairs; ++pair) {
+            f32_t const reach = distance(shown_nodes[pair], shown_nodes[pair + 1]);
+            f32_t const* first = shown_coordinates_of(shown_offsets[pair]);
+            f32_t const* second = shown_coordinates_of(shown_offsets[pair + 1]);
+            f64_t squares = 0;
+            for (std::size_t column = 0; column != 3; ++column) {
+                f64_t const offset = f64_t {first[column]} - f64_t {second[column]};
+                squares += offset * offset;
+            }
+            shown_sum += std::sqrt(squares), measured += reach;
+        }
+        return shown_sum > 0 && measured > 0 ? static_cast<f32_t>(shown_sum / measured) : 1.0f;
+    }
+
+    void place_among_shown(std::size_t at, f32_t scale) {
+        std::array<f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
+        std::array<f32_t, sample_nearest_shown_k> distances;
+        for (std::size_t anchor = 0; anchor != nearest_shown_count; ++anchor) {
+            std::size_t const kept = at * sample_nearest_shown_k + anchor;
+            f32_t const* shown_at = shown_coordinates_of(shown_offsets[nearest_shown[kept]]);
+            for (std::size_t column = 0; column != 3; ++column)
+                anchor_coordinates[anchor * 3 + column] = shown_at[column];
+            distances[anchor] = nearest_shown_distances[kept] * scale;
+        }
+        sample_gauss_newton(anchor_coordinates.data(), distances.data(), nearest_shown_count, coordinates_seed(at),
+                            coordinates + at * 3);
+    }
+
+    void scale_classically() {
+        std::size_t const anchors = std::min(drawn.size(), sample_scaling_draws_k);
+        std::vector<f32_t> centered(anchors * anchors), vector(anchors), product(anchors);
+        for (std::size_t row = 0; row != anchors; ++row)
+            for (std::size_t column = 0; column != anchors; ++column) {
+                f32_t const reach = distance(drawn[row], drawn[column]);
+                centered[row * anchors + column] = reach * reach;
+            }
+        f32_t total = 0;
+        for (std::size_t row = 0; row != anchors; ++row) {
+            f32_t sum = 0;
+            for (std::size_t column = 0; column != anchors; ++column) {
+                f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
+                sum += square;
+            }
+            product[row] = sum / static_cast<f32_t>(anchors);
+            total += product[row];
+        }
+        total /= static_cast<f32_t>(anchors);
+        for (std::size_t row = 0; row != anchors; ++row)
+            for (std::size_t column = row; column != anchors; ++column) {
+                f32_t const square = 0.5f * (centered[row * anchors + column] + centered[column * anchors + row]);
+                f32_t const entry = -0.5f * (square - product[row] - product[column] + total);
+                centered[row * anchors + column] = centered[column * anchors + row] = entry;
+            }
+        for (std::size_t axis = 0; axis != 3; ++axis) {
+            for (std::size_t row = 0; row != anchors; ++row)
+                vector[row] = 2.0f * static_cast<f32_t>(
+                                         uniform_unit_f64(splitmix64_at(arguments.seed, axis * anchors + row))) -
+                              1.0f;
+            auto const multiply = [&]() noexcept {
+                f32_t squares = 0;
+                for (std::size_t row = 0; row != anchors; ++row) {
+                    f32_t sum = 0;
+                    for (std::size_t column = 0; column != anchors; ++column)
+                        sum += centered[row * anchors + column] * vector[column];
+                    product[row] = sum, squares += sum * sum;
+                }
+                return std::sqrt(squares);
+            };
+            for (std::size_t iteration = 0; iteration != 64; ++iteration) {
+                f32_t const norm = multiply();
+                if (!(norm > 0)) break;
+                for (std::size_t row = 0; row != anchors; ++row) vector[row] = product[row] / norm;
+            }
+            // The Rayleigh quotient keeps the sign a norm would lose, so deflation subtracts the
+            // pair with the right sign.
+            multiply();
+            f32_t eigenvalue = 0;
+            for (std::size_t row = 0; row != anchors; ++row) eigenvalue += vector[row] * product[row];
+            f32_t const spread = std::sqrt(std::max(eigenvalue, 0.0f));
+            for (std::size_t row = 0; row != anchors; ++row) {
+                coordinates[row * 3 + axis] = vector[row] * spread;
+                for (std::size_t column = 0; column != anchors; ++column)
+                    centered[row * anchors + column] -= eigenvalue * vector[row] * vector[column];
+            }
+        }
+
+        std::array<f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
+        std::array<f32_t, sample_nearest_shown_k> kept_distances;
+        std::size_t const nearest = std::min(sample_nearest_shown_k, anchors);
+        for (std::size_t at = anchors; at != drawn.size(); ++at) {
+            std::array<std::size_t, sample_nearest_shown_k> kept_anchors;
+            std::size_t kept = 0;
+            for (std::size_t anchor = 0; anchor != anchors; ++anchor) {
+                f32_t const reach = distance(drawn[at], drawn[anchor]);
+                if (kept == nearest && !(reach < kept_distances[kept - 1])) continue;
+                std::size_t slot = kept == nearest ? kept - 1 : kept++;
+                for (; slot && reach < kept_distances[slot - 1]; --slot)
+                    kept_distances[slot] = kept_distances[slot - 1], kept_anchors[slot] = kept_anchors[slot - 1];
+                kept_distances[slot] = reach, kept_anchors[slot] = anchor;
+            }
+            for (std::size_t anchor = 0; anchor != kept; ++anchor)
+                for (std::size_t column = 0; column != 3; ++column)
+                    anchor_coordinates[anchor * 3 + column] = coordinates[kept_anchors[anchor] * 3 + column];
+            sample_gauss_newton(anchor_coordinates.data(), kept_distances.data(), kept, coordinates_seed(at),
+                                coordinates + at * 3);
+        }
+    }
+
+    void assign_coordinates(coordinates_kind_ const& coordinates_kind) {
+        if constexpr (requires { coordinates_kind.coordinates_of(index.entries[0].payload, coordinates); })
+            for (std::size_t at = 0; at != drawn.size(); ++at)
+                coordinates_kind.coordinates_of(index.entries[drawn[at]].payload, coordinates + at * 3);
+        else if (nearest_shown_count) {
+            f32_t const scale = shown_scale();
+            for (std::size_t at = 0; at != drawn.size(); ++at) place_among_shown(at, scale);
+        }
+        else if constexpr (requires { coordinates_kind.vector_of(index.entries[0].payload); })
+            for (std::size_t at = 0; at != drawn.size(); ++at) {
+                std::vector<f32_t> const row = coordinates_kind.vector_of(index.entries[drawn[at]].payload);
+                sample_projection(row.data(), row.size(), arguments.seed, coordinates + at * 3);
+            }
+        else if (!drawn.empty()) scale_classically();
+    }
+};
+
+/** Whether a sample's @p arguments name their shown keys and focus as the header asks; true once
+ *  @p outcome records why not. */
+template <typename arguments_>
+bool reject_sample(arguments_ const& arguments, usearch_outcome_t* outcome) {
+    usearch_rows_view_t const& coordinates = arguments.shown_coordinates;
+    return reject_if(
+               (arguments.shown_count && !arguments.shown.data) || (arguments.focus_count && !arguments.focus.data),
+               usearch_status_invalid_argument_k, "The shown keys and focus must name keys", outcome) ||
+           reject_if((arguments.shown.stride && arguments.shown.stride < sizeof(usearch_key_t)) ||
+                         (arguments.focus.stride && arguments.focus.stride < sizeof(usearch_key_t)),
+                     usearch_status_unsupported_layout_k, "The key stride is shorter than a key", outcome) ||
+           reject_if(arguments.shown_count &&
+                         (!coordinates.data || coordinates.columns != 3 || coordinates.scalar != usearch_scalar_f32_k ||
+                          (coordinates.stride && coordinates.stride < 3 * sizeof(f32_t))),
+                     usearch_status_invalid_argument_k, "The shown coordinates must be three f32 values per key",
+                     outcome);
+}
+
+/** The body of every modality's @c sample: resets the outputs, checks the shown keys and focus, and
+ *  draws up to @c wanted entries as @ref sample_plan does, writing them to @p arena only once every
+ *  draw is placed, so a cancelled call leaves them reset. */
+template <typename arguments_, typename handle_, typename score_, typename coordinates_kind_>
+void draw_sample(arguments_ const& arguments, handle_& index, score_ const& score,
+                 coordinates_kind_ const& coordinates_kind, usearch_outcome_t* outcome) {
+    reset(arguments.stats);
+    *arguments.keys = {};
+    *arguments.entry_ordinals = nullptr;
+    *arguments.parents = {};
+    *arguments.coordinates = {};
+    *arguments.written = 0;
+    if (reject_sample(arguments, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(
+        arguments.arena, arguments.outcome,
+        {arguments.shown.data, arguments.shown_coordinates.data, arguments.focus.data}, outcome);
+    if (!arena) return;
+    std::shared_lock readers(index.mutex);
+    std::size_t const wanted = arguments.wanted;
+    std::size_t const expansion = arguments.expansion_factor ? arguments.expansion_factor : sample_expansion_factor_k;
+    usearch_key_t* const keys = carve<usearch_key_t>(*arena, wanted, outcome);
+    std::size_t* const entry_ordinals = keys ? carve<std::size_t>(*arena, wanted, outcome) : nullptr;
+    usearch_key_t* const parents = entry_ordinals ? carve<usearch_key_t>(*arena, wanted, outcome) : nullptr;
+    usearch_distance_t* const scores = parents ? carve<usearch_distance_t>(*arena, wanted, outcome) : nullptr;
+    std::size_t* const counts = scores ? carve<std::size_t>(*arena, wanted, outcome) : nullptr;
+    f32_t* const coordinates = counts ? carve<f32_t>(*arena, wanted * 3, outcome) : nullptr;
+    if (!coordinates) return;
+    std::vector<f32_t> parent_distances(wanted);
+    sample_plan<arguments_, handle_, score_, coordinates_kind_> plan {
+        arguments, index,          score,   index.entries.size(),    wanted,     wanted * expansion,
+        keys,      entry_ordinals, parents, parent_distances.data(), coordinates};
+    plan.draw_passes();
+    plan.assign_coordinates(coordinates_kind);
+    std::size_t const written = plan.drawn.size();
+    if (arguments.stats)
+        arguments.stats->visited_members += plan.visited_members,
+            arguments.stats->computed_distances += plan.computed_distances;
+    if (reject_if(written && !keep_going(arguments.progress, written, written), usearch_status_cancelled_k,
+                  "The caller's handler stopped the work", outcome))
+        return;
+    for (std::size_t at = 0; at != written; ++at) {
+        scores[at] = parent_distances[at];
+        // The first draw of a call without shown points hangs from itself, so it has no parent.
+        bool const own = !std::memcmp(&parents[at], &keys[at], sizeof(usearch_key_t)) && parent_distances[at] == 0;
+        counts[at] = own ? 0 : 1;
+    }
+    if (!written) return;
+    *arguments.keys = {keys, sizeof(usearch_key_t)};
+    *arguments.entry_ordinals = entry_ordinals;
+    *arguments.parents = {parents, scores, counts, 1};
+    *arguments.coordinates = {coordinates, 3 * sizeof(f32_t), 3, usearch_scalar_f32_k};
+    *arguments.written = written;
+}
+
+#pragma endregion Sampling
+
 #pragma region Splitting
 
-/** The part each node of @p index lands in, of @p parts: roots drawn from @p seed, each part grown
+/** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
+ *  seed's stream, so equal seeds draw split roots in one order and distinct seeds in others. */
+inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
+    u64_t mixed = seed + (static_cast<u64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull;
+    mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
+    return mixed ^ (mixed >> 31);
+}
+
+/** The entries below @p count that @p within admits, in the order @p seed draws them. */
+template <typename within_>
+std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ const& within) {
+    std::vector<std::size_t> order;
+    for (std::size_t entry = 0; entry != count; ++entry)
+        if (within(entry)) order.push_back(entry);
+    // The slot breaks a tie between equal ranks, so the order is total and repeats exactly.
+    std::sort(order.begin(), order.end(), [seed](std::size_t first, std::size_t second) {
+        u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
+        return first_rank != second_rank ? first_rank < second_rank : first < second;
+    });
+    return order;
+}
+
+/** The part each node of @p index falls in, of @p parts: roots drawn from @p seed, each part grown
  *  breadth-first over the links from its root, one node per part per round and capped at an equal
- *  share, and every node no root reached joining the smallest part. */
+ *  share, and every node no root reached falling to the smallest part. */
 template <typename handle_, typename score_>
 std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
     std::size_t const nodes = index.entries.size();
@@ -1148,7 +1721,7 @@ std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts
 
 /**
  *  @brief Moves every entry of @p index into @p receivers, part @c p of @ref partition_nodes
- *      landing in receiver @c p in storage order, and empties @p index; false once @p outcome
+ *      moving to receiver @c p in storage order, and empties @p index; false once @p outcome
  *      records why not, having moved nothing.
  *
  *  Every receiver must be a distinct, empty handle other than @p index whose options
@@ -1194,7 +1767,7 @@ bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t see
     return true;
 }
 
-/** Refuses a refinement naming donors and receivers both, or receivers no split can land in: fewer
+/** Refuses a refinement naming donors and receivers both, or receivers no split can fill: fewer
  *  than two, a null slot, or the index itself. */
 template <typename arguments_>
 bool reject_receivers(arguments_ const& arguments, usearch_outcome_t* outcome) {
@@ -1217,8 +1790,8 @@ bool reject_receivers(arguments_ const& arguments, usearch_outcome_t* outcome) {
 /** The body of every modality's @c split: moves the entries as @ref split_into does, then reports a
  *  closing sweep over every receiver, which re-selects nothing in a stand-in keeping no edges. */
 template <typename arguments_, typename handle_, typename score_, typename same_kind_>
-void land_split(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
-                usearch_outcome_t* outcome) {
+void split_and_report(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
+                      usearch_outcome_t* outcome) {
     using receiver_t = std::remove_pointer_t<std::remove_cvref_t<decltype(*arguments.receivers)>>;
     if (reject_if(arguments.count && !arguments.receivers, usearch_status_invalid_argument_k,
                   "The receivers must name handles", outcome))
@@ -1231,7 +1804,7 @@ void land_split(arguments_ const& arguments, handle_& index, score_ const& score
     for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
         cancelled = !keep_going(arguments.progress, entry + 1, entries);
     if (arguments.stats) arguments.stats->visited_members = entries;
-    if (arguments.reachability) *arguments.reachability = {entries, entries, reached ? 1u : 0u};
+    if (arguments.report) arguments.report->reachability = {entries, entries, reached ? 1u : 0u, 0};
     reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
 }
 
@@ -1299,6 +1872,151 @@ inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_out
         return false;
     }
     return true;
+}
+
+/** A path in the shape every verb takes it. */
+inline usearch_bytes_view_t as_path(std::string const& text) noexcept {
+    return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
+}
+
+/** Whether @p blob opens as a JSON object, which only a manifest does; a stand-in monolith opens
+ *  with a connectivity word. */
+inline bool is_manifest(bytes_view_t blob) noexcept {
+    return blob.size() > 1 && static_cast<char>(blob[0]) == '{' && static_cast<char>(blob[1]) == '"';
+}
+
+/** The directory of @p path, its trailing separator included; empty for a bare file name. */
+inline std::string directory_of(std::string_view path) {
+    std::size_t const slash = path.find_last_of("/\\");
+    return std::string(slash == std::string_view::npos ? std::string_view {} : path.substr(0, slash + 1));
+}
+
+/** The part paths a manifest at @p manifest_path names, each resolved beside it, in file order;
+ *  empty once @p outcome records that it names none. A buffer manifest's entries carry offsets
+ *  rather than paths and are passed over, as the engine passes over them. */
+inline std::vector<std::string> manifest_parts(bytes_view_t manifest, usearch_bytes_view_t manifest_path,
+                                               usearch_outcome_t* outcome) {
+    std::string_view const json {reinterpret_cast<char const*>(manifest.data()), manifest.size()};
+    std::string const directory = directory_of(as_text(manifest_path));
+    std::vector<std::string> parts;
+    for (std::size_t at = json.find("\"path\""); at != std::string_view::npos; at = json.find("\"path\"", at)) {
+        at = json.find_first_not_of(" \t\r\n:", at + 6);
+        if (at == std::string_view::npos || json[at] != '"') break;
+        std::size_t const end = json.find('"', at + 1);
+        if (end == std::string_view::npos) break;
+        parts.push_back(directory + std::string(json.substr(at + 1, end - at - 1)));
+        at = end + 1;
+    }
+    reject_if(parts.empty(), usearch_status_malformed_k, "The checkpoint lists no part", outcome);
+    return parts;
+}
+
+/** Replaces a manifest in @p blob with its first part's bytes, where every schema question is
+ *  answered; a monolith stays as read. */
+inline bool read_first_part(std::vector<std::byte>& blob, usearch_bytes_view_t path, usearch_outcome_t* outcome) {
+    if (!is_manifest(blob)) return true;
+    std::vector<std::string> const parts = manifest_parts(blob, path, outcome);
+    return !parts.empty() && read_file(as_path(parts.front()), blob, outcome);
+}
+
+/** Opens the checkpoint @p blob read from @p path through @p open: one monolith as it is, or every
+ *  part a manifest names, each opened on its own and appended in file order into the first; null
+ *  once @p outcome records why not. */
+template <typename handle_, typename open_>
+handle_* open_parts(bytes_view_t blob, usearch_bytes_view_t path, open_ const& open, usearch_outcome_t* outcome) {
+    std::string_view const magic {"SAFEGRPH"};
+    if (reject_if(blob.size() >= magic.size() && std::memcmp(blob.data(), magic.data(), magic.size()) == 0,
+                  usearch_status_unsupported_k, "The stand-in reads its own image, not a SafeGraphs monolith", outcome))
+        return nullptr;
+    if (!is_manifest(blob)) return open(blob);
+    std::vector<std::string> const parts = manifest_parts(blob, path, outcome);
+    if (parts.empty()) return nullptr;
+    handle_* index = nullptr;
+    std::vector<std::byte> part_blob;
+    for (std::string const& part : parts) {
+        if (!read_file(as_path(part), part_blob, outcome)) break;
+        handle_* const opened = open(part_blob);
+        if (!opened) break;
+        if (!index) {
+            index = opened;
+            continue;
+        }
+        bool const accommodated = index->accommodate(index->entries.size() + opened->entries.size());
+        if (accommodated)
+            for (auto& entry : opened->entries) index->append(entry.key, std::move(entry.payload));
+        delete opened;
+        if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The parts' entries could not be accommodated",
+                      outcome))
+            break;
+    }
+    if (!index) return nullptr;
+    if (outcome->status != usearch_status_success_k) {
+        delete index;
+        return nullptr;
+    }
+    index->parts_opened = parts.size();
+    return index;
+}
+
+/** @p path without its @c .safegraphs suffix, the stem the engine names parts under. */
+inline std::string stem_of(std::string_view path) {
+    if (path.ends_with(".safegraphs")) path.remove_suffix(std::string_view {".safegraphs"}.size());
+    return std::string(path);
+}
+
+/** Part @p part of @p parts under @p stem, as <tt>stem-00001-of-00003.safegraphs</tt>. */
+inline std::string part_path(std::string const& stem, std::size_t part, std::size_t parts) {
+    char suffix[64];
+    std::snprintf(suffix, sizeof(suffix), "-%05zu-of-%05zu.safegraphs", part, parts);
+    return stem + suffix;
+}
+
+/**
+ *  @brief The body of every modality's @c save: one monolith at @p path for one shard, else one
+ *      part per shard beside the manifest at @p path, each part the image @p serialize writes of
+ *      a handle holding that shard's entries alone.
+ *
+ *  A cancelled save leaves the parts already written and no manifest naming them, so the
+ *  checkpoint reads as absent rather than half-valid, as the headers promise.
+ */
+template <typename handle_, typename serialize_>
+void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progress_t progress,
+                serialize_ const& serialize, usearch_outcome_t* outcome) {
+    std::size_t const shards = index.shards();
+    std::vector<std::byte> blob;
+    if (shards == 1) {
+        if (!serialize(index, blob, outcome)) return;
+        // The blob is one chunk, so the handler's only say is whether it is written at all.
+        if (!keep_going(progress, 0, 1))
+            return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+        if (!write_file(path, blob, outcome)) return;
+        keep_going(progress, 1, 1);
+        return;
+    }
+    std::string const stem = stem_of(as_text(path));
+    std::size_t const total = index.entries.size();
+    std::size_t const per_shard = index.shard_capacity ? index.shard_capacity : divide_round_up(total, shards);
+    std::string manifest = "{\"files\":[";
+    for (std::size_t shard = 0; shard != shards; ++shard) {
+        if (!keep_going(progress, shard, shards))
+            return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+        handle_ part;
+        part.options = index.options;
+        std::size_t const begin = std::min(shard * per_shard, total), end = std::min(begin + per_shard, total);
+        part.entries.assign(index.entries.begin() + static_cast<std::ptrdiff_t>(begin),
+                            index.entries.begin() + static_cast<std::ptrdiff_t>(end));
+        if (!serialize(part, blob, outcome)) return;
+        std::string const name = part_path(stem, shard + 1, shards);
+        if (!write_file(as_path(name), blob, outcome)) return;
+        char entry[160];
+        std::snprintf(entry, sizeof(entry), "%s{\"path\":\"%s\",\"bytes\":%zu,\"nodes\":%zu}", shard ? "," : "",
+                      name.c_str() + directory_of(name).size(), blob.size(), end - begin);
+        manifest += entry;
+    }
+    manifest += "]}";
+    if (!write_file(path, bytes_view_t {reinterpret_cast<std::byte const*>(manifest.data()), manifest.size()}, outcome))
+        return;
+    keep_going(progress, shards, shards);
 }
 
 #pragma endregion Files

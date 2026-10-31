@@ -458,7 +458,7 @@ public struct Key : IEquatable<Key>
 /// </summary>
 /// <remarks>
 /// The enumerators are ordered by shrinking dynamic range, and their values carry the numbering
-/// gaps the C enum reserves for kinds that have not landed yet.
+/// gaps the C enum reserves for kinds not yet implemented.
 /// </remarks>
 public enum Scalar : int
 {
@@ -1313,15 +1313,15 @@ public sealed unsafe class Arena : IDisposable
 public class Deferred : IDisposable
 {
     private readonly ICall _call;
-    private readonly Landing[] _landing;
+    private readonly CallOutputs[] _outputs;
 
     private bool _settled;
     private ExceptionDispatchInfo? _failure;
 
-    internal Deferred(ICall call, Landing[] landing)
+    internal Deferred(ICall call, CallOutputs[] outputs)
     {
         this._call = call;
-        this._landing = landing;
+        this._outputs = outputs;
     }
 
     /// <summary>Releases a deferred call nobody waited for, once it is final.</summary>
@@ -1376,20 +1376,20 @@ public class Deferred : IDisposable
     /// <returns>True for the one settle that did so.</returns>
     private protected unsafe bool Settle()
     {
-        lock (this._landing)
+        lock (this._outputs)
         {
             if (this._settled)
             {
                 return false;
             }
 
-            Landing* landing = this.Pinned;
-            usearch_outcome_wait(&landing->Outcome);
-            this._call.Release(landing);
+            CallOutputs* outputs = this.Pinned;
+            usearch_outcome_wait(&outputs->Outcome);
+            this._call.Release(outputs);
             GC.SuppressFinalize(this);
             try
             {
-                this._call.Finish(landing);
+                this._call.Finish(outputs);
             }
             // Every exception is caught on purpose, so each later wait raises the same one.
 #pragma warning disable CA1031
@@ -1404,8 +1404,8 @@ public class Deferred : IDisposable
         }
     }
 
-    private unsafe Landing* Pinned =>
-        (Landing*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(this._landing));
+    private unsafe CallOutputs* Pinned =>
+        (CallOutputs*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(this._outputs));
 }
 
 /// <summary>A submitted call that answers a <typeparamref name="TResult"/> once final.</summary>
@@ -1414,7 +1414,7 @@ public sealed class Deferred<TResult> : Deferred
 {
     private readonly ICall<TResult> _call;
 
-    internal Deferred(ICall<TResult> call, Landing[] landing) : base(call, landing) => this._call = call;
+    internal Deferred(ICall<TResult> call, CallOutputs[] outputs) : base(call, outputs) => this._call = call;
 
     /// <summary>Blocks until the call is final, then answers what it produced or raises its failure.
     /// Calls <c>usearch_outcome_wait</c>.</summary>
@@ -1441,13 +1441,13 @@ internal enum Completion : int
 }
 
 /// <summary>
-/// Where a call's outcome and the outputs it reports by pointer land: on the stack of a blocking
+/// Where a call's outcome and the outputs it reports by pointer are written: on the stack of a blocking
 /// call, or in the pinned element a <see cref="Deferred"/> keeps until final. <see cref="View"/> holds
 /// the one view a verb writes into its arena, and <see cref="Report"/> the one report struct it
 /// fills - its telemetry, audit, or description.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe struct Landing
+internal unsafe struct CallOutputs
 {
     public NativeOutcome Outcome;
     public nuint Written;
@@ -1463,16 +1463,16 @@ internal unsafe struct Landing
 internal unsafe interface ICall
 {
     /// <summary>Fixes what the call lends, pinning it past the C verb only when deferred, and leases its
-    /// handles for the C verb alone, then calls it with its outputs landing in <paramref name="landing"/>.
+    /// handles for the C verb alone, then calls it with its outputs written to <paramref name="outputs"/>.
     /// Throws only before the C verb is called.</summary>
-    void Submit(Landing* landing, Completion completion);
+    void Submit(CallOutputs* outputs, Completion completion);
 
     /// <summary>Settles what the call handed over - donors it consumed - then unpins what it lent, once
     /// the call is final.</summary>
-    void Release(Landing* landing);
+    void Release(CallOutputs* outputs);
 
     /// <summary>Raises the failure of a final call, or builds what it produced.</summary>
-    void Finish(Landing* landing);
+    void Finish(CallOutputs* outputs);
 }
 
 /// <summary>A call that produces a <typeparamref name="TResult"/>, readable once finished.</summary>
@@ -1501,22 +1501,22 @@ internal readonly struct CallHandles(EngineHandle index, Executor? executor)
 /// <summary>Runs one verb's call to completion, or submits it.</summary>
 internal static unsafe class Calls
 {
-    /// <summary>Runs the call with its landing on the stack, final when the C verb returns.</summary>
+    /// <summary>Runs the call with its outputs on the stack, final when the C verb returns.</summary>
     /// <param name="call">The call to run.</param>
     /// <returns>The finished call, holding its result.</returns>
     internal static TCall Block<TCall>(TCall call) where TCall : struct, ICall
     {
-        Landing landing = default;
+        CallOutputs outputs = default;
         try
         {
-            call.Submit(&landing, Completion.Blocking);
+            call.Submit(&outputs, Completion.Blocking);
         }
         finally
         {
-            call.Release(&landing);
+            call.Release(&outputs);
         }
 
-        call.Finish(&landing);
+        call.Finish(&outputs);
         return call;
     }
 
@@ -1537,11 +1537,11 @@ internal static unsafe class Calls
         ? (nuint)wanted
         : throw new USearchException(Status.InvalidArgument, "the wanted count is negative");
 
-    /// <summary>Submits the boxed call with its landing in a pinned element, which never moves.</summary>
-    private static Landing[] Submitted(ICall call)
+    /// <summary>Submits the boxed call with its outputs in a pinned element, which never moves.</summary>
+    private static CallOutputs[] Submitted(ICall call)
     {
-        Landing[] landing = GC.AllocateArray<Landing>(1, pinned: true);
-        Landing* pinned = (Landing*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(landing));
+        CallOutputs[] outputs = GC.AllocateArray<CallOutputs>(1, pinned: true);
+        CallOutputs* pinned = (CallOutputs*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(outputs));
         try
         {
             call.Submit(pinned, Completion.Deferred);
@@ -1552,7 +1552,7 @@ internal static unsafe class Calls
             throw;
         }
 
-        return landing;
+        return outputs;
     }
 }
 

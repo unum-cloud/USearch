@@ -64,10 +64,11 @@
  *  - Payload belongs to the handle, placed by its constructor's residency, as @c usearch_dense_init_ram
  *    places it in host memory.
  *  - Scratch and staging belong to the executor, placed at its creation and grown to a high-water mark.
- *  - Every output whose length scales with the call lands in an arena: matches, rows, products,
- *    monoliths, offsets, cursor and stream batches, and attention outputs alike. Only fixed-size
- *    reports, such as stats, descriptions, metadata and the scalar @c written and @c required, stay
- *    caller fields, and so does state the caller carries between calls, like attention's @c carry.
+ *  - Every output whose length scales with the call is written in an arena: matches, rows,
+ *    products, monoliths, offsets, cursor and stream batches, and attention outputs alike. Only
+ *    fixed-size reports, such as stats, descriptions, metadata and the scalar @c written and
+ *    @c required, stay caller fields, and so does state the caller carries between calls, like
+ *    attention's @c carry.
  *  - Executors make arenas. @c usearch_arena_init places one where its executor computes, host pages
  *    on its memory domains or the memory of its GPU, decided once; a @c NULL executor makes host
  *    pages for calls on the calling thread. A GPU arena keeps the rule @ref usearch_arena_t notes.
@@ -168,8 +169,8 @@ typedef struct usearch_bytes_view_t {
  *  @brief A strided run of keys - how a batch names the identities it carries, one per row of the
  *      call's @c count, or one per entry a cursor pull wrote into its arena.
  *
- *  A zero @c stride repeats the first key for every row, which is how a batch of rows lands under
- *  one key without a caller materializing the copies.
+ *  A zero @c stride repeats the first key for every row, which is how a batch of rows is written
+ *  under one key without a caller materializing the copies.
  *  An output's keys are packed, so the call writes one key's size as @c stride.
  */
 typedef struct usearch_keys_view_t {
@@ -283,6 +284,7 @@ typedef enum usearch_scalar_t {
     /** No scalar named - an unset field, or a custom metric owning its own storage. */
     usearch_scalar_unknown_k = 0,
 
+    // Floating point
     /** IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, subnormals to 4.94e-324,
      *  with infinities and NaNs. */
     usearch_scalar_f64_k = 1,
@@ -315,6 +317,7 @@ typedef enum usearch_scalar_t {
      *  infinities or NaNs, and 72% of its codes outside [-1, 1]. */
     usearch_scalar_e2m3_k = 8,
 
+    // Signed integers
     /** 8-bit signed integer spanning -128 to 127, every code a number. */
     usearch_scalar_i8_k = 10,
 
@@ -325,6 +328,7 @@ typedef enum usearch_scalar_t {
     /** 32-bit signed integer spanning ±2.15e9, every code a number. */
     usearch_scalar_i32_k = 12,
 
+    // Unsigned integers
     /** 8-bit unsigned integer spanning 0 to 255, every code a number. */
     usearch_scalar_u8_k = 20,
 
@@ -476,11 +480,15 @@ typedef struct usearch_keys_tape_view_t {
  *  this vocabulary, and callers may pin one. Each class bundles the compute features,
  *  wait instruction, and atomics its silicon generation guarantees. */
 typedef enum usearch_cpu_class_t {
+
+    /** No class detected. */
     usearch_cpu_class_unknown_k = 0,
 
+    // Portable
     /** The portable floor: no SIMD assumptions, standard yields. */
     usearch_cpu_class_serial_k,
 
+    // x86
     /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
     usearch_cpu_class_intel_haswell_k,
 
@@ -508,6 +516,7 @@ typedef enum usearch_cpu_class_t {
      *  TPAUSE waits, CMPCCXADD conditional adds. */
     usearch_cpu_class_intel_diamond_k,
 
+    // Arm
     /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
      *  Armv8.6 land here too. */
     usearch_cpu_class_aws_g2_k,
@@ -525,10 +534,12 @@ typedef enum usearch_cpu_class_t {
     /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
     usearch_cpu_class_nvidia_vera_k,
 
+    // RISC-V
     /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
      *  monitored waits, Zacas single-instruction compare-and-swap. */
     usearch_cpu_class_alibaba_c930_k,
 
+    // WebAssembly
     /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
     usearch_cpu_class_wasm32_v128_k,
 
@@ -536,6 +547,7 @@ typedef enum usearch_cpu_class_t {
      *  addressing that alone lets one module's memory pass 4 GB. */
     usearch_cpu_class_wasm64_extended_k,
 
+    // One class
     /** The one class of a monoversioned build: every capability its floor implies or its preset
      *  vouches for, as the kernel libraries compiled them. */
     usearch_cpu_class_monoversioned_k,
@@ -544,8 +556,11 @@ typedef enum usearch_cpu_class_t {
 /** The GPU families USearch ships tuned variants for, the device twin of
  *  @c usearch_cpu_class_t: one class per generation of kernel kits. */
 typedef enum usearch_gpu_class_t {
+
+    /** No class detected. */
     usearch_gpu_class_unknown_k = 0,
 
+    // NVIDIA
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
     usearch_gpu_class_nvidia_ampere_k,
 
@@ -564,6 +579,7 @@ typedef enum usearch_gpu_class_t {
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     usearch_gpu_class_nvidia_rubin_k,
 
+    // AMD
     /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
     usearch_gpu_class_amd_cdna3_k,
 
@@ -573,6 +589,7 @@ typedef enum usearch_gpu_class_t {
     /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
     usearch_gpu_class_amd_cdna5_k,
 
+    // Apple
     /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
     usearch_gpu_class_apple_metal7_k,
 
@@ -692,6 +709,35 @@ typedef struct usearch_reachability_t {
 } usearch_reachability_t;
 
 /**
+ *  @brief What one refinement-family call did to the graph, counted alike in every modality and
+ *      residency: @c refine, @c absorb, @c compact, @c split and @c refinement_finish land it.
+ *
+ *  @c changed never exceeds @c reselected, and a pass over a settled graph changes nothing. A call
+ *  that fails before its closing audit reports zeros; one its progress handler stopped still heals,
+ *  so its report stands beside the @c usearch_status_cancelled_k it answers.
+ */
+typedef struct usearch_refine_report_t {
+
+    /** Entries whose neighbors were selected again: the planned entries, then the fresh entries of
+     *  every later round, then the islands of every heal round. */
+    size_t reselected;
+
+    /** Of those, the entries whose neighbor set gained a member it lacked; order never counts, nor
+     *  does a back-link re-selecting an entry the pass did not. */
+    size_t changed;
+
+    /** Entries the first audit found not reached both ways, counted once. */
+    size_t islands_found;
+
+    /** Links written between an island and an entry the audit reached both ways, summed across
+     *  the heal's audits. */
+    size_t islands_reconnected;
+
+    /** The audit closing the heal, as a fresh @c health call right after would take it. */
+    usearch_reachability_t reachability;
+} usearch_refine_report_t;
+
+/**
  *  @brief The host memory domains a RAM-resident index places its shards in - one shard per
  *      named NUMA node, so a dual-socket box names two and gets two graphs whose traversals
  *      stay local to the cores that walk them.
@@ -789,7 +835,7 @@ typedef struct usearch_nvme_options_t {
     usearch_cpu_class_t cpu_class;
 } usearch_nvme_options_t;
 
-/** Whether a filtered search admits one candidate key or passes over it. */
+/** Whether a predicate admits one candidate key or passes over it. */
 typedef enum usearch_admission_t {
 
     /** Skip the key; the walk still routes through it. */
@@ -816,7 +862,7 @@ typedef enum usearch_predicate_cost_t {
     usearch_predicate_cost_expensive_k = 1,
 } usearch_predicate_cost_t;
 
-/** Which candidate keys a filtered search may report: a handler and the state it is called with. */
+/** Which candidate keys a search may report: a handler and the state it is called with. */
 typedef struct usearch_predicate_t {
 
     /** The @b optional handler; @c NULL admits every key. */
@@ -1030,8 +1076,9 @@ typedef struct usearch_executor_for_vram_t {
      *  own. */
     void* const* streams;
 
-    /** The @b optional ceiling on scratch bytes per stream, a refinement's included, past which a
-     *  call reports @c usearch_status_out_of_memory_k; zero lets scratch grow as geometry asks. */
+    /** The @b optional ceiling on each stream's run, which every call's scratch and outputs carve
+     *  from, past which a call reports @c usearch_status_out_of_memory_k; zero lets the run grow as
+     *  the geometry asks. */
     size_t scratch_limit;
 
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */

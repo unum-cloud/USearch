@@ -409,14 +409,17 @@ struct call_t {
      *  hold. */
     size_t count;
 
-    /** Rows of @c get, or pairs of @c multiply and keys of @c maxsim, the call landed. */
+    /** Rows of @c get, or pairs of @c multiply and keys of @c maxsim, the call wrote. */
     size_t written;
 
     /** Pairs @c multiply or keys @c maxsim scored before @c wanted cut any. */
     size_t required;
 
-    /** Entries under the key of @c count, or nodes @c refine changed. */
+    /** Entries under the key of @c count. */
     size_t tally;
+
+    /** The report of @c refine. */
+    usearch_refine_report_t report;
 
     /** Matches of @c search, inside the arena. */
     usearch_matches_view_t matches;
@@ -1174,11 +1177,11 @@ static int answer_matches(WolframLibraryData library_data, call_t* call, DataSto
     double* const scores_cells = library_data->MTensor_getRealData(scores);
     mint* const counts_cells = library_data->MTensor_getIntegerData(counts);
     // Columns past a query's count are unwritten, so only the matches it found are copied.
-    for (size_t row = 0, landed = 0; row != call->count; landed += matches.counts[row++]) {
+    for (size_t row = 0, copied = 0; row != call->count; copied += matches.counts[row++]) {
         counts_cells[row] = (mint)matches.counts[row];
         if (!matches.counts[row]) continue;
-        memcpy(keys_cells + landed, matches.keys + row * matches.columns, matches.counts[row] * sizeof(usearch_key_t));
-        memcpy(scores_cells + landed, matches.scores + row * matches.columns, matches.counts[row] * sizeof(double));
+        memcpy(keys_cells + copied, matches.keys + row * matches.columns, matches.counts[row] * sizeof(usearch_key_t));
+        memcpy(scores_cells + copied, matches.scores + row * matches.columns, matches.counts[row] * sizeof(double));
     }
     WolframIOLibrary_Functions const io = library_data->ioLibraryFunctions;
     io->DataStore_addNamedMTensor(store, "Scores", scores);
@@ -1237,7 +1240,7 @@ static int answer_count(WolframLibraryData library_data, call_t* call, DataStore
 
 /** Lands the nodes a refinement changed. */
 static int answer_refine(WolframLibraryData library_data, call_t* call, DataStore store) {
-    store_size(library_data, store, "Changed", call->tally);
+    store_size(library_data, store, "Changed", call->report.changed);
     return LIBRARY_NO_ERROR;
 }
 
@@ -1338,7 +1341,7 @@ EXTERN_C DLLEXPORT int DenseRefine(WolframLibraryData library_data, mint argumen
             .index = call.index,
             .executor = call.executor,
             .outcome = &call.outcome,
-            .changed = &call.tally,
+            .report = &call.report,
             .expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments]),
         });
     }
@@ -1406,11 +1409,11 @@ EXTERN_C DLLEXPORT int DenseSearch(WolframLibraryData library_data, mint argumen
 
 /**
  *  @brief Calls @c usearch_dense_maxsim: @c queries → @c rowsPerQuery → @c wanted → @c arena →
- *      @c expansionFactor → offsets, the scored keys, their summed maxima, and the keys landed.
+ *      @c expansionFactor → offsets, the scored keys, their summed maxima, and the keys written.
  *
  *  The token rows of every query are laid end to end, so their number divides by @p rowsPerQuery.
  *  Query @c i spans keys @c offsets[[i+1]]+1 through @c offsets[[i+2]], largest first; keys are
- *  @b [landed,16] byte cells. A zero @p wanted keeps every key a query scored.
+ *  @b [written,16] byte cells. A zero @p wanted keeps every key a query scored.
  */
 EXTERN_C DLLEXPORT int DenseMaxsim(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                    MArgument result) {

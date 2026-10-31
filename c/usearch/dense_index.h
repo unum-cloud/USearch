@@ -27,13 +27,13 @@
  *  small JSON catalog of one monolith per shard named by the stem and @c -00001-of-0000S.safegraphs
  *  beside it, each with its shard's own node IDs, so neighbors never cross files. Only compaction
  *  merges graphs. Loading reads the content, never the extension, and opens one shard per part:
- *  part @c p lands whole on shard @c p, beside any placed shards the parts leave empty, and the
- *  shards past the placed ones open over the call's memory domains or devices in turn. A manifest
- *  records where its parts were written, never where a reader must keep them, so a checkpoint
- *  written from a mounted bucket lands across a handle's own memory domains as it loads. An
- *  in-memory buffer of several shards leads with the same manifest, listing each part by its offset
- *  inside the buffer. A cancelled or failed save leaves a file without its header, which every
- *  reader rejects, and a cancelled or failed load creates no handle.
+ *  part @c p is written whole on shard @c p, beside any placed shards the parts leave empty, and
+ *  the shards past the placed ones open over the call's memory domains or devices in turn. A
+ *  manifest records where its parts were written, never where a reader must keep them, so a
+ *  checkpoint written from a mounted bucket spreads across a handle's own memory domains as it
+ *  loads. An in-memory buffer of several shards leads with the same manifest, listing each part by
+ *  its offset inside the buffer. A cancelled or failed save leaves a file without its header, which
+ *  every reader rejects, and a cancelled or failed load creates no handle.
  *
  *  A file is read through a memory mapping, so a path and a buffer are the same bytes reached two
  *  ways. Loading copies them into the handle's own shards; viewing serves the mapping itself, so a
@@ -66,7 +66,7 @@
  *  a userspace one, and a FUSE mount over a bucket reads as an ordinary path.
  *  External-memory graphs are never modified in place, so the handle is a view, and every mutating
  *  verb fails on it. Bigger indexes come from merging, never mutating: shards build in RAM,
- *  serialize as monoliths, and join a manifest - the compaction shape of LSM storage.
+ *  serialize as monoliths, and enter a manifest - the compaction shape of LSM storage.
  *
  *  @section dense_index_concurrency Concurrency & Thread Safety
  *
@@ -88,7 +88,7 @@
  *  Refinement, absorption and clearing hold the handle closed to insertions for their whole call,
  *  and so does a save of a VRAM handle. None of them waits: one meeting an insertion in flight
  *  reports @c usearch_status_contended_k and leaves the handle as it was, an insertion arriving
- *  while one runs reports the same and lands nothing, and so does a second VRAM insertion beside
+ *  while one runs reports the same and writes nothing, and so does a second VRAM insertion beside
  *  the first. The caller retries, typically once its own insertions drained. A RAM save settles
  *  optimistically instead, reporting @c usearch_status_contended_k when an insertion was in flight
  *  or published under it, and concurrent readers keep searching throughout every save.
@@ -123,19 +123,19 @@
  *  RAM and a device one on NVIDIA and AMD; Apple's Metal answers it with
  *  @c usearch_status_unsupported_k, since its kernels cannot call the caller's function.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
- *  @c usearch_dense_maxsim stage on the arena's host pages and land their outputs where it lives,
- *  through the stream of the call's own executor.
+ *  @c usearch_dense_maxsim write their outputs into the arena's device memory on NVIDIA and AMD,
+ *  through the stream of the call's own executor, and into its host pages elsewhere.
  *
  *  A VRAM handle refuses a search with a @c predicate, since a host predicate cannot narrow a
  *  device walk, and an AMD or Apple one refuses a @c usearch_traversal_scan_k scan, both with
  *  @c usearch_status_unsupported_k; RAM and NVMe answer both. @c usearch_dense_cursor_init answers
- *  on RAM, while VRAM vectors are read back by key or by search.
- *  @c usearch_dense_search_stream_init, @c usearch_dense_sample and @c usearch_dense_split are
- *  unsupported on both, and so are a cursor opened at @c starts and a pull asking for @c links.
+ *  on RAM, while VRAM vectors are read back by key or by search. @c usearch_dense_split answers on
+ *  both, @c usearch_dense_sample on RAM alone, and @c usearch_dense_search_stream_init on neither.
  *
  *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
- *  @c usearch_dense_health included, its entries read through the executor's engines. Every
- *  mutating verb answers @c usearch_status_read_only_k, and saving answers
+ *  @c usearch_dense_health included, its entries read through the executor's engines, though its
+ *  cursor walks no links: @c starts and @c links answer @c usearch_status_unsupported_k there.
+ *  Every mutating verb answers @c usearch_status_read_only_k, and saving answers
  *  @c usearch_status_unsupported_k, since a view already is its checkpoint.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
@@ -364,7 +364,7 @@ typedef struct usearch_dense_load_ram_t {
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
     usearch_bytes_view_t path;
 
-    /** The memory domains to place the parts on, part @c p landing on shard @c p, those past the
+    /** The memory domains to place the parts on, part @c p loading into shard @c p, those past the
      *  named domains opened over them in turn. */
     usearch_ram_options_t ram;
 
@@ -385,9 +385,9 @@ typedef struct usearch_dense_load_ram_t {
  *  over a hundred files is opened by naming a single one. Naming a part directly is legal and
  *  loads exactly that part as a monolith, which is a fragment of the index rather than the index.
  *
- *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p lands
- *  whole on shard @c p, and shards past the placed ones open over those domains in turn, so a
- *  checkpoint of eight parts loaded naming four domains places two parts on each.
+ *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p is
+ *  written whole on shard @c p, and shards past the placed ones open over those domains in turn, so
+ *  a checkpoint of eight parts loaded naming four domains places two parts on each.
  *
  *  A cancelled or failed load reports its status and creates no handle.
  *
@@ -429,7 +429,7 @@ typedef struct usearch_dense_load_vram_t {
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
     usearch_bytes_view_t path;
 
-    /** The devices to place the parts on, part @c p landing on shard @c p, those past the named
+    /** The devices to place the parts on, part @c p loading into shard @c p, those past the named
      *  devices opened over them in turn. */
     usearch_vram_options_t vram;
 
@@ -481,7 +481,7 @@ typedef struct usearch_dense_load_ram_buffer_t {
     /** Source holding one serialized monolith, or the manifest of several parts leading them. */
     usearch_bytes_view_t buffer;
 
-    /** The memory domains to place shards on; part @c p lands whole on shard @c p. */
+    /** The memory domains to place shards on; part @c p is written whole on shard @c p. */
     usearch_ram_options_t ram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -537,7 +537,7 @@ typedef struct usearch_dense_load_vram_buffer_t {
      *  its bytes while it runs. */
     usearch_bytes_view_t buffer;
 
-    /** The devices to place shards on; part @c p lands whole on shard @c p. */
+    /** The devices to place shards on; part @c p is written whole on shard @c p. */
     usearch_vram_options_t vram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
@@ -699,9 +699,9 @@ typedef struct usearch_dense_clear_t {
 } usearch_dense_clear_t;
 
 /**
- *  Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in flight,
- *  or a refinement, absorb, compaction, split or load holding the handle, refuses it with
- *  @c usearch_status_contended_k; a search it lands under repeats or reports the same.
+ *  @brief Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in
+ *      flight, or a refinement, absorb, compaction, split or load holding the handle, refuses it
+ *      with @c usearch_status_contended_k; a search it reaches under repeats or reports the same.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
@@ -772,7 +772,7 @@ typedef struct usearch_dense_insert_t {
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is a view.
  *  - @c usearch_status_contended_k A refinement, absorption or clear holds the handle, or on
- *    VRAM a save or another insertion does; nothing landed.
+ *    VRAM a save or another insertion does; nothing is inserted.
  */
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments);
 
@@ -791,12 +791,9 @@ typedef struct usearch_dense_refine_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional output for the number of nodes whose neighbors changed; zero means settled. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal, as @c usearch_dense_health would take
-     *  it right after; @c reachable short of @c audited is what no reconnection could reach. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
@@ -821,8 +818,8 @@ typedef struct usearch_dense_refine_t {
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
  *  merely less improved: nothing unwinds, and the call answers @c usearch_status_cancelled_k. The
  *  index keeps nothing of a stopped pass, so the next call starts at the first entry again; a
- *  caller wanting to continue where a cancel stopped holds a @c usearch_dense_refinement_t
- *  instead. A caller loops until @c changed falls below whatever change rate they consider
+ *  caller wanting to continue where a cancel stopped holds a @c usearch_dense_refinement_t instead.
+ *  A caller loops until the report's @c changed falls below whatever change rate they consider
  *  settled.
  *
  *  Re-selection alone can leave an island, an entry no search reaches, so every call closes by
@@ -930,7 +927,7 @@ typedef struct usearch_dense_search_t {
      *  AMD and Apple VRAM. */
     usearch_traversal_t traversal;
 
-    /** The @b optional admission filter, asked about a scored quad of candidates at a time. */
+    /** The @b optional predicate, asked about a scored quad of candidates at a time. */
     usearch_predicate_t predicate;
 
     /** The @b optional handler, called with queries resolved. */
@@ -952,11 +949,11 @@ typedef struct usearch_dense_search_t {
  *  threads: a block of many queries packs once into the operand layout of the CPU's matrix kernels
  *  and streams every stored vector against the pack where it lies, while a lone query takes the
  *  walk's own 4-way kernels. On NVMe the queries pack once and the threads split the value column
- *  instead, each run landing beside its keys, so the column is read once and in order. Either way
+ *  instead, each run written beside its keys, so the column is read once and in order. Either way
  *  each query's matches merge into its output row as the pass advances. On NVIDIA VRAM the batch
  *  scans every shard's vectors on the device, where the shards' matches merge too. Every residency
  *  ranks by the distances its walk reports. A @c predicate is asked only about entries closer than
- *  the worst match the query already holds, which makes the scan the fallback for filters too
+ *  the worst match the query already holds, which makes the scan the fallback for predicates too
  *  selective for a walk to cross.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
@@ -968,7 +965,7 @@ typedef struct usearch_dense_search_t {
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
  *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted,
- *  or an index holding no entries, succeeds without walking and lands only the counts, every one
+ *  or an index holding no entries, succeeds without walking and writes only the counts, every one
  *  zero.
  *
  *  @code{.c}
@@ -1092,7 +1089,7 @@ typedef struct usearch_dense_absorb_t {
     /** The handle absorbing the donors. */
     usearch_dense_index_t index;
 
-    /** The executor each donor's landing and the closing refinement fan out over. */
+    /** The executor each donor's move and the closing refinement fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1107,17 +1104,15 @@ typedef struct usearch_dense_absorb_t {
     /** Array of @c count handles, each consumed and nulled once its entries are published here. */
     usearch_dense_index_t* donors;
 
-    /** The @b optional output for the nodes the closing refine changed. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
-     *  as it stops @c usearch_dense_refine, never a landing. */
+     *  as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1171,7 +1166,7 @@ typedef struct usearch_dense_compact_t {
     /** The handle the sources compact into, possibly one of them. */
     usearch_dense_index_t target;
 
-    /** The executor every landing and the closing refinement fan out over. */
+    /** The executor every move and the closing refinement fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1184,7 +1179,7 @@ typedef struct usearch_dense_compact_t {
     size_t count;
 
     /** Array of @c count distinct handles; each but @c target is freed and nulled once every
-     *  source landed. */
+     *  source moved. */
     usearch_dense_index_t* sources;
 
     /** The @b optional most entries one target shard holds; zero, or more than the target's own
@@ -1194,14 +1189,12 @@ typedef struct usearch_dense_compact_t {
     /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional output for the nodes the closing refine changed. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
-     *  as it stops @c usearch_dense_refine, never a landing. */
+     *  as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1213,12 +1206,12 @@ typedef struct usearch_dense_compact_t {
  *      entries per shard, largest first, each into the first shard with room, so it ends with as
  *      few shards as fit; in place when @c target is among @c sources.
  *
- *  The shard a bin keeps stays resident with its IDs, every other source shard lands after it with
+ *  The shard a bin keeps stays resident with its IDs, every other source shard follows it with
  *  its edges rebased and its keys beside it, and only the appended entries walk the target across
  *  the parts and link in, then each target shard re-links the islands that leaves, as
  *  @c usearch_dense_refine does. In place, a moved entry's key moves with one atomic store, so
  *  lookups and searches of @c target run throughout and emptied shards stay as idle slots for its
- *  next generation. Once the call landed every source, each one but @c target is freed and nulled,
+ *  next generation. Once the call moved every source, each one but @c target is freed and nulled,
  *  as @c usearch_dense_absorb frees its donors; a failure frees none, those it consumed left empty
  *  and refusing insertions, so every handle in @c sources stays the caller's to free.
  *
@@ -1241,7 +1234,7 @@ typedef struct usearch_dense_split_t {
     /** The handle split into the receivers, left empty and live. */
     usearch_dense_index_t index;
 
-    /** The executor the partition, each part's landing and the closing refinements fan out over. */
+    /** The executor the partition, each part's move and the closing refinements fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1257,11 +1250,9 @@ typedef struct usearch_dense_split_t {
      *  and shard count, each receiving one part. */
     usearch_dense_index_t const* receivers;
 
-    /** The @b optional output for the nodes the closing refines changed, across the receivers. */
-    size_t* changed;
-
-    /** The @b optional output for the audits closing the heals, across the receivers. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
@@ -1270,7 +1261,7 @@ typedef struct usearch_dense_split_t {
     uint64_t seed;
 
     /** The @b optional handler, called with nodes the closing refines re-selected; a cancel stops
-     *  them as it stops @c usearch_dense_refine, never a landing. */
+     *  them as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1282,20 +1273,20 @@ typedef struct usearch_dense_split_t {
  *      graph-local parts keeping their edges rather than re-inserting their vectors, one part per
  *      receiver, and @c index left empty but live.
  *
- *  Every receiver is checked and held before the first part lands, so a refusal moves nothing. The
+ *  Every receiver is checked and held before the first part moves, so a refusal moves nothing. The
  *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
- *  links from its root, capped at an equal share of the entries, while entries no root reaches join
- *  the smallest part. A sharded handle splits shard by shard, part @c p of shard @c s landing in
- *  shard @c s of receiver @c p. Each part then lands in its receiver all-or-nothing, its edges
+ *  links from its root, capped at an equal share of the entries, while entries no root reaches
+ *  enter the smallest part. A sharded handle splits shard by shard, part @c p of shard @c s moving
+ *  into shard @c s of receiver @c p. Each part then enters its receiver all-or-nothing, its edges
  *  rebased, its edges into other parts dropped, and the entries that lost one placed first;
- *  @c index clears once every part landed. Each receiver closes by refining the entries that lost
- *  an edge and re-linking the islands that leaves, as @c usearch_dense_refine does. Insertions into
- *  @c index or a receiver arriving meanwhile are refused with @c usearch_status_contended_k, while
+ *  @c index clears once every part moved. Each receiver closes by re-selecting the entries that
+ *  lost an edge and re-linking the islands that leaves, as @c usearch_dense_refine does. Meanwhile,
+ *  insertions into @c index or a receiver are refused with @c usearch_status_contended_k, while
  *  searches of either run throughout.
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_dense_refine: a cancel skips the rest of the re-selection, still re-links, and
- *  answers @c usearch_status_cancelled_k with every part landed. A caller wanting to continue that
+ *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue that
  *  re-selection later holds a @c usearch_dense_refinement_t opened with @c receivers instead.
  *
  *  @par Statuses:
@@ -1307,6 +1298,7 @@ typedef struct usearch_dense_split_t {
  *    named twice, or @c index itself.
  *  - @c usearch_status_contended_k An insertion in flight on @c index or on a receiver, or on
  *    VRAM a save of either; nothing moves.
+ *  - @c usearch_status_overflow_k A part passes a receiver's capacity or its node IDs.
  */
 USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments);
 
@@ -1325,10 +1317,6 @@ typedef struct usearch_dense_refinement_init_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
-     *  @c usearch_dense_refinement_finish frees it. */
-    usearch_dense_refinement_t* refinement;
-
     /** The @b optional donors to absorb first, each consumed and nulled once its entries land; the
      *  array must outlive the refinement. */
     usearch_dense_index_t* donors;
@@ -1336,12 +1324,16 @@ typedef struct usearch_dense_refinement_init_t {
     /** Donor handles in @c donors. */
     size_t count;
 
-    /** The @b optional receivers to split @c index into first, as @c usearch_dense_split lands
+    /** The @b optional receivers to split @c index into first, as @c usearch_dense_split fills
      *  them, each refined in turn; the array must outlive the refinement. */
     usearch_dense_index_t const* receivers;
 
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
+
+    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
+     *  @c usearch_dense_refinement_finish frees it. */
+    usearch_dense_refinement_t* refinement;
 
     /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
@@ -1352,9 +1344,9 @@ typedef struct usearch_dense_refinement_init_t {
 
 /**
  *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
- *      @c usearch_dense_absorb lands them, or splitting it into @c receivers, as
- *      @c usearch_dense_split lands them. Every allocation the refinement needs happens here or in
- *      a landing, never in a step.
+ *      @c usearch_dense_absorb moves them, or splitting it into @c receivers, as
+ *      @c usearch_dense_split fills them. Every allocation the refinement needs happens here or in
+ *      a move, never in a step.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k @c index is an NVMe view.
@@ -1363,7 +1355,9 @@ typedef struct usearch_dense_refinement_init_t {
  *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, scalar,
  *    class, metric or geometry, a receiver holding entries, or @c index itself.
  *  - @c usearch_status_contended_k An insertion, save or another refinement in flight on
- *    @c index.
+ *    @c index, or an insertion on a receiver.
+ *  - @c usearch_status_unsupported_k @c receivers on an Apple GPU handle, whose index does
+ *    not split anything yet.
  */
 USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments);
 
@@ -1390,7 +1384,7 @@ typedef struct usearch_dense_refinement_next_t {
 
     /** The @b optional outputs for the nodes re-selected so far and, of those, the ones whose
      *  neighbors changed; their ratio falling is what says another call buys little. */
-    size_t* visited;
+    size_t* reselected;
     size_t* changed;
 
     /** The @b optional traversal telemetry of every call on the refinement so far; @c NULL skips
@@ -1399,13 +1393,13 @@ typedef struct usearch_dense_refinement_next_t {
 } usearch_dense_refinement_next_t;
 
 /**
- *  @brief Continues the refinement until it ends or @c progress cancels, landing any donors still
+ *  @brief Continues the refinement until it ends or @c progress cancels, moving any donors still
  *      pending first. Answers @c usearch_status_cancelled_k when a later call has more to do; that
  *      call continues exactly where this one stopped. The executor is held only for the call.
  *
  *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
- *  they only grow from one call to the next and @c changed never exceeds @c visited; all stay zero
- *  while donors are pending.
+ *  they only grow from one call to the next and @c changed never exceeds @c reselected; all stay
+ *  zero while donors are pending.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
@@ -1433,11 +1427,9 @@ typedef struct usearch_dense_refinement_finish_t {
     /** The refinement to finish; freed by the call, whatever it answers. */
     usearch_dense_refinement_t refinement;
 
-    /** The @b optional output for the number of nodes whose neighbors changed. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional traversal telemetry of every call on the refinement; @c NULL skips
      *  reporting. */
@@ -1447,7 +1439,7 @@ typedef struct usearch_dense_refinement_finish_t {
 /**
  *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
  *      @c usearch_dense_refine does, reports, reopens the index, and frees the handle. A
- *      refinement whose donors have not all landed re-links nothing and reports zeros.
+ *      refinement whose donors have not all moved re-links nothing and reports zeros.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
@@ -1457,9 +1449,6 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
 
 /** The arguments of @c usearch_dense_cursor_init. */
 typedef struct usearch_dense_cursor_init_t {
-
-    /** Output for the new cursor; @c NULL on failure. */
-    usearch_dense_cursor_t* cursor;
 
     /** The handle to be scanned. */
     usearch_dense_index_t index;
@@ -1472,6 +1461,9 @@ typedef struct usearch_dense_cursor_init_t {
 
     /** The keys to walk from, in the order the walk begins with them. */
     usearch_key_t const* starts;
+
+    /** Output for the new cursor; @c NULL on failure. */
+    usearch_dense_cursor_t* cursor;
 } usearch_dense_cursor_init_t;
 
 /**
@@ -1480,10 +1472,13 @@ typedef struct usearch_dense_cursor_init_t {
  *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
  *  own entries first, in the order given, then the entries those link to, breadth-first, each entry
  *  once, so a caller wanting only the starts' immediate links reads the links of the first pulled
- *  entries. A key the index lacks starts nothing.
+ *  entries. A key the index lacks starts nothing, and a key several entries share starts from its
+ *  first stored entry.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, or names @c starts as an NVMe
+ *    view; neither walks links yet.
  */
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments);
 
@@ -1532,6 +1527,7 @@ typedef struct usearch_dense_cursor_next_t {
  *  the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:
+ *  - @c usearch_status_unsupported_k @c links from an NVMe view, which walks no links yet.
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
@@ -1543,6 +1539,7 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
 /** The arguments of @c usearch_dense_sample. */
 typedef struct usearch_dense_sample_t {
 
+    /* Call */
     /** The handle to be sampled. */
     usearch_dense_index_t index;
 
@@ -1555,43 +1552,59 @@ typedef struct usearch_dense_sample_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional count of @c anchors; zero draws from the whole index. */
-    size_t anchors_count;
+    /* Inputs */
 
-    /** The rows that bound the region around them, one anchor apiece. */
-    usearch_rows_view_t anchors;
+    /** The @b optional count of @c shown; zero shows nothing yet. */
+    size_t shown_count;
 
-    /** Output for the identities drawn, inside @c arena. */
+    /** The keys already shown: never drawn again, and the paths reach toward them. */
+    usearch_keys_view_t shown;
+
+    /** Where the @c shown keys sit, @c shown_count rows of three @c usearch_scalar_f32_k values,
+     *  the points later draws are placed against. */
+    usearch_rows_view_t shown_coordinates;
+
+    /** The @b optional count of @c focus; zero looks around the whole index. */
+    size_t focus_count;
+
+    /** The keys to look around, the roots the draws grow from. */
+    usearch_keys_view_t focus;
+
+    /* Outputs */
+
+    /** Output for the keys drawn, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** Output for each draw's nearest earlier draws - their keys and distances, draw @c i spanning
-     *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
-    usearch_matches_tape_view_t* links;
+    /** Output for which of its key's entries each draw is, in the order @c usearch_dense_get
+     *  writes them, inside @c arena. */
+    size_t const** entry_ordinals;
+
+    /** Output for the one shown or earlier draw each draw hangs from and its distance, one column,
+     *  a draw with none counting zero, inside @c arena. */
+    usearch_matches_view_t* parents;
+
+    /** Output for where each draw is placed, @c written rows of three @c usearch_scalar_f32_k
+     *  values, inside @c arena. */
+    usearch_rows_view_t* coordinates;
 
     /** Output for the draws written; fewer than @c wanted only once the region is exhausted. */
     size_t* written;
 
-    /** Memory for @c keys and @c links, rewound by the call. */
+    /** Memory for every output, rewound by the call. */
     usearch_arena_t arena;
 
+    /* Knobs */
     /** The upper bound on draws this call writes. */
     size_t wanted;
 
-    /** Draws already taken in this sequence, skipped so successive calls extend one sample. */
-    size_t offset;
-
-    /** Up to how many earlier draws each draw links to; one already keeps the sample connected. */
-    size_t links_per_draw;
-
-    /** The sequence: equal seeds, anchors and radius over an unchanged index draw equally. */
+    /** The draw: equal seeds, shown keys and focus over an unchanged index draw equally, and a
+     *  larger @c wanted draws a superset. */
     uint64_t seed;
-
-    /** The @b optional radius around the anchors; zero bounds nothing. */
-    usearch_distance_t radius;
 
     /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
+    /* Observers */
     /** The @b optional handler, called with draws written and @c wanted. */
     usearch_progress_t progress;
 
@@ -1600,14 +1613,22 @@ typedef struct usearch_dense_sample_t {
 } usearch_dense_sample_t;
 
 /**
- *  @brief Draws entries uniformly, across the index or around anchors, each linked to its nearest
- *      earlier draws - so the sample is one connected component, ready to be laid out.
+ *  @brief Draws keys around @c focus, or across the whole index, each hanging from a shown or
+ *      earlier draw and placed in three dimensions beside the shown ones - so a view grows one
+ *      connected sample as it zooms, never scanning the index.
  *
- *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
- *  are exact in a scan and approximate as any walk otherwise.
+ *  The draws follow the graph: along paths joining the focus to each other and toward the nearest
+ *  shown key, then around each focus key as far as its nearest neighbor on those paths, ranked by
+ *  @c seed so a closer view draws a superset of a farther one. A key holding several entries draws
+ *  each as its own, named by its entry ordinal. Each draw is placed by its distances to its nearest
+ *  shown keys, the shown keys keeping their coordinates; with nothing shown, its row is projected
+ *  through a seeded Gaussian matrix.
  *
  *  @par Statuses:
- *  - @c usearch_status_unsupported_k Always, as no residency samples yet.
+ *  - @c usearch_status_invalid_argument_k @c NULL @c shown or @c focus for a nonzero count, or
+ *    @c shown_coordinates not three @c usearch_scalar_f32_k columns.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU or is an NVMe view; only a RAM
+ *    handle samples yet.
  */
 USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments);
 
@@ -1755,7 +1776,7 @@ typedef struct usearch_dense_save_buffer_t {
  *  Several shards write the manifest first, listing each part by its offset inside the buffer,
  *  then every part on the header's alignment, each with its shard's own node IDs, so a load opens
  *  one shard per part again. A caller who needs the bytes in memory it already owns, such as a
- *  mapped file, saves to a path instead. A VRAM handle's checkpoint lands in device memory,
+ *  mapped file, saves to a path instead. A VRAM handle's checkpoint is written in device memory,
  *  written on the host first, so the call holds twice its bytes while it runs.
  *
  *  Writing to memory is not writing quickly. A terabyte checkpoint on a handful of cores runs for
@@ -1913,6 +1934,7 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments);
 /** The arguments of @c usearch_dense_multiply. */
 typedef struct usearch_dense_multiply_t {
 
+    /* Call */
     /** The handle supplying the right-hand rows. */
     usearch_dense_index_t index;
 
@@ -1925,12 +1947,14 @@ typedef struct usearch_dense_multiply_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
+    /* Inputs */
     /** Left-hand rows - the batch axis. */
     size_t count;
 
     /** The left-hand rows, multiplied against every indexed vector the walk reaches. */
     usearch_rows_view_t left;
 
+    /* Outputs */
     /** Output for the pairs inside @c arena: each one's indexed key and product, query @c i
      *  spanning @c products->offsets[i] up to @c products->offsets[i+1]. */
     usearch_matches_tape_view_t* products;
@@ -1944,6 +1968,7 @@ typedef struct usearch_dense_multiply_t {
     /** Memory for @c products, rewound by the call. */
     usearch_arena_t arena;
 
+    /* Knobs */
     /** The @b optional bound on pairs kept per query, the first ones its walk scored; zero keeps
      *  every pair. */
     size_t wanted;
@@ -1952,19 +1977,21 @@ typedef struct usearch_dense_multiply_t {
      *  derives. */
     size_t expansion_factor;
 
+    /** How entries are reached: a walk, the default; no residency multiplies by an exact scan
+     *  yet. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional predicate, asked about a scored quad of keys at a time; a pair it
+     *  rejects is neither written nor counted, while the walk still routes through it. */
+    usearch_predicate_t predicate;
+
+    /* Observers */
+
     /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
-
-    /** How entries are reached: a walk, the default; no residency multiplies by an exact scan
-     *  yet. */
-    usearch_traversal_t traversal;
-
-    /** The @b optional admission filter, asked about a scored quad of keys at a time; a pair it
-     *  rejects is neither written nor counted, while the walk still routes through it. */
-    usearch_predicate_t predicate;
 } usearch_dense_multiply_t;
 
 /**
@@ -1978,7 +2005,7 @@ typedef struct usearch_dense_multiply_t {
  *  indexed vector at most once per left-hand row. A wider @c expansion_factor widens the emitted
  *  pattern, that breadth being what decides how much the walk touches.
  *
- *  How many pairs a walk scores is known only once it finishes, so the call lands the keys, the
+ *  How many pairs a walk scores is known only once it finishes, so the call writes the keys, the
  *  scores and their Apache Arrow offsets in @c arena as one ragged output, in one call. A non-zero
  *  @c wanted keeps the first pairs each left-hand row's walks scored, shard by shard in placement
  *  order, and @c required says how many there were.
@@ -2051,6 +2078,7 @@ typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, s
 /** The arguments of @c usearch_dense_attend. */
 typedef struct usearch_dense_attend_t {
 
+    /* Call */
     /** The handle holding one layer's keys for one key-value head. */
     usearch_dense_index_t index;
 
@@ -2063,6 +2091,7 @@ typedef struct usearch_dense_attend_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
+    /* Inputs */
     /** Query rows - the batch axis; row t · @c head_count + h is head h of token t. */
     size_t count;
 
@@ -2082,12 +2111,14 @@ typedef struct usearch_dense_attend_t {
     /** The @b optional online-softmax state, one per query row, lent by the caller; @c NULL skips it. */
     usearch_dense_softmax_state_t* carry;
 
+    /* Outputs */
     /** Output for the attended rows inside @c arena, @c count of them, as wide as the keys. */
     usearch_rows_view_t* outputs;
 
     /** Memory for @c outputs, rewound by the call. */
     usearch_arena_t arena;
 
+    /* Knobs */
     /** The @b optional scalar type the attended rows land as; zero takes the queries' own. */
     usearch_scalar_t outputs_scalar;
 
@@ -2099,19 +2130,20 @@ typedef struct usearch_dense_attend_t {
      *  dimensionality; zero derives it from the index's frozen geometry. */
     float score_scale;
 
+    /** How entries are reached: a walk, the default; no residency attends by an exact scan yet. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional predicate, asked about a scored quad of keys at a time; a key it rejects
+     *  folds into no head and resolves no value row, while the walk still routes through it. */
+    usearch_predicate_t predicate;
+
+    /* Observers */
+
     /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
-
-    /** How entries are reached: a walk, the default; no residency attends by an exact scan yet. */
-    usearch_traversal_t traversal;
-
-    /** The @b optional admission filter, asked about a scored quad of keys at a time; a key it
-     *  rejects folds into no head and resolves no value row, while the walk still routes through
-     *  it. */
-    usearch_predicate_t predicate;
 } usearch_dense_attend_t;
 
 /**
@@ -2180,6 +2212,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments);
 /** The arguments of @c usearch_dense_maxsim. */
 typedef struct usearch_dense_maxsim_t {
 
+    /* Call */
     /** The handle holding one token row per entry, several sharing a key. */
     usearch_dense_index_t index;
 
@@ -2192,6 +2225,7 @@ typedef struct usearch_dense_maxsim_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
+    /* Inputs */
     /** Queries - the batch axis; @c matches spans @c count of them. */
     size_t count;
 
@@ -2207,6 +2241,7 @@ typedef struct usearch_dense_maxsim_t {
      *  @c query_offsets is set. */
     size_t rows_per_query;
 
+    /* Outputs */
     /** Output for each query's best-scoring keys, largest first, as many as it found up to
      *  @c wanted, or every key it scored when @c wanted is zero, packed into @c arena: query @c i
      *  spans @c matches->offsets[i] up to @c matches->offsets[i+1], @c scores carrying each key's
@@ -2214,7 +2249,7 @@ typedef struct usearch_dense_maxsim_t {
     usearch_matches_tape_view_t* matches;
 
     /** The @b optional output for the keys written across every query, read on the host even
-     *  when @c matches lands in device memory. */
+     *  when @c matches lives in device memory. */
     size_t* written;
 
     /** The @b optional output for the keys scored across every query, before @c wanted cut any. */
@@ -2223,6 +2258,7 @@ typedef struct usearch_dense_maxsim_t {
     /** Memory for @c matches, rewound by the call. */
     usearch_arena_t arena;
 
+    /* Knobs */
     /** The @b optional bound on keys per query - the "k" over documents, not token rows; zero keeps
      *  every key the query scored. */
     size_t wanted;
@@ -2230,17 +2266,19 @@ typedef struct usearch_dense_maxsim_t {
     /** The @b optional breadth of the candidates; zero derives. */
     size_t expansion_factor;
 
+    /** How candidates are nominated: a walk, the default, or a scan nominating every key. */
+    usearch_traversal_t traversal;
+
+    /** The @b optional predicate over keys, asked before any key's rows are reduced. */
+    usearch_predicate_t predicate;
+
+    /* Observers */
+
     /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
-
-    /** How candidates are nominated: a walk, the default, or a scan nominating every key. */
-    usearch_traversal_t traversal;
-
-    /** The @b optional filter over keys, asked before any key's rows are reduced. */
-    usearch_predicate_t predicate;
 } usearch_dense_maxsim_t;
 
 /**

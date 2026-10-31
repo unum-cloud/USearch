@@ -404,7 +404,7 @@ endfunction ()
 # classes' per-unit ISA flags - so no cubin carries another generation's kernels. A class exists only once
 # `USEARCH_CUDA_ARCH` resolves to one of its @p selectors_, and compiles the codes that name it: in the release set the
 # lowest its kernels need, as PTX where a plain code suffices, otherwise the one named code as SASS. Only an existing
-# class joins the dispatch units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`, 1
+# class enters the dispatch units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`, 1
 # or 0. Each class sees only its own NumKong GPU target, as an AMD class does, since NumKong's own kernels compile under
 # every target a unit names. NVCC is only a device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either
 # way.
@@ -495,7 +495,7 @@ endif ()
 
 # The AMD classes, each embedding a code object for each of its processors `USEARCH_ROCM_ARCH` resolves to, through
 # ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`. A class none
-# of whose processors is resolved does not exist, and only an existing one joins the dispatch units' ladders through
+# of whose processors is resolved does not exist, and only an existing one enters the dispatch units' ladders through
 # `USEARCH_TARGET_AMD_<CLASS>`.
 if (USEARCH_ROCM_ARCH)
     set(usearch_amd_classes_)
@@ -830,7 +830,7 @@ usearch_variants(basic vram nvidia nvidia)
 
 # The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
 # instantiated views and compile at the baseline, since they inline no kernel, gated per CPU and GPU class and told
-# which GPU vendors joined.
+# which GPU vendors entered.
 usearch_object_library(
     usearch_punned
     SOURCES types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp

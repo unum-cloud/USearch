@@ -13,7 +13,7 @@
  *  add is x86's, and the ramp's add runs on the GPU.
  *
  *  - The bound a searcher acquired lies inside the flat matrices it sees mapped.
- *  - Every row below the bound landed, and a row the walk reads landed in a batch that turned.
+ *  - Every row below the bound is written, and a row the walk reads was written in a batch that turned.
  *  - One claim holder and so one grower run at a time, and the claimed ranges are disjoint.
  *  - Every batch and load ends, and every launch lies inside the flat matrices.
  *  - The claim ends open and level with the watermark unless a failure was kept.
@@ -196,7 +196,7 @@ proctype inserter(byte t) {
         :: else
         fi
     fi;
-    // the blocking insert: the drain, every row landed, then the turn; the first inserter's drain may
+    // the blocking insert: the drain, every row written, then the turn; the first inserter's drain may
     // fail instead, keeping its failure and leaving its rows invisible
     if
     :: accepted && drain_before_turn ->
@@ -215,7 +215,7 @@ finished:
 }
 
 // plan_load and finish: on an open dispenser the rows claimed like a batch, or the dispenser closed
-// as the sharded index does; then the growth, the rows landed, the restored count, the turn, and the
+// as the sharded index does; then the growth, the rows written, the restored count, the turn, and the
 // reopening of a closed dispenser; or the plan dies before `finish` and gives back what it took
 proctype loader(byte t) {
     bool closing, succeeded, reopened;
@@ -266,7 +266,7 @@ finished:
 }
 
 // submit_search_: the bound is size(), every row below it is read, and the walk follows row 0's
-// tail, which a back-link of any batch may name, only below the bound; a row the walk reads landed
+// tail, which a back-link of any batch may name, only below the bound; a row the walk reads was written
 // in a batch that turned
 proctype searcher(byte t) {
     int bound, mapped, id;
@@ -291,7 +291,7 @@ proctype searcher(byte t) {
 
 // one row of batch b through the admission ramp: refused, the count it read is remembered so the
 // retry waits for the count to move, which is what the `__nanosleep` loop amounts to; served, the
-// row lands and may append itself into row 0's tail while the slot is empty, whichever batch
+// row is written and may append itself into row 0's tail while the slot is empty, whichever batch
 // either row is in
 inline serve_row(t, b, published, id, mapped) {
     atomic {

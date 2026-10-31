@@ -127,7 +127,7 @@ proctype planner(byte t) {
         }
     fi;
     batch_dispensed[t] = true;
-    // a refused fan-out lands the rows on the calling thread, since a dispensed row must still land
+    // a refused fan-out places the rows on the calling thread, since a dispensed row must still be placed
     if
     :: release_after_dispense ->
         if

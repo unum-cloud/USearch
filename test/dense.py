@@ -5,6 +5,10 @@ kernels in the index's own metric vocabulary, so a number here compares like wit
 
 Run:
     python -m pytest test/dense.py -v
+
+File: test/dense.py
+Author: Ash Vardanian
+Date: August 16, 2026
 """
 
 import asyncio
@@ -63,7 +67,9 @@ from usearch import (
     NVMeClass,
     On,
     ReadOnlyError,
+    RefineReport,
     Residency,
+    Sample,
     Scalar,
     ShapeMismatchError,
     Status,
@@ -162,7 +168,7 @@ def test_vram_executor_takes_no_thread_count():
 
 
 def test_executor_records_its_residency():
-    """An executor names where its calls compute, which is where the outputs they size land."""
+    """An executor names where its calls compute, which is where the outputs they size live."""
     assert Executor.for_ram(threads=1).residency is Residency.RAM
 
 
@@ -584,7 +590,7 @@ def test_insert_reports_progress(executor):
 
 
 def test_insert_handler_reports_and_cannot_stop(executor):
-    """Every entry is claimed before the first report, so a handler answering False still lands the whole batch."""
+    """Every entry is claimed before the first report, so a handler answering False still inserts the whole batch."""
     index = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     index.reserve(64)
     index.on(executor).insert(np.arange(64), random_vectors(64, 16), progress=lambda done, total: done < 8)
@@ -604,7 +610,7 @@ def test_insert_surfaces_a_raising_handler(executor):
     with pytest.raises(ValueError) as raised:
         index.on(executor).insert(np.arange(8), random_vectors(8, 16), progress=broken)
     assert raised.value is failure
-    assert len(index) == 8, "the batch landed before the handler's exception surfaced"
+    assert len(index) == 8, "the batch was inserted before the handler's exception surfaced"
 
 
 # endregion Ingest
@@ -783,7 +789,7 @@ def test_get_returns_the_stored_rows(executor):
 
 
 def test_get_answers_empty_and_takes_no_subscript(executor):
-    """`get` answers absence with no rows, and a subscript, having no arena to land in, is no verb at all."""
+    """`get` answers absence with no rows, and a subscript, having no arena to write into, is no verb at all."""
     index, _ = build_index(4, 8, executor)
     absent = index.get(10_000, Arena())
     assert isinstance(absent, DenseVectors) and len(absent) == 0 and not absent
@@ -938,19 +944,19 @@ def test_absorb_absorbs_and_consumes_every_donor(executor):
             len(donor)
 
 
-def test_absorb_stopped_between_donors_leaves_the_rest_live(executor):
-    """A donor the absorb never reached is handed back to its wrapper, still usable."""
+def test_absorb_stopped_still_consumes_every_donor(executor):
+    """A stop cuts the closing refinement alone, so every donor has moved in and been consumed."""
     first, _ = build_index(8, 8, executor)
     second, _ = build_index(8, 8, executor, seed=1)
     third, _ = build_index(8, 8, executor, seed=2)
     with pytest.raises((CancelledError, UnsupportedError)) as raised:
-        first.on(executor).absorb(second, third, progress=lambda completed, total: completed < 1)
+        first.on(executor).absorb(second, third, progress=lambda completed, total: False)
     if raised.type is UnsupportedError:
         return
-    assert len(first) == 16
-    assert len(third) == 8
-    with pytest.raises(UninitializedError):
-        len(second)
+    assert len(first) == 24
+    for donor in (second, third):
+        with pytest.raises(UninitializedError):
+            len(donor)
 
 
 def test_absorb_consumes_a_donor_still_walked(executor):
@@ -1077,10 +1083,10 @@ def test_metadata_roundtrips_through_a_factory(executor, tmp_path):
 def test_refine_reports_a_sweep_and_leaves_the_index_standing(executor):
     """A sweep re-selects edges without publishing or retiring an entry, so the entries survive it."""
     index, vectors = build_index(64, 16, executor)
-    changed = index.on(executor).refine(expansion_factor=64)
-    assert isinstance(changed, int)
-    assert changed <= len(index), "a sweep cannot change more nodes than the graph holds"
-    assert len(index) == 64
+    report = index.on(executor).refine(expansion_factor=64)
+    assert isinstance(report, RefineReport)
+    assert report.changed <= report.reselected, "a sweep changes only the nodes it re-selected"
+    assert report.reachability.audited == len(index) == 64
     assert len(index.on(executor).search(vectors[:4], 5, Arena(executor))) == 4
 
 
@@ -1127,6 +1133,34 @@ def test_health_reaches_every_entry_after_a_refine(executor):
     assert health.audited == len(index)
     assert health.reachable == health.audited
     assert health.sweeps >= 1
+
+
+def test_split_partitions_every_entry_and_empties_the_source(executor):
+    """The receivers hold every entry between them, and the source stays live but empty."""
+    index, _ = build_index(64, 16, executor)
+    receivers = [DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16) for _ in range(2)]
+    for receiver in receivers:
+        receiver.reserve(64)
+    try:
+        report = index.on(executor).split(*receivers, seed=7)
+    except UnsupportedError:
+        return
+    assert isinstance(report, RefineReport)
+    assert sum(len(receiver) for receiver in receivers) == 64
+    assert len(index) == 0
+
+
+def test_sample_grows_a_superset_as_wanted_grows(executor):
+    """Equal seeds over an unchanged index draw equally, so a larger draw extends a smaller one."""
+    index, _ = build_index(64, 16, executor)
+    smaller = index.on(executor).sample(8, Arena(executor), seed=42)
+    larger = index.on(executor).sample(16, Arena(executor), seed=42)
+    assert isinstance(smaller, Sample)
+    assert len(smaller.keys) == 8 and len(larger.keys) == 16
+    assert len(larger.parents) == 16
+    assert np.asarray(larger.coordinates).shape == (16, 3)
+    drawn = {bytes(row) for row in np.asarray(larger.keys)}
+    assert {bytes(row) for row in np.asarray(smaller.keys)} <= drawn
 
 
 # endregion Refinement
@@ -1180,7 +1214,7 @@ def test_maxsim_sizes_its_outputs_over_documents(executor):
 
 
 def test_maxsim_scores_each_document_once(executor):
-    """The reduction groups by key, so a document holding many token rows still lands one entry."""
+    """The reduction groups by key, so a document holding many token rows still yields one entry."""
     index, tokens = late_interaction_index(executor)
     documents = scored_documents(index, tokens, 1, 4, executor)
     begin, end = np.asarray(documents.offsets).tolist()
@@ -1206,7 +1240,7 @@ def test_maxsim_refuses_ragged_queries(executor):
 
 
 def test_maxsim_scores_only_admitted_documents(executor):
-    """A predicate is asked before any of a document's vectors score, so a rejected one never lands."""
+    """A predicate is asked before any of a document's vectors score, so a rejected one is never written."""
     index, tokens = late_interaction_index(executor)
     documents = scored_documents(index, tokens, 2, 4, executor, predicate=lambda key: int(key) % 2 == 0)
     found = keys_to_integers(documents.keys)
@@ -1216,8 +1250,8 @@ def test_maxsim_scores_only_admitted_documents(executor):
 
 
 def test_maxsim_keeps_every_scored_document_when_wanted_is_zero(executor):
-    """A zero bound keeps every document a query scored, so no query lands fewer than under a bound,
-    and a bound cuts what lands but not what `required` counts."""
+    """A zero bound keeps every document a query scored, so no query keeps fewer than under a bound,
+    and a bound cuts what is kept but not what `required` counts."""
     index, tokens = late_interaction_index(executor)
     every = np.diff(np.asarray(scored_documents(index, tokens, 2, 0, executor).offsets))
     bounded = np.diff(np.asarray(scored_documents(index, tokens, 2, 2, executor).offsets))
@@ -1316,15 +1350,15 @@ def test_attend_over_every_key_is_full_attention(executor, head_count: int):
     np.testing.assert_allclose(carry[:, 1], weights.sum(axis=1), rtol=BF16_EPSILON)
 
 
-def test_attend_lands_in_the_arena(executor):
+def test_attend_writes_into_the_arena(executor):
     """The attended rows view the arena they were handed, so a decode loop reusing one allocates once."""
     index, keys_matrix = build_index(16, 8, executor, metric=DenseMetric.INNER)
     arena = Arena(executor)
-    landed = index.on(executor).attend(
+    attended = index.on(executor).attend(
         keys_matrix[:2], bf16_words(keys_matrix), int, arena, values_dtype=Scalar.BF16, outputs_dtype=Scalar.F32
     )
-    assert isinstance(landed, DenseVectors)
-    assert np.any(np.asarray(landed) != 0)
+    assert isinstance(attended, DenseVectors)
+    assert np.any(np.asarray(attended) != 0)
 
 
 def test_attend_refuses_a_missing_value_row(executor):

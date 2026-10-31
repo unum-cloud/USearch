@@ -199,7 +199,7 @@ std::size_t dense_count_self_hits(index_type_& index, make_index_type_ const& ma
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     for (std::size_t sample = 0; sample != samples_count; ++sample) {
         std::size_t const row = sample * (rows_count / samples_count);
-        auto const [result, status] = index.search(vectors.row(row).as_vector(), context);
+        auto const [result, status] = index.search(vectors.row(row).as_vector(), {}, context);
         if (failed(status) || !result.count) continue;
         for (std::size_t match = 0; match != result.count; ++match) {
             scored_node_t const scored = context.results[match];
@@ -234,7 +234,7 @@ std::size_t dense_expect_ascending(context_type_ const& context) noexcept {
 template <typename indexes_type_>
 struct dense_arena_context {
 
-    /** The backing run every carve of the context lands in. */
+    /** The backing run every carve of the context comes from. */
     typename indexes_type_::executor_t::arena_t arena;
 
     /** The traversal context, allocating from the arena beside it. */
@@ -340,7 +340,7 @@ concept ram_collection = std::is_same_v<typename indexes_type_::executor_t, fork
 /** The executor one sharded scenario drives, owned together with whatever it was spawned
  *  over; @c status reports the spawn. Defined per residency, each built from the @c placement
  *  the shared scenarios forward: none on RAM and NVMe, and on VRAM the executor the vendor's
- *  entry opened, whose device the shards and every further executor land on. */
+ *  entry opened, whose device the shards and every further executor run on. */
 template <typename indexes_type_>
 struct dense_indexes_executor;
 
@@ -414,63 +414,72 @@ struct dense_indexes_row_driver<indexes_type_> {
 };
 
 /** The batched verbs through @p driver: its executor, then on RAM the contexts it keeps for that
- *  executor across calls, which only the RAM collection's verbs take. */
-template <typename indexes_type_, typename queries_type_, typename... arguments_types_>
-auto drive_search(indexes_type_& indexes, queries_type_ const& queries, dense_indexes_executor<indexes_type_>& driver,
-                  arguments_types_&&... arguments) noexcept {
+ *  executor across calls, which only the RAM collection's verbs take. Each ranking is written into
+ *  @p keys, @p scores and @p counts, passed as one @c ranked_matches_span. */
+template <typename indexes_type_, typename queries_type_, typename score_type_>
+auto drive_search(indexes_type_& indexes, queries_type_ const& queries,
+                  nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<score_type_> scores,
+                  std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
+                  dense_indexes_executor<indexes_type_>& driver) noexcept {
+    ranked_matches_span<typename indexes_type_::key_t, score_type_> const matches {keys, scores, counts};
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.search(queries, driver.executor, to_writable_span(driver.traversals), arguments...);
-    else return indexes.search(queries, driver.executor, arguments...);
+        return indexes.search(queries, matches, config, driver.executor, to_writable_span(driver.traversals));
+    else return indexes.search(queries, matches, config, driver.executor);
 }
-template <typename indexes_type_, typename queries_type_, typename... arguments_types_>
+template <typename indexes_type_, typename queries_type_, typename score_type_, typename predicate_type_>
 auto drive_search_if(indexes_type_& indexes, queries_type_ const& queries,
-                     dense_indexes_executor<indexes_type_>& driver, arguments_types_&&... arguments) noexcept {
+                     nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<score_type_> scores,
+                     std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
+                     predicate_type_&& predicate, dense_indexes_executor<indexes_type_>& driver) noexcept {
+    ranked_matches_span<typename indexes_type_::key_t, score_type_> const matches {keys, scores, counts};
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.search_if(queries, driver.executor, to_writable_span(driver.traversals), arguments...);
-    else return indexes.search_if(queries, driver.executor, arguments...);
+        return indexes.search_if(queries, matches, config, predicate, driver.executor,
+                                 to_writable_span(driver.traversals));
+    else return indexes.search_if(queries, matches, config, predicate, driver.executor);
 }
-template <typename indexes_type_, typename queries_type_, typename heads_type_, typename... arguments_types_>
+template <typename indexes_type_, typename queries_type_, typename heads_type_>
 auto drive_indexer_search(indexes_type_& indexes, queries_type_ const& queries, heads_type_ const& heads,
-                          dense_indexes_executor<indexes_type_>& driver, arguments_types_&&... arguments) noexcept {
+                          nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<distance_t> scores,
+                          std::span<std::size_t> counts, typename indexes_type_::search_config_t config,
+                          dense_indexes_executor<indexes_type_>& driver) noexcept {
+    ranked_matches_span<typename indexes_type_::key_t, distance_t> const matches {keys, scores, counts};
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.search(queries, heads, driver.executor, to_writable_span(driver.traversals), arguments...);
-    else return indexes.search(queries, heads, driver.executor, arguments...);
-}
-template <typename indexes_type_, typename left_type_, typename... arguments_types_>
-auto drive_multiply(indexes_type_& indexes, left_type_ const& left, dense_indexes_executor<indexes_type_>& driver,
-                    arguments_types_&&... arguments) noexcept {
-    if constexpr (ram_collection<indexes_type_>)
-        return indexes.multiply(left, driver.executor, to_writable_span(driver.traversals), arguments...);
-    else return indexes.multiply(left, driver.executor, arguments...);
+        return indexes.search(queries, heads, matches, config, driver.executor, to_writable_span(driver.traversals));
+    else return indexes.search(queries, heads, matches, config, driver.executor);
 }
 
-/** Lands every query's kept keys in rank order into its row of @c keys and @c scores, counting them
- *  in @c counts, which start at zero, so a MaxSim test reads the rectangle it always read. */
-template <typename key_type_, typename score_type_>
-struct maxsim_rows {
-    nk::matrix_span<key_type_> keys;
-    nk::matrix_span<score_type_> scores;
-    std::span<std::size_t> counts;
-
-    template <typename total_type_>
-    status_t operator()(std::size_t, std::size_t query, key_type_ const& key, total_type_ total) const noexcept {
-        std::size_t const rank = counts[query]++;
-        keys(query, rank) = key, scores(query, rank) = static_cast<score_type_>(total);
-        return status_t::success_k;
-    }
-};
+/** The tape verbs through @p driver, over a host tape: RAM and NVMe towers write it where it is,
+ *  and a VRAM driver stages it on its device, where those towers write, and copies it home. */
+template <typename indexes_type_, typename left_type_, typename product_type_>
+auto drive_multiply(indexes_type_& indexes, left_type_ const& left,
+                    products_tape<typename indexes_type_::key_t, product_type_> products, std::span<std::size_t> scored,
+                    typename indexes_type_::search_config_t config,
+                    dense_indexes_executor<indexes_type_>& driver) noexcept {
+    if constexpr (ram_collection<indexes_type_>)
+        return indexes.multiply(left, products, scored, config, driver.executor, to_writable_span(driver.traversals));
+    else if constexpr (requires { indexes_type_::vendor_k; })
+        return driver.on_device(products,
+                                [&](products_tape<typename indexes_type_::key_t, product_type_> staged) noexcept {
+                                    return indexes.multiply(left, staged, scored, config, driver.executor);
+                                });
+    else return indexes.multiply(left, products, scored, config, driver.executor);
+}
 
 template <typename indexes_type_, typename rows_type_, typename score_type_>
 auto drive_maxsim(indexes_type_& indexes, rows_type_ const& rows, std::span<std::size_t const> query_offsets,
-                  dense_indexes_executor<indexes_type_>& driver, typename indexes_type_::search_config_t config,
-                  nk::matrix_span<typename indexes_type_::key_t> keys, nk::matrix_span<score_type_> scores,
-                  std::span<std::size_t> counts, std::span<std::size_t> scored) noexcept {
-    for (std::size_t& count : counts) count = 0;
-    maxsim_rows<typename indexes_type_::key_t, score_type_> const land {keys, scores, counts};
+                  std::span<std::size_t> scored, products_tape<typename indexes_type_::key_t, score_type_> matches,
+                  typename indexes_type_::search_config_t config,
+                  dense_indexes_executor<indexes_type_>& driver) noexcept {
+    typename indexes_type_::maxsim_config_t const maxsim_config {config, matches.stride};
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.maxsim(rows, query_offsets, driver.executor, to_writable_span(driver.traversals), config,
-                              keys.extent(1), scored, land);
-    else return indexes.maxsim(rows, query_offsets, driver.executor, config, keys.extent(1), scored, land);
+        return indexes.maxsim(rows, query_offsets, scored, matches, maxsim_config, driver.executor,
+                              to_writable_span(driver.traversals));
+    else if constexpr (requires { indexes_type_::vendor_k; })
+        return driver.on_device(
+            matches, [&](products_tape<typename indexes_type_::key_t, score_type_> staged) noexcept {
+                return indexes.maxsim(rows, query_offsets, scored, staged, maxsim_config, driver.executor);
+            });
+    else return indexes.maxsim(rows, query_offsets, scored, matches, maxsim_config, driver.executor);
 }
 template <typename indexes_type_, typename... arguments_types_>
 status_t drive_run(typename indexes_type_::refine_plan_t& plan, dense_indexes_executor<indexes_type_>& driver,
@@ -485,15 +494,15 @@ auto drive_finish(typename indexes_type_::refine_plan_t& plan, dense_indexes_exe
         return plan.finish(driver.executor, to_writable_span(driver.traversals));
     else return plan.finish(driver.executor);
 }
-template <typename indexes_type_, typename queries_type_, typename lookup_type_, typename outputs_type_,
-          typename... arguments_types_>
+template <typename indexes_type_, typename queries_type_, typename lookup_type_, typename outputs_type_>
 auto drive_attend(indexes_type_& indexes, queries_type_ const& queries, std::size_t head_count, lookup_type_&& lookup,
                   f32_t score_scale, outputs_type_ const& outputs, std::span<softmax_state_t> carry,
-                  dense_indexes_executor<indexes_type_>& driver, arguments_types_&&... arguments) noexcept {
+                  typename indexes_type_::search_config_t config,
+                  dense_indexes_executor<indexes_type_>& driver) noexcept {
     if constexpr (ram_collection<indexes_type_>)
-        return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, driver.executor,
-                              to_writable_span(driver.traversals), arguments...);
-    else return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, driver.executor, arguments...);
+        return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, config, driver.executor,
+                              to_writable_span(driver.traversals));
+    else return indexes.attend(queries, head_count, lookup, score_scale, outputs, carry, config, driver.executor);
 }
 
 /** Every row of @p view widened to @c f32, row-major - exact for every stored scalar kind. */
@@ -557,8 +566,8 @@ std::vector<f32_t> dense_widened_query(nk::vector_view<scalar_type_> query) {
 
 #pragma region Foundations
 
-/** Guards: an insert lands without a reservation, and every other geometry is refused, on a fresh
- *  index per scenario. */
+/** Guards: an insert succeeds without a reservation, and every other geometry is refused, on a
+ *  fresh index per scenario. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -571,7 +580,7 @@ std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_l
     auto wider = make_vectors<scalar_t>(3, 2 * dimensions, stream_key(seed, "guards"));
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(3);
 
-    auto const [search_result, search_status] = index.search(vectors.view().row(0).as_vector(), context);
+    auto const [search_result, search_status] = index.search(vectors.view().row(0).as_vector(), {}, context);
     failures += expect(search_status == status_t::success_k && search_result.count == 0);
     failures += expect_eq(index.insert(to_span(keys), wider.view(), {}, context).status, status_t::config_mismatch_k);
     auto const [insert_result, insert_status] = index.insert(to_span(keys), vectors.view(), {}, context);
@@ -625,7 +634,7 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
     failures += expect_eq(index.size(), 3u);
 
     for (std::size_t row = 0; row != 3; ++row) {
-        auto const [search_result, search_status] = index.search(vectors.view().row(row).as_vector(), context);
+        auto const [search_result, search_status] = index.search(vectors.view().row(row).as_vector(), {}, context);
         failures += expect(search_status == status_t::success_k && search_result.count >= 1);
         if constexpr (kernel_ != nk_kernel_dot_k) {
             scored_node_t const nearest = context.results[0];
@@ -637,7 +646,7 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
         // A query narrower than the index's width is refused, never read past its end.
         auto narrower = make_vectors<scalar_t>(1, dense_dimensions_for<scalar_t>(dense_tiny_values_k / 2),
                                                stream_key(seed, "three_vectors"));
-        failures += expect_eq(index.search(narrower.view().row(0).as_vector(), context).status,
+        failures += expect_eq(index.search(narrower.view().row(0).as_vector(), {}, context).status,
                               status_t::config_mismatch_k);
     }
     return failures;
@@ -680,10 +689,10 @@ std::size_t dense_expect_growth_and_recall(make_index_type_ const& make_index, a
 
     if constexpr (kernel_ != nk_kernel_dot_k)
         failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
-    // A single query lands its whole expansion, past any inline landing.
+    // A single query keeps its whole expansion, past any inline staging.
     typename index_type_::search_config_t wide {};
     wide.expansion_factor = 200;
-    auto const [wide_found, wide_status] = index.search(vectors.view().row(0).as_vector(), context, wide);
+    auto const [wide_found, wide_status] = index.search(vectors.view().row(0).as_vector(), wide, context);
     failures += expect(succeeded(wide_status) && wide_found.count == 200 && context.results.size() == 200);
     failures += dense_expect_ascending(context);
     return failures;
@@ -748,14 +757,14 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     std::size_t const query_row = dense_growth_nodes_k / 2;
     auto query = vectors.view().row(query_row).as_vector();
     typename index_type_::traversal_context_t unfiltered_context {{}};
-    auto const [unfiltered_result, unfiltered_status] = index.search(query, unfiltered_context);
+    auto const [unfiltered_result, unfiltered_status] = index.search(query, {}, unfiltered_context);
     failures += expect(unfiltered_status == status_t::success_k && unfiltered_result.count > 0);
     scored_node_t const* reference = unfiltered_context.results.data();
 
     // The trivially-true predicate walks and reports exactly like the unfiltered sibling.
     auto all_pass = quad_predicate([](node_id_t) noexcept { return admission_t::admit_k; });
     typename index_type_::traversal_context_t all_pass_context {{}};
-    auto const [with_true, with_true_status] = index.search_if(query, all_pass, all_pass_context);
+    auto const [with_true, with_true_status] = index.search_if(query, {}, all_pass, all_pass_context);
     failures += expect(with_true_status == status_t::success_k);
     failures += expect_eq(with_true.count, unfiltered_result.count);
     for (std::size_t match = 0; match != with_true.count && match != unfiltered_result.count; ++match) {
@@ -771,8 +780,8 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
             admissions[lane] = nodes[lane] % 2 == 0 ? admission_t::admit_k : admission_t::reject_k;
     };
     typename index_type_::traversal_context_t scalar_context {{}}, batched_context {{}};
-    auto const [with_scalar, with_scalar_status] = index.search_if(query, even_only, scalar_context);
-    auto const [with_batched, with_batched_status] = index.search_if(query, even_batched, batched_context);
+    auto const [with_scalar, with_scalar_status] = index.search_if(query, {}, even_only, scalar_context);
+    auto const [with_batched, with_batched_status] = index.search_if(query, {}, even_batched, batched_context);
     failures += expect(with_scalar_status == status_t::success_k && with_scalar.count > 0);
     failures += expect(with_batched_status == status_t::success_k);
     failures += expect_eq(with_batched.count, with_scalar.count);
@@ -788,6 +797,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     // cardinality-driven brute-force crossover, not the graph walk.
     std::size_t const moduli[] = {2, 16, 64};
     std::size_t hits = 0, recall_samples = 0;
+    error_stats_t distance_errors;
     for (std::size_t modulus : moduli) {
         auto matches = quad_predicate([modulus](node_id_t node_id) noexcept {
             return node_id % modulus == 0 ? admission_t::admit_k : admission_t::reject_k;
@@ -797,7 +807,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
             if (sample % 2) sampled_row += 1; // An excluded neighbor of a matching row.
             typename index_type_::traversal_context_t sampled_context {{}};
             auto const [sampled_result, sampled_status] = index.search_if(vectors.view().row(sampled_row).as_vector(),
-                                                                          matches, sampled_context);
+                                                                          {}, matches, sampled_context);
             bool const self_matches = sampled_row % modulus == 0;
             // The walk routes on until its matches fill the breadth or none is left unvisited.
             failures += expect(sampled_status == status_t::success_k);
@@ -807,8 +817,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
             bool self_found = false;
             for (std::size_t match = 0; match != sampled_result.count; ++match) {
                 failures += expect(results[match].node_id % modulus == 0);
-                distance_t const oracle = oracle_distance(sampled_row, results[match].node_id);
-                failures += expect_near(results[match].distance, oracle);
+                distance_errors.add(results[match].distance, oracle_distance(sampled_row, results[match].node_id));
                 if (match) failures += expect(results[match].distance >= results[match - 1].distance);
                 if (!self_matches) failures += expect(results[match].node_id != assigned_ids[sampled_row]);
                 self_found |= results[match].node_id == assigned_ids[sampled_row];
@@ -819,11 +828,13 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     }
     if constexpr (kernel_ != nk_kernel_dot_k)
         failures += expect(hits * 100 >= recall_samples * dense_minimal_recall_percent_k);
+    failures += expect_errors("predicated distances", comparison_family_t::approximate_k,
+                              comparison_verdict_t::assert_k, distance_errors, 0);
 
     // An impossible predicate drains legally: empty result set, successful status.
     auto none_pass = quad_predicate([](node_id_t) noexcept { return admission_t::reject_k; });
     typename index_type_::traversal_context_t none_context {{}};
-    auto const [with_none, with_none_status] = index.search_if(query, none_pass, none_context);
+    auto const [with_none, with_none_status] = index.search_if(query, {}, none_pass, none_context);
     failures += expect(with_none_status == status_t::success_k);
     failures += expect_eq(with_none.count, std::size_t {0});
     return failures;
@@ -846,7 +857,7 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
     using scalar_t = typename index_type_::scalar_t;
     using vector_view_t = typename index_type_::vector_view_t;
     using search_config_t = typename index_type_::search_config_t;
-    using small_size_t = typename index_type_::small_size_t;
+    using candidates_count_t = typename index_type_::candidates_count_t;
     constexpr bool device_k = requires { make_index.context(); };
     using oracle_kit_t = typename quads_ladder<scalar_t, dense_oracle_capability<index_type_>()>::kit_t;
     constexpr std::size_t rows_count = dense_growth_nodes_k, wanted = 10, wide = rows_count + 5;
@@ -872,6 +883,7 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
             admissions[lane] = even(nodes[lane]) ? admission_t::admit_k : admission_t::reject_k;
     };
     // The ranking left in `context.results` against the oracle's, over the nodes `admits` admits.
+    error_stats_t scan_errors;
     auto expect_ranking = [&](vector_view_t query, std::size_t breadth, auto admits) {
         auto const query_norms = norms<oracle_kit_t>(query);
         auto oracle = [&](node_id_t node) noexcept {
@@ -893,34 +905,35 @@ std::size_t dense_expect_scan(make_index_type_ const& make_index, allocation_led
         for (std::size_t rank = 0; rank != min_of(context.results.size(), kept); ++rank) {
             scored_node_t const match = context.results[rank];
             ranking_failures += expect(admits(match.node_id));
-            ranking_failures += expect_near(match.distance, admitted[rank]);
-            ranking_failures += expect_near(match.distance, oracle(match.node_id));
+            scan_errors.add(match.distance, admitted[rank]);
+            scan_errors.add(match.distance, oracle(match.node_id));
         }
         return ranking_failures;
     };
 
-    search_config_t const scan {.expansion_factor = static_cast<small_size_t>(wanted),
+    search_config_t const scan {.expansion_factor = static_cast<candidates_count_t>(wanted),
                                 .traversal = traversal_t::scan_k};
     for (std::size_t sample = 0; sample != 4; ++sample) {
         vector_view_t const query = vectors.view().row(sample * (rows_count / 4) + 1).as_vector();
-        auto const [found, status] = index.search(query, context, scan);
+        auto const [found, status] = index.search(query, scan, context);
         failures += expect(succeeded(status));
         failures += expect_eq(found.count, context.results.size());
         failures += expect_eq(found.computed_distances, rows_count);
         failures += expect_ranking(query, wanted, all);
         if constexpr (!device_k) {
-            failures += expect(succeeded(index.search_if(query, admit_even, context, scan).status));
+            failures += expect(succeeded(index.search_if(query, scan, admit_even, context).status));
             failures += expect_ranking(query, wanted, even);
-            failures += expect(succeeded(index.search_if(query, admit_even_batched, context, scan).status));
+            failures += expect(succeeded(index.search_if(query, scan, admit_even_batched, context).status));
             failures += expect_ranking(query, wanted, even);
         }
     }
-    search_config_t const wide_scan {.expansion_factor = static_cast<small_size_t>(wide),
+    search_config_t const wide_scan {.expansion_factor = static_cast<candidates_count_t>(wide),
                                      .traversal = traversal_t::scan_k};
     vector_view_t const query = vectors.view().row(0).as_vector();
-    failures += expect(succeeded(index.search(query, context, wide_scan).status));
+    failures += expect(succeeded(index.search(query, wide_scan, context).status));
     failures += expect_ranking(query, wide, all);
-    return failures;
+    return failures + expect_errors("scan distances", comparison_family_t::approximate_k,
+                                    comparison_verdict_t::assert_k, scan_errors, 0);
 }
 
 /** @ref dense_expect_scan, then the ledger it left must balance. */
@@ -937,8 +950,8 @@ std::size_t dense_expect_dot(dot_result_type_ found, dense_oracle_dot_t oracle) 
     return expect(std::fabs(static_cast<f64_t>(found) - oracle.dot) <= 1e-4 * oracle.magnitude + 1e-6);
 }
 
-/** The @p picks are the exact top `picks.size()` rows of @p keys by ⟨query, key⟩, as an exhaustive walk lands
- *  them. */
+/** The @p picks are the exact top <tt>picks.size()</tt> rows of @p keys by ⟨query, key⟩, as an exhaustive
+ *  walk finds them. */
 template <typename scalar_type_, typename row_type_>
 std::size_t dense_expect_top_logits(nk::matrix_view<scalar_type_> keys, nk::vector_view<scalar_type_> query,
                                     std::span<row_type_ const> picks) {
@@ -952,12 +965,12 @@ std::size_t dense_expect_top_logits(nk::matrix_view<scalar_type_> keys, nk::vect
     std::sort(ranked.rbegin(), ranked.rend());
     f64_t const threshold = ranked[picks.size() - 1];
 
-    std::vector<bool> seen(rows_count);
+    std::vector<bool> found(rows_count);
     for (row_type_ const pick : picks) {
         std::size_t const row = static_cast<std::size_t>(pick);
-        failures += expect(row < rows_count && !seen[row]);
-        if (row >= rows_count || seen[row]) continue;
-        seen[row] = true;
+        failures += expect(row < rows_count && !found[row]);
+        if (row >= rows_count || found[row]) continue;
+        found[row] = true;
         failures += expect(dots[row].dot + 1e-4 * dots[row].magnitude + 1e-6 >= threshold);
     }
     return failures;
@@ -1041,12 +1054,12 @@ std::size_t dense_expect_indexer_matches(dense_indexer_inputs<scalar_type_> cons
     std::sort(ranked.rbegin(), ranked.rend());
     f64_t const threshold = ranked[rows.size() - 1];
 
-    std::vector<bool> seen(rows_count);
+    std::vector<bool> found(rows_count);
     for (std::size_t rank = 0; rank != rows.size(); ++rank) {
         std::size_t const row = dense_key_number(rows[rank]);
-        failures += expect(row < rows_count && !seen[row]);
-        if (row >= rows_count || seen[row]) continue;
-        seen[row] = true;
+        failures += expect(row < rows_count && !found[row]);
+        if (row >= rows_count || found[row]) continue;
+        found[row] = true;
         dense_oracle_dot_t const score = dense_indexer_score(inputs, query, row);
         failures += dense_expect_dot(1 - static_cast<f64_t>(distances[rank]), score);
         failures += expect(score.dot + 1e-4 * score.magnitude + 1e-6 >= threshold);
@@ -1073,14 +1086,14 @@ std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allo
 
     dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
     typename index_type_::search_config_t const exhaustive {
-        static_cast<typename index_type_::small_size_t>(nodes_count)};
+        static_cast<typename index_type_::candidates_count_t>(nodes_count)};
     auto node_ids = nk::vector<node_id_t>::zeros(wanted).value;
     auto distances = nk::vector<distance_t>::zeros(wanted).value;
     nk::vector_view<node_id_t> const ranked_ids = node_ids.view();
     nk::vector_view<distance_t> const ranked_distances = distances.view();
     for (std::size_t query = 0; query != queries_count; ++query) {
         auto const [searched, status] = index.search(vectors.view().row(query).as_vector(), inputs.heads().row(query),
-                                                     context, exhaustive);
+                                                     exhaustive, context);
         failures += expect(status == status_t::success_k);
         std::size_t const kept = min_of(searched.count, wanted);
         for (std::size_t rank = 0; rank != kept; ++rank)
@@ -1128,13 +1141,13 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
         nk::matrix_view<scalar_t> const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
         dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
         typename indexes_type_::search_config_t const exhaustive {
-            static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
+            static_cast<typename indexes_type_::index_t::candidates_count_t>(rows_count)};
         auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
         auto found_distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
         std::array<std::size_t, queries_count> counts;
-        auto const [searched, status] = drive_indexer_search(indexes, queries, inputs.heads(), driver, exhaustive,
-                                                             found_keys.span(), found_distances.span(),
-                                                             std::span {counts});
+        auto const [searched, status] = drive_indexer_search(indexes, queries, inputs.heads(), found_keys.span(),
+                                                             found_distances.span(), std::span {counts}, exhaustive,
+                                                             driver);
         failures += expect(succeeded(status));
         nk::matrix_view<key_t> const ranked_keys = found_keys.view();
         nk::matrix_view<distance_t> const ranked_distances = found_distances.view();
@@ -1151,11 +1164,11 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
  *  @brief Sharded scans against a one-to-one oracle over every stored row.
  *
  *  Two shards hold more rows than one first chunk, and one of two threads' share of the queries
- *  outnumbers one packed block, so the scan crosses both seams. Each query - a stored row - ranks
- *  its true nearest at their own distances, a NaN for a self-match included; a predicate narrows
- *  the same ranking to the keys it admits where the residency takes one; rows streamed in blocks
- *  of one kit step, where a cache size blocks them, rank alike; and a request wider than the store
- *  returns every row. The serial kit judges a device's ranking.
+ *  outnumbers one packed block, so the scan crosses both block boundaries. Each query - a stored
+ *  row - ranks its true nearest at their own distances, a NaN for a self-match included; a
+ *  predicate narrows the same ranking to the keys it admits where the residency takes one; rows
+ *  streamed in blocks of one kit step, where a cache size blocks them, rank alike; and a request
+ *  wider than the store returns every row. The serial kit judges a device's ranking.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) {
@@ -1205,6 +1218,7 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     auto admit_even = quad_predicate(
         [&](key_t key) noexcept { return even(key) ? admission_t::admit_k : admission_t::reject_k; });
     // One query's found ranking against the oracle's, sorted over the keys `admits` lets through.
+    error_stats_t scan_errors;
     auto expect_ranking = [&](nk::matrix_view<key_t> ranked_keys, nk::matrix_view<distance_t> ranked_distances,
                               std::size_t query, auto admits) {
         std::vector<distance_t> admitted;
@@ -1216,23 +1230,23 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
             key_t const key = ranked_keys(query, rank);
             distance_t const distance = ranked_distances(query, rank);
             ranking_failures += expect(admits(key));
-            ranking_failures += expect_near(distance, admitted[rank]);
-            ranking_failures += expect_near(distance, oracle(query, dense_key_number(key) - 1));
+            scan_errors.add(distance, admitted[rank]);
+            scan_errors.add(distance, oracle(query, dense_key_number(key) - 1));
         }
         return ranking_failures;
     };
 
     typename indexes_type_::search_config_t const scan {.traversal = traversal_t::scan_k};
-    auto const [found, status] = drive_search(indexes, queries, driver, scan, found_keys.span(), found_distances.span(),
-                                              std::span {counts});
+    auto const [found, status] = drive_search(indexes, queries, found_keys.span(), found_distances.span(),
+                                              std::span {counts}, scan, driver);
     failures += expect(succeeded(status));
     failures += expect_eq(found.computed_distances, queries_count * rows_count);
     for (std::size_t query = 0; query != queries_count; ++query)
         failures += expect_ranking(found_keys.view(), found_distances.view(), query, all);
 
     if constexpr (!device_k) {
-        auto const filtered_status = drive_search_if(indexes, queries, driver, scan, found_keys.span(),
-                                                     found_distances.span(), std::span {counts}, admit_even)
+        auto const filtered_status = drive_search_if(indexes, queries, found_keys.span(), found_distances.span(),
+                                                     std::span {counts}, scan, admit_even, driver)
                                          .status;
         failures += expect(succeeded(filtered_status));
         for (std::size_t query = 0; query != queries_count; ++query)
@@ -1241,8 +1255,8 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     // A cache smaller than one pack leaves blocks of a single kit step.
     if constexpr (requires { scan.cache_bytes; }) {
         typename indexes_type_::search_config_t const blocked {.traversal = traversal_t::scan_k, .cache_bytes = 1};
-        auto const blocked_status = drive_search(indexes, queries, driver, blocked, found_keys.span(),
-                                                 found_distances.span(), std::span {counts})
+        auto const blocked_status = drive_search(indexes, queries, found_keys.span(), found_distances.span(),
+                                                 std::span {counts}, blocked, driver)
                                         .status;
         failures += expect(succeeded(blocked_status));
         for (std::size_t query = 0; query != queries_count; ++query)
@@ -1250,13 +1264,14 @@ std::size_t test_dense_indexes_scan(u64_t seed, placement_types_&... placement) 
     }
 
     auto const wide_queries = vectors(nk::range(std::size_t {0}, wide_queries_count), nk::slice);
-    auto const wide_status = drive_search(indexes, wide_queries, driver, scan, wide_keys.span(), wide_distances.span(),
-                                          std::span {counts}.first(wide_queries_count))
+    auto const wide_status = drive_search(indexes, wide_queries, wide_keys.span(), wide_distances.span(),
+                                          std::span {counts}.first(wide_queries_count), scan, driver)
                                  .status;
     failures += expect(succeeded(wide_status));
     for (std::size_t query = 0; query != wide_queries_count; ++query)
         failures += expect_ranking(wide_keys.view(), wide_distances.view(), query, all);
-    return failures;
+    return failures + expect_errors("sharded scan distances", comparison_family_t::approximate_k,
+                                    comparison_verdict_t::assert_k, scan_errors, 0);
 }
 
 #pragma endregion Search
@@ -1357,7 +1372,7 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
  *  matrices chunk by chunk, load into a fresh reserved index the same way, and expect the
  *  restored graph to answer self-queries just as the original did - norms re-derive on
  *  load and are never serialized. On RAM a pool of lanes then takes chunks from one plan
- *  by a shared cursor and must land the same bytes. */
+ *  by a shared cursor and must write the same bytes. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                              u64_t seed) {
@@ -1453,7 +1468,7 @@ std::size_t dense_expect_clipped_load(make_index_type_ const& make_index, alloca
     return failures;
 }
 
-/** A plan finished with nothing landed refuses and publishes nothing, and so does a step
+/** A plan finished with nothing placed refuses and publishes nothing, and so does a step
  *  past its last. */
 template <typename index_type_, typename node_id_type_, typename make_index_type_>
 std::size_t dense_expect_partial_load(make_index_type_ const& make_index, allocation_ledger_t& ledger,
@@ -1476,7 +1491,7 @@ std::size_t dense_expect_partial_load(make_index_type_ const& make_index, alloca
     failures += expect_eq(plan.finish(), status_t::config_mismatch_k);
     failures += expect_eq(failing.size(), 0u);
 
-    // A refused finish spends nothing: the missing steps land and the same plan publishes once.
+    // A refused finish spends nothing: the missing steps run and the same plan publishes once.
     for (std::size_t position = 1; position < steps.size(); ++position)
         failures += expect_eq(plan.load(steps[position], source, local, key_of), status_t::success_k);
     failures += expect_eq(plan.finish(), status_t::success_k);
@@ -1500,7 +1515,7 @@ std::size_t dense_expect_moved_plan_refuses(index_type_& index, std::size_t node
 }
 
 /** A load plan that dies before its finish releases the nodes it claimed, once even when moved: the
- *  next plan appends at the same base, in the nodes the reservation hosts, and lands the whole
+ *  next plan appends at the same base, in the nodes the reservation hosts, and places the whole
  *  checkpoint. */
 template <typename index_type_, typename node_id_type_, typename make_index_type_>
 std::size_t dense_expect_abandoned_load(make_index_type_ const& make_index, allocation_ledger_t& ledger,
@@ -1520,7 +1535,7 @@ std::size_t dense_expect_abandoned_load(make_index_type_ const& make_index, allo
     return failures;
 }
 
-/** A save plan refuses a step past its watermark, and a finish with nothing landed. */
+/** A save plan refuses a step past its watermark, and a finish with nothing placed. */
 template <typename index_type_, typename scalar_type_, typename node_id_type_>
 std::size_t dense_expect_save_plan_misuse(index_type_& index, nk::matrix<scalar_type_>& saved_vectors,
                                           nk::matrix<node_id_type_>& saved_neighbors,
@@ -1535,10 +1550,10 @@ std::size_t dense_expect_save_plan_misuse(index_type_& index, nk::matrix<scalar_
     return failures;
 }
 
-/** Hostile load submissions: a target of another geometry refuses before any entry lands, a source
- *  failing on a later chunk publishes nothing, a misused plan refuses, a count past the
- *  reservation grows by design, and an out-of-range neighbor ID rides the sentinel
- *  convention - stored, but never surfaced by any search. */
+/** Hostile load submissions: a target of another geometry refuses before any entry is copied, a
+ *  source failing on a later chunk publishes nothing, a misused plan refuses, a count past the
+ *  reservation grows by design, and an out-of-range neighbor ID rides the sentinel convention -
+ *  stored, but never surfaced by any search. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -1607,7 +1622,7 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
         status_t::success_k);
     typename index_type_::traversal_context_t patched_context {{}};
     for (std::size_t sample = 0; sample != 16; ++sample) {
-        auto const [result, status] = patched.search(vectors.view().row((sample * 19) % nodes_count).as_vector(),
+        auto const [result, status] = patched.search(vectors.view().row((sample * 19) % nodes_count).as_vector(), {},
                                                      patched_context);
         failures += expect(status == status_t::success_k);
         for (std::size_t match = 0; match != result.count; ++match)
@@ -1624,9 +1639,9 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index, u64_t se
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** Loads append: an ID space past the source's nodes lands nothing, the same payload landed twice
+/** Loads append: an ID space past the source's nodes places nothing, the same payload placed twice
  *  doubles the index, the second copy's IDs shift by the first copy's nodes with sentinels intact,
- *  and a self-query lands on either copy. */
+ *  and a self-query finds either copy. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -1657,8 +1672,8 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     std::unique_ptr<index_type_> const doubled_ptr = make_index(ledger);
     index_type_& doubled = *doubled_ptr;
     failures += expect(doubled.reserve({2 * nodes_count}).status == status_t::success_k);
-    // An ID space past the source's nodes would rebase IDs beyond the landed ones, so nothing
-    // lands.
+    // An ID space past the source's nodes would rebase IDs beyond the placed ones, so the plan
+    // places nothing at all.
     iota_view<node_id_t> const overreaching {0, static_cast<node_id_t>(nodes_count + 1)};
     failures += expect_eq(dense_load(doubled, make_index, source, to_span(keys), nodes_count, overreaching),
                           status_t::config_mismatch_k);
@@ -1678,7 +1693,7 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
                    synchronization_t::exclusive_k, scratch.span()),
         status_t::success_k);
 
-    // The first copy lands verbatim; the second copy's vectors match and its IDs shift.
+    // The first copy is placed verbatim; the second copy's vectors match and its IDs shift.
     failures += expect(std::memcmp(doubled_vectors.data(), saved_vectors.data(),
                                    dense_rows_bytes(saved_vectors.view(), nodes_count)) == 0);
     failures += expect(std::memcmp(doubled_neighbors.data(), saved_neighbors.data(),
@@ -1699,12 +1714,12 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
         }
     failures += expect_eq(unshifted, 0u);
 
-    // A self-query lands on one of the two copies with a self-match distance.
+    // A self-query finds one of the two copies with a self-match distance.
     if constexpr (kernel_ != nk_kernel_dot_k) {
         typename index_type_::traversal_context_t doubled_context = dense_make_context<index_type_>(make_index);
         for (std::size_t sample = 0; sample != 16; ++sample) {
             std::size_t const row = (sample * 19) % nodes_count;
-            auto const [result, status] = doubled.search(vectors.view().row(row).as_vector(), doubled_context);
+            auto const [result, status] = doubled.search(vectors.view().row(row).as_vector(), {}, doubled_context);
             failures += expect(status == status_t::success_k && result.count > 0);
             if (!result.count) continue;
             scored_node_t const best = doubled_context.results[0];
@@ -1747,7 +1762,7 @@ auto dense_audit_health(index_type_& index, typename index_type_::traversal_cont
     if constexpr (requires { index.health(context); }) return index.health(context);
     else {
         auto [plan, status] = index.plan_health();
-        if (failed(status)) return expected<typename index_type_::health_result_t> {{}, status};
+        if (failed(status)) return expected<typename index_type_::reachability_t> {{}, status};
         dense_sweep_reachability(plan);
         return plan.finish();
     }
@@ -1784,7 +1799,7 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
                                         ? dense_count_self_hits(index, make_index, vectors.view(), dense_growth_nodes_k,
                                                                 32)
                                         : 0;
-    auto const [first_refinement, first_status] = index.refine({0, published}, context);
+    auto const [first_refinement, first_status] = index.refine({0, published}, {}, context);
     failures += expect(first_status == status_t::success_k);
     // Every pass heals the islands it leaves, so islands add their re-selections to the range's,
     // and only then.
@@ -1792,12 +1807,12 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
                        (first_refinement.reselected_nodes == dense_growth_nodes_k) == !first_refinement.islands_found);
     failures += expect(first_refinement.changed_nodes > 0 &&
                        first_refinement.changed_nodes <= first_refinement.reselected_nodes);
-    traversal_telemetry_t const& spent = first_refinement.telemetry;
+    traversal_stats_t const& spent = first_refinement.traversal_stats;
     failures += expect(spent.computed_distances > 0 && spent.visited_members > 0);
     failures += expect(spent.computed_distances_in_refines + spent.computed_distances_in_reverse_refines <=
                        spent.computed_distances);
 
-    auto const [second_refinement, second_status] = index.refine({0, published}, context);
+    auto const [second_refinement, second_status] = index.refine({0, published}, {}, context);
     failures += expect(second_status == status_t::success_k);
     failures += expect(second_refinement.reselected_nodes >= dense_growth_nodes_k &&
                        (second_refinement.reselected_nodes == dense_growth_nodes_k) ==
@@ -1805,10 +1820,10 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
     failures += expect(second_refinement.changed_nodes < first_refinement.changed_nodes);
 
     // A range past the end re-selects only islands, and one straddling it stops at the watermark.
-    auto const [beyond, beyond_status] = index.refine({published, published + 16}, context);
+    auto const [beyond, beyond_status] = index.refine({published, published + 16}, {}, context);
     failures += expect(beyond_status == status_t::success_k);
     failures += expect((beyond.reselected_nodes == 0) == !beyond.islands_found);
-    auto const [straddling, straddling_status] = index.refine({published / 2, published * 2}, context);
+    auto const [straddling, straddling_status] = index.refine({published / 2, published * 2}, {}, context);
     failures += expect(straddling_status == status_t::success_k);
     std::size_t const straddled = dense_growth_nodes_k - dense_growth_nodes_k / 2;
     failures += expect(straddling.reselected_nodes >= straddled &&
@@ -1861,7 +1876,7 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
         std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(dense_growth_nodes_k);
         failures += expect(index.insert(to_span(keys), vectors.view(), assigned_ids.span(), context).status ==
                            status_t::success_k);
-        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context).status ==
+        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, {}, context).status ==
                            status_t::success_k);
 
         auto const shape = index.saved_shape();
@@ -1899,7 +1914,7 @@ std::size_t test_dense_duplicate_basin(make_index_type_ const& make_index, u64_t
         failures += expect_eq(trapped, 0u);
         failures += expect(*std::max_element(class_links.begin(), class_links.end()) * 4 < duplicate_rows_k);
 
-        auto const [found, found_status] = index.search(vectors.row(0).as_vector(), context);
+        auto const [found, found_status] = index.search(vectors.row(0).as_vector(), {}, context);
         std::size_t members_found = 0;
         for (std::size_t match = 0; succeeded(found_status) && match != found.count; ++match)
             members_found += context.results[match].distance < dense_self_match_tolerance_k;
@@ -2027,16 +2042,16 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     failures += expect(succeeded(before_status));
     failures += expect(before_health.reachable_nodes < nodes_count);
 
-    auto const [repair, repair_status] = islanded.refine({}, context);
+    auto const [repair, repair_status] = islanded.refine({}, {}, context);
     failures += expect(succeeded(repair_status));
-    failures += expect_eq(repair.health.reachable_nodes, nodes_count);
+    failures += expect_eq(repair.reachability.reachable_nodes, nodes_count);
     failures += expect(repair.islands_found > 0);
 
     auto const [after_health, after_status] = dense_audit_health(islanded, context);
     failures += expect(succeeded(after_status));
     failures += expect_eq(after_health.reachable_nodes, nodes_count);
 
-    auto const [settled_repair, settled_status] = islanded.refine({}, context);
+    auto const [settled_repair, settled_status] = islanded.refine({}, {}, context);
     failures += expect(succeeded(settled_status));
     failures += expect_eq(settled_repair.islands_found, 0u);
     failures += expect_eq(settled_repair.islands_reconnected, 0u);
@@ -2056,17 +2071,17 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t se
 template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
 std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make_index, vectors_view_type_ queries) {
     using search_config_t = typename index_type_::search_config_t;
-    using small_size_t = typename index_type_::small_size_t;
+    using candidates_count_t = typename index_type_::candidates_count_t;
     constexpr std::size_t wanted_k = 10;
     typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
-    search_config_t const scan {.expansion_factor = static_cast<small_size_t>(wanted_k),
+    search_config_t const scan {.expansion_factor = static_cast<candidates_count_t>(wanted_k),
                                 .traversal = traversal_t::scan_k};
     std::size_t found = 0;
     for (std::size_t query = 0; query != queries.extent(0); ++query) {
         auto const query_vector = queries.row(query).as_vector();
-        if (failed(index.search(query_vector, context, scan).status) || context.results.empty()) continue;
+        if (failed(index.search(query_vector, scan, context).status) || context.results.empty()) continue;
         f64_t const tenth = context.results[context.results.size() - 1].distance;
-        auto const [walked, status] = index.search(query_vector, context);
+        auto const [walked, status] = index.search(query_vector, {}, context);
         if (failed(status)) continue;
         for (std::size_t rank = 0; rank != min_of(wanted_k, walked.count); ++rank)
             found += context.results[rank].distance <= tenth + 1e-3 * max_of(std::fabs(tenth), 1.0);
@@ -2076,11 +2091,11 @@ std::size_t dense_recall_at_ten(index_type_& index, make_index_type_ const& make
 
 /**
  *  @brief A built index splits into two and, refilled, into three graph-local parts: every entry
- *      lands in exactly one receiver, the source empties and takes entries from zero again, and
- *      every receiver reaches all its rows and walks within noise of the source's recall at ten.
+ *      ends in exactly one receiver, the donor empties and takes entries from zero again, and
+ *      every receiver reaches all its rows and walks within noise of the donor's recall at ten.
  *
  *  Equal graphs split under one seed place every entry alike. Refusals leave every index whole:
- *  fewer than two receivers, a repeated or non-empty one, the source among them, another metric
+ *  fewer than two receivers, a repeated or non-empty one, the donor among them, another metric
  *  or another geometry.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
@@ -2114,23 +2129,23 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
     auto recall_close = [&](std::size_t found, std::size_t baseline) {
         return expect(found * 100 + noise_percent_k * samples_k * 10 >= baseline * 100);
     };
-    // Drives one split, then checks that every source entry lands in exactly one receiver, byte for
+    // Drives one split, then checks that every donor entry ends in exactly one receiver, byte for
     // byte, and that every receiver reaches its nodes.
-    auto split = [&](index_type_& source, std::vector<index_type_*>& receivers, u64_t split_seed) {
+    auto split = [&](index_type_& donor, std::vector<index_type_*>& receivers, u64_t split_seed) {
         {
-            failures += expect_eq(source.reserve_traversal(context, {}), status_t::success_k);
-            auto [plan, plan_status] = source.plan_split(receivers, {}, split_seed);
+            failures += expect_eq(donor.reserve_traversal(context, {}), status_t::success_k);
+            auto [plan, plan_status] = donor.plan_split(receivers, {{}, split_seed});
             failures += expect_eq(plan_status, status_t::success_k);
-            failures += expect(plan.landing() && source.size() == rows_k && receivers[0]->size() == 0);
+            failures += expect(plan.moving() && donor.size() == rows_k && receivers[0]->size() == 0);
             do
                 for (auto const step : plan.steps())
                     failures += expect_eq(plan.run(step, context), status_t::success_k);
             while (plan.advance());
             auto const [split_result, finish_status] = plan.finish();
             failures += expect_eq(finish_status, status_t::success_k);
-            failures += expect_eq(split_result.health.audited_nodes, rows_k);
+            failures += expect_eq(split_result.reachability.audited_nodes, rows_k);
         }
-        failures += expect_eq(source.size(), 0u);
+        failures += expect_eq(donor.size(), 0u);
         std::vector<std::size_t> holders(rows_k);
         for (index_type_* receiver : receivers) {
             failures += expect(receiver->size() * receivers.size() <= rows_k + receivers.size() && receiver->size());
@@ -2148,13 +2163,13 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
         failures += expect_eq(misplaced, 0u);
     };
 
-    std::unique_ptr<index_type_> const source = make_index(ledger);
+    std::unique_ptr<index_type_> const donor = make_index(ledger);
     std::unique_ptr<index_type_> const twin = make_index(ledger);
-    build(*source);
+    build(*donor);
     build(*twin);
-    std::size_t const source_recall = dense_recall_at_ten(*source, make_index, queries.view());
+    std::size_t const donor_recall = dense_recall_at_ten(*donor, make_index, queries.view());
 
-    // Refusals precede every claim: the source and every receiver stay as they were.
+    // Refusals precede every claim: the donor and every receiver stay as they were.
     {
         std::vector<std::unique_ptr<index_type_>> owned;
         std::vector<index_type_*> receivers = make_receivers(owned, 2);
@@ -2165,23 +2180,23 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
         failures += expect(succeeded(narrower->reserve({16}).status));
         for (std::vector<index_type_*> refused :
              {std::vector<index_type_*> {receivers[0]}, std::vector<index_type_*> {receivers[0], receivers[0]},
-              std::vector<index_type_*> {receivers[0], source.get()},
+              std::vector<index_type_*> {receivers[0], donor.get()},
               std::vector<index_type_*> {receivers[0], foreign.get()},
               std::vector<index_type_*> {receivers[0], narrower.get()}})
-            failures += expect_eq(source->plan_split(refused).status, status_t::config_mismatch_k);
+            failures += expect_eq(donor->plan_split(refused).status, status_t::config_mismatch_k);
         failures += expect(succeeded(receivers[1]->reserve({16}).status));
         failures += expect(succeeded(
             receivers[1]->insert({keys.data(), 1u}, vectors(nk::range(0, 1), nk::slice), {}, context).status));
-        failures += expect_eq(source->plan_split(receivers).status, status_t::config_mismatch_k);
-        failures += expect(source->size() == rows_k && receivers[0]->size() == 0 && receivers[1]->size() == 1);
+        failures += expect_eq(donor->plan_split(receivers).status, status_t::config_mismatch_k);
+        failures += expect(donor->size() == rows_k && receivers[0]->size() == 0 && receivers[1]->size() == 1);
     }
 
-    // Two parts, twice over equal graphs: every entry lands at the same node of the same receiver.
+    // Two parts, twice over equal graphs: every entry ends at the same node of the same receiver.
     std::vector<std::unique_ptr<index_type_>> halves_owned, twin_halves_owned;
     std::vector<index_type_*> halves = make_receivers(halves_owned, 2);
     std::vector<index_type_*> twin_halves = make_receivers(twin_halves_owned, 2);
     u64_t const split_seed = stream_key(seed, "split", 2);
-    split(*source, halves, split_seed);
+    split(*donor, halves, split_seed);
     split(*twin, twin_halves, split_seed);
     for (std::size_t half = 0; half != halves.size(); ++half) {
         failures += expect_eq(halves[half]->size(), twin_halves[half]->size());
@@ -2190,17 +2205,17 @@ std::size_t dense_expect_split(make_index_type_ const& make_index, allocation_le
             moved += std::memcmp(halves[half]->vector(node).byte_data(), twin_halves[half]->vector(node).byte_data(),
                                  row_bytes) != 0;
         failures += expect_eq(moved, 0u);
-        failures += recall_close(dense_recall_at_ten(*halves[half], make_index, queries.view()), source_recall);
+        failures += recall_close(dense_recall_at_ten(*halves[half], make_index, queries.view()), donor_recall);
     }
 
-    // The emptied source takes entries from zero again, so it refills and splits into three.
+    // The emptied donor takes entries from zero again, so it refills and splits into three.
     std::vector<std::unique_ptr<index_type_>> thirds_owned;
     std::vector<index_type_*> thirds = make_receivers(thirds_owned, 3);
-    failures += expect(succeeded(source->insert(to_span(keys), vectors.view(), {}, context).status));
-    failures += expect_eq(source->size(), rows_k);
-    split(*source, thirds, stream_key(seed, "split", 3));
+    failures += expect(succeeded(donor->insert(to_span(keys), vectors.view(), {}, context).status));
+    failures += expect_eq(donor->size(), rows_k);
+    split(*donor, thirds, stream_key(seed, "split", 3));
     for (index_type_* third : thirds)
-        failures += recall_close(dense_recall_at_ten(*third, make_index, queries.view()), source_recall);
+        failures += recall_close(dense_recall_at_ten(*third, make_index, queries.view()), donor_recall);
     return failures;
 }
 
@@ -2244,6 +2259,7 @@ std::size_t dense_expect_full_attention(nk::matrix_view<scalar_type_> keys, nk::
     std::vector<dense_oracle_dot_t> const dots = dense_oracle_dots(
         dense_widened_rows(queries, scalar_type_::dtype()), dense_widened_rows(keys, scalar_type_::dtype()), columns);
     std::vector<f64_t> expected(columns);
+    error_stats_t output_errors, carry_errors;
     for (std::size_t task = 0; task != tasks; ++task) {
         f64_t maximum = std::numeric_limits<f64_t>::lowest(), partition = 0;
         for (std::size_t row = 0; row != rows_count; ++row)
@@ -2256,11 +2272,14 @@ std::size_t dense_expect_full_attention(nk::matrix_view<scalar_type_> keys, nk::
                 expected[column] += weight * widened_values[row * columns + column];
         }
         for (std::size_t column = 0; column != columns; ++column)
-            failures += expect_near(outputs(task, column), expected[column] / partition);
-        failures += expect_near(carry[task].maximum_score, maximum);
-        failures += expect_near(carry[task].partition, partition);
+            output_errors.add(outputs(task, column), expected[column] / partition);
+        carry_errors.add(carry[task].maximum_score, maximum);
+        carry_errors.add(carry[task].partition, partition);
     }
-    return failures;
+    failures += expect_errors("attention outputs", comparison_family_t::normalized_reduction_k,
+                              comparison_verdict_t::assert_k, output_errors, 0);
+    return failures + expect_errors("attention carries", comparison_family_t::approximate_k,
+                                    comparison_verdict_t::assert_k, carry_errors, 0);
 }
 
 /** What any walk's attention must hold, however narrow: every attended row is finite and inside the hull of
@@ -2299,8 +2318,9 @@ std::size_t dense_expect_attention_bounds(nk::matrix_view<scalar_type_> keys, nk
     return failures;
 }
 
-/** The dot a walk reports for @p left against @p right. Test rows hold small integers, so every kernel and
- *  accumulation order lands it exactly, and the serial kernel stands in for every residency's. */
+/** The dot a walk reports for @p left against @p right. Test rows hold small integers, so every
+ *  kernel and accumulation order computes it exactly, and the serial kernel stands in for the
+ *  kernels of every residency. */
 template <typename scalar_type_>
 typename scalar_type_::dot_result_t dense_native_dot(nk::vector_view<scalar_type_> left,
                                                      nk::vector_view<scalar_type_> right) noexcept {
@@ -2318,15 +2338,18 @@ std::size_t dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::mat
                                      nk::vector_view<id_type_> ids, nk::vector_view<dot_type_> products,
                                      row_of_type_&& row_of) {
     std::size_t failures = expect_eq(ids.size(), products.size());
-    std::array<bool, rows_count_> seen {};
+    std::array<bool, rows_count_> found {};
+    error_stats_t product_errors;
     for (std::size_t pair = 0; pair != ids.size(); ++pair) {
         std::size_t const row = row_of(ids[pair]);
-        failures += expect(row < rows_count_ && !seen[row]);
-        if (row >= rows_count_ || seen[row]) continue;
-        seen[row] = true;
-        failures += expect(products[pair] == dense_native_dot(left, vectors.row(row).as_vector()));
+        failures += expect(row < rows_count_ && !found[row]);
+        if (row >= rows_count_ || found[row]) continue;
+        found[row] = true;
+        product_errors.add(static_cast<f64_t>(products[pair]),
+                           static_cast<f64_t>(dense_native_dot(left, vectors.row(row).as_vector())));
     }
-    return failures;
+    return failures + expect_errors("graph products", comparison_family_t::exact_k, comparison_verdict_t::assert_k,
+                                    product_errors, 0);
 }
 
 /** Graph products against the native dots: every scored pair is counted, a narrow row keeps its width
@@ -2348,7 +2371,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     auto node_ids = nk::vector<node_id_t>::full(rows_count, node_id_unknown_k).value;
     auto products = nk::vector<typename index_type_::dot_result_t>::zeros(rows_count).value;
     auto const empty = index.multiply(vectors.view().row(0).as_vector(), to_span(node_ids.span()),
-                                      to_span(products.span()), context);
+                                      to_span(products.span()), {}, context);
     failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
     failures += expect(node_ids[0] == node_id_unknown_k);
 
@@ -2356,7 +2379,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
     typename index_type_::search_config_t const exhaustive {
-        static_cast<typename index_type_::small_size_t>(rows_count)};
+        static_cast<typename index_type_::candidates_count_t>(rows_count)};
     nk::vector_view<node_id_t> const kept_ids = node_ids.view();
     nk::vector_view<typename index_type_::dot_result_t> const kept_products = products.view();
     for (std::size_t const wanted : {rows_count, std::size_t {4}})
@@ -2364,7 +2387,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
             auto const left = vectors.view().row(row).as_vector();
             nk::range_t const width = nk::range(std::size_t {0}, wanted);
             auto const [multiplied, status] = index.multiply(left, to_span(node_ids[width]), to_span(products[width]),
-                                                             context, exhaustive);
+                                                             exhaustive, context);
             failures += expect(status == status_t::success_k);
             failures += expect_eq(multiplied.count, multiplied.computed_distances);
             failures += expect(multiplied.count > 0 && multiplied.count <= rows_count);
@@ -2375,7 +2398,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
         }
 
     auto const refused = index.multiply(vectors.view().row(0).as_vector(), to_span(node_ids.span()),
-                                        to_span(products[nk::range(std::size_t {0}, std::size_t {3})]), context);
+                                        to_span(products[nk::range(std::size_t {0}, std::size_t {3})]), {}, context);
     failures += expect(refused.status == status_t::config_mismatch_k);
     return failures;
 }
@@ -2419,7 +2442,7 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
     // An empty index folds nothing: zero rows and empty partitions.
     {
         auto const [attended, status] = index.attend(queries.view(), 1, lookup, 1, outputs.span(), std::span {carry},
-                                                     context);
+                                                     {}, context);
         failures += expect(status == status_t::success_k && attended.count == rows_count);
         nk::matrix_view<f32_t> const attended_rows = outputs.view();
         failures += expect(std::all_of(attended_rows.begin(), attended_rows.end(),
@@ -2437,16 +2460,17 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
         dense_oracle_dots(dense_widened_rows(queries.view(), index_type_::vector_dtype_k),
                           dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
     typename index_type_::search_config_t const exhaustive {
-        static_cast<typename index_type_::small_size_t>(nodes_count)};
+        static_cast<typename index_type_::candidates_count_t>(nodes_count)};
     for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
         auto const [attended, status] = index.attend(queries.view(), head_count, lookup, score_scale, outputs.span(),
-                                                     std::span {carry}, context, exhaustive);
+                                                     std::span {carry}, exhaustive, context);
         failures += expect(status == status_t::success_k);
         failures += expect_eq(attended.count, rows_count);
         failures += dense_expect_full_attention(vectors.view(), queries.view(), head_count, value_of, score_scale,
                                                 outputs.view(), std::span<softmax_state_t const> {carry});
         failures += expect(
-            index.attend(queries.view(), head_count, lookup, score_scale, outputs.span(), std::span {carry}, context)
+            index
+                .attend(queries.view(), head_count, lookup, score_scale, outputs.span(), std::span {carry}, {}, context)
                 .status == status_t::success_k);
         failures += dense_expect_attention_bounds(vectors.view(), values.view(), queries.view(), score_scale,
                                                   outputs.view(), std::span<softmax_state_t const> {carry});
@@ -2458,15 +2482,15 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
             if (nodes[lane] + 1 == nodes_count) rows[lane] = vector_view_t {};
     };
     failures += expect(
-        index.attend(queries.view(), 1, row_less, score_scale, outputs.span(), std::span {carry}, context, exhaustive)
+        index.attend(queries.view(), 1, row_less, score_scale, outputs.span(), std::span {carry}, exhaustive, context)
             .status == status_t::shape_mismatch_k);
     failures += expect(index
                            .attend(queries.view(), 1, lookup, score_scale,
                                    outputs(nk::range(std::size_t {0}, rows_count - 1), nk::slice), std::span {carry},
-                                   context)
+                                   {}, context)
                            .status == status_t::config_mismatch_k);
     failures += expect(
-        index.attend(queries.view(), 3, lookup, score_scale, outputs.span(), std::span {carry}, context).status ==
+        index.attend(queries.view(), 3, lookup, score_scale, outputs.span(), std::span {carry}, {}, context).status ==
         status_t::shape_mismatch_k);
     return failures;
 }
@@ -2482,13 +2506,14 @@ std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
     }
 }
 
-/** Sharded graph products against the native dots: every scored pair is counted, a narrow row keeps its
- *  width while counting past it, every kept pair names a distinct stored row with its exact dot, and
- *  mismatched spans refuse. */
+/** Sharded graph products against the native dots: every scored pair is counted, a narrow row keeps
+ *  a stride of pairs while counting past it, every kept pair names a distinct stored row with its
+ *  exact dot, and a short scored span refuses. */
 template <typename indexes_type_, typename... placement_types_>
 std::size_t dense_expect_indexes_products(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
+    using dot_result_t = typename indexes_type_::dot_result_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
@@ -2507,34 +2532,36 @@ std::size_t dense_expect_indexes_products(u64_t seed, placement_types_&... place
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
     auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
-    auto found_keys = nk::matrix<key_t>::zeros({left_count, rows_count}).value;
-    auto found_products = nk::matrix<typename indexes_type_::dot_result_t>::zeros({left_count, rows_count}).value;
-    std::array<std::size_t, left_count> counts;
-    // A narrow call writes the leading columns, so its output rows stride past their width.
-    auto multiply = [&](std::size_t wanted, std::span<std::size_t> counts_span) noexcept {
-        nk::range_t const columns = nk::range(std::size_t {0}, wanted);
-        return drive_multiply(indexes, left, driver, typename indexes_type_::search_config_t {},
-                              found_keys(nk::all, columns, nk::slice), found_products(nk::all, columns, nk::slice),
-                              counts_span);
+    std::vector<key_t> found_keys(left_count * rows_count);
+    std::vector<dot_result_t> found_products(left_count * rows_count);
+    std::array<std::size_t, left_count + 1> offsets {};
+    std::array<std::size_t, left_count> scored {};
+    // A narrow call keeps a stride of every row's pairs, so each run publishes at most that many.
+    auto multiply = [&](std::size_t wanted, std::span<std::size_t> scored_span) noexcept {
+        offsets[0] = 0;
+        products_tape<key_t, dot_result_t> const products {std::span {found_keys}, std::span {found_products},
+                                                           std::span {offsets}, wanted};
+        return drive_multiply(indexes, left, products, scored_span, typename indexes_type_::search_config_t {}, driver);
     };
-    nk::matrix_view<key_t> const kept_keys = found_keys.view();
-    nk::matrix_view<typename indexes_type_::dot_result_t> const kept_products = found_products.view();
     for (std::size_t const wanted : {rows_count, std::size_t {4}}) {
-        auto const [multiplied, status] = multiply(wanted, counts);
+        auto const [multiplied, status] = multiply(wanted, std::span {scored});
         failures += expect(succeeded(status));
         failures += expect_eq(multiplied.count, multiplied.computed_distances);
         for (std::size_t row = 0; row != left_count; ++row) {
-            failures += expect(counts[row] > 0 && counts[row] <= rows_count);
-            if (wanted < rows_count) failures += expect(counts[row] > wanted);
-            nk::range_t const kept = nk::range(std::size_t {0}, min_of(counts[row], wanted));
+            failures += expect(scored[row] > 0 && scored[row] <= rows_count);
+            if (wanted < rows_count) failures += expect(scored[row] > wanted);
+            std::size_t const first = offsets[row], kept = min_of(scored[row], wanted);
+            failures += expect_eq(offsets[row + 1] - first, kept);
+            if (offsets[row + 1] - first != kept) continue;
             failures += dense_expect_product_row<rows_count>(
-                left.row(row).as_vector(), vectors.view(), kept_keys(row, kept, nk::slice).as_vector(),
-                kept_products(row, kept, nk::slice).as_vector(),
+                left.row(row).as_vector(), vectors.view(),
+                nk::vector_view<key_t> {std::span {found_keys}.subspan(first, kept)},
+                nk::vector_view<dot_result_t> {std::span {found_products}.subspan(first, kept)},
                 [](key_t key) noexcept { return dense_key_number(key) - 1; });
         }
     }
 
-    failures += expect(multiply(rows_count, std::span {counts}.first(left_count - 1)).status ==
+    failures += expect(multiply(rows_count, std::span {scored}.first(left_count - 1)).status ==
                        status_t::config_mismatch_k);
     return failures;
 }
@@ -2547,10 +2574,11 @@ std::size_t test_dense_indexes_products(u64_t seed, placement_types_&... placeme
 }
 
 /** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk
- *  as wide as the index ranks exactly the oracle's best documents at their exact scores, a default
- *  one never scores a key above its own, and a ragged batch refuses. Towers taking query offsets
- *  also score every key a default walk nominates exactly, rank a scan exactly, cut queries of 3 and
- *  5 rows from one batch, and rank a 16-row query, as wide as a matrix engine's tile, exactly. */
+ *  as wide as the index ranks the oracle's best documents, a default one ranks only keys of the
+ *  index, and offsets past the rows refuse. Host towers also rank a scan, cut queries of 3 and 5
+ *  rows from one batch, and rank a 16-row query, as wide as a matrix engine's tile. Every score is
+ *  recorded against its exact one and warns past three sigmas: the reducer truncates each row's
+ *  ranking and imputes the rows it misses at the floor, so no path promises exact scores. */
 template <typename indexes_type_, typename... placement_types_>
 std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placement) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -2558,7 +2586,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     using search_config_t = typename indexes_type_::search_config_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
     constexpr std::size_t documents_count = rows_count / tokens_per_document;
-    constexpr std::size_t rows_per_query = 4, queries_count = 3, wanted = 5;
+    constexpr std::size_t tokens_per_query = 4, queries_count = 3, wanted = 5;
     using exact_scores_t = std::array<std::array<f64_t, documents_count>, queries_count>;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
@@ -2579,7 +2607,7 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     // A document's exact score over query rows [first, end), the leading stored rows: every row's
     // best dot among its tokens, summed. Test rows are non-negative, so every dot is too, and a row
     // that misses a document only lowers its score.
-    auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
+    auto const queries = vectors(nk::range(std::size_t {0}, queries_count * tokens_per_query), nk::slice);
     auto exact_of = [&](std::size_t first, std::size_t end, std::size_t document) noexcept {
         f64_t total = 0;
         for (std::size_t row = first; row != end; ++row) {
@@ -2595,76 +2623,67 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
     exact_scores_t exact {};
     for (std::size_t query = 0; query != queries_count; ++query)
         for (std::size_t document = 0; document != documents_count; ++document)
-            exact[query][document] = exact_of(query * rows_per_query, (query + 1) * rows_per_query, document);
+            exact[query][document] = exact_of(query * tokens_per_query, (query + 1) * tokens_per_query, document);
 
-    auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
-    auto found_scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
-    std::array<std::size_t, queries_count> counts, scored;
-    // Towers that take query offsets read the same uniform batch through them.
-    constexpr bool uniform_k = requires(nk::matrix_view<scalar_t> rows, search_config_t config) {
-        indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
-                       std::span {counts}, std::span {scored});
-    };
+    std::vector<key_t> found_keys(queries_count * wanted);
+    std::vector<f64_t> found_scores(queries_count * wanted);
+    std::array<std::size_t, queries_count + 1> offsets {};
+    std::array<std::size_t, queries_count> scored {};
     std::array<std::size_t, queries_count + 1> uniform_offsets;
     for (std::size_t query = 0; query != uniform_offsets.size(); ++query)
-        uniform_offsets[query] = query * rows_per_query;
-    auto maxsim_cut = [&](nk::matrix_view<scalar_t> rows, std::span<std::size_t const> offsets,
+        uniform_offsets[query] = query * tokens_per_query;
+    auto maxsim_cut = [&](nk::matrix_view<scalar_t> rows, std::span<std::size_t const> query_offsets,
                           search_config_t config) noexcept {
-        nk::range_t const landed = nk::range(std::size_t {0}, offsets.size() - 1);
-        if constexpr (uniform_k)
-            return indexes.maxsim(rows, rows_per_query, driver.executor, config, found_keys.span(), found_scores.span(),
-                                  std::span {counts}, std::span {scored});
-        else
-            return drive_maxsim(indexes, rows, offsets, driver, config, found_keys(landed, nk::slice),
-                                found_scores(landed, nk::slice),
-                                std::span<std::size_t>(counts.data(), offsets.size() - 1),
-                                std::span<std::size_t>(scored.data(), offsets.size() - 1));
+        std::size_t const placed = query_offsets.size() - 1;
+        offsets[0] = 0;
+        products_tape<key_t, f64_t> const matches {std::span {found_keys}, std::span {found_scores},
+                                                   std::span {offsets}.first(placed + 1), wanted};
+        return drive_maxsim(indexes, rows, query_offsets, std::span {scored}.first(placed), matches, config, driver);
     };
     auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
         return maxsim_cut(rows, std::span<std::size_t const> {uniform_offsets}, config);
     };
+    auto kept_of = [&](std::size_t query) noexcept { return offsets[query + 1] - offsets[query]; };
     auto document_of = [&](std::size_t query, std::size_t rank) noexcept {
-        return dense_key_number(found_keys(query, rank)) - 1;
+        return dense_key_number(found_keys[offsets[query] + rank]) - 1;
     };
 
-    // Every landed query scores every document and ranks the best of `expected_scores` at their
-    // exact scores, up to the rounding of a device that sums its dots in another order.
-    auto expect_ranked = [&](exact_scores_t const& expected_scores, std::size_t landed) noexcept {
+    // Every placed query scores every document and ranks the best of `expected_scores`.
+    error_stats_t score_errors;
+    auto expect_ranked = [&](exact_scores_t const& expected_scores, std::size_t placed) noexcept {
         std::size_t missed = 0;
-        for (std::size_t query = 0; query != landed; ++query) {
+        for (std::size_t query = 0; query != placed; ++query) {
             std::array<f64_t, documents_count> ranked = expected_scores[query];
             std::sort(ranked.rbegin(), ranked.rend());
-            missed += expect_eq(counts[query], wanted) + expect_eq(scored[query], documents_count);
-            for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+            missed += expect_eq(kept_of(query), wanted) + expect_eq(scored[query], documents_count);
+            for (std::size_t rank = 0; rank != kept_of(query); ++rank) {
                 std::size_t const document = document_of(query, rank);
                 missed += expect(document < documents_count);
                 if (document >= documents_count) continue;
-                missed += expect_near(found_scores(query, rank), ranked[rank]) +
-                          expect_near(found_scores(query, rank), expected_scores[query][document]);
+                score_errors.add(found_scores[offsets[query] + rank], ranked[rank]);
+                score_errors.add(found_scores[offsets[query] + rank], expected_scores[query][document]);
             }
         }
         return missed;
     };
 
-    // A walk as wide as the index ranks every token, so the best documents land at their exact
-    // scores.
-    search_config_t const exhaustive {static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
+    // A walk as wide as the index ranks every token, so the best documents are kept.
+    search_config_t const exhaustive {static_cast<typename indexes_type_::index_t::candidates_count_t>(rows_count)};
     failures += expect(succeeded(maxsim(queries, exhaustive).status));
     failures += expect_ranked(exact, queries_count);
 
-    // A default walk may miss a document, but every document it nominates scores exactly once
-    // its rows reduce; a reducer of walk rankings stays only below the exact value.
+    // A default walk may miss a document and score the ones it nominates from truncated rankings.
     failures += expect(succeeded(maxsim(queries, {}).status));
     for (std::size_t query = 0; query != queries_count; ++query)
-        for (std::size_t rank = 0; rank != counts[query]; ++rank) {
+        for (std::size_t rank = 0; rank != kept_of(query); ++rank) {
             std::size_t const document = document_of(query, rank);
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            if (!uniform_k || found_scores(query, rank) > exact[query][document])
-                failures += expect_near(found_scores(query, rank), exact[query][document]);
+            score_errors.add(found_scores[offsets[query] + rank], exact[query][document]);
         }
 
-    if constexpr (!uniform_k) {
+    // The device towers take no scan and whole batches of uniform queries only.
+    if constexpr (!requires { indexes_type_::vendor_k; }) {
         // A scan nominates every document, so it ranks as exactly as the widest walk.
         search_config_t scan;
         scan.traversal = traversal_t::scan_k;
@@ -2694,10 +2713,16 @@ std::size_t dense_expect_indexes_maxsim(u64_t seed, placement_types_&... placeme
         }
     }
 
-    // Offsets past the rows refuse their layout, and rows no uniform query divides their shape.
-    failures += expect(maxsim(queries(nk::range(std::size_t {0}, rows_per_query + 1), nk::slice), {}).status ==
-                       (uniform_k ? status_t::shape_mismatch_k : status_t::config_mismatch_k));
-    return failures;
+    // Offsets past the rows refuse their layout.
+    failures += expect_eq(maxsim(queries(nk::range(std::size_t {0}, tokens_per_query + 1), nk::slice), {}).status,
+                          status_t::config_mismatch_k);
+    // The device sums every row's best native dot in f64 over exact rankings, so it asserts within
+    // rounding; the host reducer truncates rankings and only warns.
+    constexpr bool device_k = requires { indexes_type_::vendor_k; };
+    return failures + (device_k ? expect_errors("maxsim scores", comparison_family_t::approximate_k,
+                                                comparison_verdict_t::assert_k, score_errors, 0)
+                                : expect_errors("maxsim scores", comparison_family_t::bounded_k,
+                                                comparison_verdict_t::warn_k, score_errors, 3));
 }
 
 /** @ref dense_expect_indexes_maxsim for the dot kernel; no other kernel offers MaxSim. */
@@ -2747,16 +2772,17 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
         auto outputs = nk::matrix<f32_t>::zeros({rows_count, dimensions}).value;
         std::vector<softmax_state_t> carry(rows_count);
 
-        typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(nodes_count)};
+        typename index_t::search_config_t const exhaustive {
+            static_cast<typename index_t::candidates_count_t>(nodes_count)};
         for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
             auto const [attended, status] = drive_attend(indexes, queries.view(), head_count, lookup, score_scale,
-                                                         outputs.span(), std::span {carry}, driver, exhaustive);
+                                                         outputs.span(), std::span {carry}, exhaustive, driver);
             failures += expect(succeeded(status));
             failures += expect_eq(attended.count, rows_count);
             failures += dense_expect_full_attention(vectors.view(), queries.view(), head_count, value_of, score_scale,
                                                     outputs.view(), std::span<softmax_state_t const> {carry});
             failures += expect(succeeded(drive_attend(indexes, queries.view(), head_count, lookup, score_scale,
-                                                      outputs.span(), std::span {carry}, driver)
+                                                      outputs.span(), std::span {carry}, {}, driver)
                                              .status));
             failures += dense_expect_attention_bounds(vectors.view(), values.view(), queries.view(), score_scale,
                                                       outputs.view(), std::span<softmax_state_t const> {carry});
@@ -2768,14 +2794,14 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
                 if (dense_key_number(batch[lane]) + 1 == nodes_count) rows[lane] = vector_view_t {};
         };
         failures += expect(drive_attend(indexes, queries.view(), 1, row_less, score_scale, outputs.span(),
-                                        std::span {carry}, driver, exhaustive)
+                                        std::span {carry}, exhaustive, driver)
                                .status == status_t::shape_mismatch_k);
         failures += expect(drive_attend(indexes, queries.view(), 1, lookup, score_scale,
                                         outputs(nk::range(std::size_t {0}, rows_count - 1), nk::slice),
-                                        std::span {carry}, driver)
+                                        std::span {carry}, {}, driver)
                                .status == status_t::config_mismatch_k);
         failures += expect(
-            drive_attend(indexes, queries.view(), 3, lookup, score_scale, outputs.span(), std::span {carry}, driver)
+            drive_attend(indexes, queries.view(), 3, lookup, score_scale, outputs.span(), std::span {carry}, {}, driver)
                 .status == status_t::shape_mismatch_k);
         return failures;
     }
@@ -2911,11 +2937,11 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
         // A device index answers the predicated sibling with `device_error_k`, its walk running no
         // host predicate, and takes the unfiltered steps alone.
         bool const predicable =
-            index.search_if(query_vectors.view().row(0).as_vector(), odd_only, threads.contexts[0]).status !=
+            index.search_if(query_vectors.view().row(0).as_vector(), {}, odd_only, threads.contexts[0]).status !=
             status_t::device_error_k;
         auto search_step = [&](typename index_type_::vector_view_t query, bool predicated) {
-            if (predicated) return index.search_if(query, odd_only, threads.contexts[0]);
-            return index.search(query, threads.contexts[0]);
+            if (predicated) return index.search_if(query, {}, odd_only, threads.contexts[0]);
+            return index.search(query, {}, threads.contexts[0]);
         };
         for (std::size_t step = 0; step < dense_reader_minimal_searches_k || //
                                    writer_lanes_remaining.load(std::memory_order_acquire) != 0;
@@ -3012,7 +3038,7 @@ std::size_t test_dense_indexes_guards(u64_t seed, placement_types_&... placement
     failures += expect_eq(rows_in_shards, rows);
 
     // A batch past the reservation grows into it - whole, with no ID holes - and the capacity
-    // reported afterwards covers every entry that landed.
+    // reported afterwards covers every entry that placed.
     failures += expect(succeeded(indexes
                                      .insert(std::span<key_t const> {keys.data(), rows + 1}, oversized.view(), //
                                              executor)
@@ -3022,8 +3048,8 @@ std::size_t test_dense_indexes_guards(u64_t seed, placement_types_&... placement
     return failures;
 }
 
-/** A composition grows past any reservation: entries well beyond it land one at a time and batched,
- *  every key stays findable, and a second, larger reservation is a hint rather than a refusal. */
+/** A composition grows past any reservation: entries well beyond it are inserted one at a time and
+ *  batched, every key stays findable, and a second, larger reservation is a hint, not a refusal. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_growth(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -3090,22 +3116,22 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), executor, narrow).status));
 
-    auto const [first, first_status] = indexes.refine(executor);
+    auto const [first, first_status] = indexes.refine({}, executor);
     failures += expect(succeeded(first_status));
     failures += expect(first.reselected_nodes >= rows && first.changed_nodes <= first.reselected_nodes);
     failures += expect(first.changed_nodes > 0);
-    failures += expect(first.health.reachable_nodes <= rows &&
-                       first.health.reachable_nodes + first.islands_found >= rows);
+    failures += expect(first.reachability.reachable_nodes <= rows &&
+                       first.reachability.reachable_nodes + first.islands_found >= rows);
 
-    auto const [second, second_status] = indexes.refine(executor);
+    auto const [second, second_status] = indexes.refine({}, executor);
     failures += expect(succeeded(second_status));
     failures += expect(second.changed_nodes < first.changed_nodes);
 
     // The audit reads the graph the last pass left, so it counts what that pass ended on.
     auto const [health, health_status] = indexes.health(executor);
     failures += expect(succeeded(health_status));
-    failures += expect_eq(health.reachable_nodes, second.health.reachable_nodes);
-    failures += expect_eq(health.audited_nodes, second.health.audited_nodes);
+    failures += expect_eq(health.reachable_nodes, second.reachability.reachable_nodes);
+    failures += expect_eq(health.audited_nodes, second.reachability.audited_nodes);
     failures += expect(health.sweeps >= 1);
 
     // A plan dropped after a cancelled run heals nothing, but reopens the index it held closed.
@@ -3115,23 +3141,23 @@ std::size_t test_dense_indexes_refine(u64_t seed, placement_types_&... placement
             .status;
     };
     {
-        auto [plan, plan_status] = indexes.plan_refine(executor);
+        auto [plan, plan_status] = indexes.plan_refine({}, executor);
         failures += expect_eq(plan_status, status_t::success_k);
         auto cancel = [](std::size_t, std::size_t) noexcept { return continuation_t::cancel_k; };
         failures += expect_eq(drive_run(plan, driver, cancel), status_t::cancelled_k);
         failures += expect_eq(insert_late(), status_t::contended_k);
-        failures += expect_eq(indexes.plan_refine(executor).status, status_t::contended_k);
+        failures += expect_eq(indexes.plan_refine({}, executor).status, status_t::contended_k);
     }
     failures += expect_eq(insert_late(), status_t::success_k);
     failures += expect_eq(indexes.size(), rows + 1);
     return failures;
 }
 
-/** Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table
- *  past the seed chunk lands in a chunk the arena opens beside it, so no walk saturates and
- *  every query ranks. Candidates as wide as the whole reservation make every walk exhaustive by
- *  construction - approximate search promises nothing narrower - so every thread's visited set
- *  outgrows its first size, and every key a sparse predicate admits surfaces. */
+/** Executor arenas seeded at exactly the first-size estimate serve every walk: a re-table past the
+ *  seed chunk goes in a chunk the arena opens beside it, so no walk saturates and every query
+ *  ranks. Candidates as wide as the whole reservation make every walk exhaustive by construction -
+ *  approximate search promises nothing narrower - so every thread's visited set outgrows its first
+ *  size, and every key a sparse predicate admits surfaces. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -3162,7 +3188,7 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     // Sixteen keys match; with candidates as wide as the reservation every walk visits its whole
     // shard, so all eight surface - narrower candidates could promise only that what surfaces is
     // admitted and ranked.
-    typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows)};
+    typename index_t::search_config_t const exhaustive {static_cast<typename index_t::candidates_count_t>(rows)};
     auto sparse = quad_predicate([](key_t key) noexcept {
         return dense_key_number(key) % 128 == 0 ? admission_t::admit_k : admission_t::reject_k;
     });
@@ -3170,8 +3196,10 @@ std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     auto found_distances = nk::matrix<typename indexes_type_::distance_t>::zeros({queries, wanted}).value;
     std::vector<std::size_t> counts(queries);
     auto const [search_result, search_status] = indexes.search_if(
-        vectors(nk::range(rows, rows + queries), nk::slice), executor, to_writable_span(driver.traversals), exhaustive,
-        found_keys.span(), found_distances.span(), std::span {counts}, sparse);
+        vectors(nk::range(rows, rows + queries), nk::slice),
+        ranked_matches_span<key_t, typename indexes_type_::distance_t> {found_keys.span(), found_distances.span(),
+                                                                        std::span {counts}},
+        exhaustive, sparse, executor, to_writable_span(driver.traversals));
     failures += expect(succeeded(search_status));
     failures += expect_eq(search_result.saturated_walks, 0u);
     for (std::size_t const count : counts) failures += expect_eq(count, wanted);
@@ -3201,7 +3229,7 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
     if (failed(rows_driver.status)) return failures + expect(false);
 
-    // Every second entry lands under one shared key; the rest keep distinct ones.
+    // Every second entry is inserted under one shared key; the rest keep distinct ones.
     key_t const shared = dense_key<key_t>(1000);
     for (std::size_t row = 0; row != rows; ++row) {
         key_t const key = row % 2 ? shared : dense_key<key_t>(1 + row);
@@ -3221,14 +3249,14 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
     failures += expect_eq(indexes.get(dense_key<key_t>(2), fetched.span(), 2, driver.executor), 0u);
 
     // The batched verbs answer what the single-key ones do, repeats and absent keys included, and
-    // every key's entries land in its own band of the batch, in the single-key order.
+    // every key's entries go in its own band of the batch, in the single-key order.
     std::array<key_t, 4> const probes {shared, dense_key<key_t>(1), dense_key<key_t>(2), shared};
     std::span<key_t const> const probed {probes};
     std::array<std::size_t, 4> counted {}, contained {}, gotten {};
     auto batch = make_vectors<scalar_t>(probes.size() * 2, dimensions, stream_key(seed, "guards", 4));
     failures += expect(succeeded(indexes.count(probed, std::span {counted}, driver.executor)));
     failures += expect(succeeded(indexes.contains(probed, std::span {contained}, driver.executor)));
-    failures += expect(succeeded(indexes.get(probed, batch.span(), 2, std::span {gotten}, driver.executor)));
+    failures += expect(succeeded(indexes.get(probed, batch.span(), std::span {gotten}, 2, driver.executor)));
     std::size_t const row_bytes = dense_rows_bytes(fetched.view(), 1);
     for (std::size_t probe = 0; probe != probes.size(); ++probe) {
         failures += expect_eq(counted[probe], indexes.count(probes[probe]));
@@ -3238,7 +3266,7 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed, placement_types_&... p
             failures += expect(std::memcmp(batch.view().row(probe * 2 + row).as_vector().byte_data(),
                                            fetched.view().row(row).as_vector().byte_data(), row_bytes) == 0);
     }
-    failures += expect_eq(indexes.get(probed, batch.span(), 3, std::span {gotten}, driver.executor),
+    failures += expect_eq(indexes.get(probed, batch.span(), std::span {gotten}, 3, driver.executor),
                           status_t::config_mismatch_k);
     return failures;
 }
@@ -3359,28 +3387,28 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
                                      .insert(std::span<key_t const> {keys.data() + half, rows - half},
                                              vectors(nk::range(half, rows), nk::slice), executor)
                                      .status));
-    failures += expect_eq(recipient.absorb(recipient, executor).status, status_t::config_mismatch_k);
-    // An empty plural keeps its own geometry rather than adopting the donor's.
+    failures += expect_eq(recipient.absorb(recipient, {}, executor).status, status_t::config_mismatch_k);
+    // An empty sharded index keeps its own geometry rather than adopting the donor's.
     indexes_type_ wider {kernel_, {2 * dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(wider, placement...)));
-    failures += expect_eq(wider.absorb(donor, executor).status, status_t::config_mismatch_k);
+    failures += expect_eq(wider.absorb(donor, {}, executor).status, status_t::config_mismatch_k);
     failures += expect_eq(donor.size(), rows - half);
 
-    failures += expect(succeeded(relay.absorb(donor, executor).status));
+    failures += expect(succeeded(relay.absorb(donor, {}, executor).status));
     failures += expect(donor.size() == 0 && relay.size() == rows - half);
     failures += expect(relay.dimensions() == dimensions && relay.connectivity() == connectivity_16_k);
 
-    auto const [absorbed, absorbed_status] = recipient.absorb(relay, executor);
+    auto const [absorbed, absorbed_status] = recipient.absorb(relay, {}, executor);
     failures += expect(succeeded(absorbed_status));
     failures += expect_eq(relay.size(), 0u);
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
-    // Every appended entry re-selects, whatever shard it landed in.
+    // Every appended entry re-selects, whatever shard it placed in.
     failures += expect(absorbed.reselected_nodes >= rows - half && absorbed.changed_nodes > 0);
     // The refine heals while its island count shrinks, which a dot graph's hubs can stall short of
     // every node.
     auto const [health, health_status] = recipient.health(executor);
     failures += expect(succeeded(health_status));
-    failures += expect_eq(health.reachable_nodes, absorbed.health.reachable_nodes);
+    failures += expect_eq(health.reachable_nodes, absorbed.reachability.reachable_nodes);
     failures += expect(health.reachable_nodes * 100 >= rows * dense_minimal_recall_percent_k);
 
     // Sampled self-recall through the merged search, judged by distance band on each half alone, so
@@ -3396,8 +3424,8 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
             for (std::size_t sample = 0; sample != samples_count; ++sample) {
                 std::size_t const row = first_row + sample * (half / samples_count);
                 auto const [result, status] = recipient.search(vectors.view().row(row).as_vector(),
-                                                               rows_driver.handle(), {}, std::span<key_t> {found_keys},
-                                                               std::span {found_distances});
+                                                               std::span<key_t> {found_keys},
+                                                               std::span {found_distances}, {}, rows_driver.handle());
                 failures += expect(status == status_t::success_k && result.count > 0);
                 for (std::size_t match = 0; match != result.count; ++match)
                     if (found_distances[match] < dense_self_match_tolerance_k &&
@@ -3413,11 +3441,12 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
 }
 
 /** Four indexes over the quarters of one dataset merge into an empty recipient through one plan: a
- *  group naming a null donor refuses before any lands, leaving every donor whole; a plan whose
+ *  group naming a null donor refuses before any moves, leaving every donor whole; a plan whose
  *  first run is cancelled mid re-selection has consumed every donor and refuses insertions, and on
- *  a GPU saves, while it lives; the next run continues it, and it finishes having re-selected
- *  exactly as many nodes as an uncancelled absorb of the same quarters, its entries spread evenly
- *  over the recipient's shards and every key resolving to its own entry. */
+ *  a GPU saves, while it lives; the next run continues it, and it finishes having stepped over
+ *  exactly as many nodes as an uncancelled absorb of the same quarters, re-selecting every appended
+ *  node and no more than it stepped over, its entries spread evenly over the recipient's shards and
+ *  every key resolving to its own entry. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... placement) {
     using index_t = typename indexes_type_::index_t;
@@ -3464,7 +3493,7 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     std::array<std::unique_ptr<indexes_type_>, 4> baseline_quarters;
     std::array<indexes_type_*, 4> baseline_donors {};
     build_quarters(baseline_quarters, baseline_donors);
-    failures += expect_eq(baseline.absorb(std::span<indexes_type_*> {baseline_donors}, executor, {}, proceed).status,
+    failures += expect_eq(baseline.absorb(std::span<indexes_type_*> {baseline_donors}, {}, executor, proceed).status,
                           status_t::success_k);
     std::size_t const baseline_visited = reported.exchange(0);
     failures += expect(baseline_visited >= rows);
@@ -3475,15 +3504,15 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     std::array<indexes_type_*, 4> donors {};
     build_quarters(quarters, donors);
 
-    // Validation comes before the first landing, so a null slot leaves every donor as it was.
+    // Validation comes before the first move, so a null slot leaves every donor as it was.
     std::array<indexes_type_*, 2> refused {donors[0], nullptr};
-    failures += expect_eq(recipient.plan_absorb(std::span<indexes_type_*> {refused}, executor).status,
+    failures += expect_eq(recipient.plan_absorb(std::span<indexes_type_*> {refused}, {}, executor).status,
                           status_t::config_mismatch_k);
     failures += expect(refused[0] == donors[0] && donors[0]->size() == quarter && recipient.size() == 0);
 
     std::array<indexes_type_*, 4> consumed = donors;
     {
-        auto [plan, plan_status] = recipient.plan_absorb(std::span<indexes_type_*> {consumed}, executor);
+        auto [plan, plan_status] = recipient.plan_absorb(std::span<indexes_type_*> {consumed}, {}, executor);
         failures += expect_eq(plan_status, status_t::success_k);
         failures += expect_eq(drive_run(plan, driver, cancel), status_t::cancelled_k);
         for (std::size_t which = 0; which != donors.size(); ++which)
@@ -3508,10 +3537,13 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         auto const [absorbed, finish_status] = drive_finish(plan, driver);
         failures += expect_eq(finish_status, status_t::success_k);
         failures += expect_eq(reported.load(), baseline_visited);
-        failures += expect(absorbed.reselected_nodes >= baseline_visited);
+        // The first quarter stays as each shard's resident part, so only the remaining rows get
+        // re-selected once more.
+        failures += expect(absorbed.reselected_nodes >= rows - quarter);
+        failures += expect(absorbed.reselected_nodes <= baseline_visited);
     }
     failures += expect_eq(recipient.size(), rows);
-    // Donor shards differ by an entry at most, and each lands on the recipient shard with the
+    // Donor shards differ by an entry at most, and each moves to the recipient shard with the
     // fewest.
     std::size_t fewest = rows, most = 0;
     for (std::size_t shard = 0; shard != recipient.shards_count(); ++shard)
@@ -3526,12 +3558,12 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
 
 /**
  *  @brief A sharded index splits into two and into three graph-local parts, each absorbed back,
- *      and recall at ten against the exact oracle stays within noise of the source's throughout.
+ *      and recall at ten against the exact oracle stays within noise of the donor's throughout.
  *
- *  Shard @c s lands in every receiver's shard @c s, every key resolves in exactly one receiver with
- *  its vector intact, the source empties and takes entries again, and every receiver reaches its
- *  nodes. While a split's plan lives, an insertion into a receiver refuses. Refusals leave every
- *  index whole: fewer than two receivers, a repeated or non-empty one, the source among them,
+ *  Shard @c s moves into every receiver's shard @c s, every key resolves in exactly one receiver
+ *  with its vector intact, the donor empties and takes entries again, and every receiver reaches
+ *  its nodes. While a split's plan lives, an insertion into a receiver refuses. Refusals leave
+ *  every index whole: fewer than two receivers, a repeated or non-empty one, the donor among them,
  *  another metric or another shard count.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
@@ -3582,8 +3614,9 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
             for (std::size_t const row : held) exact.push_back(oracle(query, row));
             std::sort(exact.begin(), exact.end());
             f64_t const tenth = exact[wanted_k - 1];
-            auto const [result, status] = indexes.search(queries.view().row(query).as_vector(), walker.handle(), {},
-                                                         std::span<key_t> {found_keys}, std::span {found_distances});
+            auto const [result, status] = indexes.search(queries.view().row(query).as_vector(),
+                                                         std::span<key_t> {found_keys}, std::span {found_distances}, {},
+                                                         walker.handle());
             failures += expect(succeeded(status));
             for (std::size_t rank = 0; rank != result.count; ++rank)
                 found += found_distances[rank] <= tenth + 1e-3 * max_of(std::fabs(tenth), 1.0);
@@ -3605,13 +3638,13 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
         return receivers;
     };
     // Every key in exactly one receiver, sampled vectors intact, and every receiver reaching its
-    // nodes and walking within noise of the source.
+    // nodes and walking within noise of the donor.
     auto fetched = make_vectors<scalar_t>(1, dimensions, stream_key(seed, "indexes_split", 2));
     std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
     auto expect_parts = [&](std::vector<indexes_type_*> const& receivers, std::size_t baseline) {
-        std::size_t landed = 0, misplaced = 0, mismatched = 0;
-        for (indexes_type_* receiver : receivers) landed += receiver->size();
-        failures += expect_eq(landed, rows);
+        std::size_t placed = 0, misplaced = 0, mismatched = 0;
+        for (indexes_type_* receiver : receivers) placed += receiver->size();
+        failures += expect_eq(placed, rows);
         for (std::size_t row = 0; row != rows; ++row) {
             std::size_t holders = 0;
             for (indexes_type_* receiver : receivers) {
@@ -3635,13 +3668,13 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
         }
     };
 
-    indexes_type_ source {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(source, placement...)));
-    failures += expect(succeeded(source.reserve({rows}).status));
-    failures += expect(succeeded(source.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
-    std::size_t const source_recall = recall_at_ten(source);
+    indexes_type_ donor {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(donor, placement...)));
+    failures += expect(succeeded(donor.reserve({rows}).status));
+    failures += expect(succeeded(donor.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
+    std::size_t const donor_recall = recall_at_ten(donor);
 
-    // Refusals precede every hold: the source and every receiver stay as they were, and open.
+    // Refusals precede every hold: the donor and every receiver stay as they were, and open.
     {
         std::vector<std::unique_ptr<indexes_type_>> owned;
         std::vector<indexes_type_*> receivers = make_receivers(owned, 2);
@@ -3654,23 +3687,23 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
                            succeeded(place_shards(wider, placement...)));
         for (std::vector<indexes_type_*> refused :
              {std::vector<indexes_type_*> {receivers[0]}, std::vector<indexes_type_*> {receivers[0], receivers[0]},
-              std::vector<indexes_type_*> {receivers[0], &source}, std::vector<indexes_type_*> {receivers[0], &foreign},
+              std::vector<indexes_type_*> {receivers[0], &donor}, std::vector<indexes_type_*> {receivers[0], &foreign},
               std::vector<indexes_type_*> {receivers[0], &wider}})
-            failures += expect_eq(source.plan_split(refused, executor).status, status_t::config_mismatch_k);
+            failures += expect_eq(donor.plan_split(refused, {}, executor).status, status_t::config_mismatch_k);
         failures += expect(succeeded(receivers[1]->reserve({16}).status));
         failures += expect(succeeded(
             receivers[1]
                 ->insert(std::span<key_t const> {keys.data(), 1}, vectors(nk::range(0, 1), nk::slice), executor)
                 .status));
-        failures += expect_eq(source.plan_split(receivers, executor).status, status_t::config_mismatch_k);
-        failures += expect(source.size() == rows && receivers[0]->size() == 0 && receivers[1]->size() == 1);
+        failures += expect_eq(donor.plan_split(receivers, {}, executor).status, status_t::config_mismatch_k);
+        failures += expect(donor.size() == rows && receivers[0]->size() == 0 && receivers[1]->size() == 1);
     }
 
     // Two parts, the receivers closed while the plan lives, then absorbed back.
     std::vector<std::unique_ptr<indexes_type_>> halves_owned;
     std::vector<indexes_type_*> halves = make_receivers(halves_owned, 2);
     {
-        auto [plan, plan_status] = source.plan_split(halves, executor, {}, stream_key(seed, "indexes_split", 3));
+        auto [plan, plan_status] = donor.plan_split(halves, {{}, stream_key(seed, "indexes_split", 3)}, executor);
         failures += expect_eq(plan_status, status_t::success_k);
         failures += expect_eq(
             halves[0]
@@ -3680,30 +3713,31 @@ std::size_t test_dense_indexes_split(u64_t seed, placement_types_&... placement)
         failures += expect_eq(drive_run(plan, driver), status_t::success_k);
         auto const [split, finish_status] = drive_finish(plan, driver);
         failures += expect_eq(finish_status, status_t::success_k);
-        failures += expect_eq(split.health.audited_nodes, rows);
+        failures += expect_eq(split.reachability.audited_nodes, rows);
     }
-    failures += expect_eq(source.size(), 0u);
-    expect_parts(halves, source_recall);
-    failures += expect(succeeded(halves[0]->absorb(*halves[1], executor).status));
+    failures += expect_eq(donor.size(), 0u);
+    expect_parts(halves, donor_recall);
+    failures += expect(succeeded(halves[0]->absorb(*halves[1], {}, executor).status));
     failures += expect_eq(halves[1]->size(), 0u);
     failures += dense_indexes_expect_restored(*halves[0], vectors, keys, dimensions, executor, seed);
-    failures += recall_close(recall_at_ten(*halves[0]), source_recall);
+    failures += recall_close(recall_at_ten(*halves[0]), donor_recall);
 
     // The reunion splits into three through the one-shot, and absorbs back once more.
     std::vector<std::unique_ptr<indexes_type_>> thirds_owned;
     std::vector<indexes_type_*> thirds = make_receivers(thirds_owned, 3);
-    failures += expect(succeeded(halves[0]->split(thirds, executor, {}, stream_key(seed, "indexes_split", 4)).status));
+    failures += expect(
+        succeeded(halves[0]->split(thirds, {{}, stream_key(seed, "indexes_split", 4)}, executor).status));
     failures += expect_eq(halves[0]->size(), 0u);
-    expect_parts(thirds, source_recall);
+    expect_parts(thirds, donor_recall);
     std::vector<indexes_type_*> donors {thirds[1], thirds[2]};
-    failures += expect(succeeded(thirds[0]->absorb(donors, executor).status));
+    failures += expect(succeeded(thirds[0]->absorb(donors, {}, executor).status));
     failures += dense_indexes_expect_restored(*thirds[0], vectors, keys, dimensions, executor, seed);
-    failures += recall_close(recall_at_ten(*thirds[0]), source_recall);
+    failures += recall_close(recall_at_ten(*thirds[0]), donor_recall);
 
-    // The emptied source takes entries again.
-    failures += expect(succeeded(source.reserve({rows}).status));
-    failures += expect(succeeded(source.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
-    failures += expect_eq(source.size(), rows);
+    // The emptied donor takes entries again.
+    failures += expect(succeeded(donor.reserve({rows}).status));
+    failures += expect(succeeded(donor.insert(std::span<key_t const> {keys}, vectors.view(), executor).status));
+    failures += expect_eq(donor.size(), rows);
     return failures;
 }
 
@@ -3791,8 +3825,8 @@ std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placem
         std::array<key_t, 8> found_keys {};
         std::array<typename indexes_type_::distance_t, 8> found_distances {};
         auto const [search_result, search_status] = restored.search(
-            vectors.view().row(0).as_vector(), rows_driver.handle(), {}, std::span<key_t> {found_keys},
-            std::span {found_distances});
+            vectors.view().row(0).as_vector(), std::span<key_t> {found_keys}, std::span {found_distances}, {},
+            rows_driver.handle());
         failures += expect(search_status == status_t::success_k && search_result.count > 0);
     }
 
@@ -3800,7 +3834,7 @@ std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placem
     return failures;
 }
 
-/** A load lands each part on a shard of its own: a reservation smaller than the parts still fits
+/** A load places each part on a shard of its own: a reservation smaller than the parts still fits
  *  them, since a shard rounds up to whole chunks, and a populated index refuses a second load. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_part_load(u64_t seed, placement_types_&... placement) {
@@ -3903,10 +3937,90 @@ inline bytes_view_t dense_first_part(bytes_view_t buffer) noexcept {
     return first;
 }
 
+/** Distinct rows of which every 32nd repeats the first, built over @p placement: no repeat takes
+ *  links from more than two others, so the class forms a chain a walk passes along rather than a
+ *  star around one member. Only warns until duplicate classes are handled. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
+std::size_t dense_expect_duplicates_build(u64_t seed, placement_types_&... placement) {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using node_id_t = typename index_t::node_id_t;
+    // A dot scores identical rows by their norm and an angular through approximate roots, so
+    // neither ties them.
+    if constexpr (kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k) return 0;
+    constexpr std::size_t rows = 1024, stride = 32;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver {placement...};
+    if (failed(driver.status)) return expect(false);
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "tied_build"));
+    // Read through a view: a span's packed dimension is a proxy, and proxy-to-proxy assignment
+    // copies no bit.
+    auto const source = vectors.view().row(0).as_vector();
+    for (std::size_t row = stride; row < rows; row += stride) {
+        auto target = vectors.row(row).as_vector();
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension) target[dimension] = source[dimension];
+    }
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
+    std::size_t failures = dense_indexes_build(indexes, driver.executor, vectors, keys, placement...);
+
+    std::vector<std::byte> buffer;
+    auto save = [&]<typename saved_type_>(saved_type_& saved, typename saved_type_::executor_t& executor) {
+        save_config_t const config = dense_indexes_save_config<saved_type_>();
+        buffer.resize(saved.storage_requirements(config).value);
+        return saved.save(bytes_span_t {buffer}, config, executor);
+    };
+    // An NVMe view serves the graph its RAM group built.
+    if constexpr (requires { indexes.built; })
+        failures += expect(succeeded(save(indexes.built, indexes.builder.executor)));
+    else failures += expect(succeeded(save(indexes, driver.executor)));
+    if (failures) return failures;
+
+    bytes_view_t const whole {buffer};
+    std::vector<bytes_view_t> parts;
+    if (safegraphs_is_monolith(whole)) parts.push_back(whole);
+    else
+        failures += expect(
+            succeeded(safegraphs_read_manifest(whole, std::allocator<byte_t> {}, [&](safegraphs_part_t part) {
+                          parts.push_back(whole.subspan(part.offset, part.bytes));
+                      }).status));
+    std::size_t widest = 0;
+    for (bytes_view_t const part : parts) {
+        auto const [header, header_status] = safegraphs_read_header(part, std::allocator<byte_t> {});
+        std::size_t const nodes = header.nodes();
+        std::size_t const width = regular_width(header.neighbors.shape).value_or(0);
+        bytes_view_t const stored_keys = header.data_of(part, header.key);
+        bytes_view_t const links = header.data_of(part, header.neighbors);
+        failures += expect(succeeded(header_status) && stored_keys.size() == nodes * sizeof(key_t) &&
+                           links.size() == nodes * width * sizeof(node_id_t));
+        if (failures) return failures;
+        std::vector<bool> tied(nodes);
+        for (std::size_t node = 0; node != nodes; ++node) {
+            key_t key;
+            std::memcpy(&key, stored_keys.data() + node * sizeof(key_t), sizeof(key_t));
+            tied[node] = (dense_key_number(key) - 1) % stride == 0;
+        }
+        std::vector<std::size_t> in_degree(nodes);
+        for (std::size_t node = 0; node != nodes; ++node)
+            for (std::size_t slot = 0; tied[node] && slot != width; ++slot) {
+                node_id_t link;
+                std::memcpy(&link, links.data() + (node * width + slot) * sizeof(node_id_t), sizeof(node_id_t));
+                // Out-of-range IDs are the column's empty slots.
+                if (static_cast<std::size_t>(link) < nodes && tied[link]) ++in_degree[link];
+            }
+        for (std::size_t const degree : in_degree) widest = max_of(widest, degree);
+    }
+    if (widest > 2) fmt::println(stderr, "  warning: {} of {} repeats link to one of them", widest, rows / stride);
+    return failures;
+}
+
 /** The norms column of @p monolith, one part of @p rows rows a sharded index of @p geometry saved:
  *  present where the shards keep norms, taken as written by a restore, and derived again for a part
  *  without the column or with a dtype the shards never keep. Every restore is placed over
- *  @p placement, lands the part on its first shard and saves again, and the norms that save writes
+ *  @p placement, places the part on its first shard and saves again, and the norms that save writes
  *  are the ones it holds. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename executor_type_, typename... placement_types_>
 std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, executor_type_& executor,
@@ -3973,15 +4087,17 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
     mistyped.dtype = sizeof(dot_result_t) == 8 ? dtype_t::b64_k : dtype_t::b32_k;
     std::vector<norms_t> const without_column = resaved_norms(doctored({}));
     std::vector<norms_t> const under_mistype = resaved_norms(doctored(mistyped));
+    error_stats_t norm_errors;
     for (std::size_t sample = 0; sample != 8; ++sample) {
         std::size_t const row = sample * (rows / 8);
         f64_t const sum = static_cast<f64_t>(original[row].sum), sumsq = static_cast<f64_t>(original[row].sumsq);
-        failures += expect_near(static_cast<f64_t>(without_column[row].sum), sum);
-        failures += expect_near(static_cast<f64_t>(without_column[row].sumsq), sumsq);
-        failures += expect_near(static_cast<f64_t>(under_mistype[row].sum), sum);
-        failures += expect_near(static_cast<f64_t>(under_mistype[row].sumsq), sumsq);
+        norm_errors.add(static_cast<f64_t>(without_column[row].sum), sum);
+        norm_errors.add(static_cast<f64_t>(without_column[row].sumsq), sumsq);
+        norm_errors.add(static_cast<f64_t>(under_mistype[row].sum), sum);
+        norm_errors.add(static_cast<f64_t>(under_mistype[row].sumsq), sumsq);
     }
-    return failures;
+    return failures + expect_errors("derived norms", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                                    norm_errors, 0);
 }
 
 /** Buffers hold a lone shard's monolith or a manifest leading one part per shard:
@@ -4089,7 +4205,7 @@ std::size_t test_dense_indexes_cancelled_load(u64_t seed, placement_types_&... p
  *
  *  A RAM index admits both batches at once. A VRAM index admits one mutation at a time and
  *  answers the overlapping one with @c contended_k, so a refused batch is retried once the
- *  threads join; either way every entry lands exactly once.
+ *  threads are awaited; either way every entry is inserted exactly once.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... placement) {
@@ -4164,9 +4280,9 @@ std::size_t test_dense_indexes_concurrent_add(u64_t seed, placement_types_&... p
         std::array<typename indexes_type_::distance_t, 8> found_distances {};
         for (std::size_t sample = 0; sample != samples_count; ++sample) {
             std::size_t const row = sample * (rows_per_executor / samples_count);
-            auto const [result, status] = indexes.search(slices[0].view().row(row).as_vector(), rows_driver.handle(),
-                                                         {}, std::span<key_t> {found_keys},
-                                                         std::span {found_distances});
+            auto const [result, status] = indexes.search(slices[0].view().row(row).as_vector(),
+                                                         std::span<key_t> {found_keys}, std::span {found_distances}, {},
+                                                         rows_driver.handle());
             failures += expect(status == status_t::success_k && result.count > 0);
             for (std::size_t match = 0; match != result.count; ++match)
                 if (found_distances[match] < dense_self_match_tolerance_k &&
@@ -4236,8 +4352,8 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
         std::size_t searches = 0;
         for (; !writer_done.load(std::memory_order_acquire) || searches < dense_reader_minimal_searches_k; ++searches) {
             auto const [result, status] = indexes.search(vectors.view().row(searches % nodes_count).as_vector(),
-                                                         rows_driver.handle(), {}, std::span<key_t> {found_keys},
-                                                         std::span {found_distances});
+                                                         std::span<key_t> {found_keys}, std::span {found_distances}, {},
+                                                         rows_driver.handle());
             if (status != status_t::success_k) {
                 thread_failures.add(1);
                 break;
@@ -4386,7 +4502,7 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
              step < dense_reader_minimal_searches_k || inserter_threads_remaining.load(std::memory_order_acquire) != 0;
              ++step) {
             auto query = query_slice.row(step % dense_thread_nodes_k).as_vector();
-            auto const [result, status] = index.search(query, threads.contexts[thread]);
+            auto const [result, status] = index.search(query, {}, threads.contexts[thread]);
             if (status != status_t::success_k) thread_failures.add(1);
             thread_failures.add(
                 scored_failures(threads.contexts[thread].results.data(), result.count, index.size(), expansion_bound));
@@ -4459,8 +4575,8 @@ std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, al
             expansion_factor);
         typename index_type_::search_config_t immutable_config = concurrent_config;
         immutable_config.synchronization = synchronization_t::immutable_k;
-        auto const [concurrent_result, concurrent_status] = index.search(query, concurrent_context, concurrent_config);
-        auto const [immutable_result, immutable_status] = index.search(query, immutable_context, immutable_config);
+        auto const [concurrent_result, concurrent_status] = index.search(query, concurrent_config, concurrent_context);
+        auto const [immutable_result, immutable_status] = index.search(query, immutable_config, immutable_context);
         failures += expect_eq(immutable_status, concurrent_status);
         failures += expect_eq(immutable_result.count, concurrent_result.count);
         for (std::size_t match = 0; match != concurrent_result.count; ++match) {
@@ -4485,9 +4601,9 @@ std::size_t test_dense_immutable_parity(make_index_type_ const& make_index, u64_
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
-/** The external reader's cursor, exercised across chunk seams: full-prefix parity of IDs & vector
- *  bytes, follow semantics on the staged neighbor list, refresh stickiness - past the end stays
- *  past the end - a thread racing live inserters, and the immutable mode agreeing with the
+/** The external reader's cursor, exercised across chunk boundaries: full-prefix parity of IDs &
+ *  vector bytes, follow semantics on the staged neighbor list, refresh stickiness - past the end
+ *  stays past the end - a thread racing live inserters, and the immutable mode agreeing with the
  *  concurrent one on the settled graph. */
 template <typename index_type_, typename concurrent_cursor_type_, typename immutable_cursor_type_,
           typename make_index_type_>
@@ -4529,18 +4645,19 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     }
     failures += expect_eq(visited, nodes_count);
 
-    // Follow semantics: every staged edge lands where the neighbor list said; misuse refuses.
+    // Follow semantics: every staged edge points where the neighbor list said; misuse refuses.
     failures += expect_eq(cursor.seek(0), status_t::success_k);
     std::vector<node_id_t> first_row {cursor.neighbors().begin(), cursor.neighbors().end()};
     for (std::size_t slot = 0; slot != first_row.size(); ++slot) {
         failures += expect_eq(cursor.seek(0), status_t::success_k);
-        failures += expect_eq(cursor.follow(static_cast<typename index_type_::small_size_t>(slot)),
+        failures += expect_eq(cursor.follow(static_cast<typename index_type_::candidates_count_t>(slot)),
                               status_t::success_k);
         failures += expect_eq(cursor.id(), first_row[slot]);
     }
     failures += expect_eq(cursor.seek(0), status_t::success_k);
-    failures += expect_eq(cursor.follow(static_cast<typename index_type_::small_size_t>(cursor.neighbors().size())),
-                          status_t::malformed_k);
+    failures += expect_eq(
+        cursor.follow(static_cast<typename index_type_::candidates_count_t>(cursor.neighbors().size())),
+        status_t::malformed_k);
     failures += expect_eq(cursor.seek(static_cast<node_id_t>(nodes_count)), status_t::malformed_k);
 
     // The snapshot is sticky until refreshed; a past-the-end cursor never resurrects.
@@ -4751,8 +4868,8 @@ std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, a
     failures += expect(succeeded(unbounded.frontier.reserve(dense_growth_nodes_k)));
     std::size_t const frontier_capacity = shedding.frontier.capacity();
     auto const query = vectors.view().row(dense_growth_nodes_k).as_vector();
-    auto const [shed, shed_status] = index.search(query, shedding, config);
-    auto const [kept, kept_status] = index.search(query, unbounded, config);
+    auto const [shed, shed_status] = index.search(query, config, shedding);
+    auto const [kept, kept_status] = index.search(query, config, unbounded);
     failures += expect(succeeded(shed_status) && succeeded(kept_status));
     failures += expect_eq(shed.count, kept.count);
     for (std::size_t rank = 0; rank < shed.count && rank < kept.count; ++rank)
@@ -4798,7 +4915,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     ledger.byte_budget = ledger.live_bytes;
 
     auto const [search_result, search_status] = index.search(vectors.view().row(dense_growth_nodes_k).as_vector(),
-                                                             starved, config);
+                                                             config, starved);
     failures += expect_eq(search_status, status_t::success_k);
     failures += expect(search_result.count > 0);
     failures += expect_eq(search_result.saturated_walks, 1u);
@@ -4894,7 +5011,7 @@ std::size_t test_dense_refine_atomic(make_index_type_ const& make_index, u64_t s
 
 /** Racing a bounded arena: with the budget frozen at exactly two batches of spare
  *  capacity, four uniform threads resolve to exactly two winners & two @c bad_alloc_k
- *  refusals, the winners' IDs land dense & duplicate-free, the ID-space ceiling still
+ *  refusals, the winners' IDs come out dense & duplicate-free, the ID-space ceiling still
  *  answers @c overflow_k, and a lifted budget makes a refused batch retryable. */
 template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {

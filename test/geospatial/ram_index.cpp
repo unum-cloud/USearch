@@ -133,7 +133,7 @@ static std::size_t check_positions_conversion() {
 }
 
 /** The frame at any position is orthonormal at the quantization scale, and displacing
- *  along one of its axes lands in the cone that axis names. */
+ *  along one of its axes falls in the cone that axis names. */
 static std::size_t check_positions_frame() {
     std::size_t failures = 0;
     std::array<earth_fixed_t, 4> const bases {to_earth_fixed({51.5, -0.1, 0.0}), to_earth_fixed({-33.9, 151.2, 0.0}),
@@ -445,7 +445,7 @@ static std::size_t check_observations_admits() {
     return failures;
 }
 
-/** A saved monolith read back from storage, every observation a fixed 32-byte row the view reads
+/** A saved monolith read back from storage, every observation a fixed 32-byte entry the view reads
  *  without a directory and decodes in place. */
 static std::size_t check_positions_nvme(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
@@ -469,7 +469,7 @@ static std::size_t check_positions_nvme(u64_t seed) {
                                                                      make_metric, query_of, matches);
 }
 
-/** Containment over storage lands what the radius walk finds in RAM: for every probe and radius, a
+/** Containment over storage finds what the radius walk finds in RAM: for every probe and radius, a
  *  scan of the saved corpus hands back exactly the keys the complete walk reports. */
 static std::size_t check_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
@@ -534,20 +534,20 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
         auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
             return expected<earth_observation_t> {queries[query], status_t::success_k};
         };
-        // Every reach is exclusive, so an entry exactly at the radius lands as the walk keeps it.
+        // Every reach is exclusive, so an entry exactly at the radius is kept as the walk keeps it.
         std::vector<nk_u64_t> reaches(queries_count);
         for (std::size_t query = 0; query != queries_count; ++query) {
             i64_t const radius = radii_centimetres[query % radii_centimetres.size()];
             reaches[query] = static_cast<nk_u64_t>(radius * radius + 1);
         }
         std::vector<std::vector<key_t>> scanned(queries_count);
-        auto land = [&]<std::size_t extent_>(std::size_t, std::size_t query, std::span<key_t const, extent_> keys,
-                                             std::span<earth_observation_t const, extent_>,
-                                             std::span<nk_u64_t const, extent_>) noexcept {
+        auto collect = [&]<std::size_t extent_>(std::size_t, std::size_t query, std::span<key_t const, extent_> keys,
+                                                std::span<earth_observation_t const, extent_>,
+                                                std::span<nk_u64_t const, extent_>) noexcept {
             for (key_t const& key : keys) scanned[query].push_back(key);
         };
         auto const [found, status] = viewed.scan_within(std::span<nk_u64_t const> {reaches}, make_metric, query_of,
-                                                        executor, land);
+                                                        collect, executor);
         failures += expect_eq(status, status_t::success_k);
         for (std::size_t query = 0; query != queries_count; ++query) {
             failures += expect_eq(scanned[query].size(), walked[query].size());

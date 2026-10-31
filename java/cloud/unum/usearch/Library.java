@@ -62,7 +62,7 @@ final class Library {
      * A verb the engine does not export answers with a handle of the right shape that raises when
      * it is called. Failing at the call rather than at class initialization is what keeps the rest
      * of the binding usable against an engine that implements only part of the interface - which
-     * every engine does while a modality is still landing.
+     * every engine does while a modality is still being implemented.
      *
      * @param name The exported symbol.
      * @param descriptor Its argument and return layouts.

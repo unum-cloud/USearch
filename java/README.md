@@ -353,21 +353,34 @@ try (DenseSearchStream stream = index.on(pool).searchStream(query)) {
 
 Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `insert`.
-Re-selecting a settled node changes nothing, so a caller loops until the changed-node count falls below whatever rate it considers settled.
+It answers a `RefineReport` of the nodes re-selected and changed, the islands found and reconnected, and the `reachability` audit closing the heal.
+Re-selecting a settled node changes nothing, so a caller loops until `changed` falls below whatever rate it considers settled.
 
 ```java
 DenseRefineConfig wide = new DenseRefineConfig().expansionFactor(256);
-while (index.on(pool).refine(wide) > index.describe().size() / 100) {}
+while (index.on(pool).refine(wide).changed() > index.describe().size() / 100) {}
 ```
 
 ### Absorbing & Splitting
 
 `absorb` appends donor indexes one after another, keeping their graphs and linking each in across the appended part, rather than re-inserting their vectors.
-Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its entries may already have landed.
-Splitting is not in the C library yet.
+Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its entries may already have moved.
+`split` is its inverse: the entries are partitioned along the graph into empty receivers, leaving the source empty and live.
+Both answer a `RefineReport` of their closing refinements.
 
 ```java
 index.on(pool).absorb(shard0, shard1);  // both donors are closed from here on
+index.on(pool).split(new DenseSplitConfig().seed(7), left, right);  // two empty receivers take a part each
+```
+
+### Sampling
+
+`sample` draws keys around a focus, each hanging from a shown or earlier draw, and places them in three dimensions beside the keys already shown, so a view grows one connected sample as it zooms.
+
+```java
+Sample drawn = index.on(pool).sample(
+        256, arena, new DenseSampleConfig().shown(shown, shownCoordinates).focus(near).seed(42));
+float x = drawn.coordinate(0, 0);
 ```
 
 ### Sparse Multiplication

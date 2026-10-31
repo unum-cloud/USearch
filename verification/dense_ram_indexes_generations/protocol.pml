@@ -61,7 +61,7 @@ byte dispensed[shards];   // each shard's `next_dispensed_id_`, a ghost, since n
 bool constructed[shards]; // a builder holds the shard constructed, so a second build is caught
 byte done;                // the adders, once finished
 bool batch_dispensed;     // the planned batch's ranges are dispensed
-byte batch_share[shards]; // the rows the batch lands on each shard
+byte batch_share[shards]; // the rows the batch places on each shard
 byte batch_part[shards];  // the ID its range starts at on each shard
 
 // The inlines below name their callers' locals: `count`, `seen`, `won`, `granted`, `opened`,

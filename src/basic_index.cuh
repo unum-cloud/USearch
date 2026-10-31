@@ -7,9 +7,9 @@
  *      forwards its exported entry points to.
  *
  *  A modality's traits supply only what its verbs differ in: the geometry an init or a checkpoint
- *  states, the check of a call's values, and the C argument structures its variants' verb tables
- *  take. Every verb visits three homes, and the variants' bodies compile in the modality's class
- *  units.
+ *  states, the check of a call's values, and the composites each C argument structure lowers onto
+ *  once, here, before a variant's verb table takes them. Every verb visits three residencies, and
+ *  the variants' bodies compile in the modality's class units.
  */
 #pragma once
 
@@ -18,7 +18,7 @@
 #include <span>        // `std::span` - the listed devices, a view's paths and entries
 #include <string_view> // `std::string_view` - checkpoint paths
 #include <type_traits> // `std::remove_pointer_t`
-#include <utility>     // `std::exchange` - a landed donor's slot
+#include <utility>     // `std::exchange` - a consumed donor's slot
 #include <variant>     // `std::variant`, `std::visit`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
@@ -27,11 +27,11 @@
 
 #pragma region Handles
 
-/** The verb table of every home one modality compiles, one of which a handle holds. */
+/** The verb table of every residency one modality compiles, one of which a handle holds. */
 template <typename traits_type_>
-using basic_home_tables = std::variant<basic_verbs<traits_type_, dense_home_t::ram_k> const*,
-                                       basic_verbs<traits_type_, dense_home_t::nvme_k> const*,
-                                       basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const*>;
+using basic_variant_tables = std::variant<basic_verbs<traits_type_, vendored_residency_t::ram_k> const*,
+                                          basic_verbs<traits_type_, vendored_residency_t::nvme_k> const*,
+                                          basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const*>;
 
 /**
  *  @brief The one dynamically-typed index of a modality every binding consumes: the variant picked
@@ -43,12 +43,13 @@ template <typename traits_type_>
 struct basic_handle {
     using traits_t = traits_type_;
 
-    /** The picked variant's home table, and the variant only that table's entries cast back to its
-     *  type. */
-    basic_home_tables<traits_type_> tables;
+    /** The picked variant's residency table, and the variant only that table's entries cast back
+     *  to its type. */
+    basic_variant_tables<traits_type_> tables;
     void* variant = nullptr;
 
-    basic_handle(basic_home_tables<traits_type_> picked, void* created) noexcept : tables(picked), variant(created) {}
+    basic_handle(basic_variant_tables<traits_type_> picked, void* created) noexcept
+        : tables(picked), variant(created) {}
     basic_handle(basic_handle const&) = delete;
     basic_handle& operator=(basic_handle const&) = delete;
     ~basic_handle() noexcept {
@@ -60,7 +61,7 @@ struct basic_handle {
  *  view, with the table whose entries pull and free it, which outlives every handle. */
 template <typename handle_type_>
 struct basic_cursor {
-    basic_home_tables<typename handle_type_::traits_t> tables;
+    basic_variant_tables<typename handle_type_::traits_t> tables;
     void* cursor = nullptr;
 
     /** The handle the cursor was opened on, which every pull names again. */
@@ -74,12 +75,12 @@ struct basic_cursor {
     }
 };
 
-/** What a modality's refinement handle owns: one variant's plan with the donors it lands, which
+/** What a modality's refinement handle owns: one variant's plan with the donors it absorbs, which
  *  keeps its index closed until it dies, and the caller's donor slots it nulls. */
 template <typename handle_type_>
 struct basic_refinement {
-    basic_home_tables<typename handle_type_::traits_t> tables;
-    void* refining = nullptr;
+    basic_variant_tables<typename handle_type_::traits_t> tables;
+    void* refinement = nullptr;
 
     /** The handle and executor the refinement was opened with, only ever compared with the ones
      *  each call passes. */
@@ -90,33 +91,38 @@ struct basic_refinement {
     handle_type_** donors = nullptr;
     std::size_t count = 0;
 
+    /** The caller's receiver array, @c receivers_count slots. */
+    handle_type_* const* receivers = nullptr;
+    std::size_t receivers_count = 0;
+
     ~basic_refinement() noexcept {
-        if (refining) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refining); }, tables);
+        if (refinement) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refinement); }, tables);
     }
 };
 
-/** The handle a call's arguments name, as the index they act on or the slot a new one lands in. */
+/** The handle a call's arguments name, as the index they act on or the slot a new one fills. */
 template <typename arguments_type_>
 using handle_of = std::remove_pointer_t<std::remove_pointer_t<decltype(std::declval<arguments_type_&>().index)>>;
 
 /** Applies @p visitor to the variant @p handle picked, as <tt>visitor(punned_basic_index<traits,
- *  home>)</tt>. */
+ *  residency>)</tt>. */
 template <typename handle_type_, typename visitor_type_>
 void visit_basic(handle_type_ const& handle, visitor_type_&& visitor) noexcept {
     using traits_t = typename handle_type_::traits_t;
     std::visit(
-        [&]<dense_home_t home_>(basic_verbs<traits_t, home_> const* verbs) noexcept {
-            visitor(punned_basic_index<traits_t, home_> {*verbs, handle.basic.variant});
+        [&]<vendored_residency_t residency_>(basic_verbs<traits_t, residency_> const* verbs) noexcept {
+            visitor(punned_basic_index<traits_t, residency_> {*verbs, handle.basic.variant});
         },
         handle.basic.tables);
 }
 
 /** The variant of @p other when it holds the very variant @p punned is, so both share one class,
- *  home and stored scalar; null otherwise. */
-template <typename traits_type_, dense_home_t home_, typename handle_type_>
-void* same_basic_variant(punned_basic_index<traits_type_, home_> const& punned, handle_type_ const& other) noexcept {
-    basic_verbs<traits_type_, home_> const* const* const verbs = std::get_if<basic_verbs<traits_type_, home_> const*>(
-        &other.basic.tables);
+ *  residency and stored scalar; null otherwise. */
+template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
+void* same_basic_variant(punned_basic_index<traits_type_, residency_> const& punned,
+                         handle_type_ const& other) noexcept {
+    basic_verbs<traits_type_, residency_> const* const* const verbs =
+        std::get_if<basic_verbs<traits_type_, residency_> const*>(&other.basic.tables);
     return verbs && *verbs == &punned.verbs ? other.basic.variant : nullptr;
 }
 
@@ -133,17 +139,17 @@ inline void const* address_of(void const* values) noexcept { return values; }
  *  Naming none places one shard per memory domain the process may allocate on, as a dense index
  *  does.
  */
-template <typename traits_type_, dense_home_t home_>
-status_t place_shards(punned_basic_index<traits_type_, home_> const& punned,
+template <typename traits_type_, vendored_residency_t residency_>
+status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
                       usearch_ram_options_t const& ram) noexcept {
     punned.verbs.bound_shards(punned.variant, ram.shard_capacity);
     if (!ram.memory_domains || !ram.memory_domains_count)
         return emplace_on_every_domain([&](fu_memory_domain_id_t domain) noexcept {
-            return punned.verbs.emplace(punned.variant, static_cast<int>(domain));
+            return punned.verbs.emplace(punned.variant, ram_residency(domain));
         });
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
-        if (status_t const placed = punned.verbs.emplace(punned.variant,
-                                                         static_cast<int>(ram.memory_domains[position]));
+        if (status_t const placed = punned.verbs.emplace(
+                punned.variant, ram_residency(static_cast<fu_memory_domain_id_t>(ram.memory_domains[position])));
             failed(placed))
             return placed;
     return status_t::success_k;
@@ -152,15 +158,15 @@ status_t place_shards(punned_basic_index<traits_type_, home_> const& punned,
 /** The RAM or NVMe variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder
  *  that fits under @p ceiling, the serial floor last; a class unit without a variant serving the
  *  geometry sends the walk on. */
-template <typename traits_type_, dense_home_t home_, cpu_class_t... classes_>
-basic_verbs<traits_type_, home_> const* pick_basic_cpu_variant(cpu_ladder<classes_...>,
-                                                               typename traits_type_::geometry_t const& geometry,
-                                                               cpu_ceiling_t ceiling) noexcept {
-    basic_verbs<traits_type_, home_> const* picked = nullptr;
+template <typename traits_type_, vendored_residency_t residency_, cpu_class_t... classes_>
+basic_verbs<traits_type_, residency_> const* pick_basic_cpu_variant(cpu_ladder<classes_...>,
+                                                                    typename traits_type_::geometry_t const& geometry,
+                                                                    cpu_ceiling_t ceiling) noexcept {
+    basic_verbs<traits_type_, residency_> const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
         if constexpr (basic_class_compiled(class_))
             if (!picked && cpu_rung_fits(class_, ceiling))
-                picked = basic_class_tables<traits_type_, home_, class_>::find(geometry);
+                picked = basic_class_tables<traits_type_, residency_, class_>::find(geometry);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -169,27 +175,27 @@ basic_verbs<traits_type_, home_> const* pick_basic_cpu_variant(cpu_ladder<classe
 /** The NVIDIA variant of @p traits_type_ serving @p geometry on the newest rung of @p ladder the
  *  build compiled and the devices' @p available capabilities admit. */
 template <typename traits_type_, gpu_class_t... classes_>
-basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const* pick_basic_gpu_variant(
+basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* pick_basic_gpu_variant(
     gpu_ladder<classes_...>, typename traits_type_::geometry_t const& geometry, nk_capability_t available) noexcept {
-    basic_verbs<traits_type_, dense_home_t::vram_nvidia_k> const* picked = nullptr;
+    basic_verbs<traits_type_, vendored_residency_t::vram_nvidia_k> const* picked = nullptr;
     auto rung = [&]<gpu_class_t class_>() noexcept {
         if constexpr (basic_gpu_class_compiled(class_))
             if (!picked && numkong_admits(available, class_))
-                picked = basic_class_tables<traits_type_, dense_home_t::vram_nvidia_k, class_>::find(geometry);
+                picked = basic_class_tables<traits_type_, vendored_residency_t::vram_nvidia_k, class_>::find(geometry);
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
 }
 
 /**
- *  @brief Lowers @p geometry, frozen with @p arguments, onto the RAM or NVMe variant of
+ *  @brief Lowers @p geometry, with what @p arguments name past it, onto the RAM or NVMe variant of
  *      @p handle_type_ the ladder picks, then hands it to @p fill, as
  *      <tt>fill(punned_basic_index) → bool</tt>; null once @p outcome records why not.
  *
  *  The variant's class is one the machine admits and @p ram 's pinned class holds, and it serves
- *  the geometry. A RAM variant places its shards as @p ram names before it freezes.
+ *  the geometry. A RAM variant places its shards as @p ram names.
  */
-template <typename handle_type_, dense_home_t home_, typename arguments_type_, typename fill_type_>
+template <typename handle_type_, vendored_residency_t residency_, typename arguments_type_, typename fill_type_>
 handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t& geometry,
                                     arguments_type_ const& arguments, usearch_ram_options_t const& ram,
                                     usearch_outcome_t* outcome, fill_type_&& fill) noexcept {
@@ -199,25 +205,24 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
     if (failed(pick_status))
         return propagate_error(usearch_status_unsupported_k, outcome, "The CPU does not admit the pinned class"),
                nullptr;
-    basic_verbs<traits_t, home_> const* const verbs = pick_basic_cpu_variant<traits_t, home_>(cpu_ladder_t {}, geometry,
-                                                                                              ceiling);
+    basic_verbs<traits_t, residency_> const* const verbs = pick_basic_cpu_variant<traits_t, residency_>(
+        cpu_ladder_t {}, geometry, ceiling);
     if (!verbs)
         return propagate_error(usearch_status_unsupported_k, outcome, "No compiled variant serves the geometry"),
                nullptr;
-    void* const created = verbs->create(0, geometry);
-    if (!created)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
+    auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
+                                                        ram_residency_k);
+    if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
     handle_type_* const handle = new (std::nothrow) handle_type_ {{verbs, created}};
     if (!handle)
         return verbs->destroy(created),
                propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    punned_basic_index<traits_t, home_> const punned {*verbs, created};
+    punned_basic_index<traits_t, residency_> const punned {*verbs, created};
     // A view reads its shards from its files, so only a RAM variant places any.
-    if constexpr (home_ == dense_home_t::ram_k)
+    if constexpr (residency_ == vendored_residency_t::ram_k)
         if (status_t const placed = place_shards(punned, ram); failed(placed))
             return propagate_error(placed, outcome), delete handle, nullptr;
-    if (!verbs->freeze(created, geometry, traits_t::freeze_input(arguments), outcome) || !fill(punned))
-        return delete handle, nullptr;
+    if (!fill(punned)) return delete handle, nullptr;
     return handle;
 }
 
@@ -232,7 +237,7 @@ void basic_init_ram(arguments_type_* arguments) noexcept {
     *arguments->index = nullptr;
     typename handle_t::traits_t::geometry_t geometry;
     if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
-    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::ram_k>(
+    handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::ram_k>(
         geometry, *arguments, arguments->ram, outcome, [](auto const&) noexcept { return true; });
     if (!index) return;
     *arguments->index = index;
@@ -241,11 +246,11 @@ void basic_init_ram(arguments_type_* arguments) noexcept {
 
 /** Loads the checkpoint at @p path into the freshly placed @p punned on the executor @p arguments
  *  name; false once @p outcome records why not. */
-template <typename traits_type_, dense_home_t home_, typename arguments_type_>
-bool basic_load_variant(punned_basic_index<traits_type_, home_> punned, std::string_view path,
+template <typename traits_type_, vendored_residency_t residency_, typename arguments_type_>
+bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, std::string_view path,
                         arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
     usearch_executor_handle_t call_executor;
-    typename punned_basic_index<traits_type_, home_>::executor_t* const executor = executor_of(
+    typename punned_basic_index<traits_type_, residency_>::executor_t* const executor = executor_of(
         punned, arguments.executor, call_executor, outcome);
     if (!executor) return false;
     progress_ticks_t ticks {arguments.progress, executor->size()};
@@ -261,27 +266,29 @@ bool basic_load_variant(punned_basic_index<traits_type_, home_> punned, std::str
 /** Bounds every shard of a GPU variant at @p vram 's shard capacity, then places one shard per
  *  named device, on that device's vendor ordinal; the caller checked every named ordinal against
  *  the listing. */
-template <typename traits_type_, dense_home_t home_>
-status_t place_shards(punned_basic_index<traits_type_, home_> const& punned,
+template <typename traits_type_, vendored_residency_t residency_>
+status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned,
                       usearch_vram_options_t const& vram) noexcept {
     punned.verbs.bound_shards(punned.variant, vram.shard_capacity);
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard)
         if (status_t const placed = punned.verbs.emplace(
-                punned.variant, static_cast<int>(devices[named_ordinal(vram, shard)].vendor_ordinal));
+                punned.variant, vram_residency(devices[named_ordinal(vram, shard)].vendor_ordinal));
             failed(placed))
             return placed;
     return status_t::success_k;
 }
 
-/** Places the GPU variant of @p handle_type_ for @p geometry, frozen with @p arguments, one shard
- *  on every device they name, then hands it to @p fill, as <tt>fill(punned_basic_index) →
- *  bool</tt>; null once @p outcome records why not, as for a geometry no device kit serves.
+/**
+ *  @brief Places the GPU variant of @p handle_type_ for @p geometry, with what @p arguments name
+ *      past it, one shard on every device they name, then hands it to @p fill; null once @p outcome
+ *      records why not, as for a geometry no device kit serves.
  *
- *  The variant is the first on the modality's GPU ladder whose class the first device's
- *  capabilities admit, narrowed to the pinned class, and which serves the geometry; every named
- *  device shares that class. The shards are placed once the variant froze, since each one is built
- *  as its geometry names. */
+ *  It calls <tt>fill(punned_basic_index) → bool</tt>. The variant is the first on the modality's GPU
+ *  ladder whose class the first device's capabilities admit, narrowed to the pinned class, and
+ *  which serves the geometry; every named device shares that class. The shards are placed once the
+ *  variant holds its geometry, since each one is built as the geometry names.
+ */
 template <typename handle_type_, typename arguments_type_, typename fill_type_>
 handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t& geometry,
                                      arguments_type_ const& arguments, usearch_outcome_t* outcome,
@@ -304,20 +311,19 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
     if (!available)
         return propagate_error(usearch_status_unsupported_k, outcome, "The devices do not run the pinned class"),
                nullptr;
-    basic_verbs<traits_t, dense_home_t::vram_nvidia_k> const* const verbs = pick_basic_gpu_variant<traits_t>(
+    basic_verbs<traits_t, vendored_residency_t::vram_nvidia_k> const* const verbs = pick_basic_gpu_variant<traits_t>(
         typename traits_t::gpu_ladder_t {}, geometry, available);
     if (!verbs)
         return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the device"),
                nullptr;
-    void* const created = verbs->create(static_cast<int>(device->vendor_ordinal), geometry);
-    if (!created)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
+    auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
+                                                        vram_residency(device->vendor_ordinal));
+    if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
     handle_type_* const index = new (std::nothrow) handle_type_ {{verbs, created}};
     if (!index)
         return verbs->destroy(created),
                propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the index"), nullptr;
-    punned_basic_index<traits_t, dense_home_t::vram_nvidia_k> const punned {*verbs, created};
-    if (!verbs->freeze(created, geometry, traits_t::freeze_input(arguments), outcome)) return delete index, nullptr;
+    punned_basic_index<traits_t, vendored_residency_t::vram_nvidia_k> const punned {*verbs, created};
     if (status_t const placed = place_shards(punned, vram); failed(placed))
         return propagate_error(placed, outcome), delete index, nullptr;
     if (!fill(punned)) return delete index, nullptr;
@@ -356,8 +362,8 @@ void basic_load_ram(arguments_type_* arguments) noexcept {
     if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     auto load = [&](auto const& punned) noexcept { return basic_load_variant(punned, path, *arguments, outcome); };
-    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::ram_k>(geometry, *arguments, arguments->ram,
-                                                                                 outcome, load);
+    handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::ram_k>(geometry, *arguments,
+                                                                                         arguments->ram, outcome, load);
     if (index) *arguments->index = index;
 }
 
@@ -396,8 +402,8 @@ void basic_view_ram(arguments_type_* arguments) noexcept {
     };
     usearch_ram_options_t pinned {};
     pinned.cpu_class = arguments->ram.cpu_class;
-    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::ram_k>(geometry, *arguments, pinned, outcome,
-                                                                                 view);
+    handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::ram_k>(geometry, *arguments, pinned,
+                                                                                         outcome, view);
     if (index) *arguments->index = index;
 }
 
@@ -431,8 +437,8 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     };
     usearch_ram_options_t pinned {};
     pinned.cpu_class = nvme.cpu_class;
-    handle_t* const index = make_basic_cpu_handle<handle_t, dense_home_t::nvme_k>(geometry, *arguments, pinned, outcome,
-                                                                                  view);
+    handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::nvme_k>(geometry, *arguments, pinned,
+                                                                                          outcome, view);
     if (index) *arguments->index = index;
 }
 
@@ -448,7 +454,9 @@ void basic_reserve(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     visit_basic(*arguments->index, [&](auto punned) noexcept {
-        propagate_error(punned.verbs.reserve(punned.variant, *arguments), outcome);
+        propagate_error(
+            punned.verbs.reserve(punned.variant, handle_of<arguments_type_>::traits_t::capacity_of(*arguments)),
+            outcome);
     });
 }
 
@@ -464,76 +472,107 @@ void basic_clear(arguments_type_* arguments) noexcept {
 
 #pragma region Refinement
 
-/** Opens @p punned 's refinement of @p index after the @p count @p donors land, each checked
- *  against the variant and its geometry once no deferred call names it; null once @p outcome
- *  records why not. */
-template <typename handle_type_, typename traits_type_, dense_home_t home_>
-void* basic_open_refinement(handle_type_ const* index, punned_basic_index<traits_type_, home_> const& punned,
-                            handle_type_** donors, std::size_t count, std::size_t expansion,
+/** Whether each of the @p count handles of @p others shares @p punned 's variant and geometry,
+ *  waiting out the calls naming it first; false once @p outcome records why not. */
+template <typename handle_type_, typename traits_type_, vendored_residency_t residency_>
+bool accepts_basic_variants(handle_type_ const* index, punned_basic_index<traits_type_, residency_> const& punned,
+                            handle_type_* const* others, std::size_t count, char const* refusal,
                             usearch_outcome_t* outcome) noexcept {
-    growing_buffer<void*> landing {global_allocator};
-    if (failed(landing.reserve_exactly(count)))
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the donors"), nullptr;
     for (std::size_t position = 0; position != count; ++position) {
-        handle_type_* const donor = donors[position];
-        if (!donor)
-            return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"), nullptr;
-        if (donor == index)
-            return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"), nullptr;
-        void* const typed = same_basic_variant(punned, *donor);
+        handle_type_* const other = others[position];
+        if (!other) return propagate_error(usearch_status_invalid_argument_k, outcome, "A handle must not be null");
+        if (other == index) return propagate_error(usearch_status_config_mismatch_k, outcome, refusal);
+        void* const typed = same_basic_variant(punned, *other);
         if (!typed || !punned.verbs.matches(punned.variant, typed))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                   "A donor must share the index's residency, class and geometry"),
-                   nullptr;
-        finish_calls_using(donor);
-        landing.push_back_reserved(typed);
+                                   "Every handle must share the index's residency, class and geometry");
+        finish_calls_using(other);
     }
-    auto const [refining, status] = punned.verbs.refinement_open(punned.variant, to_span(landing), expansion);
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    return refining;
+    return true;
 }
 
-/** Frees the handles of the donors @p refining consumed, folding what their variants count into the
- *  variant's first, and nulls the caller's slots; the plan dropped its hold on each already. */
-template <typename traits_type_, dense_home_t home_, typename handle_type_>
-void basic_free_landed(punned_basic_index<traits_type_, home_> const& punned, void const* refining,
-                       handle_type_** donors, std::size_t count) noexcept {
+/** The variants behind the @p count handles @p others names, read in place. */
+template <typename handle_type_>
+variants_view_t view_basic_variants(handle_type_* const* others, std::size_t count) noexcept {
+    return {others, others ? count : 0, [](void const* handles, std::size_t position) noexcept -> void* {
+                handle_type_* const* const typed = static_cast<handle_type_* const*>(handles);
+                return typed[position]->basic.variant;
+            }};
+}
+
+/** Opens @p punned 's refinement of @p index after it absorbs the @p count @p donors, or after it
+ *  splits into the @p receivers_count @p receivers as @p config seeds, with null once @p outcome
+ *  records why not. */
+template <typename handle_type_, typename traits_type_, vendored_residency_t residency_>
+void* basic_open_refinement(handle_type_ const* index, punned_basic_index<traits_type_, residency_> const& punned,
+                            handle_type_** donors, std::size_t count, handle_type_* const* receivers,
+                            std::size_t receivers_count, split_config_t config,
+                            typename punned_basic_index<traits_type_, residency_>::executor_t& executor,
+                            usearch_outcome_t* outcome) noexcept {
+    if (!accepts_basic_variants(index, punned, donors, count, "An index cannot absorb itself", outcome) ||
+        !accepts_basic_variants(index, punned, receivers, receivers_count, "An index cannot split into itself",
+                                outcome))
+        return nullptr;
+    auto const [refinement, status] = punned.verbs.refinement_init(punned.variant, view_basic_variants(donors, count),
+                                                                   view_basic_variants(receivers, receivers_count),
+                                                                   config, executor);
+    if (failed(status)) return propagate_error(status, outcome), nullptr;
+    return refinement;
+}
+
+/** Hands each of the @p count @p receivers what @p punned 's variant counted of the part it took,
+ *  once the split @p refinement planned filled its parts. */
+template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
+void basic_count_split_receivers(punned_basic_index<traits_type_, residency_> const& punned, void const* refinement,
+                                 handle_type_* const* receivers, std::size_t count) noexcept {
+    for (std::size_t position = 0; position != count; ++position)
+        punned.verbs.count_split_receiver(punned.variant, refinement, receivers[position]->basic.variant);
+}
+
+/** Frees the handles of the donors @p refinement consumed, folding what their variants count into
+ *  the variant's first, and nulls the caller's slots; the plan dropped its hold on each already. */
+template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
+void basic_free_consumed(punned_basic_index<traits_type_, residency_> const& punned, void const* refinement,
+                         handle_type_** donors, std::size_t count) noexcept {
     for (std::size_t position = 0; position != count; ++position) {
-        if (!donors[position] || !punned.verbs.refinement_landed(refining, position)) continue;
-        punned.verbs.absorbed(punned.variant, donors[position]->basic.variant);
+        if (!donors[position] || !punned.verbs.refinement_consumed(refinement, position)) continue;
+        punned.verbs.count_absorbed_donor(punned.variant, donors[position]->basic.variant);
         delete std::exchange(donors[position], nullptr);
     }
 }
 
-/** Writes what a refinement's @p refined result reports into the outputs @p arguments name. */
+/** Writes what a refinement's @p refined result reports into the outputs @p arguments name: the
+ *  report, or the running totals of a step. */
 template <typename arguments_type_>
-void basic_report_refined(basic_refined_t const& refined, arguments_type_ const& arguments) noexcept {
-    accumulate_stats(arguments.stats, refined.stats);
-    if (arguments.changed) *arguments.changed = refined.changed;
-    if constexpr (requires { arguments.reachability; })
-        if (arguments.reachability) *arguments.reachability = refined.reachability;
-    if constexpr (requires { arguments.visited; })
-        if (arguments.visited) *arguments.visited = refined.visited;
+void write_refine_outputs(refine_report_t const& refined, arguments_type_ const& arguments) noexcept {
+    accumulate_stats(arguments.stats, refined);
+    if constexpr (requires { arguments.report; }) write_refine_report(arguments.report, refined);
+    else {
+        if (arguments.reselected) *arguments.reselected = refined.reselected_nodes;
+        if (arguments.changed) *arguments.changed = refined.changed_nodes;
+    }
 }
 
-/** Skips the re-selection @p refining left, heals the islands it leaves, and reports. */
-template <typename traits_type_, dense_home_t home_, typename arguments_type_>
-status_t basic_finish_refinement(punned_basic_index<traits_type_, home_> const& punned, void* refining,
+/** Skips the re-selection @p refinement left, heals the islands it leaves, and reports. */
+template <typename traits_type_, vendored_residency_t residency_, typename arguments_type_>
+status_t basic_finish_refinement(punned_basic_index<traits_type_, residency_> const& punned, void* refinement,
                                  arguments_type_ const& arguments,
-                                 typename punned_basic_index<traits_type_, home_>::executor_t& executor) noexcept {
-    auto const [refined, status] = punned.verbs.refinement_finish(punned.variant, refining, executor);
-    if (succeeded(status)) basic_report_refined(refined, arguments);
+                                 typename punned_basic_index<traits_type_, residency_>::executor_t& executor) noexcept {
+    auto const [refined, status] = punned.verbs.refinement_finish(punned.variant, refinement, executor);
+    if (succeeded(status)) write_refine_outputs(refined, arguments);
     return status;
 }
 
-/** The one-shot over a refinement, for @c refine and @c absorb alike: opens it with the call's
- *  donors, runs it once under the call's handler, then heals and reports; a cancel still heals and
- *  answers @c cancelled_k. */
+/** The one-shot over a refinement, for @c refine, @c absorb and @c split alike: opens it with the
+ *  call's donors or receivers, runs it once under the call's handler, then heals and reports; a
+ *  cancel still heals and answers @c cancelled_k. */
 template <auto verb_, typename arguments_type_>
-void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** donors, std::size_t count) noexcept {
+void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** donors, std::size_t count,
+                       handle_of<arguments_type_>* const* receivers, std::size_t receivers_count, u64_t seed) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     if (arguments->stats) *arguments->stats = {};
+    if (arguments->report) *arguments->report = {};
     if (count && !donors)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
@@ -541,16 +580,18 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        void* const refining = basic_open_refinement(arguments->index, punned, donors, count,
-                                                     arguments->expansion_factor, outcome);
-        if (!refining) return;
-        std::unique_ptr<void, void (*)(void*) noexcept> const owned {refining, punned.verbs.refinement_free};
-        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refining)};
-        status_t const ran = punned.verbs.refinement_run(punned.variant, refining, ticks, *executor);
-        basic_free_landed(punned, refining, donors, count);
+        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, seed};
+        void* const refinement = basic_open_refinement(arguments->index, punned, donors, count, receivers,
+                                                       receivers_count, config, *executor, outcome);
+        if (!refinement) return;
+        std::unique_ptr<void, void (*)(void*) noexcept> const owned {refinement, punned.verbs.refinement_free};
+        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refinement)};
+        status_t const ran = punned.verbs.refinement_next(punned.variant, refinement, *executor, ticks);
+        basic_free_consumed(punned, refinement, donors, count);
+        basic_count_split_receivers(punned, refinement, receivers, receivers_count);
         if (failed(ran) && ran != status_t::cancelled_k) return propagate_error(ran, outcome), void();
         // A stopped pass still heals, so its report stands beside the cancel.
-        if (status_t const finished = basic_finish_refinement(punned, refining, *arguments, *executor);
+        if (status_t const finished = basic_finish_refinement(punned, refinement, *arguments, *executor);
             failed(finished))
             return propagate_error(finished, outcome), void();
         propagate_error(ran, outcome);
@@ -559,12 +600,12 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
 
 template <auto verb_, typename arguments_type_>
 void basic_refine(arguments_type_* arguments) noexcept {
-    basic_refine_once<verb_>(arguments, nullptr, 0);
+    basic_refine_once<verb_>(arguments, nullptr, 0, nullptr, 0, 0);
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_absorb(arguments_type_* arguments) noexcept {
-    basic_refine_once<verb_>(arguments, arguments->donors, arguments->count);
+    basic_refine_once<verb_>(arguments, arguments->donors, arguments->count, nullptr, 0, 0);
 }
 
 template <auto verb_, typename arguments_type_>
@@ -586,32 +627,36 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
     if (arguments->receivers_count && (arguments->receivers_count < 2 || !arguments->receivers))
         return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
                void();
-    if (arguments->receivers_count)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet"), void();
-    visit_basic(*arguments->index, [&](auto punned) noexcept {
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_executor_handle_t call_executor;
-        if (!executor_of(punned, arguments->executor, call_executor, outcome)) return;
-        void* const refining = basic_open_refinement(arguments->index, punned, arguments->donors, arguments->count,
-                                                     arguments->expansion_factor, outcome);
-        if (!refining) return;
-        refinement_t* const refinement = new (std::nothrow) refinement_t {};
-        if (!refinement)
-            return punned.verbs.refinement_free(refining),
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        void* const refinement = basic_open_refinement(arguments->index, punned, arguments->donors, arguments->count,
+                                                       arguments->receivers, arguments->receivers_count, config,
+                                                       *executor, outcome);
+        if (!refinement) return;
+        refinement_t* const opened = new (std::nothrow) refinement_t {};
+        if (!opened)
+            return punned.verbs.refinement_free(refinement),
                    propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
                    void();
-        refinement->basic.tables = arguments->index->basic.tables;
-        refinement->basic.refining = refining;
-        refinement->basic.opened_on = arguments->index;
-        refinement->basic.opened_with = arguments->executor;
-        refinement->basic.donors = arguments->donors;
-        refinement->basic.count = arguments->count;
-        *arguments->refinement = refinement;
+        opened->basic.tables = arguments->index->basic.tables;
+        opened->basic.refinement = refinement;
+        opened->basic.opened_on = arguments->index;
+        opened->basic.opened_with = arguments->executor;
+        opened->basic.donors = arguments->donors;
+        opened->basic.count = arguments->count;
+        opened->basic.receivers = arguments->receivers;
+        opened->basic.receivers_count = arguments->receivers_count;
+        *arguments->refinement = opened;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
 
 /** Visits the variant the refinement @p arguments name was opened on with its state, refusing a
- *  call naming another index or executor, as <tt>visitor(variant, refining, executor)</tt>. */
+ *  call naming another index or executor, as <tt>visitor(variant, refinement, executor)</tt>. */
 template <typename arguments_type_, typename visitor_type_>
 void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
     auto* const refinement = arguments.refinement;
@@ -626,7 +671,7 @@ void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outco
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments.executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        visitor(punned, refinement->basic.refining, *executor);
+        visitor(punned, refinement->basic.refinement, *executor);
     });
 }
 
@@ -634,15 +679,16 @@ template <auto verb_, typename arguments_type_>
 void basic_refinement_next(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    if (arguments->visited) *arguments->visited = 0;
+    if (arguments->reselected) *arguments->reselected = 0;
     if (arguments->changed) *arguments->changed = 0;
     if (arguments->stats) *arguments->stats = {};
-    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refining, auto& executor) noexcept {
-        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refining)};
-        status_t const ran = punned.verbs.refinement_run(punned.variant, refining, ticks, executor);
-        basic_free_landed(punned, refining, arguments->refinement->basic.donors, arguments->refinement->basic.count);
+    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refinement, auto& executor) noexcept {
+        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refinement)};
+        status_t const ran = punned.verbs.refinement_next(punned.variant, refinement, executor, ticks);
+        basic_free_consumed(punned, refinement, arguments->refinement->basic.donors,
+                            arguments->refinement->basic.count);
         // Running totals, so a cancelled or failed call still says how far the pass got.
-        basic_report_refined(punned.verbs.refinement_running(refining), *arguments);
+        write_refine_outputs(punned.verbs.refinement_running(refinement), *arguments);
         propagate_error(ran, outcome);
     });
 }
@@ -653,12 +699,13 @@ void basic_refinement_finish(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     if (arguments->stats) *arguments->stats = {};
-    if (arguments->changed) *arguments->changed = 0;
-    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->report) *arguments->report = {};
     // Freed whatever the call answers; a plan dying unfinished reopens its index.
-    std::unique_ptr<refinement_t> const refinement {arguments->refinement};
-    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refining, auto& executor) noexcept {
-        propagate_error(basic_finish_refinement(punned, refining, *arguments, executor), outcome);
+    std::unique_ptr<refinement_t> const owned {arguments->refinement};
+    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refinement, auto& executor) noexcept {
+        status_t const finished = basic_finish_refinement(punned, refinement, *arguments, executor);
+        basic_count_split_receivers(punned, refinement, owned->basic.receivers, owned->basic.receivers_count);
+        propagate_error(finished, outcome);
     });
 }
 
@@ -679,14 +726,36 @@ void basic_describe(arguments_type_* arguments) noexcept {
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
+/** Audits the reachability of every shard. */
+template <auto verb_, typename arguments_type_>
+void basic_health(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->reachability = {};
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        auto const [audit, status] = punned.verbs.health(punned.variant, *executor);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
+}
+
 /** Counts a key's entries, and tallies their sizes where the traits measure any. */
 template <auto verb_, typename arguments_type_>
 void basic_count(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
-    visit_basic(*arguments->index, [&](auto punned) noexcept {
-        punned.verbs.count(punned.variant, arguments->key, *arguments->key_stats, arguments->executor, outcome);
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        propagate_error(punned.verbs.count(punned.variant, arguments->key, *arguments->key_stats, *executor), outcome);
     });
 }
 
@@ -710,43 +779,52 @@ void basic_insert(arguments_type_* arguments) noexcept {
                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
-        if (crossed(punned.verbs.insert(punned.variant, *arguments, ticks, *executor), arguments->stats, outcome))
+        insert_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+        if (crossed(punned.verbs.insert(punned.variant, arguments->keys, traits_t::values_of(*arguments), config,
+                                        *executor, ticks),
+                    arguments->stats, outcome))
             propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_search(arguments_type_* arguments) noexcept {
+    using traits_t = typename handle_of<arguments_type_>::traits_t;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     std::size_t const count = arguments->count, wanted = arguments->wanted;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        int const device = punned.verbs.device(punned.variant);
-        if (!accepts_traversal(device, arguments->traversal, arguments->predicate, outcome)) return;
-        if (arguments->traversal == usearch_traversal_scan_k && device != host_device_k)
+        arena_residency_t const residency = punned.verbs.residency(punned.variant);
+        if (!accepts_traversal(residency, arguments->traversal, arguments->predicate, outcome)) return;
+        if (arguments->traversal == usearch_traversal_scan_k && residency != ram_residency_k)
             return propagate_error(usearch_status_unsupported_k, outcome, "No device scan serves this modality"),
                    void();
         // Matches land on host pages, which a device arena takes over and a host one keeps.
-        bool const host_landing = arguments->arena && arguments->arena->device == host_device_k;
+        bool const host_arena = arguments->arena && arguments->arena->residency == ram_residency_k;
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          host_landing ? host_device_k : device,
+                                                          host_arena ? ram_residency_k : residency,
                                                           {address_of(arguments->queries)}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-        if (!punned.verbs.accepts_search(punned.variant, *arguments, outcome)) return;
-        auto [landing, carve_status] = carve_matches(arena->memory, count, wanted);
+        if (!traits_t::accepts(*arguments, outcome)) return;
+        typename traits_t::queries_t const queries = traits_t::queries_of(*arguments);
+        if (status_t const admitted = punned.verbs.serves_search(punned.variant, queries); failed(admitted))
+            return propagate_error(admitted, outcome), void();
+        auto [outputs, carve_status] = carve_matches(arena->memory, count, wanted);
         if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
-        if (!crossed(punned.verbs.search(punned.variant, *arguments, arena->memory, landing, ticks, *executor),
+        search_config_t const config = search_config_of(arguments->expansion_factor, arguments->traversal);
+        if (!crossed(punned.verbs.search(punned.variant, queries, outputs, config, predicate_of(arguments->predicate),
+                                         arena->memory, *executor, ticks),
                      arguments->stats, outcome))
             return;
-        auto const [matches, publish_status] = publish_matches(*arena, landing, count);
+        auto const [matches, publish_status] = publish_matches(*arena, outputs, count);
         if (failed(publish_status))
             return propagate_error(publish_status, outcome, "Failed to land the matches on the device"), void();
         *arguments->matches = matches;
@@ -754,7 +832,7 @@ void basic_search(arguments_type_* arguments) noexcept {
     });
 }
 
-/** Lands every entry within the radius a modality's containment walk names, a tape per query in
+/** Writes every entry within the radius a modality's containment walk names, a tape per query in
  *  the arena, as the variant's face answers. */
 template <auto verb_, typename arguments_type_>
 void basic_within(arguments_type_* arguments) noexcept {
@@ -766,24 +844,30 @@ void basic_within(arguments_type_* arguments) noexcept {
     *arguments->matches = {};
     if (arguments->written) *arguments->written = 0;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {address_of(arguments->queries)}, outcome);
+                                                      ram_residency_k, {address_of(arguments->queries)}, outcome);
     if (!arena) return;
     if (!traits_t::accepts(*arguments, outcome)) return;
     if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        if (!punned.verbs.accepts_within(punned.variant, *arguments, outcome)) return;
+        if (!accepts_traversal(punned.verbs.residency(punned.variant), arguments->traversal, arguments->predicate,
+                               outcome))
+            return;
+        typename traits_t::within_queries_t const queries = traits_t::queries_of(*arguments);
+        predicate_t const predicate = predicate_of(arguments->predicate);
+        if (status_t const admitted = punned.verbs.serves_within(punned.variant, queries, predicate); failed(admitted))
+            return propagate_error(admitted, outcome), void();
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
-        usearch_matches_tape_view_t matches {};
-        std::size_t written = 0;
-        if (!crossed(punned.verbs.within(punned.variant, *arguments, arena->memory, matches, written, ticks, *executor),
+        within_outputs_t outputs;
+        if (!crossed(punned.verbs.within(punned.variant, queries, outputs, search_config_of(0, arguments->traversal),
+                                         predicate, arena->memory, *executor, ticks),
                      arguments->stats, outcome))
             return;
-        *arguments->matches = matches;
-        if (arguments->written) *arguments->written = written;
+        *arguments->matches = outputs.matches;
+        if (arguments->written) *arguments->written = outputs.written;
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -799,10 +883,19 @@ void basic_get(arguments_type_* arguments) noexcept {
     if constexpr (requires { traits_t::exports(*arguments, outcome); })
         if (!traits_t::exports(*arguments, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {}, outcome);
+                                                      ram_residency_k, {}, outcome);
     if (!arena) return;
-    visit_basic(*arguments->index,
-                [&](auto punned) noexcept { punned.verbs.get(punned.variant, *arguments, arena->memory, outcome); });
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        auto const [written, status] = punned.verbs.get(punned.variant, arguments->key,
+                                                        traits_t::get_outputs_of(*arguments), arena->memory, *executor);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        if (arguments->written) *arguments->written = written;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 #pragma endregion Introspection and Search
@@ -816,19 +909,19 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
     *arguments->cursor = nullptr;
     if (arguments->starts_count && !arguments->starts)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
-    if (arguments->starts_count)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
-               void();
     cursor_handle_t* const cursor = new (std::nothrow) cursor_handle_t {};
     if (!cursor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     cursor->basic.index = arguments->index;
     cursor->basic.tables = arguments->index->basic.tables;
+    status_t opened = status_t::success_k;
     visit_basic(*arguments->index, [&](auto punned) noexcept {
-        cursor->basic.cursor = punned.verbs.cursor_open(punned.variant, outcome);
+        auto const [walk, status] = punned.verbs.cursor_init(punned.variant,
+                                                             {arguments->starts, arguments->starts_count});
+        cursor->basic.cursor = walk;
+        opened = status;
     });
-    // A variant that opened nothing said why in the outcome.
-    if (!cursor->basic.cursor) return delete cursor, void();
+    if (failed(opened)) return delete cursor, propagate_error(opened, outcome), void();
     *arguments->cursor = cursor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -845,15 +938,27 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
     if (cursor.index != arguments->index)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    if (arguments->links)
-        return propagate_error(usearch_status_unsupported_k, outcome, "No residency pulls graph links yet"), void();
     if (fu::standard_atomic_ref<u32_t>(cursor.busy).fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      host_device_k, {}, outcome);
+                                                      ram_residency_k, {}, outcome);
     if (arena)
-        visit_basic(*arguments->index, [&](auto punned) noexcept {
-            punned.verbs.cursor_next(punned.variant, cursor.cursor, *arguments, arena->memory, outcome);
+        visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                            outcome);
+            if (!executor) return;
+            links_outputs_t links {arena->memory};
+            if (arguments->links && failed(links.open()))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            auto const [keys, status] = punned.verbs.cursor_next(punned.variant, cursor.cursor,
+                                                                 arguments->links ? &links : nullptr, arguments->wanted,
+                                                                 arena->memory, *executor);
+            if (failed(status)) return propagate_error(status, outcome), void();
+            if (arguments->links) *arguments->links = links.tape();
+            *arguments->keys = {keys.data(), sizeof(usearch_key_t)};
+            *arguments->written = keys.size();
+            propagate_error(usearch_status_success_k, outcome, nullptr);
         });
     fu::standard_atomic_ref<u32_t>(cursor.busy).clear_bits(1, std::memory_order_release);
 }
@@ -874,32 +979,52 @@ void basic_save(arguments_type_* arguments) noexcept {
     });
 }
 
-/** Samples the index as each variant's face answers. */
+/** Draws around the focus keys beside the shown ones, writing every output on the arena's host
+ *  pages; only a RAM variant samples yet. */
 template <auto verb_, typename arguments_type_>
 void basic_sample(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->keys = {};
-    *arguments->links = {};
-    *arguments->written = 0;
-    if (arguments->stats) *arguments->stats = {};
-    visit_basic(*arguments->index, [&](auto punned) noexcept {
-        propagate_error(punned.verbs.sample(punned.variant, *arguments), outcome);
+    reset_sample(*arguments);
+    if (!accepts_sample(*arguments, outcome)) return;
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        using key_t = us::utilities::uuid_t;
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        usearch_arena_handle_t* const arena = claim_arena(
+            arguments->arena, arguments->outcome, arguments->executor, punned.verbs.residency(punned.variant),
+            {arguments->shown.data, arguments->shown_coordinates.data, arguments->focus.data}, outcome);
+        if (!arena) return;
+        auto const [inputs, view_status] = view_sample<key_t>(*arguments, arena->memory);
+        auto const [staging, carve_status] = carve_sample(arena->memory, arguments->wanted);
+        if (failed(view_status) || failed(carve_status))
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        sample_config_t const config {arguments->seed, arguments->expansion_factor};
+        auto const [sampled, status] = punned.verbs.sample(punned.variant, inputs, staging.template outputs<key_t>(),
+                                                           config, *executor);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        progress_ticks_t ticks {arguments->progress, arguments->wanted};
+        if (sampled.written && ticks(sampled.written, arguments->wanted) == continuation_t::cancel_k)
+            return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the work"),
+                   void();
+        publish_sample(*arguments, staging, sampled);
+        propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
 
-/** Splits the index into its receivers, which no residency serves yet. */
+/** Splits the index into its receivers, one graph-local part each, then re-links their picked
+ *  nodes. */
 template <auto verb_, typename arguments_type_>
 void basic_split(arguments_type_* arguments) noexcept {
+    if (arguments->count >= 2 && arguments->receivers)
+        return basic_refine_once<verb_>(arguments, nullptr, 0, arguments->receivers, arguments->count, arguments->seed);
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    if (arguments->changed) *arguments->changed = 0;
-    if (arguments->reachability) *arguments->reachability = {};
+    if (arguments->report) *arguments->report = {};
     if (arguments->stats) *arguments->stats = {};
-    if (arguments->count < 2 || !arguments->receivers)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
-               void();
-    propagate_error(usearch_status_unsupported_k, outcome, "No residency splits an index yet");
+    propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more");
 }
 
 /** Reads the geometry a checkpoint recorded without loading it; @p traits_type_ names the modality,

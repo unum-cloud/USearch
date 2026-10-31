@@ -258,21 +258,11 @@ status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::l
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_kernels_(cuda_api_t const& api,
-                                                                                             int device) noexcept {
-    auto [module, status] = cuda_module_t::load(api, device, kernels_type_::bytes());
-    if (failed(status)) return status;
-    module_ = std::move(module);
-    vram_kernel_symbol_t symbol;
-    for (basic::cuda_rung_t const instantiated : basic::cuda_rungs) {
-        vram_kernel_symbol(symbol, "shapes", "cuda_kernel", {"vram_arguments", 3, itanium_scope_t::basic_k},
-                           instantiated.kernel, capability_, scalar_::dtype(), itanium_type<node_id_type_> {},
-                           instantiated.slots);
-        cuda_function_handle_t& function =
-            kernels_[0][static_cast<u32_t>(instantiated.kernel)][gpu_rung_index(instantiated.slots)];
-        if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
-    }
-    return status_t::success_k;
+void vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+    vram_kernel_symbol_t& symbol, std::size_t, basic::cuda_rung_t instantiated) noexcept {
+    vram_kernel_symbol(symbol, "shapes", "cuda_kernel", {"vram_arguments", 3, itanium_scope_t::basic_k},
+                       instantiated.kernel, capability_, scalar_::dtype(), itanium_type<node_id_type_> {},
+                       instantiated.slots);
 }
 
 /** Every NVIDIA shapes kernel: @p kernel_ picks the walk, @p capability_ and @p dtype_ the kit

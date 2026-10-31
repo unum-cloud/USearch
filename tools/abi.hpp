@@ -39,7 +39,7 @@
 #include <cctype>  // `std::toupper` - the variable names
 #include <cmath>   // `std::fabs`, `std::log2` - the score tolerance, the ranking discounts
 #include <cstddef> // `std::size_t`
-#include <cstdint> // `std::int32_t`, `std::uint32_t`
+#include <cstdint> // `std::int32_t`, `std::uint32_t`, `std::uint64_t`
 #include <cstdio>  // `std::remove`, `stdout` - the round-tripped checkpoints, the terminal probe
 #include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
 #include <cstring> // `std::memcpy`, `std::memcmp` - the counters, the keys
@@ -751,7 +751,7 @@ inline std::vector<usearch_gpu_device_t> listed_devices() {
  *  @brief The executors and the arena one residency's calls run on, freed together.
  *
  *  A RAM session builds and serves on one RAM executor. A VRAM session builds and serves on the
- *  executor of its devices, landing outputs in an arena on the first of them. An NVMe session
+ *  executor of its devices, writing outputs to an arena on the first of them. An NVMe session
  *  builds on a RAM executor and serves views on an NVMe executor of its own, so a built index is
  *  saved and viewed before it is searched there.
  */
@@ -930,16 +930,26 @@ inline bool download(void* destination, void const* source, std::size_t bytes) n
 
 #pragma region Verbs
 
+/** Where a sample lands, every view inside the call's arena. */
+struct sample_outputs_view_t {
+    usearch_keys_view_t keys {};
+    std::size_t const* entry_ordinals = nullptr;
+    usearch_matches_view_t parents {};
+    usearch_rows_view_t coordinates {};
+    std::size_t written = 0;
+    usearch_traversal_stats_t stats {};
+};
+
 /** The C functions of the dense modality, behind the signatures every modality shares. */
 struct dense_verbs_t {
     using index_t = usearch_dense_index_t;
     using description_t = usearch_dense_index_description_t;
     using geometry_t = usearch_dense_metadata_t;
-    using inputs_t = usearch_rows_view_t;
+    using values_t = usearch_rows_view_t;
     using queries_t = usearch_rows_view_t;
     static constexpr std::string_view name_k = "dense";
 
-    static inputs_t slice(inputs_t rows, std::size_t first) noexcept {
+    static values_t slice(values_t rows, std::size_t first) noexcept {
         rows.data = static_cast<usearch_byte_t const*>(rows.data) + first * rows.stride;
         return rows;
     }
@@ -957,7 +967,7 @@ struct dense_verbs_t {
         usearch_dense_init_vram(&arguments);
     }
     static void insert(index_t index, usearch_executor_t executor, std::size_t count, usearch_keys_view_t keys,
-                       inputs_t rows, std::size_t expansion, usearch_traversal_stats_t* stats,
+                       values_t rows, std::size_t expansion, usearch_traversal_stats_t* stats,
                        usearch_outcome_t* outcome) noexcept {
         usearch_dense_insert_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
@@ -1020,11 +1030,10 @@ struct dense_verbs_t {
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         usearch_dense_clear(&arguments);
     }
-    static void refine(index_t index, usearch_executor_t executor, std::size_t* changed,
+    static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome) noexcept {
         usearch_dense_refine_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome,
-        arguments.changed = changed;
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         usearch_dense_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
@@ -1034,6 +1043,53 @@ struct dense_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_dense_absorb(&arguments);
     }
+    static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
+                       usearch_outcome_t* outcome) noexcept {
+        usearch_dense_health_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.reachability = reachability;
+        usearch_dense_health(&arguments);
+    }
+    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_split_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        usearch_dense_split(&arguments);
+    }
+    using cursor_t = usearch_dense_cursor_t;
+    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
+                            usearch_outcome_t* outcome) noexcept {
+        usearch_dense_cursor_init_t arguments {};
+        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.starts_count = starts.size(), arguments.starts = starts.data();
+        usearch_dense_cursor_init(&arguments);
+    }
+    static void cursor_next(index_t index, usearch_executor_t executor, usearch_arena_t arena, cursor_t cursor,
+                            std::size_t wanted, usearch_keys_view_t* keys, usearch_keys_tape_view_t* links,
+                            std::size_t* written, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_cursor_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.keys = keys, arguments.links = links, arguments.written = written;
+        arguments.arena = arena, arguments.wanted = wanted;
+        usearch_dense_cursor_next(&arguments);
+    }
+    static void sample(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                       std::span<usearch_key_t const> shown, usearch_rows_view_t shown_coordinates,
+                       std::span<usearch_key_t const> focus, std::size_t wanted, std::uint64_t seed,
+                       sample_outputs_view_t& outputs, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_sample_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.arena = arena;
+        arguments.shown_count = shown.size(), arguments.shown = keys_view(shown);
+        arguments.shown_coordinates = shown_coordinates;
+        arguments.focus_count = focus.size(), arguments.focus = keys_view(focus);
+        arguments.keys = &outputs.keys, arguments.entry_ordinals = &outputs.entry_ordinals,
+        arguments.parents = &outputs.parents;
+        arguments.coordinates = &outputs.coordinates, arguments.written = &outputs.written;
+        arguments.stats = &outputs.stats, arguments.wanted = wanted, arguments.seed = seed;
+        usearch_dense_sample(&arguments);
+    }
+    static void cursor_free(cursor_t cursor) noexcept { usearch_dense_cursor_free(cursor); }
     static void free(index_t index) noexcept { usearch_dense_free(index); }
 };
 
@@ -1050,11 +1106,11 @@ struct sequence_verbs_t {
     using index_t = usearch_sequence_index_t;
     using description_t = usearch_sequence_index_description_t;
     using geometry_t = sequence_geometry_t;
-    using inputs_t = usearch_tape_view_t;
+    using values_t = usearch_tape_view_t;
     using queries_t = usearch_tape_view_t;
     static constexpr std::string_view name_k = "sequence";
 
-    static inputs_t slice(inputs_t tape, std::size_t first) noexcept {
+    static values_t slice(values_t tape, std::size_t first) noexcept {
         tape.offsets += first;
         return tape;
     }
@@ -1085,7 +1141,7 @@ struct sequence_verbs_t {
         usearch_sequence_init_vram(&arguments);
     }
     static void insert(index_t index, usearch_executor_t executor, std::size_t count, usearch_keys_view_t keys,
-                       inputs_t sequences, std::size_t expansion, usearch_traversal_stats_t* stats,
+                       values_t sequences, std::size_t expansion, usearch_traversal_stats_t* stats,
                        usearch_outcome_t* outcome) noexcept {
         usearch_sequence_insert_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
@@ -1152,11 +1208,10 @@ struct sequence_verbs_t {
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         usearch_sequence_clear(&arguments);
     }
-    static void refine(index_t index, usearch_executor_t executor, std::size_t* changed,
+    static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome) noexcept {
         usearch_sequence_refine_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome,
-        arguments.changed = changed;
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         usearch_sequence_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
@@ -1166,6 +1221,53 @@ struct sequence_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_sequence_absorb(&arguments);
     }
+    static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
+                       usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_health_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.reachability = reachability;
+        usearch_sequence_health(&arguments);
+    }
+    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_split_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        usearch_sequence_split(&arguments);
+    }
+    using cursor_t = usearch_sequence_cursor_t;
+    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
+                            usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_cursor_init_t arguments {};
+        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.starts_count = starts.size(), arguments.starts = starts.data();
+        usearch_sequence_cursor_init(&arguments);
+    }
+    static void cursor_next(index_t index, usearch_executor_t executor, usearch_arena_t arena, cursor_t cursor,
+                            std::size_t wanted, usearch_keys_view_t* keys, usearch_keys_tape_view_t* links,
+                            std::size_t* written, usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_cursor_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.keys = keys, arguments.links = links, arguments.written = written;
+        arguments.arena = arena, arguments.wanted = wanted;
+        usearch_sequence_cursor_next(&arguments);
+    }
+    static void sample(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                       std::span<usearch_key_t const> shown, usearch_rows_view_t shown_coordinates,
+                       std::span<usearch_key_t const> focus, std::size_t wanted, std::uint64_t seed,
+                       sample_outputs_view_t& outputs, usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_sample_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.arena = arena;
+        arguments.shown_count = shown.size(), arguments.shown = keys_view(shown);
+        arguments.shown_coordinates = shown_coordinates;
+        arguments.focus_count = focus.size(), arguments.focus = keys_view(focus);
+        arguments.keys = &outputs.keys, arguments.entry_ordinals = &outputs.entry_ordinals,
+        arguments.parents = &outputs.parents;
+        arguments.coordinates = &outputs.coordinates, arguments.written = &outputs.written;
+        arguments.stats = &outputs.stats, arguments.wanted = wanted, arguments.seed = seed;
+        usearch_sequence_sample(&arguments);
+    }
+    static void cursor_free(cursor_t cursor) noexcept { usearch_sequence_cursor_free(cursor); }
     static void free(index_t index) noexcept { usearch_sequence_free(index); }
 };
 
@@ -1174,11 +1276,11 @@ struct shapes_verbs_t {
     using index_t = usearch_shapes_index_t;
     using description_t = usearch_shapes_index_description_t;
     using geometry_t = usearch_shapes_metadata_t;
-    using inputs_t = usearch_tape_view_t;
+    using values_t = usearch_tape_view_t;
     using queries_t = usearch_tape_view_t;
     static constexpr std::string_view name_k = "shapes";
 
-    static inputs_t slice(inputs_t tape, std::size_t first) noexcept {
+    static values_t slice(values_t tape, std::size_t first) noexcept {
         tape.offsets += first;
         return tape;
     }
@@ -1195,7 +1297,7 @@ struct shapes_verbs_t {
         usearch_shapes_init_vram(&arguments);
     }
     static void insert(index_t index, usearch_executor_t executor, std::size_t count, usearch_keys_view_t keys,
-                       inputs_t shapes, std::size_t expansion, usearch_traversal_stats_t* stats,
+                       values_t shapes, std::size_t expansion, usearch_traversal_stats_t* stats,
                        usearch_outcome_t* outcome) noexcept {
         usearch_shapes_insert_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
@@ -1260,11 +1362,10 @@ struct shapes_verbs_t {
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         usearch_shapes_clear(&arguments);
     }
-    static void refine(index_t index, usearch_executor_t executor, std::size_t* changed,
+    static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome) noexcept {
         usearch_shapes_refine_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome,
-        arguments.changed = changed;
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         usearch_shapes_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
@@ -1274,6 +1375,53 @@ struct shapes_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_shapes_absorb(&arguments);
     }
+    static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
+                       usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_health_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.reachability = reachability;
+        usearch_shapes_health(&arguments);
+    }
+    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_split_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        usearch_shapes_split(&arguments);
+    }
+    using cursor_t = usearch_shapes_cursor_t;
+    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
+                            usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_cursor_init_t arguments {};
+        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.starts_count = starts.size(), arguments.starts = starts.data();
+        usearch_shapes_cursor_init(&arguments);
+    }
+    static void cursor_next(index_t index, usearch_executor_t executor, usearch_arena_t arena, cursor_t cursor,
+                            std::size_t wanted, usearch_keys_view_t* keys, usearch_keys_tape_view_t* links,
+                            std::size_t* written, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_cursor_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.keys = keys, arguments.links = links, arguments.written = written;
+        arguments.arena = arena, arguments.wanted = wanted;
+        usearch_shapes_cursor_next(&arguments);
+    }
+    static void sample(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                       std::span<usearch_key_t const> shown, usearch_rows_view_t shown_coordinates,
+                       std::span<usearch_key_t const> focus, std::size_t wanted, std::uint64_t seed,
+                       sample_outputs_view_t& outputs, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_sample_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.arena = arena;
+        arguments.shown_count = shown.size(), arguments.shown = keys_view(shown);
+        arguments.shown_coordinates = shown_coordinates;
+        arguments.focus_count = focus.size(), arguments.focus = keys_view(focus);
+        arguments.keys = &outputs.keys, arguments.entry_ordinals = &outputs.entry_ordinals,
+        arguments.parents = &outputs.parents;
+        arguments.coordinates = &outputs.coordinates, arguments.written = &outputs.written;
+        arguments.stats = &outputs.stats, arguments.wanted = wanted, arguments.seed = seed;
+        usearch_shapes_sample(&arguments);
+    }
+    static void cursor_free(cursor_t cursor) noexcept { usearch_shapes_cursor_free(cursor); }
     static void free(index_t index) noexcept { usearch_shapes_free(index); }
 };
 
@@ -1297,11 +1445,11 @@ struct geospatial_verbs_t {
     using index_t = usearch_geospatial_index_t;
     using description_t = usearch_geospatial_index_description_t;
     using geometry_t = geospatial_geometry_t;
-    using inputs_t = usearch_geospatial_observation_t const*;
+    using values_t = usearch_geospatial_observation_t const*;
     using queries_t = geospatial_queries_t;
     static constexpr std::string_view name_k = "geospatial";
 
-    static inputs_t slice(inputs_t observations, std::size_t first) noexcept { return observations + first; }
+    static values_t slice(values_t observations, std::size_t first) noexcept { return observations + first; }
     static queries_t slice(queries_t queries, std::size_t first) noexcept {
         queries.observations += first;
         return queries;
@@ -1319,7 +1467,7 @@ struct geospatial_verbs_t {
         usearch_geospatial_init_vram(&arguments);
     }
     static void insert(index_t index, usearch_executor_t executor, std::size_t count, usearch_keys_view_t keys,
-                       inputs_t observations, std::size_t expansion, usearch_traversal_stats_t* stats,
+                       values_t observations, std::size_t expansion, usearch_traversal_stats_t* stats,
                        usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_insert_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
@@ -1387,11 +1535,10 @@ struct geospatial_verbs_t {
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         usearch_geospatial_clear(&arguments);
     }
-    static void refine(index_t index, usearch_executor_t executor, std::size_t* changed,
+    static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_refine_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome,
-        arguments.changed = changed;
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         usearch_geospatial_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
@@ -1401,6 +1548,53 @@ struct geospatial_verbs_t {
         arguments.count = count, arguments.donors = donors;
         usearch_geospatial_absorb(&arguments);
     }
+    static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
+                       usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_health_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.reachability = reachability;
+        usearch_geospatial_health(&arguments);
+    }
+    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_split_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        usearch_geospatial_split(&arguments);
+    }
+    using cursor_t = usearch_geospatial_cursor_t;
+    static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
+                            usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_cursor_init_t arguments {};
+        arguments.cursor = cursor, arguments.index = index, arguments.outcome = outcome;
+        arguments.starts_count = starts.size(), arguments.starts = starts.data();
+        usearch_geospatial_cursor_init(&arguments);
+    }
+    static void cursor_next(index_t index, usearch_executor_t executor, usearch_arena_t arena, cursor_t cursor,
+                            std::size_t wanted, usearch_keys_view_t* keys, usearch_keys_tape_view_t* links,
+                            std::size_t* written, usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_cursor_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.cursor = cursor, arguments.keys = keys, arguments.links = links, arguments.written = written;
+        arguments.arena = arena, arguments.wanted = wanted;
+        usearch_geospatial_cursor_next(&arguments);
+    }
+    static void sample(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                       std::span<usearch_key_t const> shown, usearch_rows_view_t shown_coordinates,
+                       std::span<usearch_key_t const> focus, std::size_t wanted, std::uint64_t seed,
+                       sample_outputs_view_t& outputs, usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_sample_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.arena = arena;
+        arguments.shown_count = shown.size(), arguments.shown = keys_view(shown);
+        arguments.shown_coordinates = shown_coordinates;
+        arguments.focus_count = focus.size(), arguments.focus = keys_view(focus);
+        arguments.keys = &outputs.keys, arguments.entry_ordinals = &outputs.entry_ordinals,
+        arguments.parents = &outputs.parents;
+        arguments.coordinates = &outputs.coordinates, arguments.written = &outputs.written;
+        arguments.stats = &outputs.stats, arguments.wanted = wanted, arguments.seed = seed;
+        usearch_geospatial_sample(&arguments);
+    }
+    static void cursor_free(cursor_t cursor) noexcept { usearch_geospatial_cursor_free(cursor); }
     static void free(index_t index) noexcept { usearch_geospatial_free(index); }
 };
 
@@ -1470,10 +1664,10 @@ handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometr
 
 /** Reserves room for @p count more entries, then inserts @p count entries of @p inputs into
  *  @p index in batches of @p batch, keyed by @ref key_of_offset from offset @p first_offset on,
- *  summing every batch's telemetry into @p totals and reporting each landed count to
+ *  summing every batch's telemetry into @p totals and reporting each inserted count to
  *  @p progress. */
 template <typename verbs_type_, typename progress_type_ = dummy_progress_t>
-usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
+usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
                                  std::size_t first_offset, std::size_t batch, std::size_t expansion,
                                  usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
@@ -1686,19 +1880,19 @@ class mapped_rows_t {
 
 #pragma region Recall
 
-/** The matches searches landed, copied off their arena: every query's keys and scores end to end,
+/** The matches searches wrote, copied off their arena: every query's keys and scores end to end,
  *  and how many each query holds, so whole searches compare and judge. */
-struct landed_matches_t {
+struct copied_matches_t {
     std::vector<uuid_t> keys;
     std::vector<usearch_distance_t> scores;
     std::vector<std::size_t> counts;
 
-    bool operator==(landed_matches_t const&) const = default;
+    bool operator==(copied_matches_t const&) const = default;
 };
 
-/** Appends the matches the first @p queries queries of @p matches hold to @p landed, read back from
+/** Appends the matches the first @p queries queries of @p matches hold to @p copied, read back from
  *  wherever the arena placed them; false when the copy failed. */
-inline bool append_landed(usearch_matches_view_t const& matches, std::size_t queries, landed_matches_t& landed) {
+inline bool append_matches(usearch_matches_view_t const& matches, std::size_t queries, copied_matches_t& copied) {
     std::vector<usearch_key_t> keys(queries * matches.columns);
     std::vector<usearch_distance_t> scores(queries * matches.columns);
     std::vector<std::size_t> counts(queries);
@@ -1707,34 +1901,34 @@ inline bool append_landed(usearch_matches_view_t const& matches, std::size_t que
         !download(counts.data(), matches.counts, counts.size() * sizeof(std::size_t)))
         return false;
     for (std::size_t query = 0; query != queries; ++query) {
-        landed.counts.push_back(counts[query]);
+        copied.counts.push_back(counts[query]);
         for (std::size_t match = query * matches.columns; match != query * matches.columns + counts[query]; ++match) {
-            landed.keys.push_back(std::bit_cast<uuid_t>(keys[match]));
-            landed.scores.push_back(scores[match]);
+            copied.keys.push_back(std::bit_cast<uuid_t>(keys[match]));
+            copied.scores.push_back(scores[match]);
         }
     }
     return true;
 }
 
 /** The matches the first @p queries queries of @p matches hold, copied off a host arena. */
-inline landed_matches_t landed_matches(usearch_matches_view_t const& matches, std::size_t queries) {
-    landed_matches_t landed {{}, {}, {matches.counts, matches.counts + queries}};
+inline copied_matches_t copy_matches(usearch_matches_view_t const& matches, std::size_t queries) {
+    copied_matches_t copied {{}, {}, {matches.counts, matches.counts + queries}};
     for (std::size_t query = 0; query != queries; ++query)
         for (std::size_t match = query * matches.columns; match != query * matches.columns + matches.counts[query];
              ++match) {
-            landed.keys.push_back(std::bit_cast<uuid_t>(matches.keys[match]));
-            landed.scores.push_back(matches.scores[match]);
+            copied.keys.push_back(std::bit_cast<uuid_t>(matches.keys[match]));
+            copied.scores.push_back(matches.scores[match]);
         }
-    return landed;
+    return copied;
 }
 
-/** Searches @p count queries of @p queries in batches of @p batch, landing every match in @p landed
+/** Searches @p count queries of @p queries in batches of @p batch, copying every match to @p copied
  *  and summing the telemetry into @p totals. */
 template <typename verbs_type_>
 usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                                  std::size_t batch, std::size_t wanted, std::size_t expansion,
                                  usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
-                                 landed_matches_t& landed) {
+                                 copied_matches_t& copied) {
     usearch_outcome_t outcome {};
     std::size_t const batch_queries = std::max<std::size_t>(1, std::min(batch, count));
     for (std::size_t first = 0; first < count; first += batch_queries) {
@@ -1745,7 +1939,7 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
                             verbs_type_::slice(queries, first), wanted, expansion, traversal, &matches, &stats,
                             &outcome);
         if (outcome.status != usearch_status_success_k) return outcome;
-        if (!append_landed(matches, sliced, landed))
+        if (!append_matches(matches, sliced, copied))
             return {usearch_status_device_k, "The matches could not be read back"};
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
         totals.restarts += stats.restarts;
@@ -1757,15 +1951,15 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
  *  nearest first with their distances, by a scan of every entry @p index holds. */
 template <typename verbs_type_>
 usearch_outcome_t scan_oracle(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t judged,
-                              std::size_t wanted, std::size_t batch, landed_matches_t& oracle) {
+                              std::size_t wanted, std::size_t batch, copied_matches_t& oracle) {
     usearch_traversal_stats_t stats {};
     return search_queries(index, queries, judged, batch, wanted, 0, usearch_traversal_scan_k, stats, oracle);
 }
 
 /** The truth a ground-truth file lists: @p depth offsets per query, each keyed by
  *  @ref key_of_offset under @p seed, without distances. */
-inline landed_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> offsets, std::size_t depth) {
-    landed_matches_t oracle;
+inline copied_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> offsets, std::size_t depth) {
+    copied_matches_t oracle;
     std::size_t const queries = depth ? offsets.size() / depth : 0;
     oracle.counts.assign(queries, depth);
     for (std::uint32_t const offset : offsets.first(queries * depth))
@@ -1778,11 +1972,11 @@ inline bool within(double found, double exact) noexcept {
     return found <= exact + 1e-6 * std::max(1.0, std::fabs(exact));
 }
 
-/** The offset of every query's first match in @p landed. */
-inline std::vector<std::size_t> match_offsets(landed_matches_t const& landed) {
-    std::vector<std::size_t> offsets(landed.counts.size() + 1);
-    for (std::size_t query = 0; query != landed.counts.size(); ++query)
-        offsets[query + 1] = offsets[query] + landed.counts[query];
+/** The offset of every query's first match in @p copied. */
+inline std::vector<std::size_t> match_offsets(copied_matches_t const& copied) {
+    std::vector<std::size_t> offsets(copied.counts.size() + 1);
+    for (std::size_t query = 0; query != copied.counts.size(); ++query)
+        offsets[query + 1] = offsets[query] + copied.counts[query];
     return offsets;
 }
 
@@ -1796,7 +1990,7 @@ inline std::vector<std::size_t> match_offsets(landed_matches_t const& landed) {
  *  file lists it, counts a match whose key it lists.
  */
 template <typename visit_type_>
-void judge_queries(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle, visit_type_&& visit) {
+void judge_queries(std::size_t k, copied_matches_t const& found, copied_matches_t const& oracle, visit_type_&& visit) {
     std::vector<std::size_t> const found_offsets = match_offsets(found), truth_offsets = match_offsets(oracle);
     bool const scored = !oracle.scores.empty();
     std::vector<bool> hits;
@@ -1818,7 +2012,7 @@ void judge_queries(std::size_t k, landed_matches_t const& found, landed_matches_
 
 /** The share of each judged query's top @p k the matches @p found hold among their own first @p k,
  *  averaged over the queries the oracle expects any match for. */
-inline double recall_at(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle) {
+inline double recall_at(std::size_t k, copied_matches_t const& found, copied_matches_t const& oracle) {
     double recall = 0;
     std::size_t answerable = 0;
     judge_queries(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
@@ -1833,7 +2027,7 @@ inline double recall_at(std::size_t k, landed_matches_t const& found, landed_mat
 /** The normalized discounted cumulative gain of @p found 's first @p k matches against @p oracle,
  *  every hit earning its rank's discount, averaged over the queries the oracle expects any match
  *  for. */
-inline double ndcg_at(std::size_t k, landed_matches_t const& found, landed_matches_t const& oracle) {
+inline double ndcg_at(std::size_t k, copied_matches_t const& found, copied_matches_t const& oracle) {
     double gain_sum = 0;
     std::size_t answerable = 0;
     judge_queries(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
@@ -1853,11 +2047,11 @@ inline double ndcg_at(std::size_t k, landed_matches_t const& found, landed_match
  *  distances per query, then handing its matches to @p on_swept as `(expansion, matches)`. */
 template <typename verbs_type_, typename swept_type_ = dummy_progress_t>
 usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
-                               landed_matches_t const& oracle, std::span<std::size_t const> expansions,
+                               copied_matches_t const& oracle, std::span<std::size_t const> expansions,
                                std::size_t wanted, std::size_t batch, swept_type_&& on_swept = {}) {
     usearch_outcome_t outcome {};
     for (std::size_t const expansion : expansions) {
-        landed_matches_t found;
+        copied_matches_t found;
         usearch_traversal_stats_t stats {};
         std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
         outcome = search_queries(index, queries, count, batch, wanted, expansion, usearch_traversal_walk_k, stats,
@@ -1999,7 +2193,7 @@ inline std::size_t check(usearch_outcome_t const& outcome,
 /** Whether @p first and @p second land as many matches per query, at the same distances rank by
  *  rank: within @p score_band of each other, or with no band within the rounding two scoring paths
  *  differ by; keys are not compared, as ties reorder them. */
-inline bool equivalent_matches(landed_matches_t const& first, landed_matches_t const& second, double score_band) {
+inline bool equivalent_matches(copied_matches_t const& first, copied_matches_t const& second, double score_band) {
     if (first.counts != second.counts || first.scores.size() != second.scores.size()) return false;
     for (std::size_t match = 0; match != first.scores.size(); ++match) {
         double const one = first.scores[match], other = second.scores[match];
@@ -2029,10 +2223,10 @@ enum class saved_bytes_t {
  *      session's devices when it has any, and as an NVMe view, and judges every copy.
  *
  *  A checkpoint of one shard is one monolith, and one of @p parts shards is that many parts beside
- *  a manifest. The copy in the index's own residency must land matches equivalent to those
- *  @p search lands on the original, as `search(handle) → landed_matches_t`, within @p score_band
- *  when the stored values round on the way; every loaded copy must save again, byte for byte when
- *  @p bytes says so; the view must answer the search. Every file the round trip wrote is removed.
+ *  a manifest. The copy in the index's own residency must land matches equivalent to the original's
+ *  under @p search, as <tt>search(handle) → copied_matches_t</tt>, within @p score_band when the stored
+ *  values round on the way; every loaded copy must save again, byte for byte when @p bytes says so;
+ *  the view must answer the search. Every file the round trip wrote is removed.
  */
 template <typename verbs_type_, typename search_type_>
 std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string const& stem, std::size_t parts,
@@ -2047,7 +2241,7 @@ std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string 
     failures += check(describe(index).shards_count == parts);
     std::vector<std::string> const saved = files_starting_with(stem);
     failures += check(saved.size() == (parts == 1 ? 1 : parts + 1));
-    landed_matches_t const original_matches = search(index);
+    copied_matches_t const original_matches = search(index);
 
     // Every loaded copy saves again under its own stem, and its files compare to the original's.
     auto const same_checkpoint = [&](std::string const& other_stem) {
@@ -2064,7 +2258,7 @@ std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string 
         if (!copy) return;
         handle<verbs_type_> reopened {copy, session, residency, index.geometry};
         if (residency == index.residency) {
-            landed_matches_t const reloaded = search(reopened);
+            copied_matches_t const reloaded = search(reopened);
             bool const equivalent = equivalent_matches(reloaded, original_matches, score_band);
             if (!equivalent && reloaded.scores.size() == original_matches.scores.size()) {
                 double widest = 0;
@@ -2207,7 +2401,7 @@ inline std::array<flag_t, 9> search_bench_flags(search_bench_settings_t& search)
 template <typename verbs_type_, typename swept_type_ = dummy_progress_t>
 int run_search_bench(settings_t const& settings, search_bench_settings_t const& search,
                      typename verbs_type_::geometry_t const& geometry, typename verbs_type_::geometry_t const& served,
-                     typename verbs_type_::inputs_t entries, std::size_t base_count,
+                     typename verbs_type_::values_t entries, std::size_t base_count,
                      typename verbs_type_::queries_t queries, std::size_t queries_count, std::string_view checkpoint,
                      swept_type_&& on_swept = {}) {
     session_t session = open_session(settings, settings.cpu_class);
@@ -2240,7 +2434,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
         fmt::println("- Reopened {} as {}", served_path, usearch_residency_name(settings.residency));
     }
 
-    landed_matches_t oracle;
+    copied_matches_t oracle;
     std::size_t const judged = std::min(search.oracle_queries.value, queries_count);
     std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
     if (report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))

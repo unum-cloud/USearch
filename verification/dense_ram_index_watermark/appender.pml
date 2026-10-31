@@ -5,13 +5,13 @@
  *  @brief The load path's `finish`: one compare-exchange moving `next_dispensed_id_` from the
  *      load's base past its rows, before the watermark's release store, beside a searcher and a save.
  *
- *  The loader lands both rows relaxed, moves the dispenser and releases the watermark.
+ *  The loader places both rows relaxed, moves the dispenser and releases the watermark.
  *
  *  - A saver that acquired the watermark must read the dispenser level with it.
  *
  *  @verify pass sc,rc11,far
  *  @verify pass far appender_order=order_relaxed: a compare-exchange is never posted, so even a
- *      relaxed one lands before the watermark's release store that carries it
+ *      relaxed one arrives before the watermark's release store that carries it
  *  @verify pass sc spends_plan=false: a second `finish` finds the dispenser past the load's base,
  *      so its compare-exchange moves nothing
  */
@@ -26,8 +26,8 @@
 proctype loader(byte t) {
     int expected;
     bool moved;
-    land_row(t, 0);
-    land_row(t, 1);
+    copy_loaded_row(t, 0);
+    copy_loaded_row(t, 1);
     finish_load(t, 0, 2, expected, moved);
     if
     :: !spends_plan -> finish_load(t, 0, 2, expected, moved)

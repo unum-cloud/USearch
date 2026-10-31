@@ -119,7 +119,7 @@ class SearchStats:
 
 
 def index_keys(index: DenseIndex | On[DenseIndex], arena: Arena) -> npt.NDArray[np.uint8]:
-    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor landing in *arena*."""
+    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor writing into *arena*."""
     cursor, batches = index.cursor(), [np.zeros((0, 16), dtype=np.uint8)]
     while batch := cursor.next(1024, arena):
         batches.append(np.array(batch.keys))

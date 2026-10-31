@@ -6,7 +6,7 @@
  *      between two shards inside a destructive window.
  *
  *  Each shard holds one row. The writer takes the unique side, makes the epoch odd, moves shard 1's
- *  row onto shard 0 by storing both watermarks, the way in-place compaction lands a row and forgets
+ *  row onto shard 0 by storing both watermarks, the way in-place compaction places a row and forgets
  *  its source, and makes the epoch even. The reader acquires an even epoch, reads both watermarks,
  *  and validates; a moved epoch retries once, then refuses.
  *

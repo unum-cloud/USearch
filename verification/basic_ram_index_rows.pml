@@ -33,13 +33,13 @@
 #include <weak_memory.pml>
 #include <basic_gate.pml>
 
-// The words, by the index member each stands for; only the newcomer's key is ever read.
+// The words, by the index member each stands for; only the appended node's key is ever read.
 #define shared_mutex 0
 #define row_state 1
 #define row_size 2
 #define row_slot(position) (3 + (position))
 #define last_visible_id 5
-#define newcomer_key 6
+#define appended_node_key 6
 
 // The values: a slot holds an edge or nothing yet, a key word holds the record's key or nothing yet.
 #define hole 0
@@ -90,7 +90,7 @@ inline lock_shared(t, observed) {
 inline unlock_shared(t, observed) { read_modify_write(t, shared_mutex, unlock_shared_order, observed, observed - 1) }
 
 // the row lock: a relaxed peek that waits out a holder, then the claiming `fetch_or`, which may
-// still lose to a claim landing after the peek; the caller declares `displaced`, since a local here
+// still lose to a claim arriving after the peek; the caller declares `displaced`, since a local here
 // costs a step
 inline lock_row(t) {
     do
@@ -122,7 +122,7 @@ inline follow(t, slot, watermark, seen) {
         :: memory == sc -> assert(snapshot_published)
         :: else
         fi;
-        load(t, newcomer_key, order_relaxed, seen);
+        load(t, appended_node_key, order_relaxed, seen);
         assert(seen == keyed(1))
     :: else
     fi
@@ -170,7 +170,7 @@ proctype inserter(byte t) {
     lock_shared(t, observed);
     // the record, then back_link_ before the turn: an append when the row has room, else the
     // re-selection clears the row and writes it anew
-    store(t, newcomer_key, order_relaxed, keyed(1));
+    store(t, appended_node_key, order_relaxed, keyed(1));
     lock_row(t);
     editing = true;
     load(t, row_size, order_relaxed, size);
@@ -203,7 +203,7 @@ proctype reader(byte t) {
     };
     // key_of: the same watermark gate, then a plain read
     if
-    :: watermark > 1 -> load(t, newcomer_key, order_relaxed, seen); assert(seen == keyed(1))
+    :: watermark > 1 -> load(t, appended_node_key, order_relaxed, seen); assert(seen == keyed(1))
     :: else
     fi;
     lock_row(t);

@@ -65,7 +65,7 @@ struct bench_context {
     using allocator_t = forkunion_allocator<std::byte>;
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
-    using small_size_t = typename index_t::small_size_t;
+    using candidates_count_t = typename index_t::candidates_count_t;
     using traversal_t = typename index_t::traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
@@ -148,7 +148,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return false;
     }
 
-    // Each thread builds its own context, so the scratch lands on its local memory domain.
+    // Each thread builds its own context, so the scratch sits on its local memory domain.
     bench.traversals.resize(threads);
     auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t) noexcept {
         auto& bench = *static_cast<bench_t*>(punned);
@@ -178,14 +178,14 @@ template <typename streamed_dataset_type_>
 void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
-    using small_size_t = typename bench_t::small_size_t;
+    using candidates_count_t = typename bench_t::candidates_count_t;
     using vector_view_t = typename bench_t::vector_view_t;
     using vectors_view_t = typename bench_t::vectors_view_t;
     streamed_dataset_type_& streamed = *static_cast<streamed_dataset_type_*>(punned);
     auto& bench = streamed.bench;
 
     typename index_t::insert_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
+    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_add.value);
     // With a loaded base, tasks cover only the topping - shift into absolute dataset rows.
     std::size_t const row = task + bench.settings.skip_vectors.value;
     vector_view_t vector;
@@ -296,14 +296,14 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using node_id_t = typename index_t::node_id_t;
-    using small_size_t = typename bench_t::small_size_t;
+    using candidates_count_t = typename bench_t::candidates_count_t;
     auto& bench = streamed.bench;
     std::size_t const max_refines = bench.settings.max_refines.value;
     std::size_t const nodes = bench.index->size();
     if (!max_refines || !nodes) return true;
 
     typename index_t::refine_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_refine.value);
+    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_refine.value);
     refinement_report_t report;
     report.nodes = nodes;
     report.expansion = bench.index->non_zero_expansion_factor(config);
@@ -320,7 +320,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     changed_per_pass.reserve(max_refines);
     progress_bar_t progress {"refining", max_refines, bench.settings.terminal};
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
-        auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, config);
+        auto [plan, plan_status] = bench.index->plan_refine({0, static_cast<node_id_t>(nodes)}, {}, {}, config);
         if (failed(plan_status)) {
             fmt::println("Failed to open refinement pass {}: status {}", pass, int(plan_status));
             return false;
@@ -388,7 +388,7 @@ template <typename streamed_dataset_type_>
 void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t thread, std::size_t) noexcept {
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
-    using small_size_t = typename bench_t::small_size_t;
+    using candidates_count_t = typename bench_t::candidates_count_t;
     using vector_view_t = typename bench_t::vector_view_t;
     auto& task = *static_cast<search_task<streamed_dataset_type_>*>(punned);
     streamed_dataset_type_& streamed = task.streamed;
@@ -396,7 +396,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     telemetry_lane_t& lane = bench.lanes[thread];
 
     typename index_t::search_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_search.value);
+    config.expansion_factor = static_cast<candidates_count_t>(bench.settings.expansion_search.value);
     // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
     std::size_t const dimensions = streamed.vectors.extent(1);
@@ -416,8 +416,8 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     auto search = [&]() noexcept {
         if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
             if (task.heads.engaged())
-                return bench.index->search(query_vector, task.heads.rows(query, 1), traversal, config);
-        return bench.index->search(query_vector, traversal, config);
+                return bench.index->search(query_vector, task.heads.rows(query, 1), config, traversal);
+        return bench.index->search(query_vector, config, traversal);
     };
     auto started = steady_clock_t::now();
     auto const [result, status] = search();

@@ -43,7 +43,7 @@
 
 #include <numkong/cast.h>     // `nk_cast_serial` & kin - the kits' scalar casts
 #include <numkong/shapes.hpp> // `nk::shapes_packed`, and the per-backend kernels
-#include <numkong/tensor.hpp> // `nk::matrix_view` - the landed clouds a round packs
+#include <numkong/tensor.hpp> // `nk::matrix_view` - the staged clouds a round packs
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
@@ -54,14 +54,14 @@ namespace unum::usearch::shapes {
 using namespace unum::usearch::utilities;
 
 /**
- *  The USearch status of a NumKong one.
+ *  @brief The USearch status of a NumKong one.
  *
  *  @par Statuses:
- *  - @c shape_mismatch_k NumKong met unexpected dimensions.
- *  - @c device_error_k NumKong met device code or memory of another device.
+ *  - @c shape_mismatch_k NumKong found unexpected dimensions.
+ *  - @c device_error_k NumKong found device code or memory of another device.
  *  - @c unsupported_k NumKong is missing the kernel or its library.
- *  - @c unsupported_layout_k NumKong met misaligned memory.
- *  - @c malformed_k NumKong met a pack of another layout.
+ *  - @c unsupported_layout_k NumKong found misaligned memory.
+ *  - @c malformed_k NumKong found a pack of another layout.
  */
 inline status_t status_of(nk_status_t status) noexcept {
     switch (status) {
@@ -80,14 +80,14 @@ inline status_t status_of(nk_status_t status) noexcept {
 }
 
 /**
- *  The USearch status of a NumKong C++ one, whose codes are the C ones.
+ *  @brief The USearch status of a NumKong C++ one, whose codes are the C ones.
  *
  *  @par Statuses:
- *  - @c shape_mismatch_k NumKong met unexpected dimensions.
- *  - @c device_error_k NumKong met device code or memory of another device.
+ *  - @c shape_mismatch_k NumKong found unexpected dimensions.
+ *  - @c device_error_k NumKong found device code or memory of another device.
  *  - @c unsupported_k NumKong is missing the kernel or its library.
- *  - @c unsupported_layout_k NumKong met misaligned memory.
- *  - @c malformed_k NumKong met a pack of another layout.
+ *  - @c unsupported_layout_k NumKong found misaligned memory.
+ *  - @c malformed_k NumKong found a pack of another layout.
  */
 inline status_t status_of(nk::status_t status) noexcept { return status_of(static_cast<nk_status_t>(status)); }
 
@@ -541,7 +541,7 @@ class shapes_metric {
     /** The round's candidate packs in push order. */
     growing_buffer<void const*, allocator_t> staged_;
 
-    /** The packs of the round's landed clouds, each on NumKong's boundary; it grows only while it
+    /** The packs of the round's staged clouds, each on NumKong's boundary; it grows only while it
      *  holds none, so a staged pack never moves. */
     growing_buffer<byte_t, allocator_t> packed_;
 
@@ -613,7 +613,7 @@ class shapes_metric {
         return basic::metric_staging_t::staged_k;
     }
 
-    /** Packs a landed @b [points,3] @p cloud into the metric's staging arena and stages it;
+    /** Packs a staged @b [points,3] @p cloud into the metric's staging arena and stages it;
      *  @c refused_k once either is full, so the walk drains first. A pack that fails leaves the
      *  round failed, as @ref status reports. */
     basic::metric_staging_t push(nk::matrix_view<scalar_t> cloud) noexcept {

@@ -2,6 +2,10 @@
 
 Stub files are never executed, so PEP 695 `type` statements and PEP 688's `Buffer` are read
 by any checker regardless of the interpreter running the tests. The package floor is 3.12.
+
+File: python/usearch/lib.pyi
+Author: Ash Vardanian
+Date: September 8, 2026
 """
 
 import builtins
@@ -500,7 +504,7 @@ class On[IndexT]:
             must be as wide as the buffer's items.
           progress (callable, optional): Called with (completed, total) entries. It reports and
             cannot stop the batch, every entry being claimed before the first report; what it
-            raises surfaces once the batch has landed. Reports are serialized.
+            raises surfaces once the batch has finished. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -521,7 +525,7 @@ class On[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> int:
+    ) -> RefineReport:
         """Re-selects the neighbors of every stored entry against the finished graph, improving
         edges that were chosen when the graph around them was still incomplete.
 
@@ -529,11 +533,11 @@ class On[IndexT]:
         reaches a better graph, in less total time, than one expensive insertion pass - so a
         wide `expansion_factor` belongs here rather than in `insert`. Searches may run
         throughout on a RAM handle but not on a VRAM one, and a caller loops until the
-        return falls below whatever change rate they consider settled.
+        report's `changed` falls below whatever change rate they consider settled.
 
-        Stopping is not an error here and raises nothing: re-selecting edges claims no
-        identity, so a stopped sweep leaves the graph correct and merely less improved. A
-        handler is therefore how a sweep is put under a time budget.
+        Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
+        re-links its islands, leaves the graph correct and merely less improved, and raises
+        `CancelledError`. A handler is therefore how a sweep is put under a time budget.
         Calls `usearch_dense_refine`.
 
         Args:
@@ -544,14 +548,15 @@ class On[IndexT]:
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
         Returns:
-          int: Nodes whose edges changed; zero means the graph has settled.
+          RefineReport: Entries re-selected and changed, the islands found and reconnected,
+            and the audit closing the heal; `changed` at zero means the graph has settled.
 
         Example:
           >>> from array import array
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
           >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
-          >>> index.refine()
+          >>> index.refine().changed
           0
         """
         ...
@@ -819,23 +824,97 @@ class On[IndexT]:
 
     def absorb(
         self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> None:
+    ) -> RefineReport:
         """Absorbs every donor into this index, one after another, keeping their graphs rather
         than re-inserting their vectors, and linking each in by walks across the appended
         part. Each donor handle is consumed and every verb on it afterwards raises. Readers
         of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
         search.
 
-        Cancellation stops between donors, so a donor already absorbed stays absorbed and one
-        not yet reached stays a live handle its caller still owns. A donor whose absorption
-        fails stays usable too, though its entries may already have landed in this index.
+        Cancellation stops the closing refinement alone: every donor is still consumed, the
+        islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
+        fails, and every later one, stays a live handle its caller still owns, though the
+        entries of the one it struck may already have moved into this index.
         Calls `usearch_dense_absorb`.
 
         Args:
           donors (DenseIndex): The indexes to absorb.
-          progress (callable, optional): Called with (completed, total) donors; returning
-            False stops the absorb and raises `CancelledError`, None carries on.
+          progress (callable, optional): Called with (completed, total) nodes the closing
+            refinement re-selected; returning False stops it, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+
+        Returns:
+          RefineReport: What the closing refinement did to the graph.
+        """
+        ...
+
+    def split(
+        self: On[DenseIndex],
+        *receivers: DenseIndex,
+        expansion_factor: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> RefineReport:
+        """Splits this index into the empty receivers, the inverse of `absorb`: the entries are
+        partitioned along the graph, each part lands in one receiver with its edges kept, and
+        a closing refinement re-links every receiver. This index is left empty and live.
+        Receivers match its residency, scalar, metric, geometry and shard count.
+        Calls `usearch_dense_split`.
+
+        Args:
+          receivers (DenseIndex): At least two empty indexes, one per part.
+          expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.
+          seed (int, optional): Picks the part roots; equal seeds split equally.
+          progress (callable, optional): Called with (completed, total) nodes the closing
+            refinements re-selected; returning False stops them, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          RefineReport: What the closing refinements did, across the receivers.
+        """
+        ...
+
+    def sample(
+        self: On[DenseIndex],
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        shown: Sequence[_KeyLike] | _Tensor | None = None,
+        shown_coordinates: _Tensor | None = None,
+        focus: Sequence[_KeyLike] | _Tensor | None = None,
+        seed: int = 0,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Sample:
+        """Draws keys around `focus`, or across the whole index, each hanging from a shown or
+        earlier draw and placed in three dimensions beside the shown ones - so a view grows
+        one connected sample as it zooms, never scanning the index. Equal seeds, shown keys
+        and focus over an unchanged index draw equally, and a larger `wanted` draws a superset.
+        Only a RAM index samples yet.
+        Calls `usearch_dense_sample`.
+
+        Args:
+          wanted (int): The upper bound on draws.
+          arena (Arena): Where the draws are written, rewound by the call.
+          shown (keys, optional): The keys already shown, never drawn again.
+          shown_coordinates (tensor, optional): (len(shown), 3) float32 places of the shown
+            keys, the points later draws are placed against.
+          focus (keys, optional): The keys to look around; None looks across the index.
+          seed (int, optional): The draw; equal seeds draw equally.
+          expansion_factor (int, optional): Breadth of the walks behind the draws; 0 derives.
+          progress (callable, optional): Called with (written, wanted) draws.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          Sample: The keys, entry ordinals, parents and coordinates of the draws, fewer than
+            `wanted` only once the region is exhausted.
         """
         ...
 
@@ -975,7 +1054,7 @@ class DeferredOn[IndexT]:
             must be as wide as the buffer's items.
           progress (callable, optional): Called with (completed, total) entries. It reports and
             cannot stop the batch, every entry being claimed before the first report; what it
-            raises surfaces once the batch has landed. Reports are serialized.
+            raises surfaces once the batch has finished. Reports are serialized.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
@@ -996,7 +1075,7 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> Deferred[int]:
+    ) -> Deferred[RefineReport]:
         """Re-selects the neighbors of every stored entry against the finished graph, improving
         edges that were chosen when the graph around them was still incomplete.
 
@@ -1004,11 +1083,11 @@ class DeferredOn[IndexT]:
         reaches a better graph, in less total time, than one expensive insertion pass - so a
         wide `expansion_factor` belongs here rather than in `insert`. Searches may run
         throughout on a RAM handle but not on a VRAM one, and a caller loops until the
-        return falls below whatever change rate they consider settled.
+        report's `changed` falls below whatever change rate they consider settled.
 
-        Stopping is not an error here and raises nothing: re-selecting edges claims no
-        identity, so a stopped sweep leaves the graph correct and merely less improved. A
-        handler is therefore how a sweep is put under a time budget.
+        Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
+        re-links its islands, leaves the graph correct and merely less improved, and raises
+        `CancelledError`. A handler is therefore how a sweep is put under a time budget.
         Calls `usearch_dense_refine`.
 
         Args:
@@ -1019,14 +1098,15 @@ class DeferredOn[IndexT]:
           stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
 
         Returns:
-          int: Nodes whose edges changed; zero means the graph has settled.
+          RefineReport: Entries re-selected and changed, the islands found and reconnected,
+            and the audit closing the heal; `changed` at zero means the graph has settled.
 
         Example:
           >>> from array import array
           >>> index = usearch.DenseIndex.init_ram(dimensions=4)
           >>> index.reserve(1)
           >>> index.insert([1], array('d', [0.1, 0.2, 0.3, 0.4]))
-          >>> index.refine()
+          >>> index.refine().changed
           0
         """
         ...
@@ -1296,23 +1376,97 @@ class DeferredOn[IndexT]:
 
     def absorb(
         self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
-    ) -> Deferred[None]:
+    ) -> Deferred[RefineReport]:
         """Absorbs every donor into this index, one after another, keeping their graphs rather
         than re-inserting their vectors, and linking each in by walks across the appended
         part. Each donor handle is consumed and every verb on it afterwards raises. Readers
         of a RAM index may keep searching throughout, while a VRAM one admits no overlapping
         search.
 
-        Cancellation stops between donors, so a donor already absorbed stays absorbed and one
-        not yet reached stays a live handle its caller still owns. A donor whose absorption
-        fails stays usable too, though its entries may already have landed in this index.
+        Cancellation stops the closing refinement alone: every donor is still consumed, the
+        islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
+        fails, and every later one, stays a live handle its caller still owns, though the
+        entries of the one it struck may already have moved into this index.
         Calls `usearch_dense_absorb`.
 
         Args:
           donors (DenseIndex): The indexes to absorb.
-          progress (callable, optional): Called with (completed, total) donors; returning
-            False stops the absorb and raises `CancelledError`, None carries on.
+          progress (callable, optional): Called with (completed, total) nodes the closing
+            refinement re-selected; returning False stops it, None carries on.
           progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+
+        Returns:
+          RefineReport: What the closing refinement did to the graph.
+        """
+        ...
+
+    def split(
+        self: DeferredOn[DenseIndex],
+        *receivers: DenseIndex,
+        expansion_factor: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[RefineReport]:
+        """Splits this index into the empty receivers, the inverse of `absorb`: the entries are
+        partitioned along the graph, each part lands in one receiver with its edges kept, and
+        a closing refinement re-links every receiver. This index is left empty and live.
+        Receivers match its residency, scalar, metric, geometry and shard count.
+        Calls `usearch_dense_split`.
+
+        Args:
+          receivers (DenseIndex): At least two empty indexes, one per part.
+          expansion_factor (int, optional): Breadth of the closing walks; 0 derives it.
+          seed (int, optional): Picks the part roots; equal seeds split equally.
+          progress (callable, optional): Called with (completed, total) nodes the closing
+            refinements re-selected; returning False stops them, None carries on.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          RefineReport: What the closing refinements did, across the receivers.
+        """
+        ...
+
+    def sample(
+        self: DeferredOn[DenseIndex],
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        shown: Sequence[_KeyLike] | _Tensor | None = None,
+        shown_coordinates: _Tensor | None = None,
+        focus: Sequence[_KeyLike] | _Tensor | None = None,
+        seed: int = 0,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Deferred[Sample]:
+        """Draws keys around `focus`, or across the whole index, each hanging from a shown or
+        earlier draw and placed in three dimensions beside the shown ones - so a view grows
+        one connected sample as it zooms, never scanning the index. Equal seeds, shown keys
+        and focus over an unchanged index draw equally, and a larger `wanted` draws a superset.
+        Only a RAM index samples yet.
+        Calls `usearch_dense_sample`.
+
+        Args:
+          wanted (int): The upper bound on draws.
+          arena (Arena): Where the draws are written, rewound by the call.
+          shown (keys, optional): The keys already shown, never drawn again.
+          shown_coordinates (tensor, optional): (len(shown), 3) float32 places of the shown
+            keys, the points later draws are placed against.
+          focus (keys, optional): The keys to look around; None looks across the index.
+          seed (int, optional): The draw; equal seeds draw equally.
+          expansion_factor (int, optional): Breadth of the walks behind the draws; 0 derives.
+          progress (callable, optional): Called with (written, wanted) draws.
+          progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.
+          stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.
+
+        Returns:
+          Sample: The keys, entry ordinals, parents and coordinates of the draws, fewer than
+            `wanted` only once the region is exhausted.
         """
         ...
 
@@ -1472,6 +1626,63 @@ class DenseReachability(structseq[Any], tuple[int, int, int, int]):
     @property
     def back_sweeps(self) -> int:
         """Levels the sweep back toward the entry point took, where an audit sweeps both ways."""
+        ...
+
+@final
+class RefineReport(structseq[Any], tuple[int, int, int, int, DenseReachability]):
+    """What one refine-family call did to the graph, as `usearch_refine_report_t` counts it."""
+
+    __match_args__: Final = ("reselected", "changed", "islands_found", "islands_reconnected", "reachability")
+
+    @property
+    def reselected(self) -> int:
+        """Entries whose neighbors were selected again, islands of every heal round included."""
+        ...
+
+    @property
+    def changed(self) -> int:
+        """Of those, the entries whose neighbor set gained a member it lacked; zero means settled."""
+        ...
+
+    @property
+    def islands_found(self) -> int:
+        """Entries the first audit found not reached both ways."""
+        ...
+
+    @property
+    def islands_reconnected(self) -> int:
+        """Links written between an island and an entry reached both ways."""
+        ...
+
+    @property
+    def reachability(self) -> DenseReachability:
+        """The audit closing the heal, as `health` would take it right after."""
+        ...
+
+@final
+class Sample(structseq[Any], tuple[_ArenaBuffer, _ArenaBuffer, Matches, _ArenaBuffer]):
+    """The draws one `sample` call wrote into an `Arena`, viewing it until it rewinds."""
+
+    __match_args__: Final = ("keys", "entry_ordinals", "parents", "coordinates")
+
+    @property
+    def keys(self) -> _ArenaBuffer:
+        """(written, 16) identities drawn, most significant byte first."""
+        ...
+
+    @property
+    def entry_ordinals(self) -> _ArenaBuffer:
+        """(written,) which of its key's entries each draw is, in the order `get` writes them."""
+        ...
+
+    @property
+    def parents(self) -> Matches:
+        """One column per draw: the shown or earlier draw it hangs from, and its distance."""
+        ...
+
+    @property
+    def coordinates(self) -> _ArenaBuffer:
+        """(written, 3) float32 places of the draws, beside the shown keys."""
         ...
 
 @final
@@ -1725,8 +1936,8 @@ class DenseIndex:
         progress: _Progress | None = None,
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
-    ) -> int:
-        """Re-selects every entry's neighbors, answering how many changed. Calls `usearch_dense_refine`."""
+    ) -> RefineReport:
+        """Re-selects every entry's neighbors, reporting what changed. Calls `usearch_dense_refine`."""
         ...
 
     def health(self) -> DenseReachability:
@@ -1816,8 +2027,38 @@ class DenseIndex:
         """Late interaction over multi-row queries. Calls `usearch_dense_maxsim`."""
         ...
 
-    def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> None:
+    def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> RefineReport:
         """Absorbs and consumes every donor, one after another. Calls `usearch_dense_absorb`."""
+        ...
+
+    def split(
+        self,
+        *receivers: DenseIndex,
+        expansion_factor: int = 0,
+        seed: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> RefineReport:
+        """Splits the entries into the empty receivers, leaving this index empty. Calls `usearch_dense_split`."""
+        ...
+
+    def sample(
+        self,
+        wanted: int,
+        arena: Arena,
+        /,
+        *,
+        shown: Sequence[_KeyLike] | _Tensor | None = None,
+        shown_coordinates: _Tensor | None = None,
+        focus: Sequence[_KeyLike] | _Tensor | None = None,
+        seed: int = 0,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
+    ) -> Sample:
+        """Draws keys around `focus`, placed beside the `shown` keys. Calls `usearch_dense_sample`."""
         ...
 
     def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:

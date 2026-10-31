@@ -2,19 +2,21 @@
  *  @file verification/dense_vram_indexes/protocol.pml
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief `dense::vram_nvidia_indexes` from `include/usearch/dense/vram_nvidia_indexes.cuh`: the
+ *  @brief `dense::vram_nvidia_indexes` from `include/usearch/dense/vram_nvidia_indexes.hpp`: the
  *      sharded CUDA index.
  *
  *  Batches claim each shard's share in shard order by one compare-exchange of its claim word from
  *  the watermark, so a shard holds one batch in flight and its map one writer. A batch uploads its
  *  keys on the launch stream ahead of the launch, files them after the drain, and turns every
  *  watermark inside one commit of the sequence word; a failed drain keeps its failure on every shard
- *  instead. Loads and saves close every shard first, and reopen them the last first.
+ *  instead. Loads and saves close every shard first, and reopen them the last first. Their column
+ *  copies and a search's merge run on the shards' streams, each closed by an event record.
  *
  *  - Every key a searcher reads is its claimer's, and the map holds every visible row once.
  *  - A snapshot it accepts holds each committed batch on both shards or on neither.
  */
 #include <weak_memory.pml>
+#include <monitor_wait.pml>
 
 // The words: each shard's watermark, `commit_sequence_`, each shard's keys, host and device as one
 // word the launch stream orders, and each shard's map. A shard's claim, its closed state and its
@@ -25,6 +27,28 @@
 #define key(shard, id) (3 + (shard) * shard_rows + (id))
 #define map_slot(shard, position) (7 + (shard) * shard_rows + (position))
 
+// The streams' words: the bytes a load's column copy writes into the shard's storage; the event
+// each shard's stream records, as the generation of its record; a search's ranking blocks in the
+// first shard's outputs, one per shard, which every call and window reuses; the merged rankings;
+// and the two pinned halves of each shard's save bounce, which its copies off the device fill.
+#define copy_target(shard) (11 + (shard))
+#define recorded(shard) (13 + (shard))
+#define staging(shard) (15 + (shard))
+#define rankings 17
+#define bounce_half(shard, half) (18 + (shard) * 2 + (half))
+
+// The operations a stream runs in the order the host queued them, each naming a shard and a value:
+// a column copy, a shard's ranking block for a call, an event record of a generation, a wait until
+// a shard's event holds a generation, the merge of every block for a call, and a save's copies of
+// one half off the device.
+#define copy_kind 0
+#define block_kind 1
+#define record_kind 2
+#define wait_kind 3
+#define merge_kind 4
+#define bounce_kind 5
+#define queue_depth 5
+
 // The sizes and values: two shards of two rows, one per claimer, a batch of one row per shard, the
 // keys, and the sequence word's unit, past the commits in flight it counts.
 #define shards 2
@@ -32,6 +56,7 @@
 #define unset 0
 #define key_of(t) (10 + (t))
 #define sequence_unit 4
+#define copied_value 1
 
 // A map slot is the key beside its node in one word, published with one release.
 #define empty 0
@@ -70,6 +95,21 @@
 #ifndef keys_once_covered
 #define keys_once_covered true
 #endif
+#ifndef copy_drained_before_finish
+#define copy_drained_before_finish true
+#endif
+#ifndef record_order
+#define record_order order_release
+#endif
+#ifndef record_before_wait
+#define record_before_wait true
+#endif
+#ifndef host_wait_per_call
+#define host_wait_per_call true
+#endif
+#ifndef block_waits_first_shard
+#define block_waits_first_shard true
+#endif
 
 byte claims[shards];          // per shard, its claim: `claimed_rows_`
 bool closed[shards];          // per shard, whether its dispenser holds the closed state
@@ -78,8 +118,12 @@ byte owner[shards * shard_rows];   // one past the thread that took the row; zer
 bool keyed[shards * shard_rows];   // per row, whether the shard's map files it
 byte done;                    // the threads finished
 bool committing[mutators];    // per mutator, whether its batch reached its commit
-byte part[mutators * shards]; // per mutator and shard, the row its batch landed at
+byte part[mutators * shards]; // per mutator and shard, the row its batch was placed at
 #define part_of(t, shard) part[(t) * shards + (shard)]
+chan stream_queue[shards] = [queue_depth] of { byte, byte, byte }; // per shard, its stream's queued operations
+byte records_queued[shards];  // per shard, the generation of the last record queued on its stream
+byte blocked[shards];         // per shard, the last call whose ranking block its stream wrote
+byte merged;                  // the last call whose merge read every block
 
 // a row of `shard` taken by thread `t`, never one another thread took
 inline take_row(t, shard, id) {
@@ -311,4 +355,128 @@ inline audit_keys() {
             }
         }
     }
+}
+
+// a stream's event record: a release store of the call's generation, waking every wait armed on it
+inline record_event(t, shard, generation) {
+    atomic {
+        store(t, recorded(shard), record_order, generation);
+        wake(recorded(shard))
+    }
+}
+
+// a wait until the shard's event holds @p generation, acquired: the host's one blocking-sync wait,
+// or a stream's wait on another stream's event
+inline await_event(t, shard, generation, seen) {
+    do
+    :: load(t, recorded(shard), order_acquire, seen);
+        if
+        :: seen >= generation -> break
+        :: else -> wait_on(t, recorded(shard), seen, false)
+        fi
+    od
+}
+
+// the host queueing an event record on the shard's stream, the generation after the last one queued
+inline queue_record(shard) {
+    atomic {
+        records_queued[shard]++;
+        stream_queue[shard] ! record_kind, shard, records_queued[shard]
+    }
+}
+
+// a load queueing the shard's column copy into its storage on the shard's stream, then the record
+// its `finish` waits on
+inline queue_copy(shard) {
+    stream_queue[shard] ! copy_kind, shard, 0;
+    queue_record(shard)
+}
+
+// a save queueing one half's copies off the device on the shard's stream, then the record the host
+// waits on before it reads the half: one step of `save_plan_t::save`
+inline queue_half(shard, half) {
+    stream_queue[shard] ! bounce_kind, shard, half;
+    queue_record(shard)
+}
+
+// a stream writing the shard's ranking block of @p call into the first shard's outputs, which no
+// merge of an earlier call may still read
+inline write_block(t, shard, call) {
+    atomic {
+        assert(merged + 1 >= call);
+        store(t, staging(shard), order_relaxed, call);
+        blocked[shard] = call
+    }
+}
+
+// the first shard's stream merging every block of @p call into the rankings
+inline merge_blocks(t, call, seen) {
+    load(t, staging(0), order_relaxed, seen);
+    assert(seen == call);
+    load(t, staging(1), order_relaxed, seen);
+    assert(seen == call);
+    store(t, rankings, order_relaxed, call);
+    merged = call
+}
+
+// the shard's stream running one operation the host queued, of @p kind, naming shard @p named
+inline run_operation(t, shard, kind, named, value, seen) {
+    if
+    :: kind == copy_kind -> store(t, copy_target(shard), order_relaxed, copied_value)
+    :: kind == block_kind -> write_block(t, shard, value)
+    :: kind == record_kind -> record_event(t, shard, value)
+    :: kind == wait_kind -> await_event(t, named, value, seen)
+    :: kind == merge_kind -> merge_blocks(t, value, seen)
+    :: kind == bounce_kind -> store(t, bounce_half(shard, value), order_relaxed, copied_value)
+    fi
+}
+
+// a later shard's part of a search: on its stream, the wait on the first shard's last record, its
+// block into the first shard's outputs, and its record
+inline queue_later_shard(shard, call) {
+    if
+    :: block_waits_first_shard -> stream_queue[shard] ! wait_kind, 0, records_queued[0]
+    :: else
+    fi;
+    stream_queue[shard] ! block_kind, shard, call;
+    queue_record(shard)
+}
+
+// `vram_shard_fanout::await_every_shard` queueing one call: every shard's work and record in shard
+// order, the first shard's stream waiting on every other shard's record, the merge, and the record
+// the host sleeps on; without @c record_before_wait the wait is queued ahead of the record it names
+inline submit_call(call) {
+    stream_queue[0] ! block_kind, 0, call;
+    queue_record(0);
+    if
+    :: record_before_wait ->
+        queue_later_shard(1, call);
+        stream_queue[0] ! wait_kind, 1, records_queued[1]
+    :: else ->
+        stream_queue[0] ! wait_kind, 1, records_queued[1];
+        queue_later_shard(1, call)
+    fi;
+    stream_queue[0] ! merge_kind, 0, call;
+    queue_record(0)
+}
+
+// the host's one wait for @p call, on the record behind its merge, then its reads: every shard's
+// work finished, and the merged rankings at least this call's
+inline await_call(t, call, seen) {
+    await_event(t, 0, 2 * (call), seen);
+    assert(blocked[0] >= call && blocked[1] >= call && merged >= call);
+    load(t, rankings, order_relaxed, seen);
+    assert(seen >= call)
+}
+
+// a loaded row's column as a search kernel reads it past the watermark it acquired: a row of
+// thread @p from holds its copy
+inline read_copied(t, shard, from, watermark, seen) {
+    load(t, last_visible_id(shard), order_acquire, watermark);
+    if
+    :: watermark > 0 ->
+        load(t, copy_target(shard), order_relaxed, seen);
+        assert(owner_of(shard, 0) != (from) + 1 || seen == copied_value)
+    :: else
+    fi
 }

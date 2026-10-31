@@ -413,7 +413,7 @@ Every long verb's config takes a `Progress` handler, called with the units finis
 
 ```go
 deadline := time.Now().Add(30 * time.Second)
-changed, err := index.On(executor).Refine(&usearch.DenseRefineConfig{
+report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{
 	ExpansionFactor: 128,
 	Progress:        func(completed, total uint) bool { return time.Now().Before(deadline) },
 })
@@ -482,16 +482,16 @@ for accepted := 0; accepted < 10; {
 
 ### Refinement
 
-`Refine` re-runs the neighbor selection over entries already in the graph, returning how many nodes had their neighbors changed.
-A batch built at a low expansion factor can be brought up to the quality of a slower build afterwards, and the count reaching zero is what settled looks like:
+`Refine` re-runs the neighbor selection over entries already in the graph, returning a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
+A batch built at a low expansion factor can be brought up to the quality of a slower build afterwards, and `Changed` reaching zero is what settled looks like:
 
 ```go
 for {
-	changed, err := index.On(executor).Refine(&usearch.DenseRefineConfig{ExpansionFactor: 128})
+	report, err := index.On(executor).Refine(&usearch.DenseRefineConfig{ExpansionFactor: 128})
 	if err != nil {
 		log.Fatal(err)
 }
-	if changed == 0 {
+	if report.Changed == 0 {
 		break
 }
 }
@@ -504,7 +504,28 @@ A donor must share the index's residency, scalar, metric and geometry, or the ca
 Each absorbed donor is consumed, and every later verb on it reports `StatusUninitialized`; a stop between donors, or a failure, leaves the rest live, still yours to close.
 
 ```go
-err := index.On(executor).Absorb([]*usearch.DenseIndex{first, second}, nil)
+report, err := index.On(executor).Absorb([]*usearch.DenseIndex{first, second}, nil)
+```
+
+`Split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+
+```go
+report, err := index.On(executor).Split([]*usearch.DenseIndex{left, right}, &usearch.DenseSplitConfig{Seed: 42})
+```
+
+### Sampling
+
+`Sample` draws keys around `Focus`, or across the whole index, each hanging from a shown or earlier draw and placed in three dimensions beside the `Shown` keys already on screen, so a view grows one connected sample as it zooms.
+Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a superset.
+
+```go
+draws, err := index.On(executor).Sample(256, arena, &usearch.DenseSampleConfig{
+	Shown: shown, ShownCoordinates: places, Focus: near, Seed: 42,
+})
+keys, _ := draws.Keys()
+entryOrdinals, _ := draws.EntryOrdinals()
+parent, distance, _ := draws.Parents().Query(0) // empty for a root
+points, _ := usearch.DenseValues[float32](draws.Coordinates())
 ```
 
 ### Sparse Multiplication

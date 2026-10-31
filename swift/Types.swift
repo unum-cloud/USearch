@@ -508,16 +508,16 @@ public enum Continuation: Sendable {
 /// work, hence `@Sendable`.
 public typealias Progress = @Sendable (_ completed: Int, _ total: Int) throws -> Continuation
 
-/// A progress handler and the landing its first thrown error goes to, placed in that landing,
+/// A progress handler and the call state its first thrown error goes to, placed in that state,
 /// since a Swift closure has no stable C representation.
 private final class ProgressState {
     let progress: Progress
-    /// The landing that keeps this state, so it outlives every call of the trampoline.
-    unowned let landing: Landing
+    /// The call state that keeps this one, so it outlives every call of the trampoline.
+    unowned let callState: CallState
 
-    init(progress: @escaping Progress, landing: Landing) {
+    init(progress: @escaping Progress, callState: CallState) {
         self.progress = progress
-        self.landing = landing
+        self.callState = callState
     }
 }
 
@@ -529,12 +529,12 @@ private let progressTrampoline: usearch_progress_callback_t = { completed, total
         return try progress.progress(completed, total) == .cancel ? usearch_cancel_k : usearch_continue_k
     }
     catch {
-        progress.landing.latch(error)
+        progress.callState.latch(error)
         return usearch_cancel_k
     }
 }
 
-// MARK: - Landings
+// MARK: - Call State
 
 /// Everything one call points the library at, held where it cannot move until the call is final.
 ///
@@ -542,14 +542,14 @@ private let progressTrampoline: usearch_progress_callback_t = { completed, total
 /// the call writes, the closures it calls back, and for a deferred call the copies of what it
 /// borrows and the objects whose memory it reads. A blocking call releases it on return, and a
 /// deferred one is kept by its `Deferred` until final.
-final class Landing {
+final class CallState {
     /// Whether the call blocks or returns once submitted.
     let completion: usearch_completion_t
     /// The outcome the call stores its final status in.
     let outcome = UnsafeMutablePointer<usearch_outcome_t>.allocate(capacity: 1)
     /// The first error a lent closure threw, from whichever thread threw it.
     private let thrown = Mutex<(any Swift.Error)?>(nil)
-    /// The trivial values the call reads or writes through, freed with the landing.
+    /// The trivial values the call reads or writes through, freed with the call state.
     private var slots: [UnsafeMutableRawPointer] = []
     /// The callback states the call reads, and the objects whose memory a deferred call reads.
     private var anchors: [AnyObject] = []
@@ -557,7 +557,7 @@ final class Landing {
     /// first wait to settle, since several threads may wait at once.
     private let finals = Mutex<[@Sendable () -> Void]>([])
     /// The arena lent to the call, until `rewind` learns whether the call took it.
-    private var lent: ArenaWrite?
+    private var lentArena: ArenaWrite?
 
     init(_ completion: usearch_completion_t = usearch_completion_blocking_k) {
         self.completion = completion
@@ -606,7 +606,7 @@ final class Landing {
     }
 
     /// Lends trivial `values` to the call: in place while a blocking call runs, or as a copy the
-    /// landing owns, since a deferred call reads them after the verb returns.
+    /// call state owns, since a deferred call reads them after the verb returns.
     func lend<Element, Value>(
         _ values: [Element],
         _ body: (UnsafePointer<Element>?) throws(USearchError) -> Value
@@ -636,7 +636,7 @@ final class Landing {
     /// the trampoline can never be paired with the wrong state; nil lends a null callback.
     func lend(_ progress: Progress?, steps: Int) -> usearch_progress_t {
         guard let progress else { return usearch_progress_t(callback: nil, state: nil, steps: steps) }
-        let state = place(ProgressState(progress: progress, landing: self))
+        let state = place(ProgressState(progress: progress, callState: self))
         return usearch_progress_t(callback: progressTrampoline, state: state, steps: steps)
     }
 
@@ -644,7 +644,7 @@ final class Landing {
     /// arena to it.
     func lend(_ arena: Arena) -> ArenaWrite {
         let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
-        lent = write
+        lentArena = write
         return write
     }
 
@@ -652,8 +652,8 @@ final class Landing {
     /// after a deferred one is submitted, so the views earlier calls wrote there stop reading. Failed
     /// calls advance it too, and only a `contended` one, which never touched the arena, does not.
     func rewind() {
-        guard let write = lent else { return }
-        lent = nil
+        guard let write = lentArena else { return }
+        lentArena = nil
         if usearch_outcome_status(outcome) != usearch_status_contended_k { write.arena.generation &+= 1 }
     }
 
@@ -696,14 +696,14 @@ final class Landing {
 enum Submission<Value> {
     /// A blocking call's result, read once the call returned final.
     case final(Value)
-    /// A deferred call's landing, and how to read its result once final.
-    case pending(Landing, () throws(USearchError) -> Value)
+    /// A deferred call's state, and how to read its result once final.
+    case pending(CallState, () throws(USearchError) -> Value)
 
     /// Blocks until the call is final, then answers its result or throws its failure.
     func wait() throws(USearchError) -> Value {
         switch self {
         case .final(let value): return value
-        case .pending(let landing, let result): return try landing.read(result)
+        case .pending(let callState, let result): return try callState.read(result)
         }
     }
 }
@@ -724,25 +724,25 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(USearchError)
 /// until the call is final. The handles it names, the arena among them, it borrows as a blocking
 /// call does. Releasing an unfinished one waits for it first.
 public final class Deferred<Value> {
-    /// The landing and the result reader.
+    /// The call state and the result reader.
     private let submission: Submission<Value>
 
     init(_ submission: Submission<Value>) {
         self.submission = submission
-        if case .pending(let landing, _) = submission { landing.rewind() }
+        if case .pending(let callState, _) = submission { callState.rewind() }
     }
 
     deinit {
-        if case .pending(let landing, _) = submission { _ = usearch_outcome_wait(landing.outcome) }
+        if case .pending(let callState, _) = submission { _ = usearch_outcome_wait(callState.outcome) }
     }
 
     /// `deferred` until the call is final, then `success` or its failure, read without blocking.
     /// Binding-only: reads the status word `usearch_outcome_wait` would, with its acquire ordering.
     public var status: Status {
-        guard case .pending(let landing, _) = submission else { return .success }
-        let raw = usearch_outcome_status(landing.outcome)
+        guard case .pending(let callState, _) = submission else { return .success }
+        let raw = usearch_outcome_status(callState.outcome)
         guard raw != usearch_status_deferred_k else { return .deferred }
-        return landing.failure?.status ?? Status(raw: raw)
+        return callState.failure?.status ?? Status(raw: raw)
     }
 
     /// Blocks until the call is final, then answers its result or throws its failure, the same
@@ -759,8 +759,8 @@ extension Deferred {
     /// isolation. Binding-only: runs `wait`.
     nonisolated(nonsending) public var value: Value {
         get async throws(USearchError) {
-            if case .pending(let landing, _) = submission {
-                nonisolated(unsafe) let outcome = landing.outcome
+            if case .pending(let callState, _) = submission {
+                nonisolated(unsafe) let outcome = callState.outcome
                 await withCheckedContinuation { continuation in
                     DispatchQueue.global().async {
                         _ = usearch_outcome_wait(outcome)
@@ -987,12 +987,12 @@ public final class Executor: @unchecked Sendable {
         threads: Int = 0,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
-        let landing = Landing()
-        let executor = landing.slots(usearch_executor_t?.none)
-        try landing.lend(memoryDomains) { (domains) throws(USearchError) in
+        let callState = CallState()
+        let executor = callState.slots(usearch_executor_t?.none)
+        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
             var arguments = usearch_executor_for_ram_t(
                 executor: executor,
-                outcome: landing.outcome,
+                outcome: callState.outcome,
                 ram: usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
@@ -1004,7 +1004,7 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_ram(&arguments)
         }
-        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
@@ -1016,12 +1016,12 @@ public final class Executor: @unchecked Sendable {
         pool: UnsafeMutableRawPointer,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
-        let landing = Landing()
-        let executor = landing.slots(usearch_executor_t?.none)
-        try landing.lend(memoryDomains) { (domains) throws(USearchError) in
+        let callState = CallState()
+        let executor = callState.slots(usearch_executor_t?.none)
+        try callState.lend(memoryDomains) { (domains) throws(USearchError) in
             var arguments = usearch_executor_on_pool_t(
                 executor: executor,
-                outcome: landing.outcome,
+                outcome: callState.outcome,
                 ram: usearch_ram_options_t(
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
@@ -1033,7 +1033,7 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_on_pool(&arguments)
         }
-        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
     }
 
     /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
@@ -1047,12 +1047,12 @@ public final class Executor: @unchecked Sendable {
         threads: Int = 0,
         deferredLimit: Int = 0
     ) throws(USearchError) -> Executor {
-        let landing = Landing()
-        let executor = landing.slots(usearch_executor_t?.none)
+        let callState = CallState()
+        let executor = callState.slots(usearch_executor_t?.none)
         withPaths(paths, cpuClass) { nvme in
             var arguments = usearch_executor_for_nvme_t(
                 executor: executor,
-                outcome: landing.outcome,
+                outcome: callState.outcome,
                 nvme: nvme,
                 threads: threads,
                 deferred_limit: deferredLimit,
@@ -1060,7 +1060,7 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_nvme(&arguments)
         }
-        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .nvme) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .nvme) }
     }
 
     /// Opens one submission stream on every named device, all of them driven by the one host thread
@@ -1081,13 +1081,13 @@ public final class Executor: @unchecked Sendable {
         if let streams, streams.count != devices.count {
             throw USearchError(status: .shapeMismatch, message: "the streams must name one per device")
         }
-        let landing = Landing()
-        let executor = landing.slots(usearch_executor_t?.none)
-        try landing.lend(devices) { (lentDevices) throws(USearchError) in
-            try landing.lend(streams ?? []) { (lentStreams) throws(USearchError) in
+        let callState = CallState()
+        let executor = callState.slots(usearch_executor_t?.none)
+        try callState.lend(devices) { (lentDevices) throws(USearchError) in
+            try callState.lend(streams ?? []) { (lentStreams) throws(USearchError) in
                 var arguments = usearch_executor_for_vram_t(
                     executor: executor,
-                    outcome: landing.outcome,
+                    outcome: callState.outcome,
                     vram: usearch_vram_options_t(
                         devices: lentDevices,
                         devices_count: devices.count,
@@ -1101,7 +1101,7 @@ public final class Executor: @unchecked Sendable {
                 usearch_executor_for_vram(&arguments)
             }
         }
-        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .vram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .vram) }
     }
 
     deinit { usearch_executor_free(raw) }
@@ -1110,10 +1110,10 @@ public final class Executor: @unchecked Sendable {
     /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
     /// Calls `usearch_executor_drain`.
     public func drain(mood: Mood = .parked) throws(USearchError) {
-        let landing = Landing()
-        var arguments = usearch_executor_drain_t(executor: raw, outcome: landing.outcome, mood: mood.raw)
+        let callState = CallState()
+        var arguments = usearch_executor_drain_t(executor: raw, outcome: callState.outcome, mood: mood.raw)
         usearch_executor_drain(&arguments)
-        try landing.read {}
+        try callState.read {}
     }
 }
 
@@ -1168,11 +1168,11 @@ public final class Arena {
     /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
     /// makes host pages for calls on the calling thread. Calls `usearch_arena_init`.
     public init(on executor: Executor? = nil) throws(USearchError) {
-        let landing = Landing()
-        let arena = landing.slots(usearch_arena_t?.none)
-        var arguments = usearch_arena_init_t(arena: arena, executor: executor?.raw, outcome: landing.outcome)
+        let callState = CallState()
+        let arena = callState.slots(usearch_arena_t?.none)
+        var arguments = usearch_arena_init_t(arena: arena, executor: executor?.raw, outcome: callState.outcome)
         usearch_arena_init(&arguments)
-        raw = try landing.read { () throws(USearchError) in try created(arena) }
+        raw = try callState.read { () throws(USearchError) in try created(arena) }
         residency = executor?.residency ?? .ram
         self.executor = executor?.residency == .vram ? executor : nil
     }

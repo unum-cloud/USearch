@@ -143,7 +143,7 @@ class executor_t {
     usearch_executor_t handle_ = nullptr;
 };
 
-/** Owns one arena; every call landing outputs in it rewinds it first. */
+/** Owns one arena; every call writing outputs into it rewinds it first. */
 class arena_t {
   public:
     arena_t() noexcept = default;
@@ -410,19 +410,20 @@ class dense_index_t {
     }
 
     /**
-     *  Adds a run of vectors under their keys, all or nothing per call.
+     *  @brief Adds a run of vectors under their keys, all or nothing per call.
      *
      *  @par Statuses:
      *  - @c usearch_status_read_only_k The index is a view.
      *  - @c usearch_status_contended_k A refinement, absorption or clear holds the index, or on
-     *    VRAM a save or another insertion does; nothing landed.
+     *    VRAM a save or another insertion does; nothing written.
      */
     outcome<> insert(usearch_dense_insert_t arguments, executor_t const& executor = {}) noexcept {
         return ran_(usearch_dense_insert, arguments, executor);
     }
 
     /**
-     *  Refines the graph, answering the entries whose edges changed.
+     *  @brief Refines the graph, answering its report: the nodes re-selected and changed, and the
+     *      islands found and reconnected.
      *
      *  @par Statuses:
      *  - @c usearch_status_device_k @p executor 's kind does not match the residency.
@@ -438,8 +439,9 @@ class dense_index_t {
      *  - @c usearch_status_unsupported_k or @c usearch_status_unsupported_layout_k A VRAM index
      *    keeps such an earlier failure.
      */
-    outcome<std::size_t> refine(usearch_dense_refine_t arguments = {}, executor_t const& executor = {}) noexcept {
-        return answered_(usearch_dense_refine, arguments, &usearch_dense_refine_t::changed, executor);
+    outcome<usearch_refine_report_t> refine(usearch_dense_refine_t arguments = {},
+                                            executor_t const& executor = {}) noexcept {
+        return answered_(usearch_dense_refine, arguments, &usearch_dense_refine_t::report, executor);
     }
 
     /**
@@ -484,7 +486,7 @@ class dense_index_t {
 #pragma region Reads
 
     /**
-     *  Finds the nearest entries of every query @p arguments names, landing them in @p arena.
+     *  @brief Finds the nearest entries of every query @p arguments names, written into @p arena.
      *
      *  @par Statuses:
      *  - @c usearch_status_unknown_kind_k A traversal other than a walk or a scan.
@@ -573,7 +575,7 @@ class dense_index_t {
     }
 
     /**
-     *  Answers the next matches of @p stream, landing them in @p arena.
+     *  @brief Answers the next matches of @p stream, writing them into @p arena.
      *
      *  @par Statuses:
      *  - @c usearch_status_invalid_argument_k @p stream was opened on another index.
@@ -671,8 +673,8 @@ class dense_index_t {
     }
 
     /**
-     *  Attends the query heads @p arguments names over the entries their walks score, landing the
-     *  rows in @p arena.
+     *  @brief Attends the query heads @p arguments names over the entries their walks score,
+     *      writing the rows into @p arena.
      *
      *  @par Statuses:
      *  - @c usearch_status_invalid_argument_k A @c NULL value lookup.
@@ -688,7 +690,8 @@ class dense_index_t {
     }
 
     /**
-     *  Scores query groups by late interaction against the index, landing the matches in @p arena.
+     *  @brief Scores query groups by late interaction against the index, writing the matches into
+     *      @p arena.
      *
      *  @par Statuses:
      *  - @c usearch_status_unknown_kind_k A traversal other than a walk or a scan.

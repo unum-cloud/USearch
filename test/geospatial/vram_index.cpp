@@ -169,7 +169,7 @@ struct handle_matches_t {
  *
  *  Every match the GPU reports must be admitted, carry the pair's exact chord in metres and ascend,
  *  and the GPU's recall at ten must reach the RAM index's at the same breadth, give or take a
- *  twentieth. A walk as wide as the collection must land the exact matches themselves.
+ *  twentieth. A walk as wide as the collection must return the exact matches themselves.
  */
 static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ordinal, observations_kind_t kind,
                                                     std::size_t count, std::size_t queries_count,
@@ -211,7 +211,8 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
     usearch_arena_init(&arena_init);
     failures += expect(!outcome.message);
 
-    // Builds and searches one handle, the GPU's when an executor is given, landing on host pages.
+    // Builds and searches one handle, the GPU's when an executor is given, its outputs on host
+    // pages either way.
     auto const build_and_search = [&](usearch_geospatial_index_t index, usearch_executor_t executor) {
         handle_matches_t matched;
         for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
@@ -323,6 +324,90 @@ static std::size_t check_geospatial_vram_collection(u64_t seed, std::int32_t ord
     return failures;
 }
 
+/** Containment on the GPU through the C verb: every query's count of entries within the radius
+ *  equals the host oracle's over the same cities, and no reported key lies outside it. */
+static std::size_t check_geospatial_vram_within(u64_t seed, std::int32_t ordinal) {
+    constexpr std::size_t count_k = 512, queries_k = 16;
+    constexpr f64_t radius_metres_k = 150;
+    std::vector<usearch_geospatial_observation_t> observations = generate_observations(observations_kind_t::city_k,
+                                                                                       count_k, seed);
+    std::vector<usearch_geospatial_observation_t> queries = generate_observations(observations_kind_t::city_k,
+                                                                                  queries_k, ~seed);
+    std::vector<usearch_key_t> keys(count_k);
+    for (std::size_t offset = 0; offset != count_k; ++offset) keys[offset] = us::tools::key_of_offset(seed, offset);
+    std::size_t failures = 0;
+
+    std::vector<earth_observation_t> stored(count_k);
+    for (std::size_t entry = 0; entry != count_k; ++entry) stored[entry] = encoded(observations[entry], nullptr);
+    std::array<std::size_t, queries_k> expected {};
+    for (std::size_t query = 0; query != queries_k; ++query) {
+        earth_observation_t const probe = encoded(queries[query], nullptr);
+        for (std::size_t entry = 0; entry != count_k; ++entry)
+            expected[query] += related(relation_t::near_k, radius_metres_k, probe, stored[entry], nullptr);
+    }
+
+    usearch_outcome_t outcome {};
+    usearch_arena_t arena = nullptr;
+    usearch_arena_init_t arena_init {};
+    arena_init.arena = &arena;
+    arena_init.outcome = &outcome;
+    usearch_arena_init(&arena_init);
+    failures += expect(!outcome.message);
+
+    std::int32_t const devices[] = {ordinal};
+    usearch_vram_options_t const vram {devices, 1};
+    usearch_geospatial_index_t index = nullptr;
+    usearch_geospatial_init_vram_t init {};
+    init.index = &index;
+    init.outcome = &outcome;
+    init.vram = vram;
+    if (!failures) usearch_geospatial_init_vram(&init);
+    failures += expect(!outcome.message);
+    usearch_executor_t executor = nullptr;
+    usearch_executor_for_vram_t placement {};
+    placement.executor = &executor;
+    placement.outcome = &outcome;
+    placement.vram = vram;
+    if (!failures) usearch_executor_for_vram(&placement);
+    failures += expect(!outcome.message);
+
+    usearch_geospatial_insert_t insert {};
+    insert.index = index;
+    insert.executor = executor;
+    insert.outcome = &outcome;
+    insert.count = count_k;
+    insert.keys = {keys.data(), sizeof(usearch_key_t)};
+    insert.observations = observations.data();
+    if (!failures) usearch_geospatial_insert(&insert);
+    failures += expect(!outcome.message);
+
+    usearch_matches_tape_view_t matches {};
+    std::size_t written = 0;
+    usearch_geospatial_within_t within {};
+    within.index = index;
+    within.executor = executor;
+    within.outcome = &outcome;
+    within.count = queries_k;
+    within.queries = queries.data();
+    within.relation = usearch_geospatial_relation_near_k;
+    within.tolerance = {radius_metres_k, 0};
+    within.matches = &matches;
+    within.written = &written;
+    within.arena = arena;
+    if (!failures) usearch_geospatial_within(&within);
+    failures += expect(!outcome.message);
+    for (std::size_t query = 0; query != queries_k && !failures; ++query) {
+        failures += expect_eq(matches.offsets[query + 1] - matches.offsets[query], expected[query]);
+        for (std::size_t match = matches.offsets[query]; match != matches.offsets[query + 1]; ++match)
+            failures += expect(matches.scores[match] <= radius_metres_k * (1 + 1e-6));
+    }
+
+    usearch_geospatial_free(index);
+    usearch_executor_free(executor);
+    usearch_arena_free(arena);
+    return failures;
+}
+
 std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const& device) {
     if (device.vendor != gpu_vendor_t::nvidia_k || !settings.filter.selects("geospatial_vram")) return 0;
     // The C interface names devices by their place in the listing, which `device` belongs to.
@@ -344,6 +429,8 @@ std::size_t check_geospatial_vram(settings_t const& settings, gpu_device_t const
         "geospatial_vram seen",
         check_geospatial_vram_collection(stream_key(settings.seed, "seen"), ordinal, observations_kind_t::cameras_k,
                                          4096, 128, usearch_geospatial_relation_seen_k, 300, 256));
+    failures += report("geospatial_vram within",
+                       check_geospatial_vram_within(stream_key(settings.seed, "within"), ordinal));
     hills_t const hills;
     failures += report(
         "geospatial_vram visible over hills",

@@ -17,7 +17,7 @@
  *
  *  @verify pass sc,rc11
  *  @verify fail rc11 sq_tail_order=order_relaxed: relaxed, the kernel consumes an entry before its
- *      payload landed
+ *      payload is written
  *  @verify fail rc11 cq_tail_order=order_relaxed: relaxed, the engine reaps a completion stale
  *  @verify fail sc abandon_waits=false: dropping at once, a read of the abandoned batch is still in
  *      flight when `submit` returns, and the engine polls it later

@@ -52,7 +52,7 @@ struct vram_entry_t {
  *  returning the distance, exact within the radius and above it past: @c lanes_per_entry_k of them
  *  and a plain @c score, or, for a kit whose split follows a rung, @c lanes_per_row of the rung and
  *  a @c score templated on it, which @ref unum::usearch::basic::vram_lanes_per_entry and
- *  @ref unum::usearch::basic::vram_score tell apart. A round's entries carry no order: results land
+ *  @ref unum::usearch::basic::vram_score tell apart. A round's entries carry no order: results go
  *  by slot, and ties break by node ID. */
 template <typename kit_>
 concept vram_basic_kit = requires(typename kit_::query_t const& query, vram_entry_t entry, byte_t* span,
@@ -104,7 +104,7 @@ struct vram_ragged_view {
      *  word loads never fault. */
     byte_t const* values;
 
-    /** Entry starts into @c values, @b [nodes+1]; an inserting warp lands its own entry's two
+    /** Entry starts into @c values, @b [nodes+1]; an inserting warp writes its own entry's two
      *  before publishing it. */
     u64_t* offsets;
 
@@ -139,7 +139,7 @@ struct vram_build_view {
     /** The wave's entry starts as the caller spelled them, @b [entries+1] from any origin. */
     u64_t const* staged_offsets;
 
-    /** Where the wave's first byte landed in the values tape. */
+    /** Where the wave's first byte went in the values tape. */
     u64_t tape_first;
 
     /** IDs strictly below this bound may be claimed & inserted by this launch. */
@@ -156,7 +156,7 @@ struct vram_build_view {
     /** Bytes of one span, a multiple of 16. */
     u32_t span_bytes;
 
-    /** The launch's base ID: staged entry 0 lands there, and the warps assign themselves offsets
+    /** The launch's base ID: staged entry 0 goes there, and the warps assign themselves offsets
      *  within @b [first_id,end_id). */
     node_id_type_ first_id;
 
@@ -168,7 +168,7 @@ struct vram_build_view {
     u32_t expansion;
 
     /** Candidates the launch's walkers select from past their two spans, as the host sized them:
-     *  all of a walk's candidates, or a back-link round's live row and its row of newcomers. */
+     *  all of a walk's candidates, or a back-link round's live row and its appended-nodes row. */
     u32_t selection_nodes;
 
     /** The context's epoch floor at launch. */
@@ -235,7 +235,7 @@ struct vram_search_view {
     /** Nodes whose neighbors fill a walk's candidates, the widest round a walk expands. */
     u32_t filling_nodes;
 
-    /** The landing for the matched IDs and distances, @b [queries,count] each. */
+    /** The outputs for the matched IDs and distances, @b [queries,count] each. */
     node_id_type_* result_ids;
     distance_t* result_distances;
     u32_t count;
@@ -599,9 +599,9 @@ __device__ __forceinline__ void vram_thread_back_links(vram_build_view<node_id_t
     warp_type_::sync();
 }
 
-/** Inserts the node identified by @p new_node_id, whose bytes already sit in the values tape: lands
- *  its two entry offsets, walks the published graph, selects diverse neighbors, publishes with one
- *  release store, and threads its picks for the back-link launch, one warp per node. */
+/** Inserts the node identified by @p new_node_id, whose bytes already sit in the values tape:
+ *  writes its two entry offsets, walks the published graph, selects diverse neighbors, publishes
+ *  with one release store, and threads its picks for the back-link launch, one warp per node. */
 template <vram_basic_kit kit_, typename selector_ = vram_keep_diverse_t, typename schedule_, vram_frontier frontier_,
           typename node_id_type_>
 __device__ __forceinline__ void vram_insert_one( //
@@ -613,7 +613,8 @@ __device__ __forceinline__ void vram_insert_one( //
     using warp_t = typename kit_::warp_t;
     vram_ragged_view<node_id_type_> const& storage = view.storage;
 
-    // Both bounds land, so readers past publication see them whichever neighbor lands first.
+    // Both bounds are written, so whichever neighbor is written first, a reader past publication
+    // sees both bounds.
     u32_t const offset = static_cast<u32_t>(new_node_id - view.first_id);
     u64_t const origin = view.staged_offsets[0];
     u64_t const row_begin = view.tape_first + view.staged_offsets[offset] - origin;
@@ -820,7 +821,7 @@ __device__ __forceinline__ void vram_back_link_one( //
     }
 }
 
-/** One query's full walk: prepares the query into its span, walks the graph, and lands its nearest
+/** One query's full walk: prepares the query into its span, walks the graph, and writes its nearest
  *  @c count IDs and distances, ascending, sentinel IDs past the live prefix. Safe against
  *  concurrent insertions: the walk gates on every slot-0 word and never writes the graph. */
 template <vram_basic_kit kit_, typename schedule_, vram_frontier frontier_, typename node_id_type_>

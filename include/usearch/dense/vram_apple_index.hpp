@@ -26,7 +26,7 @@
 
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`, `std::has_single_bit`
-#include <mutex>        // `std::unique_lock` - the growth hold
+#include <mutex>        // `std::mutex` - the growth hold
 #include <shared_mutex> // `std::shared_mutex` - walks share the storage, growth takes it alone
 #include <span>         // `std::span`
 #include <utility>      // `std::exchange`, `std::forward`
@@ -140,18 +140,36 @@ struct metal_rung {
 /** Every instantiation of a shared walk @c vram_apple_index.metal exports, which the host builds a
  *  pipeline for at the first @c reserve. */
 inline constexpr metal_rung<vram_kernel_t> metal_rungs[] = {
-    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},  {vram_kernel_t::insert_k, 4},
-    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16}, {vram_kernel_t::back_link_k, 0},
-    {vram_kernel_t::refine_k, 0},  {vram_kernel_t::refine_k, 2},  {vram_kernel_t::refine_k, 4},
-    {vram_kernel_t::refine_k, 8},  {vram_kernel_t::refine_k, 16}, {vram_kernel_t::search_k, 0},
-    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},  {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::insert_k, 0},
+    {vram_kernel_t::insert_k, 2},
+    {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},
+    {vram_kernel_t::insert_k, 16},
+    {vram_kernel_t::back_link_k, 0},
+    {vram_kernel_t::refine_k, 0},
+    {vram_kernel_t::refine_k, 2},
+    {vram_kernel_t::refine_k, 4},
+    {vram_kernel_t::refine_k, 8},
+    {vram_kernel_t::refine_k, 16},
+    {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},
+    {vram_kernel_t::search_k, 4},
+    {vram_kernel_t::search_k, 8},
     {vram_kernel_t::search_k, 16},
+    {vram_kernel_t::partition_propose_k, 0},
+    {vram_kernel_t::partition_count_k, 0},
+    {vram_kernel_t::partition_accept_k, 0},
+    {vram_kernel_t::partition_fill_k, 0},
+    {vram_kernel_t::partition_picked_k, 0},
+    {vram_kernel_t::gather_vectors_k, 0},
+    {vram_kernel_t::sum_counts_k, 0},
 };
 
 /** Every dense-only instantiation @c vram_apple_index.metal exports, built beside the shared
  *  ones. */
 inline constexpr metal_rung<vram_dense_kernel_t> metal_dense_rungs[] = {
     {vram_dense_kernel_t::derive_norms_k, 0},
+    {vram_dense_kernel_t::merge_back_links_k, 0},
 };
 
 /** Spells the @c host_name @c vram_apple_index.metal exports @p rung under: the kernel's name, then
@@ -163,6 +181,13 @@ inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_ke
     case vram_kernel_t::refine_k: symbol.append("metal_refine_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel"); return;
+    case vram_kernel_t::partition_propose_k: symbol.append("metal_partition_propose_kernel"); return;
+    case vram_kernel_t::partition_count_k: symbol.append("metal_partition_count_kernel"); return;
+    case vram_kernel_t::partition_accept_k: symbol.append("metal_partition_accept_kernel"); return;
+    case vram_kernel_t::partition_fill_k: symbol.append("metal_partition_fill_kernel"); return;
+    case vram_kernel_t::partition_picked_k: symbol.append("metal_partition_picked_kernel"); return;
+    case vram_kernel_t::gather_vectors_k: symbol.append("metal_gather_vectors_kernel"); return;
+    case vram_kernel_t::sum_counts_k: symbol.append("metal_sum_counts_kernel"); return;
     default: return;
     }
     symbol.append_value(rung.slots);
@@ -170,9 +195,10 @@ inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_ke
 inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_dense_kernel_t> rung) noexcept {
     symbol = {};
     if (rung.kernel == vram_dense_kernel_t::derive_norms_k) symbol.append("metal_derive_norms_kernel");
+    if (rung.kernel == vram_dense_kernel_t::merge_back_links_k) symbol.append("metal_merge_back_links_kernel");
 }
 
-/** What a search launch lands: ranked distances, or every scored pair of a product. */
+/** What a search launch writes: ranked distances, or every scored pair of a product. */
 enum class metal_output_t : bool { distances_k, products_k };
 
 /**
@@ -210,10 +236,13 @@ struct vram_apple_index {
     using node_id_t = dense::node_id_t;
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using distance_t = dense::distance_t;
-    using small_size_t = u32_t;
+    using candidates_count_t = u32_t;
     using traversal_context_t = metal_traversal_context<traversals_allocator_t>;
-    using refine_result_t = dense::refine_result_t;
-    using health_result_t = dense::health_result_t;
+    using refine_report_t = dense::refine_report_t;
+    using reachability_t = dense::reachability_t;
+    using shared_lock_t = std::shared_lock<std::shared_mutex>;
+    using unique_lock_t = std::unique_lock<std::shared_mutex>;
+    using batch_lock_t = std::unique_lock<std::mutex>;
     static_assert(sizeof(norms_t) == 8, "The kernels address norms as two 32-bit words");
 
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
@@ -313,9 +342,9 @@ struct vram_apple_index {
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
-    small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+    candidates_count_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
         return config.expansion_factor ? config.expansion_factor
-                                       : static_cast<small_size_t>(default_expansion_factor(connectivity()));
+                                       : static_cast<candidates_count_t>(default_expansion_factor(connectivity()));
     }
 
     /** The device's identity and limits, queried at the first @c reserve. */
@@ -403,7 +432,7 @@ struct vram_apple_index {
         if (node >= size()) return status_t::config_mismatch_k;
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
-        std::shared_lock storage {storage_};
+        shared_lock_t storage {storage_};
         std::memcpy(destination.byte_data(), vectors_matrix_.host + node * row_bytes(), packed_row_bytes());
         return status_t::success_k;
     }
@@ -416,7 +445,7 @@ struct vram_apple_index {
     };
     saved_shape_t saved_shape() const noexcept { return {size(), dimensions(), connectivity()}; }
 
-    /** Where a save lands: row-major host columns the caller sized from @c saved_shape. */
+    /** Where a save writes: row-major host columns the caller sized from @c saved_shape. */
     struct columns_t {
         bytes_span_t vectors;
         bytes_span_t neighbors;
@@ -442,7 +471,7 @@ struct vram_apple_index {
          *  @c reserve makes, past it every claim answers @c overflow_k. */
         std::size_t ceiling = max_node_count_k;
 
-        /** A request for @p entries; the ceiling is set by name only, so no positional field lands
+        /** A request for @p entries; the ceiling is set by name only, so no positional field binds
          *  on it. */
         reserve_capacity_t(std::size_t entries = 0) noexcept : capacity(entries) {}
     };
@@ -462,7 +491,7 @@ struct vram_apple_index {
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
-        std::unique_lock batch {batch_};
+        batch_lock_t batch {batch_};
         if (!counters_) ceiling_nodes_ = min_of(config.ceiling, max_node_count_k);
         if (status_t const bound = bind_(); failed(bound)) return {capacity(), bound};
         status_t const grown = grow_nodes_(config.capacity);
@@ -475,7 +504,7 @@ struct vram_apple_index {
 
     /** Optional tuning knobs; zeros mean "derive from connectivity". */
     struct insert_config_t {
-        small_size_t expansion_factor = 0;
+        candidates_count_t expansion_factor = 0;
     };
 
     /** The bytes a context grows to before it can insert @p rows rows: its counters, one arena
@@ -547,8 +576,8 @@ struct vram_apple_index {
 
     /** Optional tuning knobs of @c search(); zeros mean "derive from connectivity". */
     struct search_config_t {
-        small_size_t expansion_factor = 0;
-        small_size_t count = 10;
+        candidates_count_t expansion_factor = 0;
+        candidates_count_t count = 10;
         synchronization_t synchronization = synchronization_t::concurrent_k;
         traversal_t traversal = traversal_t::walk_k;
     };
@@ -565,7 +594,7 @@ struct vram_apple_index {
     };
 
     /** The bytes a context grows to before it can search or multiply @p rows rows under @p config,
-     *  landing @c config.count columns per row: its counters, one arena slice per simdgroup in
+     *  writing @c config.count columns per row: its counters, one arena slice per simdgroup in
      *  flight, and the staged rows beside their outputs. */
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
         if (!geometry_.dimensions || !device_.multiprocessor_count) return 0;
@@ -604,8 +633,8 @@ struct vram_apple_index {
      *  - @c uninitialized_k The index never grew.
      */
     expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
-                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
-                                     search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept {
+                                     nk::matrix_span<distance_t> result_distances, search_config_t config,
+                                     traversal_context_t& context, completion_t = completion_t::blocking_k) noexcept {
         return search_(queries, result_ids, result_distances, context, config, size(), dummy_heads_t {});
     }
 
@@ -624,8 +653,8 @@ struct vram_apple_index {
      */
     expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
-                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
-                                     search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept
+                                     nk::matrix_span<distance_t> result_distances, search_config_t config,
+                                     traversal_context_t& context, completion_t = completion_t::blocking_k) noexcept
         requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
@@ -640,8 +669,8 @@ struct vram_apple_index {
      *    device or cannot walk.
      *  - @c unsupported_k A scan is asked, which this vendor has none of.
      */
-    expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
-                                     search_config_t config = {}) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, search_config_t config,
+                                     traversal_context_t& context) noexcept {
         return search_one_(query_vector, context, config, size());
     }
 
@@ -653,8 +682,8 @@ struct vram_apple_index {
      *  - @c device_error_k Every call.
      */
     template <typename predicate_type_>
-    expected<search_result_t> search_if(vector_view_t, predicate_type_&&, traversal_context_t&,
-                                        search_config_t = {}) noexcept {
+    expected<search_result_t> search_if(vector_view_t, search_config_t, predicate_type_&&,
+                                        traversal_context_t&) noexcept {
         return {{}, status_t::device_error_k};
     }
 
@@ -671,7 +700,7 @@ struct vram_apple_index {
      */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                       traversal_context_t& context, search_config_t config = {},
+                                       search_config_t config, traversal_context_t& context,
                                        completion_t = completion_t::blocking_k) noexcept {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return multiply_(left, node_ids, products, counts, context, config, size());
@@ -686,7 +715,7 @@ struct vram_apple_index {
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t, std::size_t, value_lookup_type_&&, f32_t, rows_span_t,
-                                     std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},
+                                     std::span<softmax_state_t>, search_config_t, traversal_context_t&,
                                      completion_t = completion_t::blocking_k) noexcept {
         return {{}, status_t::unsupported_k};
     }
@@ -695,9 +724,51 @@ struct vram_apple_index {
 
 #pragma region Refinement
 
-    /** Optional tuning knobs of @c refine(). */
-    struct refine_config_t {
-        small_size_t expansion_factor = 0;
+    /** Optional tuning knobs of @c refine(): the dense refine config, as nothing here differs. */
+    using refine_config_t = dense::refine_config_t;
+
+    /** A split's knobs: its refine's, and the seed that orders the parts' growth. */
+    struct split_config_t {
+        refine_config_t refine {};
+        u64_t seed = 0;
+    };
+
+    /** One receiver's part of a split as the host assigns it: its nodes, the picked ones leading
+     *  them, and the nodes given slots so far. */
+    struct split_part_t {
+        std::size_t entries = 0, picked_count = 0, assigned_nodes = 0;
+    };
+
+    /** A split's state beside the refinement it turns into, empty for a refine. */
+    struct split_t {
+
+        /** The index the split empties, until the scatter finished. */
+        vram_apple_index* donor = nullptr;
+
+        /** The receivers, one part each, and the one the refinement is bound to. */
+        growing_buffer<vram_apple_index*> receivers {global_allocator};
+        growing_buffer<split_part_t> parts {global_allocator};
+        std::size_t bound_receiver = 0;
+
+        /** The donor's nodes at planning, and the most nodes one part takes: those over the
+         *  receivers, rounded up. */
+        std::size_t entries = 0, part_capacity = 0;
+
+        /** The partition's shared buffer, laid out as @c split_layout_ places it, which the host
+         *  reads in place between the phases. */
+        metal_buffer_t device_bytes;
+
+        /** The growth round the next batch queues from, zero once the growth converged and the
+         *  picked pass queues next. */
+        u32_t next_round = 0;
+
+        /** The refinement every receiver runs, and its rounds, none once a stop cut the pass. */
+        refine_config_t config {};
+        u32_t rounds = 1;
+
+        /** The audits and islands of the receivers healed so far, summed. */
+        reachability_t reachability {};
+        std::size_t islands = 0;
     };
 
     /**
@@ -706,12 +777,13 @@ struct vram_apple_index {
      *      @ref advance past it, and @ref finish once no phase follows.
      *
      *  A re-selecting phase walks every node of the planned range, once per round of walks across
-     *  while the shard holds several parts, into a shadow matrix that replaces the walked rows once
-     *  the device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit
-     *  and reconnection, run on the host over unified memory in @ref advance, reconnect the islands
-     *  a re-selection leaves. @ref plan_refine sized every buffer, so no phase allocates. Every
-     *  phase takes the context the plan was opened on back from its caller. Holds the index's batch
-     *  lock from plan to death, so demands an exclusive caller.
+     *  while the shard holds several parts, into a shadow matrix, each walk chaining itself onto
+     *  its picks; a merge launch behind it folds every walked row's picks, then every walker
+     *  chained onto a row, into the live rows on the device, as the CUDA pass does, so the host
+     *  reads only the counters. The audit and the reconnection run on the host over unified memory
+     *  in @ref advance, sweeping both ways. @ref plan_refine sized every buffer, so no phase
+     *  allocates. Every phase takes the context the plan was opened on back from its caller. Holds
+     *  the index's batch lock from plan to death, so demands an exclusive caller.
      */
     struct refine_plan_t {
         refine_plan_t() noexcept = default;
@@ -730,7 +802,10 @@ struct vram_apple_index {
         status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            if (phase_ == phase_t::reselect_k)
+            if (phase_ == phase_t::partition_k)
+                status_ = split_.next_round ? index_->queue_rounds_(split_, context)
+                                            : index_->queue_picked_(split_, context);
+            else if (phase_ == phase_t::reselect_k)
                 status_ = index_->submit_pass_(context, config, walked_(), {}, parts_, round_);
             else if (phase_ == phase_t::heal_k)
                 status_ = index_->submit_pass_(context, config, walked_(), to_span(audit_.islands));
@@ -745,28 +820,29 @@ struct vram_apple_index {
          *    queued phase found the index keeping it, as its @c status says.
          */
         status_t wait(traversal_context_t& context) noexcept {
-            if (index_ && succeeded(status_) && !walked_().empty()) status_ = context.wait();
+            if (index_ && succeeded(status_) && (phase_ == phase_t::partition_k || !walked_().empty()))
+                status_ = context.wait();
             return status_;
         }
 
-        /** Lands the pass from @p context on the host, audits after the rounds and every heal,
+        /** Reads the pass from @p context on the host, audits after the rounds and every heal,
          *  picks the next phase, and answers whether one follows. */
         bool advance(traversal_context_t& context) noexcept {
             if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            if (phase_ == phase_t::partition_k) return advance_partition_(context);
             metal_audit_t& audit = audit_;
             if (iota_view<node_id_t> const walked = walked_(); !walked.empty())
-                tally_ += index_->land_pass_(
-                    context, walked, phase_ == phase_t::heal_k ? to_span(audit.islands) : std::span<u32_t const> {});
+                tally_ += index_->read_pass_(context, walked.size());
             if (phase_ == phase_t::reselect_k) {
                 if (++round_ < rounds_) return true;
                 phase_ = phase_t::audit_k;
                 return true;
             }
             std::size_t const islands_before = audit.islands.size();
-            if (phase_ == phase_t::heal_k) tally_.islands_reconnected += index_->reconnect_(audit);
+            if (phase_ == phase_t::heal_k) tally_.islands_reconnected += index_->reconnect_(audit, context);
             status_t const audited = index_->audit_(audit);
             std::size_t const rows = index_->size(), left = audit.islands.size();
-            tally_.health = {rows, rows - left, audit.sweeps};
+            tally_.reachability = {rows, rows - left, audit.sweeps, audit.back_sweeps};
             // A refused audit judged no row, so nothing heals.
             if (failed(audited)) {
                 status_ = audited;
@@ -775,16 +851,18 @@ struct vram_apple_index {
             }
             if (phase_ == phase_t::audit_k) tally_.islands_found = left;
             // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
+            // are islands too.
             bool const healing = left && (phase_ == phase_t::audit_k || left < islands_before);
             phase_ = healing ? phase_t::heal_k : phase_t::done_k;
+            if (!healing && split_.receivers.size()) return settle_receiver_(context);
             return healing;
         }
 
-        /** Stops the re-selection after the round that landed last, so the next phase audits and
-         *  heals; a no-op in any other phase. */
+        /** Stops the re-selection after the round that finished last, so the next phase audits and
+         *  heals, and a split's later receivers skip theirs; a no-op in any other phase, the
+         *  partition of a split included. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) rounds_ = 0, phase_ = phase_t::audit_k;
+            if (phase_ == phase_t::reselect_k) rounds_ = 0, split_.rounds = 0, phase_ = phase_t::audit_k;
         }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's
@@ -804,7 +882,7 @@ struct vram_apple_index {
          *  - @c config_mismatch_k or @c unsupported_layout_k A phase found the index keeping it,
          *    as its @c status says.
          */
-        expected<refine_result_t> finish() const noexcept {
+        expected<refine_report_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             if (failed(status_)) return {tally_, status_};
             return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
@@ -812,7 +890,101 @@ struct vram_apple_index {
 
       private:
         friend struct vram_apple_index;
-        enum class phase_t : u8_t { reselect_k, audit_k, heal_k, done_k };
+        enum class phase_t : u8_t { partition_k, reselect_k, audit_k, heal_k, done_k };
+
+        /** The barrier after a partition batch: grows on while a round still placed nodes, places
+         *  the nodes no round reached once one placed none and queues the picked pass next, and
+         *  after the picked pass assigns every node its slot, scatters them on the host over
+         *  unified memory, files their keys, publishes every receiver and binds the first. */
+        bool advance_partition_(traversal_context_t& context) noexcept {
+            vram_apple_index& donor = *index_;
+            if (split_.next_round) {
+                if (!donor.placing_(split_)) donor.place_islands_(split_), split_.next_round = 0;
+                return true;
+            }
+            assign_slots_();
+            donor.scatter_(split_);
+            publish_parts_();
+            bind_receiver_(context);
+            return phase_ != phase_t::done_k;
+        }
+
+        /** Turns every donor node's part into its slot in place, each part's picked nodes first and
+         *  both runs in ID order. */
+        void assign_slots_() noexcept {
+            split_layout_t const layout = split_layout_(split_.entries, split_.receivers.size());
+            u32_t* const slots = reinterpret_cast<u32_t*>(split_.device_bytes.host + layout.node_parts);
+            u32_t const* const picked = reinterpret_cast<u32_t const*>(split_.device_bytes.host + layout.picked);
+            auto const is_picked = [&](std::size_t node) noexcept { return (picked[node / 32] >> (node % 32)) & 1u; };
+            for (split_part_t& part : split_.parts) part = {};
+            for (std::size_t node = 0; node != split_.entries; ++node) {
+                split_part_t& part = split_.parts[slots[node]];
+                ++part.entries, part.picked_count += is_picked(node);
+            }
+            for (u32_t const picked_pass : {1u, 0u})
+                for (std::size_t node = 0; node != split_.entries; ++node) {
+                    if (is_picked(node) != picked_pass) continue;
+                    std::size_t const part = slots[node];
+                    slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
+                }
+        }
+
+        /** Files every donor key under its slot in its receiver, publishes every receiver's nodes
+         *  at once under the closed claim words, and empties the donor. */
+        void publish_parts_() noexcept {
+            vram_apple_index& donor = *std::exchange(split_.donor, nullptr);
+            split_layout_t const layout = split_layout_(split_.entries, split_.receivers.size());
+            u32_t const* const slots = reinterpret_cast<u32_t const*>(split_.device_bytes.host + layout.node_parts);
+            for (std::size_t node = 0; node != split_.entries; ++node)
+                split_.receivers[slots[node] / split_.part_capacity]->keyed_.assign(
+                    static_cast<node_id_t>(slots[node] % split_.part_capacity),
+                    donor.keyed_[static_cast<node_id_t>(node)]);
+            for (std::size_t index = 0; index != split_.receivers.size(); ++index) {
+                vram_apple_index& receiver = *split_.receivers[index];
+                std::size_t const entries = split_.parts[index].entries;
+                u32_t* const words = metal_words(receiver.counters_);
+                words[metal_published_k] = static_cast<u32_t>(entries);
+                receiver.publish_keys_({0, static_cast<node_id_t>(entries)});
+                if (status_t const published = receiver.publish_(0, entries); failed(published)) status_ = published;
+            }
+            donor.forget_();
+        }
+
+        /** Binds the pass to the next receiver holding nodes, under its own batch hold and sized as
+         *  its own refinement: its picked nodes as the range, or straight the audit when it has
+         *  none or a stop cut the pass; past the last, reports the sums. */
+        void bind_receiver_(traversal_context_t& context) noexcept {
+            while (split_.bound_receiver != split_.receivers.size() && !split_.parts[split_.bound_receiver].entries)
+                ++split_.bound_receiver;
+            if (split_.bound_receiver == split_.receivers.size()) {
+                tally_.reachability = split_.reachability, tally_.islands_found = split_.islands;
+                phase_ = phase_t::done_k;
+                return;
+            }
+            vram_apple_index& receiver = *split_.receivers[split_.bound_receiver];
+            node_id_t const picked_count = static_cast<node_id_t>(split_.parts[split_.bound_receiver].picked_count);
+            auto [bound, status] = receiver.plan_refine({0, picked_count}, {}, split_.config, context);
+            if (failed(status)) {
+                status_ = status, phase_ = phase_t::done_k;
+                return;
+            }
+            batch_ = std::move(bound.batch_);
+            audit_ = std::move(bound.audit_);
+            index_ = &receiver;
+            nodes_ = bound.nodes_;
+            parts_ = 0, round_ = 0, rounds_ = split_.rounds;
+            phase_ = !split_.rounds || nodes_.empty() ? phase_t::audit_k : phase_t::reselect_k;
+        }
+
+        /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
+         *  answering whether a phase follows. */
+        bool settle_receiver_(traversal_context_t& context) noexcept {
+            split_.reachability += tally_.reachability;
+            split_.islands += tally_.islands_found;
+            ++split_.bound_receiver;
+            bind_receiver_(context);
+            return phase_ != phase_t::done_k;
+        }
 
         /** The rows the current phase's pass walks: the round's nodes while re-selecting, every
          *  island while healing, and none while auditing. */
@@ -822,7 +994,7 @@ struct vram_apple_index {
             return {};
         }
 
-        std::unique_lock<std::mutex> batch_;
+        batch_lock_t batch_;
         vram_apple_index* index_ = nullptr;
 
         /** The audit whose reached rows and islands the heal walks and reconnects, from one
@@ -839,7 +1011,8 @@ struct vram_apple_index {
         u32_t round_ = 0;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
-        refine_result_t tally_;
+        refine_report_t tally_;
+        split_t split_;
     };
 
     /**
@@ -857,11 +1030,10 @@ struct vram_apple_index {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p context rides another device or cannot walk.
      */
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                        refine_config_t config = {},
-                                        std::span<node_id_t const> part_bases = {}) noexcept {
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
+                                        refine_config_t config, traversal_context_t& context) noexcept {
         refine_plan_t plan;
-        plan.batch_ = std::unique_lock {batch_};
+        plan.batch_ = batch_lock_t {batch_};
         std::size_t const rows = size();
         std::size_t parts = 0;
         while (parts != part_bases.size() && part_bases[parts] < rows) ++parts;
@@ -870,9 +1042,13 @@ struct vram_apple_index {
             if (!counters_) return {std::move(plan), status_t::uninitialized_k};
             if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
             bool fresh = false;
-            if (status_t const staged = context.ensure_(context.staging_, staging_bytes_(parts), fresh); failed(staged))
+            refine_layout_t const staging = refine_layout_();
+            if (status_t const staged = context.ensure_(context.staging_, staging.bases + parts * sizeof(u32_t), fresh);
+                failed(staged))
                 return {std::move(plan), staged};
-            std::memcpy(context.staging_.host + bases_offset_(), part_bases.data(), parts * sizeof(u32_t));
+            std::memcpy(context.staging_.host + staging.bases, part_bases.data(), parts * sizeof(u32_t));
+            // Every chain starts empty, and each merge empties the ones it folds.
+            std::memset(context.staging_.host + staging.heads, 0xFF, rows * sizeof(u32_t));
             // The widest walk's arena now, so no pass grows it.
             u32_t const expansion = non_zero_expansion_factor(config);
             u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
@@ -884,7 +1060,8 @@ struct vram_apple_index {
                 failed(sized))
                 return {std::move(plan), sized};
             metal_audit_t& audit = plan.audit_;
-            for (growing_buffer<u8_t>* marks : {&audit.reached, &audit.frontier, &audit.next_frontier})
+            for (growing_buffer<u8_t>* marks :
+                 {&audit.reached, &audit.frontier, &audit.next_frontier, &audit.reaches_back, &audit.back_settled})
                 if (failed(marks->reserve_exactly(rows))) return {std::move(plan), status_t::bad_alloc_k};
             if (failed(audit.islands.reserve_exactly(rows)) || failed(audit.in_links.reserve_exactly(rows)))
                 return {std::move(plan), status_t::bad_alloc_k};
@@ -908,26 +1085,101 @@ struct vram_apple_index {
      *    keeps it.
      *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @c status says.
      */
-    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}, std::span<node_id_t const> part_bases = {}) noexcept {
-        auto [plan, status] = plan_refine(nodes, context, config, part_bases);
+    expected<refine_report_t> refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
+                                     refine_config_t config, traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_refine(nodes, part_bases, config, context);
         if (failed(status)) return {{}, status};
         do
-            if (status_t const landed = plan.queue(context, config); failed(landed) || failed(plan.wait(context)))
+            if (status_t const queued = plan.queue(context, config); failed(queued) || failed(plan.wait(context)))
                 break;
         while (plan.advance(context));
         return plan.finish();
     }
 
-    /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
-     *  the host, sweeping until no row expands. */
-    expected<health_result_t> health(traversal_context_t& context) noexcept {
+    /**
+     *  @brief Opens a split of this index's nodes into @p receivers, the CUDA and HIP plan's twin:
+     *      the partition grows on the device, and the rest runs on the host over unified memory.
+     *
+     *  One root per part through @ref seeded_bijection under @p config.seed, then rounds of growth
+     *  over the links on the device, each part capped at the nodes over the receivers rounded up,
+     *  and each node a round reaches kept by its lowest-ID proposer, so equal seeds over equal
+     *  graphs split alike, as on NVIDIA and AMD. The nodes no round reached enter the smallest
+     *  parts in ID order on the host, the picked nodes are found on the device, and the host then
+     *  assigns the slots, each part's picked nodes first, moves every node's vector, norms and
+     *  neighbors into its receiver, the links inside its part rebased and those across dropped,
+     *  files the keys, publishes every receiver at once and empties this index. Each receiver then
+     *  re-selects its picked nodes, audits and heals as @ref plan_refine does, and the tallies sum
+     *  over the receivers.
+     *
+     *  The caller keeps this index's and every receiver's claim word closed for the plan's life,
+     *  and nothing searches this index meanwhile. Receivers must be empty, distinct, and share this
+     *  index's device, metric and geometry.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index never grew.
+     *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
+     *    index itself, one of another device, metric or geometry, or a @p context of another
+     *    device or one that cannot walk.
+     *  - @c contended_k This index's or a receiver's claim word is open.
+     *  - @c overflow_k Part slots past the 32-bit IDs.
+     */
+    expected<refine_plan_t> plan_split(std::span<vram_apple_index*> receivers, split_config_t config,
+                                       traversal_context_t& context) noexcept {
+        using phase_t = typename refine_plan_t::phase_t;
+        refine_plan_t plan;
+        plan.batch_ = batch_lock_t {batch_};
+        std::size_t const parts = receivers.size(), rows = size();
+        if (!counters_) return {std::move(plan), status_t::uninitialized_k};
+        if (parts < 2 || context.device() != device_.ordinal || !context)
+            return {std::move(plan), status_t::config_mismatch_k};
+        if (!claims_.closed()) return {std::move(plan), status_t::contended_k};
+        split_t& split = plan.split_;
+        if (failed(split.receivers.reserve_exactly(parts)) || failed(split.parts.resize(parts)))
+            return {std::move(plan), status_t::bad_alloc_k};
+        for (std::size_t receiver = 0; receiver != parts; ++receiver) {
+            vram_apple_index* const into = receivers[receiver];
+            if (!into || into == this) return {std::move(plan), status_t::config_mismatch_k};
+            for (std::size_t earlier = 0; earlier != receiver; ++earlier)
+                if (receivers[earlier] == into) return {std::move(plan), status_t::config_mismatch_k};
+            if (into->device_.ordinal != device_.ordinal || into->kernel_ != kernel_ ||
+                !(into->geometry_ == geometry_) || into->size())
+                return {std::move(plan), status_t::config_mismatch_k};
+            if (!into->claims_.closed()) return {std::move(plan), status_t::contended_k};
+            split.receivers.push_back_reserved(into);
+        }
+        split.donor = this;
+        split.entries = rows;
+        split.part_capacity = divide_round_up<std::size_t>(rows, parts);
+        split.config = config.refine;
+        if (parts * split.part_capacity >= std::numeric_limits<u32_t>::max())
+            return {std::move(plan), status_t::overflow_k};
+        // Every receiver holds a full part's rows, sentinel-filled, before the partition runs.
+        for (vram_apple_index* const into : split.receivers) {
+            batch_lock_t held {into->batch_};
+            if (status_t const bound = into->bind_(); failed(bound)) return {std::move(plan), bound};
+            if (status_t const grown = into->grow_nodes_(split.part_capacity); failed(grown))
+                return {std::move(plan), grown};
+        }
+        if (rows) {
+            split_layout_t const layout = split_layout_(rows, parts);
+            split.device_bytes = context.buffers_allocator_.allocate(layout.device_bytes);
+            if (!split.device_bytes) return {std::move(plan), status_t::bad_alloc_k};
+            seed_partition_(split, config.seed);
+        }
+        plan.index_ = this;
+        plan.phase_ = rows ? phase_t::partition_k : phase_t::done_k;
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /** Measures reachability both ways from as many stride-spread landmarks as one search draws, on
+     *  the host, sweeping each way until no row expands. */
+    expected<reachability_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
         metal_audit_t& audit = context.audit_;
-        std::shared_lock storage {storage_};
+        shared_lock_t storage {storage_};
         if (status_t const audited = audit_(audit); failed(audited)) return {{}, audited};
-        return {{rows, rows - audit.islands.size(), audit.sweeps}, status_t::success_k};
+        return {{rows, rows - audit.islands.size(), audit.sweeps, audit.back_sweeps}, status_t::success_k};
     }
 
 #pragma endregion Refinement
@@ -996,7 +1248,7 @@ struct vram_apple_index {
             bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            std::shared_lock storage {index_->storage_};
+            shared_lock_t storage {index_->storage_};
             for (std::size_t row = 0; row != rows.size(); ++row)
                 std::memcpy(vectors_rows.data() + row * scalar_row_bytes,
                             index_->vectors_matrix_.host + (rows.first + row) * index_->row_bytes(), scalar_row_bytes);
@@ -1004,20 +1256,20 @@ struct vram_apple_index {
                 std::memcpy(norms_rows.data(), index_->norms_column_.host + rows.first * sizeof(norms_t),
                             norms_rows.size());
             node_id_t const* const source = index_->neighbor_rows_() + rows.first * connectivity;
-            node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
+            node_id_t* const neighbor_slots = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
-                landed[slot] = source[slot] < visible ? source[slot] : node_id_unknown_k;
+                neighbor_slots[slot] = source[slot] < visible ? source[slot] : node_id_unknown_k;
             fu::standard_atomic_ref<std::size_t> {covered}.add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
         /**
-         *  Pronounces the snapshot complete once every step's rows landed in the columns, spending
-         *  the plan.
+         *  @brief Pronounces the snapshot complete once every step's rows were copied to the
+         *      columns, spending the plan.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k Some step's rows never landed.
+         *  - @c config_mismatch_k Some step's rows were never copied.
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -1079,8 +1331,7 @@ struct vram_apple_index {
         std::size_t covered_norms = 0;
 
         load_plan_t() noexcept = default;
-        load_plan_t(vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
-                    std::size_t rows) noexcept
+        load_plan_t(vram_apple_index& index, batch_lock_t&& batch, node_id_t base, std::size_t rows) noexcept
             : base(base), rows(rows), index_(&index), batch_(std::move(batch)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : base(other.base), rows(std::exchange(other.rows, 0)), covered(other.covered),
@@ -1091,7 +1342,7 @@ struct vram_apple_index {
         load_plan_t& operator=(load_plan_t const&) = delete;
 
         /** An unfinished plan turns its rows back to sentinels under the hold, since the next claim
-         *  lands on them without growing, and gives its claim back. */
+         *  goes onto them without growing, and gives its claim back. */
         ~load_plan_t() noexcept {
             if (!index_ || !rows) return;
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(u32_t);
@@ -1150,29 +1401,29 @@ struct vram_apple_index {
                 return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
             for (std::size_t row = 0; row != range.size(); ++row) {
-                byte_t* const landing = index_->vectors_matrix_.host + (range.first + row) * row_bytes;
-                std::memcpy(landing, vectors_rows.data() + row * scalar_row_bytes, scalar_row_bytes);
-                std::memset(landing + scalar_row_bytes, 0, row_bytes - scalar_row_bytes);
+                byte_t* const vector_row = index_->vectors_matrix_.host + (range.first + row) * row_bytes;
+                std::memcpy(vector_row, vectors_rows.data() + row * scalar_row_bytes, scalar_row_bytes);
+                std::memset(vector_row + scalar_row_bytes, 0, row_bytes - scalar_row_bytes);
             }
             if (index_->stores_norms() && !norms_rows.empty()) {
                 std::memcpy(index_->norms_column_.host + range.first * sizeof(norms_t), norms_rows.data(),
                             norms_rows.size());
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
             }
-            std::span<node_id_t> const landed {index_->neighbor_rows_() + range.first * connectivity,
-                                               range.size() * connectivity};
-            std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
-            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
-            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            std::span<node_id_t> const copied_rows {index_->neighbor_rows_() + range.first * connectivity,
+                                                    range.size() * connectivity};
+            std::memcpy(copied_rows.data(), neighbors_rows.data(), neighbors_rows.size());
+            rebase_neighbors(copied_rows, source_range, shift, node_id_unknown_k);
+            compact_neighbors(copied_rows, connectivity, range.first, node_id_unknown_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
-        /** Files every appended row under the key its step landed, which @ref finish then makes
-         *  visible - the one writer of the key map, once every step landed and before the finish;
-         *  with a step missing it files nothing. */
+        /** Files every appended row under the key its step copied, which @ref finish then makes
+         *  visible - the one writer of the key map, once every step was copied and before the
+         *  finish; with a step missing it files nothing. */
         void publish_keys() noexcept {
             if (!index_ || fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return;
@@ -1198,7 +1449,7 @@ struct vram_apple_index {
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes(), connectivity = index_->connectivity();
             std::size_t const into = range.first, from = step.source_nodes.first, count = range.size();
-            std::shared_lock storage {source.storage_};
+            shared_lock_t storage {source.storage_};
             std::memcpy(index_->vectors_matrix_.host + into * row_bytes, source.vectors_matrix_.host + from * row_bytes,
                         count * row_bytes);
             if (index_->stores_norms()) {
@@ -1206,10 +1457,11 @@ struct vram_apple_index {
                             source.norms_column_.host + from * sizeof(norms_t), count * sizeof(norms_t));
                 fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
             }
-            std::span<node_id_t> const landed {index_->neighbor_rows_() + into * connectivity, count * connectivity};
-            std::memcpy(landed.data(), source.neighbor_rows_() + from * connectivity, landed.size_bytes());
-            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
-            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            std::span<node_id_t> const copied_rows {index_->neighbor_rows_() + into * connectivity,
+                                                    count * connectivity};
+            std::memcpy(copied_rows.data(), source.neighbor_rows_() + from * connectivity, copied_rows.size_bytes());
+            rebase_neighbors(copied_rows, source_range, shift, node_id_unknown_k);
+            compact_neighbors(copied_rows, connectivity, range.first, node_id_unknown_k);
             for (std::size_t row = 0; row != count; ++row)
                 index_->keyed_.assign(static_cast<node_id_t>(into + row),
                                       source.keyed_[static_cast<node_id_t>(from + row)]);
@@ -1218,12 +1470,12 @@ struct vram_apple_index {
         }
 
         /**
-         *  Derives the norms no step carried on the device, lifts the hold, and publishes the
-         *  appended nodes with the keys @ref publish_keys filed.
+         *  @brief Derives the norms no step carried on the device, lifts the hold, and publishes
+         *      the appended nodes with the keys @ref publish_keys filed.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k Some step's rows never landed, or the index keeps it, as its
+         *  - @c config_mismatch_k Some step's rows were never copied, or the index keeps it, as its
          *    @c status says.
          *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as its @c status says.
          */
@@ -1246,13 +1498,13 @@ struct vram_apple_index {
 
       private:
         vram_apple_index* index_ = nullptr;
-        std::unique_lock<std::mutex> batch_;
+        batch_lock_t batch_;
     };
 
     /**
-     *  Opens a load of @p rows at the watermark, sourced per step, as the sharded index drives its
-     *  parts: claims them, or lands them under the claim word its caller closed; a batch or load in
-     *  flight refuses it.
+     *  @brief Opens a load of @p rows at the watermark, sourced per step, as the sharded index
+     *      drives its parts: claims them, or places them under the claim word its caller closed; a
+     *      batch or load in flight refuses it.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
@@ -1264,11 +1516,11 @@ struct vram_apple_index {
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows) return {load_plan_t {*this, {}, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
-        std::unique_lock batch {batch_, std::try_to_lock};
+        batch_lock_t batch {batch_, std::try_to_lock};
         if (!batch.owns_lock()) return {{}, status_t::contended_k};
         if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
         // A closed word is the caller's, who refines or absorbs around the load; an open one is
-        // claimed like a batch's, so no batch lands beside it.
+        // claimed like a batch's, so no batch goes beside it.
         bool const claiming = !claims_.closed();
         node_id_t base = static_cast<node_id_t>(size());
         if (claiming) {
@@ -1326,8 +1578,8 @@ struct vram_apple_index {
 
 #pragma region Batches
 
-    /** The device half of @c insert: lands @p keys, stages and runs @p new_rows at @p first_id, and
-     *  returns with their IDs, the rows invisible until the caller publishes them - which the
+    /** The device half of @c insert: writes @p keys, stages and runs @p new_rows at @p first_id,
+     *  and returns with their IDs, the rows invisible until the caller publishes them - which the
      *  sharded twin does for every step at once. The caller holds the claim over them; a refusal
      *  before the launch keeps no failure, one after it keeps the failure. */
     expected<insert_result_t> submit_insert_(keys_view_t keys, rows_view_t new_rows, node_id_t first_id,
@@ -1342,7 +1594,7 @@ struct vram_apple_index {
         // Growth relocates the storage, so it runs under the hold a reserve takes too, and the
         // first one builds the pipelines every size below reads.
         {
-            std::unique_lock batch {batch_};
+            batch_lock_t batch {batch_};
             if (status_t const bound = bind_(); failed(bound)) return {{}, bound};
             if (status_t const grown = grow_nodes_(first_id + rows); failed(grown)) return {{}, grown};
         }
@@ -1382,7 +1634,7 @@ struct vram_apple_index {
         // The claim admits one batch at a time, so the batch drains before the next claims.
         status_t launched = status_t::success_k;
         {
-            std::shared_lock storage {storage_};
+            shared_lock_t storage {storage_};
             launched = launch_insert_(arguments, candidate_slots, blocks, links_offset, context);
             if (succeeded(launched)) launched = context.wait();
         }
@@ -1511,12 +1763,12 @@ struct vram_apple_index {
     void stage_rows_(byte_t* staging, rows_view_t rows, byte_t* widened) const noexcept {
         nk::vector_span<f32_t> const widened_row {reinterpret_cast<f32_t*>(widened), dimensions()};
         for (std::size_t row = 0; row != rows.rows; ++row) {
-            byte_t* const landing = staging + row * row_bytes();
+            byte_t* const staged_row = staging + row * row_bytes();
             // Zeroed whole, not past the packed bytes, as packed casts write whole bytes only.
-            std::memset(landing, 0, row_bytes());
+            std::memset(staged_row, 0, row_bytes());
             import_row<typename elementwise_ladder<import_capability_k>::kit_t,
                        typename rmscast_ladder<scalar_t, import_capability_k>::kit_t>(
-                rows, row, kernel_, nk::vector_span<scalar_t> {reinterpret_cast<scalar_t*>(landing), dimensions()},
+                rows, row, kernel_, nk::vector_span<scalar_t> {reinterpret_cast<scalar_t*>(staged_row), dimensions()},
                 widened_row);
         }
     }
@@ -1596,7 +1848,7 @@ struct vram_apple_index {
     }
 
     /** Candidates a re-selection caches, a back-link round's: a row of the node's own neighbors, a
-     *  row's worth of incoming newcomers, and the node's own row last. */
+     *  row's worth of incoming appended nodes, and the node's own row last. */
     u32_t reselection_nodes_() const noexcept { return 2 * static_cast<u32_t>(connectivity()) + 1; }
 
     /** Bytes of one builder simdgroup's slice, its walk's or its re-selection's, whichever caches
@@ -1698,7 +1950,7 @@ struct vram_apple_index {
         arguments.end_id = static_cast<u32_t>(first + rows);
         metal_context_t* const context = vectors_allocator_.context();
         if (!context) return status_t::device_error_k;
-        std::shared_lock storage {storage_};
+        shared_lock_t storage {storage_};
         metal_launch_t launch {*context->api, context->queue,
                                pipeline_(vram_dense_kernel_t::derive_norms_k, 0).pipeline};
         if (!launch) return status_t::device_error_k;
@@ -1733,19 +1985,19 @@ struct vram_apple_index {
             !submitted)
             return submitted;
         if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
-        land_search_(context, result_ids, result_distances);
+        read_search_(context, result_ids, result_distances);
         return {spent_(context, config.count), status_t::success_k};
     }
 
     /** The submission half of @c search: stages the queries and any indexer @p heads and launches
-     *  the walks over the @p visible rows; until the context lands, its staging holds the matches
-     *  @c land_search_ reads back. */
+     *  the walks over the @p visible rows; until the context finishes, its staging holds the
+     *  matches @c read_search_ reads back. */
     template <typename heads_type_ = dummy_heads_t>
     expected<search_result_t> submit_search_(rows_view_t queries, traversal_context_t& context, search_config_t config,
                                              std::size_t visible, heads_type_ const& heads = {}) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         std::size_t const queries_count = queries.rows;
-        context.landing_ = {};
+        context.walk_output_offsets_ = {};
         if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         if (!queries_count) return {{}, status_t::success_k};
         std::size_t heads_count = 0;
@@ -1781,7 +2033,7 @@ struct vram_apple_index {
         }
         std::size_t const ids_offset = rows_bytes + weights_bytes;
         std::size_t const distances_offset = ids_offset + results * sizeof(node_id_t);
-        context.landing_ = {queries_count, config.count, ids_offset, distances_offset, 0};
+        context.walk_output_offsets_ = {queries_count, config.count, ids_offset, distances_offset, 0};
         if (status_t const walked = launch_walk_(context, arguments, candidate_slots, ids_offset, distances_offset,
                                                  distances_offset, queries_count * row_bytes(), rows_bytes,
                                                  metal_output_t::distances_k);
@@ -1791,18 +2043,18 @@ struct vram_apple_index {
     }
 
     /** Copies the matches the last search on @p context left in its staging into @p result_ids
-     *  and, unless it is empty, @p result_distances; call it once the context landed. */
-    void land_search_(traversal_context_t const& context, nk::matrix_span<node_id_t> result_ids,
+     *  and, unless it is empty, @p result_distances; call it once the context finished. */
+    void read_search_(traversal_context_t const& context, nk::matrix_span<node_id_t> result_ids,
                       nk::matrix_span<distance_t> result_distances) const noexcept {
-        auto const& landing = context.landing_;
+        auto const& offsets = context.walk_output_offsets_;
         bool const wants_distances = result_distances.extent(0) != 0;
-        auto const* const ids = reinterpret_cast<node_id_t const*>(context.staging_.host + landing.first_offset);
+        auto const* const ids = reinterpret_cast<node_id_t const*>(context.staging_.host + offsets.first_offset);
         auto const* const distances = reinterpret_cast<distance_t const*>(context.staging_.host +
-                                                                          landing.second_offset);
-        for (std::size_t query = 0; query != landing.queries; ++query)
-            for (std::size_t rank = 0; rank != landing.count; ++rank) {
-                result_ids(query, rank) = ids[query * landing.count + rank];
-                if (wants_distances) result_distances(query, rank) = distances[query * landing.count + rank];
+                                                                          offsets.second_offset);
+        for (std::size_t query = 0; query != offsets.queries; ++query)
+            for (std::size_t rank = 0; rank != offsets.count; ++rank) {
+                result_ids(query, rank) = ids[query * offsets.count + rank];
+                if (wants_distances) result_distances(query, rank) = distances[query * offsets.count + rank];
             }
     }
 
@@ -1821,17 +2073,17 @@ struct vram_apple_index {
             return submitted;
         if (status_t const drained = context.wait(); failed(drained)) return {{}, drained};
         search_result_t result = spent_(context, 0);
-        result.count = land_multiply_(context, node_ids, products, counts);
+        result.count = read_multiply_(context, node_ids, products, counts);
         return {result, status_t::success_k};
     }
 
     /** The submission half of @c multiply: stages the rows and launches walks keeping up to
-     *  @p wanted pairs each over the @p visible rows; until the context lands, its staging holds
-     *  the pairs @c land_multiply_ reads back. */
+     *  @p wanted pairs each over the @p visible rows; until the context finishes, its staging holds
+     *  the pairs @c read_multiply_ reads back. */
     expected<search_result_t> submit_multiply_(rows_view_t left, std::size_t wanted, traversal_context_t& context,
                                                search_config_t config, std::size_t visible) noexcept {
         std::size_t const rows_count = left.rows;
-        context.landing_ = {};
+        context.walk_output_offsets_ = {};
         if (!rows_count) return {{}, status_t::success_k};
         u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const candidate_slots = candidate_slots_for_(expansion, 2);
@@ -1846,7 +2098,7 @@ struct vram_apple_index {
         arguments.count = static_cast<u32_t>(wanted);
         std::size_t const products_offset = rows_bytes + ids_bytes;
         std::size_t const counts_offset = products_offset + products_bytes;
-        context.landing_ = {rows_count, wanted, rows_bytes, products_offset, counts_offset};
+        context.walk_output_offsets_ = {rows_count, wanted, rows_bytes, products_offset, counts_offset};
         if (status_t const walked = launch_walk_(context, arguments, candidate_slots, rows_bytes, products_offset,
                                                  counts_offset, 0, 0, metal_output_t::products_k);
             failed(walked))
@@ -1856,19 +2108,19 @@ struct vram_apple_index {
 
     /** Copies the pairs and the scored counts the last multiply on @p context left in its staging
      *  into @p node_ids, @p products and @p counts, and answers the pairs scored in all; call it
-     *  once the context landed. */
-    std::size_t land_multiply_(traversal_context_t const& context, nk::matrix_span<node_id_t> node_ids,
+     *  once the context finished. */
+    std::size_t read_multiply_(traversal_context_t const& context, nk::matrix_span<node_id_t> node_ids,
                                nk::matrix_span<dot_result_t> products, std::span<u32_t> counts) const noexcept {
-        auto const& landing = context.landing_;
+        auto const& offsets = context.walk_output_offsets_;
         byte_t const* const staging = context.staging_.host;
-        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + landing.first_offset);
-        auto const* const dots = reinterpret_cast<dot_t const*>(staging + landing.second_offset);
-        auto const* const scored = reinterpret_cast<u32_t const*>(staging + landing.third_offset);
+        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + offsets.first_offset);
+        auto const* const dots = reinterpret_cast<dot_t const*>(staging + offsets.second_offset);
+        auto const* const scored = reinterpret_cast<u32_t const*>(staging + offsets.third_offset);
         std::size_t total = 0;
-        for (std::size_t row = 0; row != landing.queries; ++row) {
-            for (std::size_t pair = 0; pair != landing.count; ++pair) {
-                node_ids(row, pair) = ids[row * landing.count + pair];
-                products(row, pair) = dot_result_t::from_raw(dots[row * landing.count + pair]);
+        for (std::size_t row = 0; row != offsets.queries; ++row) {
+            for (std::size_t pair = 0; pair != offsets.count; ++pair) {
+                node_ids(row, pair) = ids[row * offsets.count + pair];
+                products(row, pair) = dot_result_t::from_raw(dots[row * offsets.count + pair]);
             }
             counts[row] = scored[row];
             total += scored[row];
@@ -1935,7 +2187,7 @@ struct vram_apple_index {
     }
 
     /** Submits the search kernel over the staged queries, its outputs at the given staging offsets;
-     *  an empty index lands its sentinels at once. */
+     *  an empty index writes its sentinels at once. */
     status_t launch_walk_(traversal_context_t& context, metal_arguments_t const& arguments, u32_t candidate_slots,
                           std::size_t ids_offset, std::size_t second_offset, std::size_t third_offset,
                           std::size_t heads_offset, std::size_t weights_offset, metal_output_t output) noexcept {
@@ -1949,7 +2201,7 @@ struct vram_apple_index {
             return status_t::success_k;
         }
         u32_t const keeps_word = keeps ? 1 : 0;
-        std::shared_lock storage {storage_};
+        shared_lock_t storage {storage_};
         metal_launch_t launch {context.api(), context.stream(),
                                pipeline_(vram_kernel_t::search_k, candidate_slots).pipeline};
         if (!launch) return status_t::device_error_k;
@@ -1987,22 +2239,30 @@ struct vram_apple_index {
 
 #pragma region Refinement Passes
 
-    /** Where a refine's staging keeps the walked rows' shadow neighbors: past room for every row's
-     *  ID, which the heal's passes list. */
-    std::size_t shadow_offset_() const noexcept {
-        return round_up_to_multiple<std::size_t>(size() * sizeof(u32_t), default_alignment_k);
+    /** Where a refine's staging keeps each array over the rows published now: past room for every
+     *  row's ID, which the heal's passes list, the walked rows' shadow neighbors, the walkers'
+     *  chain heads and links, a walked mark per row, the merge's counter words, and the parts'
+     *  bases closing the layout. */
+    struct refine_layout_t {
+        std::size_t shadow = 0, heads = 0, links = 0, walked = 0, counters = 0, bases = 0;
+    };
+    refine_layout_t refine_layout_() const noexcept {
+        std::size_t const rows = size(), row_bytes = connectivity() * sizeof(u32_t);
+        refine_layout_t staging;
+        staging.shadow = round_up_to_multiple<std::size_t>(rows * sizeof(u32_t), default_alignment_k);
+        staging.heads = staging.shadow + rows * row_bytes;
+        staging.links = staging.heads + rows * sizeof(u32_t);
+        staging.walked = staging.links + rows * row_bytes;
+        staging.counters = round_up_to_multiple<std::size_t>(staging.walked + rows, default_alignment_k);
+        staging.bases = staging.counters + counters_bytes_k;
+        return staging;
     }
-
-    /** Where a refine's staging keeps the parts' bases: past the shadow neighbors. */
-    std::size_t bases_offset_() const noexcept { return shadow_offset_() + size() * connectivity() * sizeof(u32_t); }
-
-    /** Bytes of a refine's staging over the rows published now, with room for @p parts bases. */
-    std::size_t staging_bytes_(std::size_t parts) const noexcept { return bases_offset_() + parts * sizeof(u32_t); }
 
     /** Submits the re-selection of @p nodes, or of the IDs @p node_ids lists with @p nodes spanning
      *  its offsets, into the shadow matrix of the staging @ref plan_refine sized, each node first
-     *  walking across the neighboring group in round @p round when @p parts parts are given.
-     *  Nothing waits; @c land_pass_ reads the pass once it landed. */
+     *  walking across the neighboring group in round @p round when @p parts parts are given, then
+     *  the merge of every walked row and chain into the live rows, riding the walk's threadgroups
+     *  and arena. Nothing waits; @c read_pass_ reads the pass once it finished. */
     status_t submit_pass_(traversal_context_t& context, refine_config_t config, iota_view<node_id_t> nodes,
                           std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
         std::size_t const rows = size();
@@ -2029,8 +2289,17 @@ struct vram_apple_index {
         arguments.parts = parts > 1 ? parts : 0;
         arguments.round = round;
         reset_counters_(counters_);
+        refine_layout_t const staging = refine_layout_();
+        std::memset(context.staging_.host + staging.walked, 0, rows);
+        std::memset(context.staging_.host + staging.counters, 0, counters_bytes_k);
+        auto const bind_chains = [&](metal_launch_t& launch) noexcept {
+            launch.bind(context.staging_, metal_shadow_buffer_k, staging.shadow);
+            launch.bind(context.staging_, metal_chain_heads_buffer_k, staging.heads);
+            launch.bind(context.staging_, metal_chain_links_buffer_k, staging.links);
+            launch.bind(context.staging_, metal_walked_buffer_k, staging.walked);
+        };
 
-        std::shared_lock storage {storage_};
+        shared_lock_t storage {storage_};
         metal_launch_t launch {context.api(), context.stream(),
                                pipeline_(vram_kernel_t::refine_k, candidate_slots).pipeline};
         if (!launch) return status_t::device_error_k;
@@ -2038,52 +2307,48 @@ struct vram_apple_index {
         launch.bind(context.staging_, metal_staging_buffer_k);
         launch.bind(context.arena_, metal_arena_buffer_k);
         launch.bind(counters_, metal_counters_buffer_k);
-        launch.bind(context.staging_, metal_shadow_buffer_k, shadow_offset_());
-        launch.bind(context.staging_, metal_part_bases_buffer_k, bases_offset_());
-        return context.submit_(launch, blocks, threadgroup_threads_());
+        launch.bind(context.staging_, metal_part_bases_buffer_k, staging.bases);
+        bind_chains(launch);
+        if (status_t const submitted = context.submit_(launch, blocks, threadgroup_threads_()); failed(submitted))
+            return submitted;
+        metal_launch_t merge {context.api(), context.stream(),
+                              pipeline_(vram_dense_kernel_t::merge_back_links_k, 0).pipeline};
+        if (!merge) return status_t::device_error_k;
+        arguments.first_id = 0;
+        arguments.end_id = static_cast<u32_t>(rows);
+        arguments.use_node_ids = 0;
+        arguments.selection_nodes = reselection_nodes_();
+        bind_storage_(merge, arguments);
+        merge.bind(context.arena_, metal_arena_buffer_k);
+        merge.bind(context.staging_, metal_counters_buffer_k, staging.counters);
+        bind_chains(merge);
+        return context.submit_(merge, blocks, threadgroup_threads_());
     }
 
-    /** Lands the pass @c submit_pass_ submitted over @p nodes or @p node_ids, once it finished:
-     *  every walked row replaces the live one, and the rows that changed are counted. */
-    refine_result_t land_pass_(traversal_context_t& context, iota_view<node_id_t> nodes,
-                               std::span<u32_t const> node_ids) noexcept {
-        std::size_t const walk_count = nodes.size();
-        std::size_t const connectivity = this->connectivity();
-        // Exclusive pass: the walked rows land in the live matrix with plain stores.
-        refine_result_t result;
-        u32_t* const live = neighbor_rows_();
-        u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + shadow_offset_());
-        for (std::size_t offset = 0; offset != walk_count; ++offset) {
-            std::size_t const node = node_ids.empty() ? nodes.first + offset : node_ids[offset];
-            u32_t* const row = live + node * connectivity;
-            u32_t const* const picked = shadow + node * connectivity;
-            // Changed means the set gained a member the row lacked;
-            // a reordering or a loss alone never counts.
-            bool gained = false;
-            for (std::size_t slot = 0; slot != connectivity && !gained; ++slot) {
-                bool lacked = picked[slot] != node_id_unknown_k && picked[slot] != node;
-                for (std::size_t old_slot = 0; lacked && old_slot != connectivity; ++old_slot)
-                    lacked = row[old_slot] != picked[slot];
-                gained = lacked;
-            }
-            std::memcpy(row, picked, connectivity * sizeof(u32_t));
-            result.changed_nodes += gained;
-        }
-        u32_t const* const counters = metal_words(counters_);
-        result.reselected_nodes = walk_count;
-        result.telemetry.visited_members = metal_tally(counters, metal_hops_k);
-        result.telemetry.computed_distances = metal_tally(counters, metal_scored_k);
-        result.telemetry.restarts = metal_tally(counters, metal_restarts_k);
+    /** Reads the pass @c submit_pass_ submitted over @p walked rows, once it finished: the rows the
+     *  merge counted changed, and the walk's and the merge's telemetry. */
+    refine_report_t read_pass_(traversal_context_t& context, std::size_t walked) const noexcept {
+        u32_t const* const walk = metal_words(counters_);
+        u32_t const* const merge = reinterpret_cast<u32_t const*>(context.staging_.host + refine_layout_().counters);
+        refine_report_t result;
+        result.reselected_nodes = walked;
+        result.changed_nodes = merge[metal_changed_k];
+        result.traversal_stats.visited_members = metal_tally(walk, metal_hops_k);
+        result.traversal_stats.computed_distances = metal_tally(walk, metal_scored_k) +
+                                                    metal_tally(merge, metal_scored_k);
+        result.traversal_stats.restarts = metal_tally(walk, metal_restarts_k);
         return result;
     }
 
-    /** Sweeps forward reachability on the host from as many stride-spread landmarks as one search
-     *  draws, collecting the rows it never reached into @c islands; @p audit grows to the rows
-     *  published now and keeps its capacity for later rounds and calls. */
+    /** Sweeps reachability on the host from as many stride-spread landmarks as one search draws,
+     *  forward and then back toward them, collecting the rows not reached both ways into
+     *  @c islands; @p audit grows to the rows published now and keeps its capacity for later
+     *  rounds and calls. */
     status_t audit_(metal_audit_t& audit) const noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
-        for (growing_buffer<u8_t>* marks : {&audit.reached, &audit.frontier, &audit.next_frontier}) {
+        for (growing_buffer<u8_t>* marks :
+             {&audit.reached, &audit.frontier, &audit.next_frontier, &audit.reaches_back, &audit.back_settled}) {
             if (failed(marks->reserve_exactly(rows))) return status_t::bad_alloc_k;
             marks->clear();
             marks->extend_uninitialized(rows);
@@ -2092,9 +2357,10 @@ struct vram_apple_index {
         u32_t const* const neighbors = neighbor_rows_();
         std::memset(audit.reached.data(), 0, rows);
         std::memset(audit.frontier.data(), 0, rows);
+        std::memset(audit.reaches_back.data(), 0, rows);
         for (std::size_t seed = 0; seed != seed_count; ++seed) {
             std::size_t const row = seed * rows / seed_count;
-            audit.reached[row] = audit.frontier[row] = 1;
+            audit.reached[row] = audit.frontier[row] = audit.reaches_back[row] = 1;
         }
         // Each sweep's frontier holds only rows the one before reached first, so the sweeps end
         // once every reachable row was a frontier.
@@ -2114,17 +2380,38 @@ struct vram_apple_index {
             if (!expanded) break;
             std::swap(audit.frontier, audit.next_frontier);
         }
+        // Each level back marks the rows linking into one that reached back a level before, so no
+        // reverse adjacency is built.
+        for (audit.back_sweeps = 0;; ++audit.back_sweeps) {
+            std::memcpy(audit.back_settled.data(), audit.reaches_back.data(), rows);
+            bool reached_any_back = false;
+            for (std::size_t row = 0; row != rows; ++row) {
+                if (audit.reaches_back[row]) continue;
+                for (std::size_t slot = 0; slot != connectivity; ++slot) {
+                    u32_t const target = neighbors[row * connectivity + slot];
+                    if (target == node_id_unknown_k || target == row || target >= rows || !audit.back_settled[target])
+                        continue;
+                    audit.reaches_back[row] = 1, reached_any_back = true;
+                    break;
+                }
+            }
+            if (!reached_any_back) break;
+        }
         audit.islands.clear();
         for (std::size_t row = 0; row != rows; ++row)
-            if (!audit.reached[row]) audit.islands.push_back_reserved(static_cast<u32_t>(row));
+            if (!audit.reached[row] || !audit.reaches_back[row])
+                audit.islands.push_back_reserved(static_cast<u32_t>(row));
         return status_t::success_k;
     }
 
-    /** Reconnects each island into the first of its reached picks with room for it, or into the
-     *  landmark covering its ID: a free slot when one is left, otherwise a landing spread across
-     *  the tail by its ID that never evicts a sibling island nor a reached resident left with no
-     *  other reached in-link. Answers the links written. */
-    std::size_t reconnect_(metal_audit_t& audit) noexcept {
+    /** Reconnects each island as @c vram_reconnect_island does: an unreached one into the first of
+     *  its reached picks with room for it, or into the landmark covering its ID, and one reaching
+     *  no landmark back, unless a live pick does, takes an out-link to the first of the heal's
+     *  walked picks in @p context 's staging that does, or to that landmark. A link takes a free
+     *  slot when one is left, otherwise a slot spread across the tail by the linked ID that never
+     *  evicts a sibling island nor a reached resident left with no other reached in-link. Answers
+     *  the links written. */
+    std::size_t reconnect_(metal_audit_t& audit, traversal_context_t const& context) noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
         std::size_t const spread = heal_spread(connectivity);
@@ -2141,42 +2428,290 @@ struct vram_apple_index {
                 if (target != node_id_unknown_k && target != row && target < rows) ++in_links[target];
             }
         }
+        u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + refine_layout_().shadow);
         std::size_t reconnected = 0;
-        for (u32_t const island : audit.islands) {
-            auto const land = [&](u32_t target) noexcept {
-                u32_t* const target_row = neighbors + static_cast<std::size_t>(target) * connectivity;
-                for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                    if (target_row[slot] == island) return true;
-                    if (target_row[slot] != node_id_unknown_k && target_row[slot] != target) continue;
-                    target_row[slot] = island, ++reconnected;
-                    return true;
-                }
-                for (std::size_t attempt = 0; attempt != spread; ++attempt) {
-                    std::size_t const landing = connectivity - 1 - (island + attempt) % spread;
-                    u32_t const resident = target_row[landing];
-                    if (resident == island) return true;
+        // Whether `linked` now sits in the owner's row, placing it there when a slot allows.
+        auto const attach = [&](u32_t owner, u32_t linked) noexcept {
+            u32_t* const owner_row = neighbors + static_cast<std::size_t>(owner) * connectivity;
+            for (std::size_t slot = 0; slot != connectivity; ++slot) {
+                if (owner_row[slot] == linked) return true;
+                if (owner_row[slot] != node_id_unknown_k && owner_row[slot] != owner) continue;
+                owner_row[slot] = linked, ++reconnected;
+                return true;
+            }
+            for (std::size_t attempt = 0; attempt != spread; ++attempt) {
+                std::size_t const target_slot = connectivity - 1 - (linked + attempt) % spread;
+                u32_t const resident = owner_row[target_slot];
+                if (resident == linked) return true;
+                // An unreached row proves no in-link, and only its own island writes it.
+                if (audit.reached[owner]) {
                     if (resident != node_id_unknown_k && (resident >= rows || !audit.reached[resident])) continue;
-                    bool const evicting = resident != node_id_unknown_k && resident != target;
+                    bool const evicting = resident != node_id_unknown_k && resident != owner;
                     if (evicting && in_links[resident] <= 1) continue;
                     if (evicting) --in_links[resident];
-                    target_row[landing] = island, ++reconnected;
-                    return true;
                 }
-                return false;
-            };
-            bool landed = false;
-            u32_t const* const island_row = neighbors + static_cast<std::size_t>(island) * connectivity;
-            for (std::size_t slot = 0; slot != connectivity && !landed; ++slot) {
-                u32_t const pick = island_row[slot];
-                if (pick != node_id_unknown_k && pick != island && pick < rows && audit.reached[pick])
-                    landed = land(pick);
+                owner_row[target_slot] = linked, ++reconnected;
+                return true;
             }
-            if (landed || !seed_count) continue;
-            std::size_t const seed = static_cast<std::size_t>(island) * seed_count / rows;
-            u32_t const landmark = static_cast<u32_t>(seed * rows / seed_count);
-            if (landmark != island) land(landmark);
+            return false;
+        };
+        // The first of `picks` in `marks`, or the sentinel.
+        auto const first_pick_in = [&](u32_t const* picks, u32_t island, growing_buffer<u8_t> const& marks) noexcept {
+            for (std::size_t slot = 0; slot != connectivity; ++slot)
+                if (picks[slot] != node_id_unknown_k && picks[slot] != island && picks[slot] < rows &&
+                    marks[picks[slot]])
+                    return picks[slot];
+            return node_id_unknown_k;
+        };
+        for (u32_t const island : audit.islands) {
+            // A walk starts at the landmark covering this ID, which is what makes it reached, and
+            // reaching back too.
+            u32_t landmark = island;
+            if (seed_count) landmark = static_cast<u32_t>(std::size_t {island} * seed_count / rows * rows / seed_count);
+            u32_t const* const island_row = neighbors + static_cast<std::size_t>(island) * connectivity;
+            if (!audit.reached[island]) {
+                bool attached = false;
+                for (std::size_t slot = 0; slot != connectivity && !attached; ++slot) {
+                    u32_t const pick = island_row[slot];
+                    if (pick != node_id_unknown_k && pick != island && pick < rows && audit.reached[pick])
+                        attached = attach(pick, island);
+                }
+                if (!attached && landmark != island) attach(landmark, island);
+            }
+            if (audit.reaches_back[island] ||
+                first_pick_in(island_row, island, audit.reaches_back) != node_id_unknown_k)
+                continue;
+            u32_t const nearest = first_pick_in(shadow + std::size_t {island} * connectivity, island,
+                                                audit.reaches_back);
+            if (nearest != node_id_unknown_k) attach(island, nearest);
+            else if (landmark != island) attach(island, landmark);
         }
         return reconnected;
+    }
+
+    /** Where a split's shared buffer keeps each array of @p nodes nodes into @p parts parts, in
+     *  bytes: each node's part, which the host turns into its slot, the round's proposals, the two
+     *  frontiers and the picked bitset, one bit per node each, then per part its size and its round
+     *  count, and the nodes the last two rounds placed, by the round number's parity. */
+    struct split_layout_t {
+        std::size_t node_parts = 0, proposals = 0, frontier = 0, next_frontier = 0, picked = 0;
+        std::size_t part_sizes = 0, round_counts = 0, placed = 0, device_bytes = 0;
+    };
+    static split_layout_t split_layout_(std::size_t nodes, std::size_t parts) noexcept {
+        std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
+        split_layout_t layout;
+        layout.proposals = nodes * sizeof(u32_t);
+        layout.frontier = layout.proposals + nodes * sizeof(u32_t);
+        layout.next_frontier = layout.frontier + words * sizeof(u32_t);
+        layout.picked = layout.next_frontier + words * sizeof(u32_t);
+        layout.part_sizes = layout.picked + words * sizeof(u32_t);
+        layout.round_counts = layout.part_sizes + parts * sizeof(u32_t);
+        layout.placed = layout.round_counts + parts * sizeof(u32_t);
+        layout.device_bytes = layout.placed + 2 * sizeof(u32_t);
+        return layout;
+    }
+
+    /** Starts @p split 's partition on the host, the buffer still idle: every node unplaced and
+     *  unproposed, the bitsets and counters empty, and the roots @p seed picks placed alone into
+     *  the frontier of round one. */
+    void seed_partition_(split_t& split, u64_t seed) noexcept {
+        std::size_t const entries = split.entries, parts = split.receivers.size();
+        split_layout_t const layout = split_layout_(entries, parts);
+        byte_t* const scratch = split.device_bytes.host;
+        std::memset(scratch, 0xFF, layout.frontier);
+        std::memset(scratch + layout.frontier, 0, layout.device_bytes - layout.frontier);
+        u32_t* const node_parts = reinterpret_cast<u32_t*>(scratch + layout.node_parts);
+        u32_t* const frontier = reinterpret_cast<u32_t*>(scratch + layout.frontier);
+        u32_t* const part_sizes = reinterpret_cast<u32_t*>(scratch + layout.part_sizes);
+        for (std::size_t part = 0; part != min_of(parts, entries); ++part) {
+            std::size_t const root = seeded_bijection(part, entries, seed);
+            node_parts[root] = static_cast<u32_t>(part);
+            frontier[root / 32] |= 1u << (root % 32);
+            part_sizes[part] = 1;
+        }
+        split.next_round = 1;
+    }
+
+    /** The scalars and the scratch slots every partition pass of @p split binds, its frontiers
+     *  swapped on even rounds. */
+    void bind_partition_(metal_launch_t& launch, metal_arguments_t const& arguments,
+                         split_t const& split) const noexcept {
+        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        bool const odd = arguments.round & 1u;
+        launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
+        launch.bind(neighbors_matrix_, metal_neighbors_buffer_k);
+        launch.bind(split.device_bytes, metal_node_parts_buffer_k, layout.node_parts);
+        launch.bind(split.device_bytes, metal_proposals_buffer_k, layout.proposals);
+        launch.bind(split.device_bytes, metal_frontier_buffer_k, odd ? layout.frontier : layout.next_frontier);
+        launch.bind(split.device_bytes, metal_next_frontier_buffer_k, odd ? layout.next_frontier : layout.frontier);
+        launch.bind(split.device_bytes, metal_part_sizes_buffer_k, layout.part_sizes);
+        launch.bind(split.device_bytes, metal_round_counts_buffer_k, layout.round_counts);
+        launch.bind(split.device_bytes, metal_placed_buffer_k, layout.placed);
+        launch.bind(split.device_bytes, metal_picked_buffer_k, layout.picked);
+    }
+
+    /** Commits @p split 's growth rounds from its next one up to twice it on @p context 's stream,
+     *  four passes each, so the batches double until one ends past convergence; a round queued past
+     *  it leaves at entry. Every node is placed once at most, so the nodes bound the rounds. */
+    status_t queue_rounds_(split_t& split, traversal_context_t& context) noexcept {
+        metal_arguments_t arguments = arguments_();
+        arguments.end_id = static_cast<u32_t>(split.entries);
+        arguments.part_capacity = static_cast<u32_t>(split.part_capacity);
+        u32_t const first_round = split.next_round, parts = static_cast<u32_t>(split.receivers.size());
+        shared_lock_t storage {storage_};
+        for (u32_t round = first_round; round != 2 * first_round; ++round) {
+            arguments.round = round;
+            for (vram_kernel_t const pass : {vram_kernel_t::partition_propose_k, vram_kernel_t::partition_count_k,
+                                             vram_kernel_t::partition_accept_k, vram_kernel_t::partition_fill_k}) {
+                metal_launch_t launch {context.api(), context.stream(), pipeline_(pass, 0).pipeline};
+                if (!launch) return status_t::device_error_k;
+                bind_partition_(launch, arguments, split);
+                u32_t const groups = pass == vram_kernel_t::partition_fill_k
+                                         ? parts
+                                         : device_.multiprocessor_count * max_of(resident_blocks_(pass, 0), 1u);
+                if (status_t const submitted = context.submit_(launch, groups, threadgroup_threads_());
+                    failed(submitted))
+                    return submitted;
+            }
+        }
+        split.next_round = 2 * first_round;
+        return status_t::success_k;
+    }
+
+    /** Whether the last growth round of @p split placed anything, so more rounds follow; read once
+     *  its batch finished. */
+    static bool placing_(split_t const& split) noexcept {
+        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        u32_t const* const placed = reinterpret_cast<u32_t const*>(split.device_bytes.host + layout.placed);
+        return placed[(split.next_round - 1) & 1u] != 0;
+    }
+
+    /** Places every node no growth round reached on the host, in ID order, each entering the part
+     *  smallest at its turn, the lowest-indexed among equals, as the CUDA pass does on a block. */
+    static void place_islands_(split_t& split) noexcept {
+        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        u32_t* const node_parts = reinterpret_cast<u32_t*>(split.device_bytes.host + layout.node_parts);
+        u32_t* const part_sizes = reinterpret_cast<u32_t*>(split.device_bytes.host + layout.part_sizes);
+        std::size_t const parts = split.receivers.size();
+        for (std::size_t node = 0; node != split.entries; ++node) {
+            if (node_parts[node] != node_id_unknown_k) continue;
+            std::size_t smallest = 0;
+            for (std::size_t part = 1; part != parts; ++part)
+                if (part_sizes[part] < part_sizes[smallest]) smallest = part;
+            node_parts[node] = static_cast<u32_t>(smallest);
+            ++part_sizes[smallest];
+        }
+    }
+
+    /** Commits the pass picking @p split 's nodes that link into another part, on
+     *  @p context 's stream, once every node holds its part. */
+    status_t queue_picked_(split_t& split, traversal_context_t& context) noexcept {
+        metal_arguments_t arguments = arguments_();
+        arguments.end_id = static_cast<u32_t>(split.entries);
+        shared_lock_t storage {storage_};
+        metal_launch_t launch {context.api(), context.stream(),
+                               pipeline_(vram_kernel_t::partition_picked_k, 0).pipeline};
+        if (!launch) return status_t::device_error_k;
+        bind_partition_(launch, arguments, split);
+        return context.submit_(
+            launch, walk_blocks_(split.entries, max_of(resident_blocks_(vram_kernel_t::partition_picked_k, 0), 1u)),
+            threadgroup_threads_());
+    }
+
+    /** Moves every node of @p split into its receiver at the slot it was assigned, on the host over
+     *  unified memory: its vector and norms as they are, and its neighbors with the links inside
+     *  its part rebased through their own slots and packed to the front, the links across dropped,
+     *  and a node nothing survived in pointing at itself. */
+    void scatter_(split_t const& split) noexcept {
+        split_layout_t const layout = split_layout_(split.entries, split.receivers.size());
+        u32_t const* const slots = reinterpret_cast<u32_t const*>(split.device_bytes.host + layout.node_parts);
+        std::size_t const capacity = split.part_capacity, connectivity = this->connectivity();
+        shared_lock_t storage {storage_};
+        for (std::size_t node = 0; node != split.entries; ++node) {
+            u32_t const part = static_cast<u32_t>(slots[node] / capacity);
+            std::size_t const position = slots[node] % capacity;
+            vram_apple_index& receiver = *split.receivers[part];
+            std::memcpy(receiver.vectors_matrix_.host + position * row_bytes(),
+                        vectors_matrix_.host + node * row_bytes(), row_bytes());
+            if (stores_norms())
+                std::memcpy(receiver.norms_column_.host + position * sizeof(norms_t),
+                            norms_column_.host + node * sizeof(norms_t), sizeof(norms_t));
+            node_id_t const* const from = neighbor_rows_() + node * connectivity;
+            node_id_t* const into = receiver.neighbor_rows_() + position * connectivity;
+            std::size_t kept = 0;
+            for (std::size_t slot = 0; slot != connectivity; ++slot) {
+                node_id_t const id = from[slot];
+                if (id < split.entries && id != node && slots[id] / capacity == part)
+                    into[kept++] = static_cast<node_id_t>(slots[id] % capacity);
+            }
+            for (std::size_t slot = kept; slot != connectivity; ++slot) into[slot] = node_id_unknown_k;
+            if (!kept) into[0] = static_cast<node_id_t>(position);
+        }
+    }
+
+    /**
+     *  @brief Copies on @p context 's stream the packed row of every entry of @p rows, as the
+     *      stored scalar, into the staging past the entries, @p output_rows rows packed back to
+     *      back: a lookup's gather, which the host reads in place once the context finished.
+     *
+     *  @return Where the gathered rows start in the staging, or null on a refusal.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or an entry
+     *    names a node not visible or an output row past @p output_rows.
+     */
+    expected<byte_t const*> launch_gather_vectors_(std::span<vram_gathered_row_t const> rows, std::size_t output_rows,
+                                                   traversal_context_t& context) noexcept {
+        if (context.device() != device_.ordinal || !context) return {nullptr, status_t::config_mismatch_k};
+        std::size_t const visible = size();
+        for (vram_gathered_row_t const& row : rows)
+            if (row.node >= visible || row.output_row >= output_rows) return {nullptr, status_t::config_mismatch_k};
+        std::size_t const outputs_offset = round_up_to_multiple(rows.size_bytes(), default_alignment_k);
+        bool fresh = false;
+        if (status_t const staged = context.ensure_(context.staging_, outputs_offset + output_rows * packed_row_bytes(),
+                                                    fresh);
+            failed(staged))
+            return {nullptr, staged};
+        std::memcpy(context.staging_.host, rows.data(), rows.size_bytes());
+        if (rows.empty()) return {context.staging_.host + outputs_offset, status_t::success_k};
+        metal_arguments_t arguments = arguments_();
+        arguments.queries_count = static_cast<u32_t>(rows.size());
+        arguments.packed_bytes = static_cast<u32_t>(packed_row_bytes());
+        shared_lock_t storage {storage_};
+        metal_launch_t launch {context.api(), context.stream(), pipeline_(vram_kernel_t::gather_vectors_k, 0).pipeline};
+        if (!launch) return {nullptr, status_t::device_error_k};
+        launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
+        launch.bind(vectors_matrix_, metal_vectors_buffer_k);
+        launch.bind(context.staging_, metal_gathered_rows_buffer_k);
+        launch.bind(context.staging_, metal_gathered_outputs_buffer_k, outputs_offset);
+        status_t const submitted = context.submit_(
+            launch, walk_blocks_(rows.size(), max_of(resident_blocks_(vram_kernel_t::gather_vectors_k, 0), 1u)),
+            threadgroup_threads_());
+        return {failed(submitted) ? nullptr : context.staging_.host + outputs_offset, submitted};
+    }
+
+    /**
+     *  @brief Sums on @p context 's stream the @p queries_count per-query counts its staging holds
+     *      from @p counts_offset bytes in, as a walk left them, into the one word that the
+     *      context's @c matched reads once it finished.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The counts pass the staging, or the @p context rides another device
+     *    or cannot walk.
+     */
+    status_t launch_sum_counts_(std::size_t counts_offset, u32_t queries_count,
+                                traversal_context_t& context) const noexcept {
+        if (context.device() != device_.ordinal || !context ||
+            counts_offset + std::size_t {queries_count} * sizeof(u64_t) > context.staging_.bytes)
+            return status_t::config_mismatch_k;
+        metal_arguments_t arguments = arguments_();
+        arguments.queries_count = queries_count;
+        metal_launch_t launch {context.api(), context.stream(), pipeline_(vram_kernel_t::sum_counts_k, 0).pipeline};
+        if (!launch) return status_t::device_error_k;
+        launch.bind_bytes(&arguments, sizeof(arguments), metal_arguments_buffer_k);
+        launch.bind(context.staging_, metal_counts_buffer_k, counts_offset);
+        launch.bind(context.counters_, metal_counters_buffer_k);
+        return context.submit_(launch, 1, threadgroup_threads_());
     }
 
 #pragma endregion Refinement Passes
@@ -2219,7 +2754,7 @@ struct vram_apple_index {
      *  failure with it, so IDs restart from zero on the storage already grown, which nothing frees.
      *  The key map empties with them. */
     void forget_() noexcept {
-        std::unique_lock storage {storage_};
+        unique_lock_t storage {storage_};
         if (std::size_t const rows = size())
             std::memset(neighbors_matrix_.host, 0xFF, rows * connectivity() * sizeof(u32_t));
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(0, std::memory_order_release);
@@ -2298,7 +2833,7 @@ struct vram_apple_index {
             neighbors_allocator_.deallocate(neighbors);
             return status_t::bad_alloc_k;
         }
-        std::unique_lock storage {storage_};
+        unique_lock_t storage {storage_};
         if (capacity_rows_) {
             std::memcpy(vectors.host, vectors_matrix_.host, capacity_rows_ * row_bytes());
             if (stores_norms()) std::memcpy(norms.host, norms_column_.host, capacity_rows_ * sizeof(norms_t));

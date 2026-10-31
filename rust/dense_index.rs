@@ -155,7 +155,7 @@ pub struct usearch_dense_clear_t {
     pub completion: usearch_completion_t,
 }
 
-pub type usearch_dense_traversal_stats_t = DenseTraversalStats;
+pub type usearch_traversal_stats_t = DenseTraversalStats;
 
 #[repr(C)]
 pub struct usearch_dense_insert_t {
@@ -168,7 +168,7 @@ pub struct usearch_dense_insert_t {
     pub vectors: usearch_rows_view_t,
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 #[repr(C)]
@@ -177,14 +177,14 @@ pub struct usearch_dense_refine_t {
     pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
-    pub changed: *mut usize,
-    pub reachability: *mut usearch_dense_reachability_t,
+    pub report: *mut usearch_refine_report_t,
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
-pub type usearch_dense_reachability_t = DenseReachability;
+pub type usearch_reachability_t = DenseReachability;
+pub type usearch_refine_report_t = RefineReport;
 
 #[repr(C)]
 pub struct usearch_dense_health_t {
@@ -192,7 +192,7 @@ pub struct usearch_dense_health_t {
     pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
-    pub reachability: *mut usearch_dense_reachability_t,
+    pub reachability: *mut usearch_reachability_t,
 }
 
 #[repr(C)]
@@ -210,7 +210,7 @@ pub struct usearch_dense_search_t {
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
     pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 #[repr(C)]
@@ -244,20 +244,58 @@ pub struct usearch_dense_absorb_t {
     pub completion: usearch_completion_t,
     pub count: usize,
     pub donors: *mut usearch_dense_index_t,
-    pub changed: *mut usize,
-    pub reachability: *mut usearch_dense_reachability_t,
+    pub report: *mut usearch_refine_report_t,
     pub expansion_factor: usize,
     pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
+    pub stats: *mut usearch_traversal_stats_t,
+}
+
+#[repr(C)]
+pub struct usearch_dense_split_t {
+    pub index: usearch_dense_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub count: usize,
+    pub receivers: *const usearch_dense_index_t,
+    pub report: *mut usearch_refine_report_t,
+    pub expansion_factor: usize,
+    pub seed: u64,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
+}
+
+#[repr(C)]
+pub struct usearch_dense_sample_t {
+    pub index: usearch_dense_index_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub completion: usearch_completion_t,
+    pub shown_count: usize,
+    pub shown: usearch_keys_view_t,
+    pub shown_coordinates: usearch_rows_view_t,
+    pub focus_count: usize,
+    pub focus: usearch_keys_view_t,
+    pub keys: *mut usearch_keys_view_t,
+    pub entry_ordinals: *mut *const usize,
+    pub parents: *mut usearch_matches_view_t,
+    pub coordinates: *mut usearch_rows_view_t,
+    pub written: *mut usize,
+    pub arena: usearch_arena_t,
+    pub wanted: usize,
+    pub seed: u64,
+    pub expansion_factor: usize,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 #[repr(C)]
 pub struct usearch_dense_cursor_init_t {
-    pub cursor: *mut usearch_dense_cursor_t,
     pub index: usearch_dense_index_t,
     pub outcome: *mut usearch_outcome_t,
     pub starts_count: usize,
     pub starts: *const usearch_key_t,
+    pub cursor: *mut usearch_dense_cursor_t,
 }
 
 #[repr(C)]
@@ -392,10 +430,10 @@ pub struct usearch_dense_multiply_t {
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 pub type usearch_dense_softmax_state_t = DenseSoftmaxState;
@@ -420,10 +458,10 @@ pub struct usearch_dense_attend_t {
     pub outputs_scalar: usearch_scalar_t,
     pub expansion_factor: usize,
     pub score_scale: f32,
-    pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 #[repr(C)]
@@ -442,10 +480,10 @@ pub struct usearch_dense_maxsim_t {
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_t,
-    pub stats: *mut usearch_dense_traversal_stats_t,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub progress: usearch_progress_t,
+    pub stats: *mut usearch_traversal_stats_t,
 }
 
 extern "C" {
@@ -471,6 +509,8 @@ extern "C" {
     pub fn usearch_dense_count(arguments: *mut usearch_dense_count_t);
     pub fn usearch_dense_get(arguments: *mut usearch_dense_get_t);
     pub fn usearch_dense_absorb(arguments: *mut usearch_dense_absorb_t);
+    pub fn usearch_dense_split(arguments: *mut usearch_dense_split_t);
+    pub fn usearch_dense_sample(arguments: *mut usearch_dense_sample_t);
 
     pub fn usearch_dense_cursor_init(arguments: *mut usearch_dense_cursor_init_t);
     pub fn usearch_dense_cursor_next(arguments: *mut usearch_dense_cursor_next_t);
@@ -658,7 +698,7 @@ pub struct DenseIndexDescription {
 
 /// Traversal telemetry, fully overwritten by the call it is passed to.
 ///
-/// Mirrors `usearch_dense_traversal_stats_t`.
+/// Mirrors `usearch_traversal_stats_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 #[non_exhaustive]
@@ -673,7 +713,7 @@ pub struct DenseTraversalStats {
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.
 ///
-/// Mirrors `usearch_dense_reachability_t`.
+/// Mirrors `usearch_reachability_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 #[non_exhaustive]
@@ -686,6 +726,27 @@ pub struct DenseReachability {
     pub sweeps: usize,
     /// Levels the sweep back toward the entry point took, where an audit sweeps both ways.
     pub back_sweeps: usize,
+}
+
+/// What one refine-family call did to the graph: [`DenseVerbs::refine`], [`DenseVerbs::absorb`]
+/// and [`DenseVerbs::split`] land it.
+///
+/// Mirrors `usearch_refine_report_t`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(C)]
+#[non_exhaustive]
+pub struct RefineReport {
+    /// Entries whose neighbors were selected again, the islands of every heal round included.
+    pub reselected: usize,
+    /// Of those, the entries whose neighbor set gained a member it lacked; never above
+    /// `reselected`.
+    pub changed: usize,
+    /// Entries the first audit found not reached both ways, counted once.
+    pub islands_found: usize,
+    /// Links written between an island and an entry the audit reached both ways.
+    pub islands_reconnected: usize,
+    /// The audit closing the heal, as a fresh [`DenseVerbs::health`] right after would take it.
+    pub reachability: DenseReachability,
 }
 
 /// The online-softmax carry of one query row, which folds one attention call into another over
@@ -717,8 +778,8 @@ pub struct DenseLoadRamConfig<'config> {
     pub path: &'config Path,
     /// The executor the read fans out over; `None` reads on the calling thread.
     pub executor: Option<&'config Executor>,
-    /// NUMA node IDs to place the parts on, part `p` landing whole on shard `p` modulo their count;
-    /// empty derives every node the process may use.
+    /// NUMA node IDs to place the parts on, part `p` loading whole into shard `p` modulo their
+    /// count; empty derives every node the process may use.
     pub memory_domains: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the machine.
     pub cpu_class: Option<CPUClass>,
@@ -753,7 +814,7 @@ pub struct DenseLoadVramConfig<'config> {
     pub path: &'config Path,
     /// The executor the upload runs on; `None` uploads on the default stream of each device.
     pub executor: Option<&'config Executor>,
-    /// CUDA device ordinals to place the parts on, part `p` landing whole on device `p` modulo
+    /// CUDA device ordinals to place the parts on, part `p` loading whole into device `p` modulo
     /// their count; empty derives one free device.
     pub devices: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the devices.
@@ -789,7 +850,7 @@ pub struct DenseLoadRamBufferConfig<'config> {
     pub buffer: &'config [u8],
     /// The executor the copy fans out over; `None` copies on the calling thread.
     pub executor: Option<&'config Executor>,
-    /// NUMA node IDs to place shards on, the monolith landing whole on the first; empty derives
+    /// NUMA node IDs to place shards on, the monolith loading whole into the first; empty derives
     /// every node the process may use.
     pub memory_domains: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the machine.
@@ -829,7 +890,7 @@ pub struct DenseLoadVramBufferConfig<'config> {
     pub buffer: &'config [u8],
     /// The executor the upload runs on; `None` uploads on the default stream of each device.
     pub executor: Option<&'config Executor>,
-    /// CUDA device ordinals to place shards on, the monolith landing whole on the first; empty
+    /// CUDA device ordinals to place shards on, the monolith loading whole into the first; empty
     /// derives one free device.
     pub devices: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the devices.
@@ -1069,10 +1130,65 @@ impl From<usize> for DenseAttendConfig<'_> {
 pub struct DenseAbsorbConfig<'config, Donors> {
     /// The indexes absorbed, consumed whether or not the absorb succeeds.
     pub donors: Donors,
-    /// Reports the donors absorbed and stops wherever it says to.
+    /// Reports the nodes the closing refinement re-selected and stops it wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
+}
+
+/// The receivers a split fills and the knobs of its closing refinements; see [`DenseVerbs::split`].
+///
+/// Mirrors `usearch_dense_split_t`.
+pub struct DenseSplitConfig<'config> {
+    /// At least two empty indexes of the source's residency, scalar, class, metric, geometry and
+    /// shard count, each receiving one part.
+    pub receivers: &'config [&'config DenseIndex],
+    /// The breadth of the closing refinements' walks; zero derives it from the geometry.
+    pub expansion_factor: usize,
+    /// Picks the part roots: equal seeds over an unchanged index split equally.
+    pub seed: u64,
+    /// Reports the nodes the closing refinements re-selected and stops them wherever it says to.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
+}
+
+impl<'config> From<&'config [&'config DenseIndex]> for DenseSplitConfig<'config> {
+    fn from(receivers: &'config [&'config DenseIndex]) -> Self {
+        DenseSplitConfig {
+            receivers,
+            expansion_factor: 0,
+            seed: 0,
+            progress: None,
+            progress_steps: 0,
+            stats: None,
+        }
+    }
+}
+
+/// The view a sample grows and how it draws; see [`DenseVerbs::sample`].
+///
+/// Mirrors `usearch_dense_sample_t`.
+#[derive(Default)]
+pub struct DenseSampleConfig<'config> {
+    /// The keys already shown: never drawn again, and the paths reach toward them.
+    pub shown: &'config [Key],
+    /// Where each of `shown` sits, the points later draws are placed against.
+    pub shown_coordinates: &'config [[f32; 3]],
+    /// The keys to look around; empty looks around the whole index.
+    pub focus: &'config [Key],
+    /// The draw: equal seeds, shown keys and focus over an unchanged index draw equally.
+    pub seed: u64,
+    /// The breadth of the walks behind the draws; zero derives it from the geometry.
+    pub expansion_factor: usize,
+    /// Reports the draws written against `wanted` and stops wherever it says to.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the traversal telemetry lands, overwritten by the call.
+    pub stats: Option<&'config mut DenseTraversalStats>,
 }
 
 impl<Donors: IntoIterator<Item = DenseIndex>> From<Donors> for DenseAbsorbConfig<'_, Donors> {
@@ -1157,6 +1273,8 @@ impl Accepts<DenseMultiplyConfig<'static>> for Deferring {}
 impl Accepts<DenseAttendConfig<'static>> for Deferring {}
 impl<Value> Accepts<&'static ValueLookup<'static, Value>> for Deferring {}
 impl<Donors> Accepts<DenseAbsorbConfig<'static, Donors>> for Deferring {}
+impl Accepts<DenseSplitConfig<'static>> for Deferring {}
+impl Accepts<DenseSampleConfig<'static>> for Deferring {}
 impl<Location> Accepts<DenseSaveConfig<'static, Location>> for Deferring where Deferring: Accepts<Location> {}
 impl Accepts<DenseSaveBufferConfig<'static, '_>> for Deferring {}
 
@@ -1250,6 +1368,54 @@ impl<'arena> Monolith<'arena> {
         self.arena.host()?;
         // Safety: the arena holds a finished call's output in host memory.
         Ok(unsafe { arena_slice(self.monolith.0.data, self.monolith.0.length) })
+    }
+}
+
+/// The draws [`DenseVerbs::sample`] exported into the arena it borrows.
+///
+/// Rust-only.
+pub struct Sample<'arena> {
+    arena: &'arena Arena,
+    keys: Exported<usearch_keys_view_t>,
+    entry_ordinals: Exported<*const usize>,
+    parents: Exported<usearch_matches_view_t>,
+    coordinates: Exported<usearch_rows_view_t>,
+    written: usize,
+}
+
+impl<'arena> Sample<'arena> {
+    /// Draws the call wrote; fewer than wanted only once the region is exhausted.
+    pub fn written(&self) -> usize { self.written }
+
+    /// The keys drawn, refused with [`Status::Device`] over device memory.
+    pub fn keys(&self) -> Result<&'arena [Key]> {
+        self.arena.host()?;
+        // Safety: the arena holds a finished call's packed output in host memory.
+        Ok(unsafe { arena_slice(self.keys.0.data, self.written) })
+    }
+
+    /// Which of its key's entries each draw is, in the order [`DenseVerbs::get`] writes them.
+    pub fn entry_ordinals(&self) -> Result<&'arena [usize]> {
+        self.arena.host()?;
+        // Safety: the arena holds a finished call's packed output in host memory.
+        Ok(unsafe { arena_slice(self.entry_ordinals.0, self.written) })
+    }
+
+    /// The one shown or earlier draw each draw hangs from and its distance, one query per draw,
+    /// a draw with none holding no match.
+    pub fn parents(&self) -> Matches<'arena> {
+        Matches {
+            arena: self.arena,
+            view: Exported(self.parents.0),
+            queries: self.written,
+        }
+    }
+
+    /// Where each draw is placed, beside the shown keys.
+    pub fn coordinates(&self) -> Result<&'arena [[f32; 3]]> {
+        self.arena.host()?;
+        // Safety: the arena holds a finished call's packed output of three `f32` per row.
+        Ok(unsafe { arena_slice(self.coordinates.0.data.cast::<[f32; 3]>(), self.written) })
     }
 }
 
@@ -1750,13 +1916,14 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Re-selects the neighbors of every stored entry against the finished graph, answering the
-    /// number of nodes whose edges changed.
+    /// Re-selects the neighbors of every stored entry against the finished graph, answering a
+    /// [`RefineReport`] of the nodes re-selected and changed and the islands it re-linked.
     ///
     /// A cheap insertion pass followed by refinement beats one expensive pass, so a wide expansion
     /// factor belongs here rather than in [`DenseVerbs::insert`]. On a RAM handle searches may run
-    /// throughout, on a VRAM one they may not, and insertions never may. A stop is a time budget
-    /// rather than a failure, so it reports no status.
+    /// throughout, on a VRAM one they may not, and insertions never may. A stop is a time budget:
+    /// the call still re-links its islands, leaving the graph correct, and answers
+    /// [`Status::Cancelled`].
     ///
     /// Calls `usearch_dense_refine`.
     fn refine<'config>(self, config: DenseRefineConfig<'config>) -> Answer<'index, Self, DenseRefine<'config>>
@@ -1765,7 +1932,7 @@ pub trait DenseVerbs<'index>: Copy {
     {
         <Self::Completion as Completion>::answer(DenseRefine {
             handles: self.handles(),
-            changed: 0,
+            report: RefineReport::default(),
             config,
         })
     }
@@ -1783,7 +1950,7 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Resolves a matrix of queries into up to `wanted` nearest matches apiece, landing them in
+    /// Resolves a matrix of queries into up to `wanted` nearest matches apiece, writing them into
     /// `arena` as [`Matches`].
     ///
     /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
@@ -1808,7 +1975,7 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Late-interaction scoring of multi-row queries against multi-row entries, landing up to
+    /// Late-interaction scoring of multi-row queries against multi-row entries, writing up to
     /// `wanted` keys per query, largest score first, in `arena` as one ragged run; zero keeps every
     /// key a query scored.
     ///
@@ -1842,8 +2009,8 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Approximate sparse product of a matrix against the indexed vectors, landing its keys, products
-    /// and offsets in `arena` as one ragged run.
+    /// Approximate sparse product of a matrix against the indexed vectors, writing its keys,
+    /// products and offsets in `arena` as one ragged run.
     ///
     /// The linear-algebra sibling of [`DenseVerbs::search`], reporting every pair the traversal
     /// scored rather than only the nearest. Pairs arrive in traversal order rather than sorted.
@@ -1871,7 +2038,7 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// Softmax attention of every query row over every indexed key its walk scores, folded as
-    /// Flash Attention folds key tiles, with no top-k cut, landing in `arena` as rows of the
+    /// Flash Attention folds key tiles, with no top-k cut, writing into `arena` as rows of the
     /// queries' own scalar type.
     ///
     /// The index holds one layer's keys for one key-value head and no values: `value_lookup`
@@ -1912,10 +2079,10 @@ pub trait DenseVerbs<'index>: Copy {
     /// re-inserting their vectors and linking each in by walks across the appended part.
     ///
     /// Readers of a RAM index may keep searching throughout, while a VRAM one admits no
-    /// overlapping search. The donors are consumed whether or not the absorb succeeds: a stopped
-    /// absorb keeps the donors already absorbed, the count the handler last saw names the
-    /// boundary, and the donors past it are freed with the call, while a failed one may leave the
-    /// failing donor's entries behind.
+    /// overlapping search. The donors are consumed whether or not the absorb succeeds: a stop cuts
+    /// only the closing refinement, every donor already moved, and answers [`Status::Cancelled`],
+    /// while a failure frees the donors it never reached and may leave the failing donor's entries
+    /// behind.
     ///
     /// Calls `usearch_dense_absorb`.
     fn absorb<'config, Donors: IntoIterator<Item = DenseIndex>>(
@@ -1929,8 +2096,54 @@ pub trait DenseVerbs<'index>: Copy {
         <Self::Completion as Completion>::answer(DenseAbsorb {
             handles: self.handles(),
             donors: DonorHandles::of(config.donors),
+            report: RefineReport::default(),
             progress: config.progress,
             progress_steps: config.progress_steps,
+        })
+    }
+
+    /// Splits this index into the empty receivers, the inverse of [`DenseVerbs::absorb`]: the
+    /// entries are partitioned along the graph, each part lands in one receiver with its edges
+    /// kept, and a closing refinement re-links every receiver, leaving this index empty and live.
+    ///
+    /// Calls `usearch_dense_split`.
+    fn split<'config>(self, config: impl Into<DenseSplitConfig<'config>>) -> Answer<'index, Self, DenseSplit<'config>>
+    where
+        Self::Completion: Accepts<DenseSplitConfig<'config>>,
+    {
+        <Self::Completion as Completion>::answer(DenseSplit {
+            handles: self.handles(),
+            receivers: ReceiverHandles(Vec::new()),
+            report: RefineReport::default(),
+            config: config.into(),
+        })
+    }
+
+    /// Draws keys around the focus, or across the whole index, each hanging from a shown or
+    /// earlier draw and placed in three dimensions beside the shown ones, writing up to `wanted`
+    /// of them into `arena` as a [`Sample`]. A larger `wanted` under the same seed draws a
+    /// superset; only a RAM index samples yet.
+    ///
+    /// Calls `usearch_dense_sample`.
+    fn sample<'config, 'arena>(
+        self,
+        wanted: usize,
+        arena: &'arena mut Arena,
+        config: DenseSampleConfig<'config>,
+    ) -> Answer<'index, Self, DenseSample<'config, 'arena>>
+    where
+        Self::Completion: Accepts<DenseSampleConfig<'config>>,
+    {
+        <Self::Completion as Completion>::answer(DenseSample {
+            handles: self.handles(),
+            wanted,
+            config,
+            arena,
+            keys: Exported::default(),
+            entry_ordinals: Exported(ptr::null()),
+            parents: Exported::default(),
+            coordinates: Exported::default(),
+            written: 0,
         })
     }
 
@@ -2278,13 +2491,13 @@ impl<Keys: AsRef<[Key]>, Rows: RowsView> Calling for DenseInsert<'_, Keys, Rows>
 /// Calls `usearch_dense_refine`.
 pub struct DenseRefine<'config> {
     handles: Handles,
-    changed: usize,
+    report: RefineReport,
     config: DenseRefineConfig<'config>,
 }
 
 impl Calling for DenseRefine<'_> {
     type Arguments = usearch_dense_refine_t;
-    type Output = usize;
+    type Output = RefineReport;
 
     fn arguments(
         &mut self,
@@ -2298,8 +2511,7 @@ impl Calling for DenseRefine<'_> {
             executor: self.handles.executor,
             outcome,
             completion,
-            changed: &mut self.changed,
-            reachability: ptr::null_mut(),
+            report: &mut self.report,
             expansion_factor: self.config.expansion_factor,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
@@ -2308,7 +2520,7 @@ impl Calling for DenseRefine<'_> {
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_refine(arguments) }
 
-    fn finish(self) -> Result<usize> { Ok(self.changed) }
+    fn finish(self) -> Result<RefineReport> { Ok(self.report) }
 }
 
 /// A reachability audit; see [`DenseVerbs::health`].
@@ -2661,13 +2873,14 @@ impl Drop for DonorHandles {
 pub struct DenseAbsorb<'config> {
     handles: Handles,
     donors: DonorHandles,
+    report: RefineReport,
     progress: Option<&'config mut ProgressCallback<'config>>,
     progress_steps: usize,
 }
 
 impl Calling for DenseAbsorb<'_> {
     type Arguments = usearch_dense_absorb_t;
-    type Output = ();
+    type Output = RefineReport;
 
     fn arguments(
         &mut self,
@@ -2683,8 +2896,7 @@ impl Calling for DenseAbsorb<'_> {
             completion,
             count: self.donors.0.len(),
             donors: self.donors.0.as_mut_ptr(),
-            changed: ptr::null_mut(),
-            reachability: ptr::null_mut(),
+            report: &mut self.report,
             expansion_factor: 0,
             progress,
             stats: ptr::null_mut(),
@@ -2693,7 +2905,127 @@ impl Calling for DenseAbsorb<'_> {
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_absorb(arguments) }
 
-    fn finish(self) -> Result<()> { Ok(()) }
+    fn finish(self) -> Result<RefineReport> { Ok(self.report) }
+}
+
+/// A split into receiver indexes; see [`DenseVerbs::split`].
+///
+/// Calls `usearch_dense_split`.
+pub struct DenseSplit<'config> {
+    handles: Handles,
+    receivers: ReceiverHandles,
+    report: RefineReport,
+    config: DenseSplitConfig<'config>,
+}
+
+/// The handles of the receivers a split borrows, laid out as the library reads them.
+struct ReceiverHandles(Vec<usearch_dense_index_t>);
+
+// Safety: the handles belong to borrowed `DenseIndex`es, which are `Sync`.
+unsafe impl Send for ReceiverHandles {}
+
+impl Calling for DenseSplit<'_> {
+    type Arguments = usearch_dense_split_t;
+    type Output = RefineReport;
+
+    fn arguments(
+        &mut self,
+        outcome: *mut usearch_outcome_t,
+        completion: usearch_completion_t,
+        callbacks: &Callbacks,
+    ) -> Result<Self::Arguments> {
+        self.receivers = ReceiverHandles(self.config.receivers.iter().map(|receiver| receiver.handle).collect());
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        Ok(usearch_dense_split_t {
+            index: self.handles.index,
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            count: self.receivers.0.len(),
+            receivers: self.receivers.0.as_ptr(),
+            report: &mut self.report,
+            expansion_factor: self.config.expansion_factor,
+            seed: self.config.seed,
+            progress,
+            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+        })
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_split(arguments) }
+
+    fn finish(self) -> Result<RefineReport> { Ok(self.report) }
+}
+
+/// A sample of draws around a focus; see [`DenseVerbs::sample`].
+///
+/// Calls `usearch_dense_sample`.
+pub struct DenseSample<'config, 'arena> {
+    handles: Handles,
+    wanted: usize,
+    config: DenseSampleConfig<'config>,
+    arena: &'arena mut Arena,
+    keys: Exported<usearch_keys_view_t>,
+    entry_ordinals: Exported<*const usize>,
+    parents: Exported<usearch_matches_view_t>,
+    coordinates: Exported<usearch_rows_view_t>,
+    written: usize,
+}
+
+impl<'arena> Calling for DenseSample<'_, 'arena> {
+    type Arguments = usearch_dense_sample_t;
+    type Output = Sample<'arena>;
+
+    fn arguments(
+        &mut self,
+        outcome: *mut usearch_outcome_t,
+        completion: usearch_completion_t,
+        callbacks: &Callbacks,
+    ) -> Result<Self::Arguments> {
+        if self.config.shown.len() != self.config.shown_coordinates.len() {
+            return Err(fail(Status::InvalidArgument, "every shown key needs its coordinates"));
+        }
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        Ok(usearch_dense_sample_t {
+            index: self.handles.index,
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            shown_count: self.config.shown.len(),
+            shown: usearch_keys_view_t::of(self.config.shown),
+            shown_coordinates: usearch_rows_view_t {
+                data: self.config.shown_coordinates.as_ptr().cast(),
+                stride: core::mem::size_of::<[f32; 3]>(),
+                columns: 3,
+                scalar: Scalar::F32 as usearch_scalar_t,
+            },
+            focus_count: self.config.focus.len(),
+            focus: usearch_keys_view_t::of(self.config.focus),
+            keys: &mut self.keys.0,
+            entry_ordinals: &mut self.entry_ordinals.0,
+            parents: &mut self.parents.0,
+            coordinates: &mut self.coordinates.0,
+            written: &mut self.written,
+            arena: self.arena.handle,
+            wanted: self.wanted,
+            seed: self.config.seed,
+            expansion_factor: self.config.expansion_factor,
+            progress,
+            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+        })
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_sample(arguments) }
+
+    fn finish(self) -> Result<Sample<'arena>> {
+        Ok(Sample {
+            arena: self.arena,
+            keys: self.keys,
+            entry_ordinals: self.entry_ordinals,
+            parents: self.parents,
+            coordinates: self.coordinates,
+            written: self.written,
+        })
+    }
 }
 
 /// A checkpoint write; see [`DenseVerbs::save`].
@@ -3713,23 +4045,70 @@ mod tests {
 
     // region: Refinement and Linear Algebra
 
-    /// The return is a change count rather than a status, so a caller loops until the graph
-    /// settles.
+    /// The return is a report rather than a status, so a caller loops until the graph settles.
     #[test]
     fn refinement_reports_its_sweep() -> Result<()> {
         const COUNT: usize = 64;
         let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
         let mut stats = DenseTraversalStats::default();
-        let changed = index.on(&executor()).refine(DenseRefineConfig {
+        let report = index.on(&executor()).refine(DenseRefineConfig {
             expansion_factor: 64,
             stats: Some(&mut stats),
             ..DenseRefineConfig::default()
         })?;
         assert!(
-            changed <= COUNT,
-            "a sweep cannot change more nodes than the index holds"
+            report.changed <= report.reselected,
+            "a sweep changes only the nodes it re-selected"
+        );
+        assert_eq!(
+            report.reachability.audited, COUNT,
+            "the closing audit judges every entry"
         );
         assert!(stats.visited_members > 0, "the sweep reports the nodes it swept");
+        Ok(())
+    }
+
+    /// The receivers hold every entry between them, and the source stays live but empty.
+    #[test]
+    fn splits_into_receivers() -> Result<()> {
+        const DIMENSIONS: usize = 8;
+        const COUNT: usize = 64;
+        let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let receivers = [
+            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?,
+            empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?,
+        ];
+        for receiver in &receivers {
+            receiver.reserve(COUNT)?;
+        }
+        let borrowed = [&receivers[0], &receivers[1]];
+        let report = index.on(&executor()).split(DenseSplitConfig {
+            seed: 7,
+            ..DenseSplitConfig::from(&borrowed[..])
+        })?;
+        assert!(report.changed <= report.reselected);
+        assert_eq!(receivers[0].describe()?.size + receivers[1].describe()?.size, COUNT);
+        assert_eq!(index.describe()?.size, 0);
+        Ok(())
+    }
+
+    /// Equal seeds over an unchanged index draw equally, so a larger draw extends a smaller one.
+    #[test]
+    fn a_larger_sample_draws_a_superset() -> Result<()> {
+        const COUNT: usize = 64;
+        let (index, _, _) = populated_index(COUNT, 8, DenseMetric::Angular, Scalar::BF16)?;
+        let (mut smaller_arena, mut larger_arena) = (Arena::new()?, Arena::new()?);
+        let seeded = || DenseSampleConfig {
+            seed: 42,
+            ..Default::default()
+        };
+        let smaller = index.on(&executor()).sample(8, &mut smaller_arena, seeded())?;
+        let larger = index.on(&executor()).sample(16, &mut larger_arena, seeded())?;
+        assert_eq!((smaller.written(), larger.written()), (8, 16));
+        assert_eq!(larger.coordinates()?.len(), 16);
+        assert_eq!(larger.parents().queries(), 16);
+        let drawn = larger.keys()?;
+        assert!(smaller.keys()?.iter().all(|key| drawn.contains(key)));
         Ok(())
     }
 
@@ -4237,22 +4616,27 @@ mod tests {
         Ok(())
     }
 
-    /// Stopping a sweep is the time budget rather than a failure, so nothing is reported.
+    /// Stopping a sweep is its time budget: the call still re-links its islands, so the graph it
+    /// leaves stays whole, and answers `Cancelled`.
     #[test]
-    fn a_stopped_refinement_is_not_a_failure() -> Result<()> {
+    fn a_stopped_refinement_still_heals() -> Result<()> {
         const DIMENSIONS: usize = 8;
         const COUNT: usize = 32;
         let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
 
         let mut watch = Watch::new(Patience::StopAtFirstReport);
-        index.on(&executor()).refine(DenseRefineConfig {
+        let refined = index.on(&executor()).refine(DenseRefineConfig {
             progress: Some(&mut |finished, total| watch.saw(finished, total)),
             ..DenseRefineConfig::default()
-        })?;
+        });
 
+        match refined {
+            Ok(report) => assert!(report.changed <= report.reselected, "an unstopped sweep reports it"),
+            Err(failure) => assert_eq!(failure.status, Status::Cancelled),
+        }
         assert!(watch.ordered, "a report never counts down");
-        assert_eq!(watch.last.1, COUNT, "the sweep is denominated in stored entries");
-        assert!(watch.last.0 != 0, "the handler saw the sweep start");
+        assert!(watch.last.1 != 0, "the handler saw the sweep start");
+        assert_eq!(index.on(&executor()).health()?.audited, COUNT);
         Ok(())
     }
 
@@ -4286,8 +4670,9 @@ mod tests {
         Ok(())
     }
 
+    /// The handler counts the nodes the closing refinement re-selected, never the donors moved.
     #[test]
-    fn a_reported_absorb_counts_its_donors() -> Result<()> {
+    fn a_reported_absorb_counts_its_closing_refinement() -> Result<()> {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 16;
         let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
@@ -4297,19 +4682,23 @@ mod tests {
             populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0,
         ];
         let mut watch = Watch::new(Patience::Complete);
-        index.on(&executor()).absorb(DenseAbsorbConfig {
+        let report = index.on(&executor()).absorb(DenseAbsorbConfig {
             progress: Some(&mut |finished, total| watch.saw(finished, total)),
             ..DenseAbsorbConfig::from(donors)
         })?;
 
         assert!(watch.ordered, "a report never counts down");
-        assert_eq!(watch.last, (2, 2), "one report per donor absorbed");
+        assert_eq!(
+            watch.last.0, watch.last.1,
+            "the last report names a finished refinement"
+        );
+        assert!(report.changed <= report.reselected);
         assert_eq!(index.describe()?.size, COUNT * 3);
         Ok(())
     }
 
-    /// A stopped absorb keeps what it absorbed, and the donors past the boundary are freed with the
-    /// call - they were handed over by value, so a leak or a double free would surface here.
+    /// A stop cuts only the closing refinement, so every donor has moved - they were handed over
+    /// by value, so a leak or a double free would surface here too.
     #[test]
     fn a_stopped_absorb_keeps_the_donors_it_absorbed() -> Result<()> {
         const DIMENSIONS: usize = 16;
@@ -4328,10 +4717,10 @@ mod tests {
         });
 
         match absorbed {
-            Ok(()) => assert_eq!(watch.last.0, DONORS, "an unstopped absorb took them all"),
+            Ok(report) => assert!(report.changed <= report.reselected, "an unstopped absorb reports it"),
             Err(failure) => assert_eq!(failure.status, Status::Cancelled),
         }
-        assert_eq!(index.describe()?.size, COUNT * (1 + watch.last.0));
+        assert_eq!(index.describe()?.size, COUNT * (1 + DONORS));
         Ok(())
     }
 

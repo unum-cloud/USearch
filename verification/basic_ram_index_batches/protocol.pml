@@ -2,27 +2,27 @@
  *  @file verification/basic_ram_index_batches/protocol.pml
  *  @author Ash Vardanian
  *  @date October 14, 2026
- *  @brief A basic index batch: one add dispenses its range, its rows land, and one turn publishes it.
+ *  @brief A basic index batch: one add dispenses its range, its rows are placed, and one turn publishes it.
  *
  *  From `include/usearch/basic/ram_index.hpp`. A row's walk admits the rows below its snapshot
  *  outright and, past it, only the rows an acquire of their `wired_k` bit shows wired, as
  *  `dispensed_admission_t` does; each row writes its value and neighbors plain, then sets its own
  *  `wired_k` with a release. A range's turn holder files its keys in the map as its one writer,
  *  between the turn's wait and the watermark's release. Two batches of two rows each: `serial.pml`
- *  lands a batch on its inserter's thread, as `insert` does, and `planned.pml` fans one out over
+ *  places a batch on its inserter's thread, as `insert` does, and `planned.pml` fans one out over
  *  steppers.
  */
 #include <weak_memory.pml>
 #include <watermark_turn.pml>
 
 // The words, by the index member each stands for: the two counters, each row's state, wired or not,
-// each row's value and neighbors, written plain before the state, a plan's `landed` tally, and each
+// each row's value and neighbors, written plain before the state, a plan's `placed` tally, and each
 // row's seat in the key map, filed or not.
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define wired(id) (2 + (id))
 #define row(id) (6 + (id))
-#define landed_tally 10
+#define placed_tally 10
 #define key_state(id) (11 + (id))
 #define range_rows 2
 #define rows 4
@@ -46,14 +46,14 @@
 #ifndef keys_in_turn
 #define keys_in_turn true
 #endif
-#ifndef landed_order
-#define landed_order order_release
+#ifndef placed_order
+#define placed_order order_release
 #endif
-#ifndef finish_waits_landed
-#define finish_waits_landed true
+#ifndef finish_waits_placed
+#define finish_waits_placed true
 #endif
-#ifndef caller_lands_refused
-#define caller_lands_refused true
+#ifndef caller_copies_refused
+#define caller_copies_refused true
 #endif
 
 // a read of a row a walk or a search admitted: its payload, in the reader's view
@@ -123,24 +123,24 @@ inline insert_batch(t) {
 // `insert_plan_t::insert` of one position: the row wired with its walk below its own ID, where a
 // batch-mate another step wired is admitted only through `wired_k`, then the step's count added to
 // the tally, waking a `finish` armed on it
-inline land_position(t, id, first_invisible, other, seen) {
+inline copy_position(t, id, first_invisible, other, seen) {
     wire(t, id, id, first_invisible, other, seen);
     atomic {
-        add_no_return(t, landed_tally, landed_order, 1);
-        wake(landed_tally)
+        add_no_return(t, placed_tally, placed_order, 1);
+        wake(placed_tally)
     }
 }
 
 // `insert_plan_t::finish`, retried while it refuses: the tally acquired until every position
-// landed, then the range's one turn, which files the keys
+// placed, then the range's one turn, which files the keys
 inline finish(t, first, id, tally, watermark) {
     if
-    :: finish_waits_landed ->
+    :: finish_waits_placed ->
         do
-        :: load(t, landed_tally, order_acquire, tally);
+        :: load(t, placed_tally, order_acquire, tally);
             if
             :: tally == range_rows -> break
-            :: else -> wait_on(t, landed_tally, tally, false)
+            :: else -> wait_on(t, placed_tally, tally, false)
             fi
         od
     :: else

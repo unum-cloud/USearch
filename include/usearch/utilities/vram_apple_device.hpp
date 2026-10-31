@@ -490,7 +490,7 @@ struct metal_shared_allocator_t {
  *  without waiting. Every call to a device runs through one of these, so encoders live on the
  *  caller's stack and any number of threads encode at once; a committed one stays retained as
  *  Apple's event, the twin of @c cuda_event_t, since a queue runs its command buffers in commit
- *  order, so its landing means every earlier one's. */
+ *  order, so its finishing means every earlier one's. */
 struct metal_launch_t {
     metal_api_t const* api = nullptr;
     void* commands = nullptr;
@@ -562,7 +562,7 @@ struct metal_launch_t {
 
     /** Polls the committed command buffer without blocking; nothing committed has nothing to
      *  run. */
-    status_t landed() const noexcept {
+    status_t finished() const noexcept {
         if (!commands || encoder) return status_t::success_k;
         constexpr std::size_t completed_k = 4, error_k = 5; // `MTLCommandBufferStatusCompleted`, `...Error`
         std::size_t const state = metal_send<std::size_t>(*api, commands, "status");
@@ -574,7 +574,7 @@ struct metal_launch_t {
     /** Waits for the committed command buffer and answers whether the device finished it. */
     status_t wait() noexcept {
         if (commands && !encoder) metal_send<void>(*api, commands, "waitUntilCompleted");
-        return landed();
+        return finished();
     }
 };
 
@@ -607,7 +607,7 @@ struct metal_device_arena_t {
         return status_t::success_k;
     }
 
-    /** Every upload already landed, so there is nothing to wait for. */
+    /** Every upload already arrived, so there is nothing to wait for. */
     status_t wait() noexcept { return status_t::success_k; }
 
     int device() const noexcept { return device_; }
@@ -622,7 +622,7 @@ struct metal_device_arena_t {
  *  drives every device, and the hold serializes callers as the CUDA executor's does. */
 struct metal_executor_t {
 
-    /** Where a call names this executor, the C layer lands outputs in this arena. */
+    /** Where a call names this executor, the C layer writes outputs to this arena. */
     using device_arena_t = metal_device_arena_t;
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::apple_k;
 
@@ -786,14 +786,21 @@ struct metal_audit_t {
     growing_buffer<u8_t> frontier {global_allocator};
     growing_buffer<u8_t> next_frontier {global_allocator};
 
-    /** The nodes the last audit never reached. */
+    /** The nodes reaching a landmark back, and those that did before the current level, a byte per
+     *  node each. */
+    growing_buffer<u8_t> reaches_back {global_allocator};
+    growing_buffer<u8_t> back_settled {global_allocator};
+
+    /** The nodes the last audit did not reach both ways. */
     growing_buffer<u32_t> islands {global_allocator};
 
     /** The reached nodes pointing at each node, counted before a reconnection takes any. */
     growing_buffer<u32_t> in_links {global_allocator};
 
-    /** Levels the last audit swept to convergence. */
+    /** Levels the last audit swept forward to convergence, and the levels back that reached a
+     *  node. */
     std::size_t sweeps = 0;
+    std::size_t back_sweeps = 0;
 };
 
 /** The tally at @p counter in @p words: its low word joined with the high word it carries into. */
@@ -805,7 +812,7 @@ inline u64_t metal_tally(u32_t const* words, u32_t counter) noexcept {
 inline u32_t* metal_words(metal_buffer_t const& counters) noexcept { return reinterpret_cast<u32_t*>(counters.host); }
 
 /** One caller's scratch for driving an Apple index: the walks' arena, the staging of one batch, the
- *  telemetry counters and the single-query landing. Two contexts on one index share only the
+ *  telemetry counters and the single-query staging. Two contexts on one index share only the
  *  storage. */
 template <typename buffers_allocator_type_ = metal_shared_allocator_t>
 struct metal_traversal_context {
@@ -817,7 +824,7 @@ struct metal_traversal_context {
     /** The backend of the arena, the staging and the counters, on the stream's device. */
     using buffers_allocator_t = buffers_allocator_type_;
 
-    /** The single-query verb's landing, grown to the walk's breadth: the ascending matches, then,
+    /** The single-query verb's staging, grown to the walk's breadth: the ascending matches, then,
      *  past them, the IDs and distances read back from the staging. */
     struct results_t {
         growing_buffer<scored_node_t> entries_ {global_allocator};
@@ -853,10 +860,10 @@ struct metal_traversal_context {
     status_t wait() noexcept { return committed_.wait(); }
 
     /** Polls whether the last command buffer this context committed finished without blocking, so
-     *  one host thread awaits whichever of several streams lands first. */
-    status_t landed() const noexcept { return committed_.landed(); }
+     *  one host thread awaits whichever of several streams finishes first. */
+    status_t finished() const noexcept { return committed_.finished(); }
 
-    /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */
+    /** The telemetry of the last submission, zeroed when it was staged; read once it finished. */
     vram_telemetry_block_t spent() const noexcept {
         u32_t const* const words = metal_words(counters_);
         vram_telemetry_block_t block {};
@@ -874,15 +881,22 @@ struct metal_traversal_context {
         return block;
     }
 
-    /** Whether the last walk met a value-lookup miss, a node its value lookup had no row for, which
-     *  refuses it; read once it landed. */
+    /** Whether the last walk hit a value-lookup miss, a node its value lookup had no row for, which
+     *  refuses it; read once it finished. */
     bool missed() const noexcept {
         u32_t const* const words = metal_words(counters_);
         return words[metal_missed_k] != 0;
     }
 
-    /** Where the last walk left its outputs in the staging, read back once the context lands. */
-    struct landing_t {
+    /** The sum a count-sum launch on this context wrote, such as the matches a batch found; read
+     *  once it finished. */
+    std::size_t matched() const noexcept {
+        u32_t const* const words = metal_words(counters_);
+        return std::size_t {words[metal_matched_k]} | std::size_t {words[metal_matched_k + 1]} << 32;
+    }
+
+    /** Where the last walk left its outputs in the staging, read back once the context finished. */
+    struct walk_output_offsets_t {
         std::size_t queries = 0, count = 0;
         std::size_t first_offset = 0, second_offset = 0, third_offset = 0;
     };
@@ -893,13 +907,13 @@ struct metal_traversal_context {
     metal_buffer_t counters_;
     metal_buffer_t arena_;
     metal_buffer_t staging_;
-    landing_t landing_;
+    walk_output_offsets_t walk_output_offsets_;
 
     /** The host-side audit a refine heals by and a health check reports, grown like the staging. */
     metal_audit_t audit_;
 
     /** The last command buffer submitted through this context; its stream runs them in commit
-     *  order, so this one landing means every earlier one did. */
+     *  order, so this one finishing means every earlier one did. */
     metal_launch_t committed_;
 
     /** Monotone epoch floor over the arena's visited slots, so the arena zeroes only when fresh or

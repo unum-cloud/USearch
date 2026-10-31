@@ -171,7 +171,7 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     std::size_t failures = expect_built(cell, index, shapes.view(), sizes.shapes);
     if (failures) return failures;
     failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
-    failures += expect_refined(index, usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-shapes-{:016x}", stream_key(seed, name));
     if (cell.residency == usearch_residency_ram_k) failures += expect_poses_round_trip(index, stem + "-poses");
     failures += expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,

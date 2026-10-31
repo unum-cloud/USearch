@@ -336,9 +336,9 @@ typedef struct usearch_shapes_load_ram_t {
  *  @brief Copies a checkpoint into a new, mutable index in host memory, its geometry read from
  *      the checkpoint's own headers.
  *
- *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p lands
- *  whole on shard @c p, beside any placed shards the parts leave empty, and the shards past the
- *  placed ones open over those domains in turn.
+ *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p is
+ *  written whole on shard @c p, beside any placed shards the parts leave empty, and the shards past
+ *  the placed ones open over those domains in turn.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
@@ -619,12 +619,9 @@ typedef struct usearch_shapes_refine_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional output for the entries whose neighbors changed; zero means settled. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal; @c reachable short of @c audited is
-     *  what no reconnection could reach. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
@@ -670,6 +667,42 @@ typedef struct usearch_shapes_refine_t {
  */
 USEARCH_EXPORT void usearch_shapes_refine(usearch_shapes_refine_t* arguments);
 
+/** The arguments of @c usearch_shapes_health. */
+typedef struct usearch_shapes_health_t {
+
+    /** The handle to be audited. */
+    usearch_shapes_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Output for the audit; zeroed on failure. */
+    usearch_reachability_t* reachability;
+} usearch_shapes_health_t;
+
+/**
+ *  @brief Audits how much of the graph a search can reach: every shard swept level by level from
+ *      its first entry, forward and back. Read-only, so concurrent insertions merely leave fresh
+ *      entries out of the audit.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k The executor's kind does not match the residency.
+ *  - @c usearch_status_uninitialized_k No shard is placed, or the executor holds no pool workers
+ *    or streams.
+ *  - @c usearch_status_contended_k Another call holds the executor or its pool, or a destructive
+ *    window overlapped the audit twice.
+ *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
+ *    device.
+ *  - @c usearch_status_unsupported_k The handle is an NVMe view, which audits nothing yet.
+ */
+USEARCH_EXPORT void usearch_shapes_health(usearch_shapes_health_t* arguments);
+
 /** The arguments of @c usearch_shapes_search. */
 typedef struct usearch_shapes_search_t {
 
@@ -708,7 +741,7 @@ typedef struct usearch_shapes_search_t {
      *  NVMe. */
     usearch_traversal_t traversal;
 
-    /** The @b optional admission filter, asked about a batch of candidates at a time. */
+    /** The @b optional predicate, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
 
     /** The @b optional handler, called with queries resolved and their count. */
@@ -774,10 +807,12 @@ typedef struct usearch_shapes_count_t {
 } usearch_shapes_count_t;
 
 /**
- *  Counts the entries stored under one key, with the extent of their points.
+ *  @brief Counts the entries stored under one key, with the extent of their points.
+ *
+ *  A GPU handle counts the entries alone and leaves the extents zero, because its payloads stay on
+ *  the devices themselves.
  *
  *  @par Statuses:
- *  - @c usearch_status_unsupported_k The handle lives on a GPU, whose index counts nothing yet.
  *  - @c usearch_status_device_k An NVMe view's executor is not an NVMe executor.
  *  - @c usearch_status_uninitialized_k An NVMe view's executor holds no pool workers.
  *  - @c usearch_status_contended_k Another call holds an NVMe view's executor, or its pool runs
@@ -844,7 +879,7 @@ typedef struct usearch_shapes_absorb_t {
     /** The handle absorbing the donors. */
     usearch_shapes_index_t index;
 
-    /** The executor each donor's landing and the closing refinement fan out over. */
+    /** The executor each donor's move and the closing refinement fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -859,17 +894,15 @@ typedef struct usearch_shapes_absorb_t {
     /** Array of @c count handles, each consumed and nulled once its entries are published here. */
     usearch_shapes_index_t* donors;
 
-    /** The @b optional output for the entries the closing refine changed. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
-     *  it as it stops @c usearch_shapes_refine, never a landing. */
+     *  it as it stops @c usearch_shapes_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -881,8 +914,8 @@ typedef struct usearch_shapes_absorb_t {
  *      rather than re-inserting their shapes, and links each in by walks across. Donor handles are
  *      consumed and must not be used afterwards, not even for @c usearch_shapes_free.
  *
- *  Every donor is checked and held before the first one lands, so a refusal consumes none. The
- *  donors then land one after another, each all-or-nothing: its entries append to @c index with
+ *  Every donor is checked and held before the first one enters, so a refusal consumes none. The
+ *  donors then enter one after another, each all-or-nothing: its entries append to @c index with
  *  their edges rebased, publish at once, and the donor is consumed, so at most one donor's entries
  *  are ever held twice. One refinement then walks every entry across the parts the donors appended,
  *  round by round, so a group of donors costs one refinement rather than one per donor. Readers of
@@ -913,7 +946,7 @@ typedef struct usearch_shapes_split_t {
     /** The handle split into the receivers, left empty and live. */
     usearch_shapes_index_t index;
 
-    /** The executor the partition, each part's landing and the closing refinements fan out over. */
+    /** The executor the partition, each part's move and the closing refinements fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -929,11 +962,9 @@ typedef struct usearch_shapes_split_t {
      *  each receiving one part. */
     usearch_shapes_index_t const* receivers;
 
-    /** The @b optional output for the entries the closing refines changed, across the receivers. */
-    size_t* changed;
-
-    /** The @b optional output for the audits closing the heals, across the receivers. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
     size_t expansion_factor;
@@ -942,7 +973,7 @@ typedef struct usearch_shapes_split_t {
     uint64_t seed;
 
     /** The @b optional handler, called with entries the closing refines re-selected; a cancel stops
-     *  them as it stops @c usearch_shapes_refine, never a landing. */
+     *  them as it stops @c usearch_shapes_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -954,19 +985,19 @@ typedef struct usearch_shapes_split_t {
  *      @c usearch_shapes_absorb: graph-local parts keeping their edges rather than re-inserting
  *      their shapes, one part per receiver, and @c index left empty but live.
  *
- *  Every receiver is checked and held before the first part lands, so a refusal moves nothing. The
+ *  Every receiver is checked and held before the first part moves, so a refusal moves nothing. The
  *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
- *  links from its root, capped at an equal share of the entries, while entries no root reaches join
- *  the smallest part. Each part then lands in its receiver all-or-nothing, its edges rebased, its
- *  edges into other parts dropped, and the entries that lost one placed first; @c index clears once
- *  every part landed. Each receiver closes by refining the entries that lost an edge and re-linking
- *  the islands that leaves, as @c usearch_shapes_refine does. Insertions into @c index or a
- *  receiver arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may
+ *  links from its root, capped at an equal share of the entries, while entries no root reaches
+ *  enter the smallest part. Each part then enters its receiver all-or-nothing, its edges rebased,
+ *  its edges into other parts dropped, and the entries that lost one placed first; @c index clears
+ *  once every part moved. Each receiver closes by re-selecting the entries that lost an edge and
+ *  re-linking the islands that leaves, as @c usearch_shapes_refine does. Insertions into @c index
+ *  or a receiver arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may
  *  search either until the call is final.
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_shapes_refine: a cancel skips the rest of the re-selection, still re-links, and
- *  answers @c usearch_status_cancelled_k with every part landed. A caller wanting to continue that
+ *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue that
  *  re-selection later holds a @c usearch_shapes_refinement_t opened with @c receivers instead.
  *
  *  @par Statuses:
@@ -974,9 +1005,11 @@ typedef struct usearch_shapes_split_t {
  *  - @c usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
  *    @c NULL slot in them.
  *  - @c usearch_status_config_mismatch_k A receiver of another residency, class, scalar, kind or
- *    geometry, one holding entries, one named twice, or @c index itself.
+ *    geometry, one holding entries or another shard count, one named twice, or @c index itself.
  *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
  *    receiver; nothing moves.
+ *  - @c usearch_status_overflow_k A part passes a receiver shard's ceiling.
+ *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index splits nothing yet.
  */
 USEARCH_EXPORT void usearch_shapes_split(usearch_shapes_split_t* arguments);
 
@@ -995,10 +1028,6 @@ typedef struct usearch_shapes_refinement_init_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
-     *  @c usearch_shapes_refinement_finish frees it. */
-    usearch_shapes_refinement_t* refinement;
-
     /** The @b optional donors to absorb first, each consumed and nulled once its entries land; the
      *  array must outlive the refinement. */
     usearch_shapes_index_t* donors;
@@ -1006,12 +1035,16 @@ typedef struct usearch_shapes_refinement_init_t {
     /** Donor handles in @c donors. */
     size_t count;
 
-    /** The @b optional receivers to split @c index into first, as @c usearch_shapes_split lands
+    /** The @b optional receivers to split @c index into first, as @c usearch_shapes_split fills
      *  them, each refined in turn; the array must outlive the refinement. */
     usearch_shapes_index_t const* receivers;
 
     /** Receiver handles in @c receivers, zero or at least two. */
     size_t receivers_count;
+
+    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
+     *  @c usearch_shapes_refinement_finish frees it. */
+    usearch_shapes_refinement_t* refinement;
 
     /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
     size_t expansion_factor;
@@ -1022,8 +1055,8 @@ typedef struct usearch_shapes_refinement_init_t {
 
 /**
  *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
- *      @c usearch_shapes_absorb lands them, or splitting it into @c receivers, as
- *      @c usearch_shapes_split lands them. Every allocation the refinement needs in the index
+ *      @c usearch_shapes_absorb moves them, or splitting it into @c receivers, as
+ *      @c usearch_shapes_split fills them. Every allocation the refinement needs in the index
  *      happens here, never in a step.
  *
  *  @par Statuses:
@@ -1062,7 +1095,7 @@ typedef struct usearch_shapes_refinement_next_t {
 
     /** The @b optional outputs for the entries re-selected so far and, of those, the ones whose
      *  neighbors changed; their ratio falling is what says another call buys little. */
-    size_t* visited;
+    size_t* reselected;
     size_t* changed;
 
     /** The @b optional traversal telemetry of every call on the refinement so far; @c NULL skips
@@ -1071,13 +1104,13 @@ typedef struct usearch_shapes_refinement_next_t {
 } usearch_shapes_refinement_next_t;
 
 /**
- *  @brief Continues the refinement until it ends or @c progress cancels, landing any donors still
+ *  @brief Continues the refinement until it ends or @c progress cancels, moving any donors still
  *      pending first. Answers @c usearch_status_cancelled_k when a later call has more to do; that
  *      call continues exactly where this one stopped. The executor is held only for the call.
  *
  *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
- *  they only grow from one call to the next and @c changed never exceeds @c visited; all stay zero
- *  while donors are pending.
+ *  they only grow from one call to the next and @c changed never exceeds @c reselected; all stay
+ *  zero while donors are pending.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
@@ -1103,11 +1136,9 @@ typedef struct usearch_shapes_refinement_finish_t {
     /** The refinement to finish; freed by the call, whatever it answers. */
     usearch_shapes_refinement_t refinement;
 
-    /** The @b optional output for the number of entries whose neighbors changed. */
-    size_t* changed;
-
-    /** The @b optional output for the audit closing the heal. */
-    usearch_reachability_t* reachability;
+    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
+     *  counts it; @c NULL skips reporting. */
+    usearch_refine_report_t* report;
 
     /** The @b optional traversal telemetry of every call on the refinement; @c NULL skips
      *  reporting. */
@@ -1117,7 +1148,7 @@ typedef struct usearch_shapes_refinement_finish_t {
 /**
  *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
  *      @c usearch_shapes_refine does, reports, reopens the index, and frees the handle. A
- *      refinement whose donors have not all landed re-links nothing and reports zeros.
+ *      refinement whose donors have not all moved re-links nothing and reports zeros.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
@@ -1127,9 +1158,6 @@ USEARCH_EXPORT void usearch_shapes_refinement_finish(usearch_shapes_refinement_f
 
 /** The arguments of @c usearch_shapes_cursor_init. */
 typedef struct usearch_shapes_cursor_init_t {
-
-    /** Output for the new cursor; @c NULL on failure. */
-    usearch_shapes_cursor_t* cursor;
 
     /** The handle to be scanned. */
     usearch_shapes_index_t index;
@@ -1142,6 +1170,9 @@ typedef struct usearch_shapes_cursor_init_t {
 
     /** The keys to walk from, in the order the walk begins with them. */
     usearch_key_t const* starts;
+
+    /** Output for the new cursor; @c NULL on failure. */
+    usearch_shapes_cursor_t* cursor;
 } usearch_shapes_cursor_init_t;
 
 /**
@@ -1150,10 +1181,13 @@ typedef struct usearch_shapes_cursor_init_t {
  *  Without @c starts the cursor yields every entry as stored. With them it yields the start keys'
  *  own entries first, in the order given, then the entries those link to, breadth-first, each
  *  entry once, so a caller wanting only the starts' immediate links reads the links of the first
- *  pulled entries. A key the index lacks starts nothing.
+ *  pulled entries. A key the index lacks starts nothing, and a key several entries share starts
+ *  from the first stored.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, or names @c starts as an NVMe
+ *    view; neither walks links yet.
  */
 USEARCH_EXPORT void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments);
 
@@ -1203,6 +1237,7 @@ typedef struct usearch_shapes_cursor_next_t {
  *  call given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:
+ *  - @c usearch_status_unsupported_k @c links from an NVMe view, which walks no links yet.
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments);
@@ -1214,6 +1249,7 @@ USEARCH_EXPORT void usearch_shapes_cursor_free(usearch_shapes_cursor_t cursor);
 /** The arguments of @c usearch_shapes_sample. */
 typedef struct usearch_shapes_sample_t {
 
+    /* Call */
     /** The handle to be sampled. */
     usearch_shapes_index_t index;
 
@@ -1226,44 +1262,59 @@ typedef struct usearch_shapes_sample_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional count of @c anchors; zero draws from the whole index. */
-    size_t anchors_count;
+    /* Inputs */
 
-    /** The shapes that bound the region around them, one anchor apiece, as points end to end
-     *  around @c anchors_count + 1 point offsets. @ref shapes_index_tape */
-    usearch_tape_view_t anchors;
+    /** The @b optional count of @c shown; zero shows nothing yet. */
+    size_t shown_count;
 
-    /** Output for the identities drawn, inside @c arena. */
+    /** The keys already shown: never drawn again, and the paths reach toward them. */
+    usearch_keys_view_t shown;
+
+    /** Where the @c shown keys sit, @c shown_count rows of three @c usearch_scalar_f32_k values,
+     *  the points later draws are placed against. */
+    usearch_rows_view_t shown_coordinates;
+
+    /** The @b optional count of @c focus; zero looks around the whole index. */
+    size_t focus_count;
+
+    /** The keys to look around, the roots the draws grow from. */
+    usearch_keys_view_t focus;
+
+    /* Outputs */
+
+    /** Output for the keys drawn, inside @c arena. */
     usearch_keys_view_t* keys;
 
-    /** Output for each draw's nearest earlier draws - their keys and distances, draw @c i spanning
-     *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
-    usearch_matches_tape_view_t* links;
+    /** Output for which of its key's entries each draw is, in the order @c usearch_shapes_get
+     *  writes them, inside @c arena. */
+    size_t const** entry_ordinals;
+
+    /** Output for the one shown or earlier draw each draw hangs from and its distance, one column,
+     *  a draw with none counting zero, inside @c arena. */
+    usearch_matches_view_t* parents;
+
+    /** Output for where each draw is placed, @c written rows of three @c usearch_scalar_f32_k
+     *  values, inside @c arena. */
+    usearch_rows_view_t* coordinates;
 
     /** Output for the draws written; fewer than @c wanted only once the region is exhausted. */
     size_t* written;
 
-    /** Memory for @c keys and @c links, rewound by the call. */
+    /** Memory for every output, rewound by the call. */
     usearch_arena_t arena;
 
+    /* Knobs */
     /** The upper bound on draws this call writes. */
     size_t wanted;
 
-    /** Draws already taken in this sequence, skipped so successive calls extend one sample. */
-    size_t offset;
-
-    /** Up to how many earlier draws each draw links to; one already keeps the sample connected. */
-    size_t links_per_draw;
-
-    /** The sequence: equal seeds, anchors and radius over an unchanged index draw equally. */
+    /** The draw: equal seeds, shown keys and focus over an unchanged index draw equally, and a
+     *  larger @c wanted draws a superset. */
     uint64_t seed;
-
-    /** The @b optional radius around the anchors; zero bounds nothing. */
-    usearch_distance_t radius;
 
     /** The @b optional breadth of the candidates of the walks behind the draws; zero derives. */
     size_t expansion_factor;
 
+    /* Observers */
     /** The @b optional handler, called with draws written and @c wanted. */
     usearch_progress_t progress;
 
@@ -1272,14 +1323,22 @@ typedef struct usearch_shapes_sample_t {
 } usearch_shapes_sample_t;
 
 /**
- *  @brief Draws entries uniformly, across the index or around anchors, each linked to its nearest
- *      earlier draws - so the sample is one connected component, ready to be laid out.
+ *  @brief Draws keys around @c focus, or across the whole index, each hanging from a shown or
+ *      earlier draw and placed in three dimensions beside the shown ones - so a view grows one
+ *      connected sample as it zooms, never scanning the index.
  *
- *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
- *  are exact in a scan and approximate as any walk otherwise.
+ *  The draws follow the graph: along paths joining the focus to each other and toward the nearest
+ *  shown key, then around each focus key as far as its nearest neighbor on those paths, ranked by
+ *  @c seed so a closer view draws a superset of a farther one. A key holding several entries draws
+ *  each as its own, named by its entry ordinal. Each draw is placed by its distances to its nearest
+ *  shown keys, the shown keys keeping their coordinates; with nothing shown, the draws are scaled
+ *  against one another.
  *
  *  @par Statuses:
- *  - @c usearch_status_unsupported_k Always, as no residency samples yet.
+ *  - @c usearch_status_invalid_argument_k @c NULL @c shown or @c focus for a nonzero count, or
+ *    @c shown_coordinates not three @c usearch_scalar_f32_k columns.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU or is an NVMe view; only a RAM
+ *    handle samples yet.
  */
 USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments);
 

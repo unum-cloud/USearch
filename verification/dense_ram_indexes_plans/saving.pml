@@ -4,7 +4,7 @@
  *  @date October 10, 2026
  *  @brief The monolith save: one `plan_save` per shard beside a planned batch and a searcher.
  *
- *  The batch lands one row on each shard as `insert_plan_t` does, filing each shard's key while it
+ *  The batch places one row on each shard as `insert_plan_t` does, filing each shard's key while it
  *  holds that shard's turn. The saver opens every shard's plan, then runs every shard's `finish`;
  *  the searcher counts each shard's map below the watermark it acquired.
  *

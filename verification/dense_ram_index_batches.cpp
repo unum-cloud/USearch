@@ -6,9 +6,9 @@
  *      `include/usearch/dense/ram_index.hpp`.
  *
  *  Two commits dispense two IDs each with one add, each spawns a helper for its second row as the
- *  executor's fan-out would, joins it, and takes one watermark turn for the whole range. A searcher
- *  acquires the watermark, which never lies strictly inside a range, and reads every row's payload
- *  below it. The same scenario is @c dense_ram_index_batches.pml.
+ *  executor's fan-out would, awaits it, and takes one watermark turn for the whole range. A
+ *  searcher acquires the watermark, which never lies strictly inside a range, and reads every row's
+ *  payload below it. The same scenario is @c dense_ram_index_batches.pml.
  *
  *  @verify pass sc,rc11,imm dense_ram_index_batches
  *  @verify fail sc,rc11,imm dense_ram_index_batches_range_turn_false: a turn per row lets the

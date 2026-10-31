@@ -679,7 +679,7 @@ f64_t uniform_unit(generator_type_& generator) noexcept {
  *      target drawn at a log-uniform range above the node's own spacing and a uniform
  *      bearing - the inverse-square law in distance, Kleinberg's exponent for a surface.
  *
- *  Costs one walk to measure the spacing and one per draw. A draw that lands back on the
+ *  Costs one walk to measure the spacing and one per draw. A draw that falls back on the
  *  node, or on a neighbor it already links to, wires nothing and is not retried.
  *
  *  @param[in,out] index The index holding @p node, published.
@@ -702,7 +702,7 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
     earth_fixed_t const origin = index.published_value_of(node).position;
 
     // The spacing is the chord to the nearest other node; a lone node draws nothing.
-    auto const around = index.search(origin, metric, context, search_config_t {4});
+    auto const around = index.search(origin, search_config_t {4}, metric, context);
     if (failed(around.status)) return around.status;
     f64_t spacing = 0;
     for (std::size_t position = 0; position != around.value.count && spacing == 0; ++position)
@@ -717,7 +717,7 @@ status_t draw_long_links(index_type_& index, typename index_type_::node_id_t nod
     for (std::size_t draw = 0; draw != draws; ++draw) {
         f64_t const range = spacing * std::exp(uniform_unit(generator) * log_reach);
         f64_t const bearing = uniform_unit(generator) * 2.0 * std::numbers::pi;
-        auto const found = index.search(destination(origin, range, bearing), metric, context, search_config_t {});
+        auto const found = index.search(destination(origin, range, bearing), search_config_t {}, metric, context);
         if (failed(found.status)) return found.status;
         node_id_t target = node;
         for (std::size_t position = 0; position != found.value.count && target == node; ++position)
@@ -796,7 +796,7 @@ radius_result_t within(index_type_& index, query_type_ const& query, i64_t radiu
     std::size_t candidates_count = 0;
     std::size_t previous_candidates_count = 0;
     for (;;) {
-        auto const searched = index.search(query, metric, context, search_config_t {expansion});
+        auto const searched = index.search(query, search_config_t {expansion}, metric, context);
         if (failed(searched.status)) return {searched.status, 0, 0};
         candidates_count = searched.value.count;
         bool const covered = candidates_count == expansion &&

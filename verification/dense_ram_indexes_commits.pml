@@ -4,7 +4,7 @@
  *  @date October 10, 2026
  *  @brief A batch's commit across the shards, behind one counted sequence word.
  *
- *  `include/usearch/dense/ram_indexes.hpp` makes a batch visible whole across shards. A commit lands
+ *  `include/usearch/dense/ram_indexes.hpp` makes a batch visible whole across shards. A commit places
  *  a row and its key on each shard, awaits every turn, files each shard's key into its map while
  *  holding that turn, then stores the watermarks between two adds on the commit sequence word. The
  *  looker counts the first commit's key as `count` does, under `read_until_settled`; a closer,
@@ -51,7 +51,7 @@
 #define key(shard, id) (3 + (shard) * 2 + (id))
 #define map_slot(shard, position) (7 + (shard) * 2 + (position))
 
-// The values a key slot carries: unset, or the key of the thread that landed the row. A map slot
+// The values a key slot carries: unset, or the key of the thread that placed the row. A map slot
 // is the key beside its node in one word, published with one release: its tag's ordering against
 // its slot is `ram_tables.pml`'s concern.
 #define unset 0
@@ -110,7 +110,7 @@ bool closed[shards];                 // each shard's dispenser holds the closed 
 bool dispensing;                     // the dispensing mutex is held
 byte done;                           // the commits and the closer, once finished
 bool commit_dispensed[commits];      // the commit has its IDs
-byte commit_part[commits * shards];  // the ID each commit landed on each shard
+byte commit_part[commits * shards];  // the ID each commit placed on each shard
 bool commit_got[commits * shards];   // the commit dispensed its range on the shard
 #define part(commit, shard) commit_part[(commit) * shards + (shard)]
 #define got(commit, shard) commit_got[(commit) * shards + (shard)]

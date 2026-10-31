@@ -314,11 +314,12 @@ Cursors and streams keep their index alive until they go.
 
 ### Refinement
 
-`refine` re-selects the neighbors of every stored entry against the finished graph and reports how many nodes changed edges, so a cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
-Zero means the graph has settled, and searches may run throughout.
+`refine` re-selects the neighbors of every stored entry against the finished graph and returns a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
+A cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
+Zero `changed` means the graph has settled, and searches may run throughout.
 
 ```swift
-while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 128)) != 0 {}
+while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 128)).changed != 0 {}
 ```
 
 ### Absorbing & Splitting
@@ -328,6 +329,26 @@ It consumes every donor it absorbs, so every later verb on one reports `uninitia
 
 ```swift
 try index.on(executor).absorb([shard])
+```
+
+`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+Both report the closing refines as `refine` does.
+
+```swift
+let report = try index.on(executor).split(into: [left, right], config: DenseSplitConfig(seed: 42))
+```
+
+### Sampling
+
+`sample` draws keys around `focus`, or across the whole index, each hanging from a shown or earlier draw and placed in three dimensions beside the `shown` keys already on screen, so a view grows one connected sample as it zooms.
+Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a superset.
+
+```swift
+let draws = try index.on(executor).sample(wanted: 256, arena: arena, config: DenseSampleConfig(
+    shown: shown, shownCoordinates: places, focus: near, seed: 42))
+for draw in 0 ..< draws.count {
+    let (key, entryOrdinal, parent, point) = (draws.keys[draw], draws.entryOrdinal(draw), draws.parents[draw], draws.coordinates[draw])
+}
 ```
 
 ### Sparse Multiplication

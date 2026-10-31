@@ -197,8 +197,8 @@ static bool dense_open_vectors(world_t const& world, std::string_view path, dens
 }
 
 /** Opens @p path as the keys of the vectors' rows: a `.u64bin` or `.u128bin` of one little-endian
- *  integer per row, as every RetriEval scalar is stored, landing in a key's low bytes as row
- *  numbers do; a 128-bit integer fills the whole key, so a UUID's integer form keys its row. */
+ *  integer per row, as every RetriEval scalar is stored, filling a key's low bytes as row numbers
+ *  do; a 128-bit integer fills the whole key, so a UUID's integer form keys its row. */
 static bool dense_open_keys(world_t const& world, std::string_view path, dense_source_t& source) {
     source.key_bytes = path.ends_with(".u64bin") ? 8 : path.ends_with(".u128bin") ? 16 : 0;
     if (!source.key_bytes) {
@@ -558,7 +558,7 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
     if (std::optional<int> const exit = parse_verb(
             world, argc, argv, "usearch dense insert <vectors> --save <address> [flags]", flags, positionals, given))
         return *exit;
-    bool const parted = world.size > 1;
+    bool const distributed = world.size > 1;
     bool const speaks = world.rank == 0;
     if (given != 1 || settings.save.empty()) {
         if (speaks) fmt::println(stderr, "the vectors and --save are required");
@@ -569,7 +569,7 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
         if (speaks) fmt::println(stderr, "--metric=\"{}\" names no metric", settings.metric);
         return EXIT_FAILURE;
     }
-    if (!parted && !checkpoints_admit_save(settings.save)) return EXIT_FAILURE;
+    if (!distributed && !checkpoints_admit_save(settings.save)) return EXIT_FAILURE;
 
     dense_clock_t::time_point const started = dense_clock_t::now();
     dense_source_t source;
@@ -578,11 +578,11 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
     if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, engine)))
         return EXIT_FAILURE;
 
-    std::string const address = parted ? dense_part_path(dense_stem(settings.save), world.rank, world.size)
-                                       : std::string(settings.save);
+    std::string const address = distributed ? dense_part_path(dense_stem(settings.save), world.rank, world.size)
+                                            : std::string(settings.save);
     bool const built = dense_construct(world, settings, source, engine, address, started);
     if (world.barrier(!built)) return EXIT_FAILURE;
-    if (!parted) return EXIT_SUCCESS;
+    if (!distributed) return EXIT_SUCCESS;
 
     std::array<std::uint64_t, 2> const sent {dense_file_bytes(address), source.slice_rows};
     std::vector<std::uint64_t> gathered(speaks ? sent.size() * world.size : 0);

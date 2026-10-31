@@ -11,15 +11,15 @@
  *  plans, so every residency shares one framing. What a residency does differently rides in as an
  *  object answering:
  *  - <tt>columns_extents(shards, shard, codec)</tt>, one sizing pass over a shard;
- *  - <tt>open_shard_save(shards, shard, columns, codec)</tt> and <tt>open_shard_load(shards, shard,
- *    columns)</tt>, one shard's own plans, landing nodes and their keys through
- *    <tt>save(range)</tt> and <tt>load(range)</tt>, the codec passed along where they take one, the
- *    load's @c finish filing the keys as the shard's one writer before its watermark moves;
- *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part lands on, placed or
+ *  - <tt>open_shard_save(shards, shard, columns, codec)</tt>, one shard's own save plan, copying nodes and
+ *    their keys through <tt>save(range)</tt>, the codec passed along where it takes one;
+ *  - <tt>open_shard_load(shards, shard, columns)</tt>, the shard's own load plan through <tt>load(range)</tt>,
+ *    whose @c finish files the keys as the shard's one writer before its watermark moves;
+ *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part goes to, placed or
  *    opened;
  *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load.
  *
- *  A residency whose plans land nodes in order is driven through
+ *  A residency whose plans copy nodes in order is driven through
  *  @ref unum::usearch::utilities::serial_executor_t.
  */
 #pragma once
@@ -152,7 +152,7 @@ struct shard_columns {
     }
 
     /**
-     *  Opens the shard's load plan, which lands the keys beside the nodes.
+     *  @brief Opens the shard's load plan, which copies the keys beside the nodes.
      *
      *  @par Statuses:
      *  - @c overflow_k The nodes pass the shard's node IDs or its key multimap.
@@ -172,7 +172,7 @@ struct shard_columns {
 /**
  *  @brief Writes the live shards of @p shards under @p path: a lone live shard's monolith at the
  *      path itself, or one monolith per live shard beside the manifest @p path names, the manifest
- *      landing last as the commit record.
+ *      written last as the commit record.
  *
  *  Retired shards hold no nodes and get no part, and each part keeps its shard's own IDs. A
  *  refusal of @p codec passes through.

@@ -141,8 +141,9 @@ struct metal_sorted_candidates {
     /** Whether the candidates already hold the ID @p staged_id names on this lane, every lane taking part. */
     bool holds(uint staged_id, uint lane) { return deduplicate(metal_make(0, staged_id), lane) == metal_sentinel_k; }
 
-    /** The fold's result for a batch of which only the @p admitted lanes can enter, as the CUDA candidates'
-     *  @c insert_each lands it: each takes its rank, ranks at and past it move up one, and the last rank drops. */
+    /** The fold's result for a batch of which only the @p admitted lanes can enter, as the CUDA
+     *  candidates' @c insert_each writes it: each takes its rank, ranks at and past it move up one,
+     *  and the last rank drops. */
     void insert_each(ulong staged, uint admitted, uint lane) {
         while (admitted) {
             ulong const value = warp_t::shuffle(staged, ctz(admitted));
@@ -317,7 +318,8 @@ struct metal_arena_frontier {
             prefix_mask |= 0xFFu << shift;
             rank -= below;
         }
-        // In place: a kept entry lands at or before its own slot, after the ballot over its batch's loads.
+        // In place: a kept entry moves to its own slot or an earlier one, after the ballot over the
+        // loads of its batch.
         uint kept = 0;
         for (uint base = 0; base < tail_size; base += warp_t::width_k) {
             uint const index = base + lane;
@@ -488,10 +490,11 @@ struct metal_walk_t {
         return fresh;
     }
 
-    /** Scores @p count rows of @p batch_ids against @p query, a sub-group of @c lanes_per_row lanes per row, landing
-     *  each row's node in @c scored and its dot in @c dots; answers this lane's node, or the sentinel past @p count.
-     *  A lane whose row lies past the batch re-reads the batch's first row instead of taking a guard, and each lane
-     *  finalizes its own row, so the metric's epilogue runs once per lane. */
+    /** Scores @p count rows of @p batch_ids against @p query, a sub-group of @c lanes_per_row lanes
+     *  per row, writing each row's node in @c scored and its dot in @c dots; answers this lane's
+     *  node, or the sentinel past @p count. A lane whose row lies past the batch re-reads the
+     *  batch's first row instead of taking a guard, and each lane finalizes its own row, so the
+     *  metric's epilogue runs once per lane. */
     ulong score_batch(device uint4 const* query_row, norms_t query_norms, device uint const* batch_ids, uint count) {
         uint const lanes_log2 = ctz(lanes_per_row);
         uint const rows_per_round = warp_t::width_k >> lanes_log2;
@@ -839,10 +842,11 @@ struct metal_sorted_buffer {
             ulong const moved = active ? entries[index] : metal_sentinel_k;
             uint shift = 0;
             for (uint source = 0; source != count; ++source) { // Simdgroup-uniform: shuffles inside.
-                ulong const newcomer = warp_t::shuffle(value, source);
-                shift += active && metal_distance_bits(newcomer) < metal_distance_bits(moved);
+                ulong const appended_node = warp_t::shuffle(value, source);
+                shift += active && metal_distance_bits(appended_node) < metal_distance_bits(moved);
             }
-            warp_t::sync(); // The whole lane-width is in registers before any of its writes lands.
+            // The whole lane-width is in registers before any of its writes reaches memory.
+            warp_t::sync();
             if (active && index + shift < capacity) entries[index + shift] = moved;
             warp_t::sync();
         }
@@ -852,12 +856,13 @@ struct metal_sorted_buffer {
     }
 };
 
-/** Re-selects one node's neighbors from the @p candidates_count distinct candidates staged in @c candidate_ids, the
- *  diversity heuristic over them ascending by distance to the node, and lands them in its live row slot by slot,
- *  slot zero released last, so a concurrent walk reads every slot whole. The node's own row is the cache's
- *  @p query_row, its last. It keeps the diverse picks alone, as the CPU's reverse refine does: a backfilled row stays
- *  full, so on a dot graph every later newcomer competes with the hubs and the small-norm nodes lose their last
- *  in-links. */
+/** Re-selects one node's neighbors from @c candidate_ids, its @p candidates_count distinct staged
+ *  candidates, the diversity heuristic over them ascending by distance to the node, and writes them
+ *  in its live row slot by slot, slot zero released last, so a concurrent walk reads every slot
+ *  whole. The node's own row is the cache's @p query_row, its last. It keeps the diverse picks
+ *  alone, as the CPU's reverse refine does: a backfilled row stays full, so on a dot graph every
+ *  later appended node competes with the hubs and the small-norm nodes lose their last in-links,
+ *  one by one. */
 inline void metal_reselect_staged(thread metal_walk_t& walk, uint node_id, uint candidates_count, uint query_row) {
     device uint* const candidate_ids = walk.candidate_ids;
     device uint* const kept_positions = walk.kept_positions;
@@ -919,7 +924,7 @@ inline void metal_reselect_staged(thread metal_walk_t& walk, uint node_id, uint 
         }
     }
 
-    // Land the final neighbors in the live row - the insertion's slot convention.
+    // Write the final neighbors in the live row - the insertion's slot convention.
     warp_t::sync();
     device uint* const live_row = walk.neighbors_for(node_id);
     for (uint slot = walk.lane; slot < walk.connectivity; slot += warp_t::width_k)
@@ -930,12 +935,13 @@ inline void metal_reselect_staged(thread metal_walk_t& walk, uint node_id, uint 
     if (walk.lane == 0) warp_t::store_release(live_row, candidate_ids[kept_positions[0]]);
 }
 
-/** Back-links one node a wave of newcomers picked, chasing their picks from @p link_heads through @p link_next in
- *  rounds: each round caches the live row and as many newcomers as fit before the node's own row at @p query_row,
- *  appends them into the free slots when they all fit, and otherwise re-selects over both through
- *  @ref metal_reselect_staged; the next round starts from the row the last one wrote, so no newcomer is dropped.
- *  Pick @b p is newcomer @b first_id+p/connectivity. The launch hands each node to one simdgroup, the only writer of
- *  its row. */
+/** Back-links one node a wave of appended nodes picked, chasing their picks from @p link_heads
+ *  through @p link_next in rounds: each round caches the live row and as many appended nodes as fit
+ *  before the node's own row at @p query_row, appends them into the free slots when they all fit,
+ *  and otherwise re-selects over both through @ref metal_reselect_staged; the next round starts
+ *  from the row the last one wrote, so no appended node is dropped. Pick @b p is appended node
+ *  <tt>first_id + p / connectivity</tt>. The launch hands each node to one simdgroup, the sole writer of
+ *  its own row. */
 inline void metal_back_link_one(thread metal_walk_t& walk, uint node_id, device uint const* link_heads,
                                 device uint const* link_next, uint first_id, uint query_row) {
     device uint* const candidate_ids = walk.candidate_ids;
@@ -945,7 +951,7 @@ inline void metal_back_link_one(thread metal_walk_t& walk, uint node_id, device 
     // before the call returns, so every lane reads it.
     uint pick = link_heads[node_id];
     while (pick != metal_unknown_k) {
-        // The live neighbors first, a self-loop in slot 0 meaning none, then the newcomers.
+        // The live neighbors first, a self-loop in slot 0 meaning none, then the appended nodes.
         uint live_count = 0;
         for (uint slot_base = 0; slot_base < walk.connectivity; slot_base += warp_t::width_k) {
             uint const slot = slot_base + walk.lane;
@@ -964,8 +970,8 @@ inline void metal_back_link_one(thread metal_walk_t& walk, uint node_id, device 
         pick = warp_t::shuffle(pick, 0);
         warp_t::sync();
 
-        // Room for every newcomer left: append them past the live neighbors, a published-empty row's self-loop
-        // giving way to the first, released last, and nothing to re-judge.
+        // Room for every appended node left: append them past the live neighbors, a published-empty
+        // row's self-loop giving way to the first, released last, and nothing to re-judge.
         if (candidates_count <= walk.connectivity) {
             for (uint slot = max(live_count, 1u) + walk.lane; slot < candidates_count; slot += warp_t::width_k)
                 warp_t::store_relaxed(live_row + slot, candidate_ids[slot]);
@@ -1070,8 +1076,9 @@ inline norms_t metal_stage_query(thread metal_walk_t& walk, device uint4 const* 
 
 #pragma region Kernels
 
-/** The chains a wave's newcomers thread their picks onto for the back-link launch behind them: each node's last pick,
- *  unknown for none, the pick each was threaded before, and the nodes any newcomer picked with their count. */
+/** The chains a wave's appended nodes thread their picks onto for the back-link launch behind them:
+ *  each node's last pick, unknown for none, the pick each was threaded before, and the nodes any
+ *  appended node picked with their count. */
 struct metal_links_t {
     device uint* heads;
     device uint* next;
@@ -1094,7 +1101,7 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
         walk.epoch = arguments.epoch_base + (new_node_id - arguments.first_id) + 1;
         walk.random = metal_lane_generator(new_node_id, lane);
 
-        // Land the payload, derive the norms, and park the query in one pass.
+        // Write the payload, derive the norms, and park the query in one pass.
         device uint4 const* const staged = metal_row(staging, new_node_id - arguments.first_id, walk.row_fragments);
         device uint4* const owned = walk.vector_for(new_node_id);
         for (uint fragment_index = lane; fragment_index < walk.row_fragments; fragment_index += warp_t::width_k)
@@ -1150,12 +1157,14 @@ inline void metal_back_link(constant metal_arguments_t& arguments, device uint4*
     metal_flush(walk);
 }
 
-/** One simdgroup re-selects one node at a time into the shadow matrix, read-only on the live one. */
+/** One simdgroup re-selects one node at a time into the shadow matrix, read-only on the live one,
+ *  marks it in @p walked, and chains itself onto every pick through @p link_heads and @p link_next,
+ *  as an insertion does, for @ref metal_merge_back_links to fold. */
 template <uint slots_>
 inline void metal_refine(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint const* node_ids, device uchar* arena,
-                         device atomic_uint* counters, device uint* shadow, device uint const* part_bases, uint slice,
-                         uint lane) {
+                         device atomic_uint* counters, device uint* shadow, device uint const* part_bases,
+                         device uint* link_heads, device uint* link_next, device uchar* walked, uint slice, uint lane) {
     metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
     while (true) {
         uint offset = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
@@ -1211,14 +1220,59 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         device uint* const shadow_row = metal_row(shadow, node_id, walk.connectivity);
         for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k)
             shadow_row[slot] = slot < selected ? walk.selected_ids[slot] : slot == 0 ? node_id : metal_unknown_k;
+        for (uint slot = lane; slot < selected; slot += warp_t::width_k) {
+            uint const pick = node_id * walk.connectivity + slot;
+            link_next[pick] = warp_t::exchange_acquire(link_heads + walk.selected_ids[slot], pick);
+        }
+        if (lane == 0) walked[node_id] = 1;
         warp_t::sync();
     }
     metal_flush(walk);
 }
 
-/** One simdgroup walks one query at a time, assigning itself queries from the batch counter, landing its nearest IDs
- *  and distances, or under @p fold.keeps the pairs it scored and their count, ranked under indexer heads when the
- *  fold names any. Slot zero walks the arena frontier and ranks everything it kept. */
+/** One simdgroup folds one row at a time into its live row, assigning itself rows from the launch
+ *  counter: a row the pass walked first takes its forward picks from @p shadow, counted changed
+ *  when they gained a member the live row lacked, then every walker chained onto the row folds in
+ *  through @ref metal_back_link_one, and its chain resets for the next pass. Exclusive pass: no
+ *  simdgroup reads another's row. */
+inline void metal_merge_back_links(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
+                                   device uint* neighbors, device uchar* arena, device atomic_uint* counters,
+                                   device uint const* shadow, device uint* link_heads, device uint const* link_next,
+                                   device uchar const* walked, uint slice, uint lane) {
+    metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
+    while (true) {
+        uint node_id = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
+        node_id = warp_t::shuffle(node_id, 0);
+        if (node_id >= arguments.end_id) break;
+        bool const forward = walked[node_id] != 0;
+        if (!forward && link_heads[node_id] == metal_unknown_k) continue;
+        if (forward) {
+            device uint* const live_row = walk.neighbors_for(node_id);
+            device uint const* const picked = metal_row(shadow, node_id, walk.connectivity);
+            bool lane_gained = false;
+            for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k) {
+                uint const pick = picked[slot];
+                bool lacked = pick != metal_unknown_k && pick != node_id;
+                for (uint old_slot = 0; lacked && old_slot != walk.connectivity; ++old_slot)
+                    lacked = live_row[old_slot] != pick;
+                lane_gained = lane_gained || lacked;
+            }
+            bool const gained = simd_any(lane_gained);
+            warp_t::sync();
+            for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k) live_row[slot] = picked[slot];
+            warp_t::fence();
+            if (lane == 0 && gained) atomic_fetch_add_explicit(counters + metal_changed_k, 1u, memory_order_relaxed);
+        }
+        metal_back_link_one(walk, node_id, link_heads, link_next, 0, walk.selection_nodes - 1);
+        if (lane == 0) link_heads[node_id] = metal_unknown_k;
+    }
+    metal_flush(walk);
+}
+
+/** One simdgroup walks one query at a time, assigning itself queries from the batch counter,
+ *  writing its nearest IDs and distances, or under @p fold.keeps the pairs it scored and their
+ *  count, ranked under indexer heads when the fold names any. Slot zero walks the arena frontier
+ *  and ranks everything it kept. */
 template <uint slots_>
 inline void metal_search(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint4 const* queries, device uchar* arena,
@@ -1265,12 +1319,12 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
         device uint* const ids_row = metal_row(result_ids, query, arguments.count);
         device float* const distances_row = metal_row(result_distances, query, arguments.count);
         uint const metric = walk.metric, count = arguments.count;
-        auto land = [&](uint rank, ulong entry) {
+        auto write_rank = [&](uint rank, ulong entry) {
             if (rank >= count) return;
             ids_row[rank] = metal_id_of(entry);
             distances_row[rank] = kit_t::convert_to_distance(metric, metal_distance_of(entry));
         };
-        frontier.for_each_rank(count, lane, land);
+        frontier.for_each_rank(count, lane, write_rank);
     }
     metal_flush(walk);
 }
@@ -1358,31 +1412,49 @@ kernel void metal_refine_kernel(constant metal_arguments_t& arguments [[buffer(m
                                 device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
                                 device uint* shadow [[buffer(metal_shadow_buffer_k)]],
                                 device uint const* part_bases [[buffer(metal_part_bases_buffer_k)]],
+                                device uint* link_heads [[buffer(metal_chain_heads_buffer_k)]],
+                                device uint* link_next [[buffer(metal_chain_links_buffer_k)]],
+                                device uchar* walked [[buffer(metal_walked_buffer_k)]],
                                 uint group [[threadgroup_position_in_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
     metal_refine<slots_>(arguments, vectors, norms, neighbors, node_ids, arena, counters, shadow, part_bases,
-                         group * metal_simdgroups_k + simdgroup, lane);
+                         link_heads, link_next, walked, group * metal_simdgroups_k + simdgroup, lane);
 }
 
 template [[host_name("metal_refine_kernel_0")]] kernel void metal_refine_kernel<0>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
+    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
 template [[host_name("metal_refine_kernel_2")]] kernel void metal_refine_kernel<2>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
+    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
 template [[host_name("metal_refine_kernel_4")]] kernel void metal_refine_kernel<4>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
+    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
 template [[host_name("metal_refine_kernel_8")]] kernel void metal_refine_kernel<8>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
+    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
 template [[host_name("metal_refine_kernel_16")]] kernel void metal_refine_kernel<16>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, uint, uint, uint);
+    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
+
+/** One merge launch per refine pass, over every row the pass walked or a walker picked. */
+[[host_name("metal_merge_back_links_kernel")]] kernel void metal_merge_back_links_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint4* vectors [[buffer(metal_vectors_buffer_k)]], device norms_t* norms [[buffer(metal_norms_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]], device uchar* arena [[buffer(metal_arena_buffer_k)]],
+    device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
+    device uint const* shadow [[buffer(metal_shadow_buffer_k)]],
+    device uint* link_heads [[buffer(metal_chain_heads_buffer_k)]],
+    device uint const* link_next [[buffer(metal_chain_links_buffer_k)]],
+    device uchar const* walked [[buffer(metal_walked_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    metal_merge_back_links(arguments, vectors, norms, neighbors, arena, counters, shadow, link_heads, link_next, walked,
+                           group * metal_simdgroups_k + simdgroup, lane);
+}
 
 /*  Searches and graph products share one entry point per width, plus slot zero's arena frontier past the widest
- *  rung: the word at @c metal_keeps_buffer_k says which the launch lands. */
+ *  rung: the word at @c metal_keeps_buffer_k says which the launch writes. */
 
 template <uint slots_>
 kernel void metal_search_kernel(
@@ -1425,5 +1497,205 @@ template [[host_name("metal_search_kernel_16")]] kernel void metal_search_kernel
     device float const*, constant uint&, uint, uint, uint);
 
 #pragma endregion Kernels
+
+#pragma region Gathers and Splits
+
+/** Copies the packed row of every listed node into its output row, one simdgroup per entry, as the
+ *  stored scalar: a lookup's gather into memory the host reads in place. */
+[[host_name("metal_gather_vectors_kernel")]] kernel void metal_gather_vectors_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint4 const* vectors [[buffer(metal_vectors_buffer_k)]],
+    device uint2 const* rows [[buffer(metal_gathered_rows_buffer_k)]],
+    device uchar* outputs [[buffer(metal_gathered_outputs_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    uint const slices = groups * metal_simdgroups_k;
+    for (uint entry = group * metal_simdgroups_k + simdgroup; entry < arguments.queries_count; entry += slices) {
+        // The node first, then its output row, as the host's eight-byte entries lay them.
+        uint2 const row = rows[entry];
+        device uchar const* const from = (device uchar const*)metal_row(vectors, row.x, arguments.row_fragments);
+        device uchar* const into = outputs + ulong(row.y) * arguments.packed_bytes;
+        for (uint byte = lane; byte < arguments.packed_bytes; byte += metal_simdgroup_width_k) into[byte] = from[byte];
+    }
+}
+
+/** Sums a batch's per-query counts into the counters' matched words on the grid's first simdgroup
+ *  alone, so the host reads one word instead of every query's count. */
+[[host_name("metal_sum_counts_kernel")]] kernel void metal_sum_counts_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device ulong const* counts [[buffer(metal_counts_buffer_k)]],
+    device uint* counters [[buffer(metal_counters_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    if (group != 0 || simdgroup != 0) return;
+    ulong sum = 0;
+    for (uint query = lane; query < arguments.queries_count; query += metal_simdgroup_width_k) sum += counts[query];
+    for (uint mask = metal_simdgroup_width_k / 2; mask; mask >>= 1) sum += warp_t::shuffle_xor(sum, mask);
+    if (lane != 0) return;
+    counters[metal_matched_k] = uint(sum);
+    counters[metal_matched_k + 1] = uint(sum >> 32);
+}
+
+/** Whether bit @p row of @p words is set. */
+inline bool metal_bitset_contains(device uint const* words, uint row) { return (words[row / 32] >> (row % 32)) & 1u; }
+
+/** Sets bit @p row of @p words, which other lanes set beside it. */
+inline void metal_bitset_insert(device uint* words, uint row) {
+    atomic_fetch_or_explicit((device atomic_uint*)(words + row / 32), 1u << (row % 32), memory_order_relaxed);
+}
+
+/** Whether the round before the bound one placed nothing, which ends the growth: a round queued
+ *  past convergence leaves at entry, as every later pass of it does; a first round, having none
+ *  before it, never ends the growth. */
+inline bool metal_converged(constant metal_arguments_t& arguments, device uint const* placed) {
+    return arguments.round > 1 && placed[(arguments.round & 1u) ^ 1u] == 0;
+}
+
+/** A growth round's first pass, one simdgroup per frontier row: a row of a part with room proposes
+ *  itself to every unplaced row it links to, and each keeps its lowest-ID proposer, so no
+ *  simdgroup order sways the round, as the CUDA pass does. */
+[[host_name("metal_partition_propose_kernel")]] kernel void metal_partition_propose_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint const* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint const* node_parts [[buffer(metal_node_parts_buffer_k)]],
+    device atomic_uint* proposals [[buffer(metal_proposals_buffer_k)]],
+    device uint const* frontier [[buffer(metal_frontier_buffer_k)]],
+    device uint const* part_sizes [[buffer(metal_part_sizes_buffer_k)]],
+    device uint const* placed [[buffer(metal_placed_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    if (metal_converged(arguments, placed)) return;
+    uint const slices = groups * metal_simdgroups_k, rows = arguments.end_id;
+    for (uint row = group * metal_simdgroups_k + simdgroup; row < rows; row += slices) {
+        if (!metal_bitset_contains(frontier, row) || part_sizes[node_parts[row]] >= arguments.part_capacity) continue;
+        device uint const* const links = metal_row(neighbors, row, arguments.connectivity);
+        for (uint slot = lane; slot < arguments.connectivity; slot += metal_simdgroup_width_k) {
+            uint const target = links[slot];
+            if (target == metal_unknown_k || target == row || target >= rows || node_parts[target] != metal_unknown_k)
+                continue;
+            uint held = atomic_load_explicit(proposals + target, memory_order_relaxed);
+            while (row < held && !atomic_compare_exchange_weak_explicit(proposals + target, &held, row,
+                                                                        memory_order_relaxed, memory_order_relaxed)) {}
+        }
+    }
+}
+
+/** A growth round's second pass, one thread per row: counts the rows proposed to each part, and
+ *  empties the next frontier and the round's placed word for the passes after it, since the host
+ *  writes nothing between the round's command buffers. */
+[[host_name("metal_partition_count_kernel")]] kernel void metal_partition_count_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint const* node_parts [[buffer(metal_node_parts_buffer_k)]],
+    device uint const* proposals [[buffer(metal_proposals_buffer_k)]],
+    device uint* next_frontier [[buffer(metal_next_frontier_buffer_k)]],
+    device atomic_uint* round_counts [[buffer(metal_round_counts_buffer_k)]],
+    device uint* placed [[buffer(metal_placed_buffer_k)]], uint position [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]) {
+    if (metal_converged(arguments, placed)) return;
+    for (uint word = position; word < (arguments.end_id + 31) / 32; word += threads) next_frontier[word] = 0;
+    if (position == 0) placed[arguments.round & 1u] = 0;
+    for (uint row = position; row < arguments.end_id; row += threads) {
+        uint const proposal = proposals[row];
+        if (proposal != metal_unknown_k)
+            atomic_fetch_add_explicit(round_counts + node_parts[proposal], 1u, memory_order_relaxed);
+    }
+}
+
+/** A growth round's third pass, one thread per row: places every row proposed to a part with room
+ *  for the round's whole count in the next frontier, counting them in the round's placed word; the
+ *  rows a round count would overflow stay proposed for the fill. Proposers were placed in earlier
+ *  rounds, so no thread rewrites a part another one reads. */
+[[host_name("metal_partition_accept_kernel")]] kernel void metal_partition_accept_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* node_parts [[buffer(metal_node_parts_buffer_k)]],
+    device uint* proposals [[buffer(metal_proposals_buffer_k)]],
+    device uint* next_frontier [[buffer(metal_next_frontier_buffer_k)]],
+    device uint const* part_sizes [[buffer(metal_part_sizes_buffer_k)]],
+    device uint const* round_counts [[buffer(metal_round_counts_buffer_k)]],
+    device uint* placed [[buffer(metal_placed_buffer_k)]], uint position [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]) {
+    if (metal_converged(arguments, placed)) return;
+    for (uint row = position; row < arguments.end_id; row += threads) {
+        uint const proposal = proposals[row];
+        if (proposal == metal_unknown_k) continue;
+        uint const part = node_parts[proposal];
+        if (round_counts[part] > arguments.part_capacity - part_sizes[part]) continue;
+        node_parts[row] = part;
+        proposals[row] = metal_unknown_k;
+        metal_bitset_insert(next_frontier, row);
+        atomic_fetch_add_explicit((device atomic_uint*)(placed + (arguments.round & 1u)), 1u, memory_order_relaxed);
+    }
+}
+
+/** A growth round's last pass, one threadgroup per part: a part whose round count fit takes it into
+ *  its size, and one the round count overflows places its lowest-ID proposed rows up to its room in
+ *  the next frontier, and fills up. Either way the part's proposals and round count clear for the
+ *  round that follows. */
+[[host_name("metal_partition_fill_kernel")]] kernel void metal_partition_fill_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* node_parts [[buffer(metal_node_parts_buffer_k)]],
+    device uint* proposals [[buffer(metal_proposals_buffer_k)]],
+    device uint* next_frontier [[buffer(metal_next_frontier_buffer_k)]],
+    device uint* part_sizes [[buffer(metal_part_sizes_buffer_k)]],
+    device uint* round_counts [[buffer(metal_round_counts_buffer_k)]],
+    device uint* placed [[buffer(metal_placed_buffer_k)]], uint part [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_position_in_threadgroup]], uint group_threads [[threads_per_threadgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint simdgroup_counts[metal_simdgroups_k];
+    if (metal_converged(arguments, placed)) return;
+    uint const wanted = round_counts[part], room = arguments.part_capacity - part_sizes[part];
+    threadgroup_barrier(mem_flags::mem_device);
+    if (wanted > room)
+        for (uint first = 0, taken = 0; first < arguments.end_id; first += group_threads) {
+            uint const row = first + thread_index;
+            uint const proposal = row < arguments.end_id ? proposals[row] : metal_unknown_k;
+            bool const proposed_here = proposal != metal_unknown_k && node_parts[proposal] == part;
+            uint const voted = warp_t::ballot(proposed_here);
+            if (lane == 0) simdgroup_counts[simdgroup] = popcount(voted);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint rank = taken + popcount(voted & warp_t::below(lane)), total = 0;
+            for (uint other = 0; other != metal_simdgroups_k; ++other) {
+                if (other < simdgroup) rank += simdgroup_counts[other];
+                total += simdgroup_counts[other];
+            }
+            if (proposed_here) {
+                if (rank < room) {
+                    node_parts[row] = part;
+                    metal_bitset_insert(next_frontier, row);
+                }
+                proposals[row] = metal_unknown_k;
+            }
+            taken += total;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    if (thread_index != 0) return;
+    part_sizes[part] += wanted > room ? room : wanted;
+    round_counts[part] = 0;
+    if (wanted > room)
+        atomic_fetch_add_explicit((device atomic_uint*)(placed + (arguments.round & 1u)), room, memory_order_relaxed);
+}
+
+/** Marks in @p picked every row linking into another part, one simdgroup per row. */
+[[host_name("metal_partition_picked_kernel")]] kernel void metal_partition_picked_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint const* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint const* node_parts [[buffer(metal_node_parts_buffer_k)]],
+    device uint* picked [[buffer(metal_picked_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    uint const slices = groups * metal_simdgroups_k, rows = arguments.end_id;
+    for (uint row = group * metal_simdgroups_k + simdgroup; row < rows; row += slices) {
+        uint const part = node_parts[row];
+        device uint const* const links = metal_row(neighbors, row, arguments.connectivity);
+        bool across = false;
+        for (uint slot = lane; slot < arguments.connectivity; slot += metal_simdgroup_width_k) {
+            uint const target = links[slot];
+            across = across ||
+                     (target != metal_unknown_k && target != row && target < rows && node_parts[target] != part);
+        }
+        if (simd_any(across) && lane == 0) metal_bitset_insert(picked, row);
+    }
+}
+
+#pragma endregion Gathers and Splits
 
 } // namespace unum::usearch::dense

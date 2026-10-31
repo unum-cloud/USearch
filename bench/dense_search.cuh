@@ -242,8 +242,8 @@ inline ranking_verdict_t judge_ranking(std::span<f64_t const> returned, f64_t ne
 
 #pragma region Indexer Heads
 
-/** A lightning indexer's heads as `--heads` and `--weights` name them, landed in the stored scalar @p scalar_type_
- *  beside the rows its walks navigate by. */
+/** A lightning indexer's heads as the @c --heads and @c --weights settings name them, cast to the
+ *  stored scalar @p scalar_type_ beside the rows its walks navigate by. */
 template <typename scalar_type_>
 struct bench_indexer_heads {
 

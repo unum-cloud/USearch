@@ -323,21 +323,33 @@ A cursor or a stream releases its walk on `close()` or at the end of a `with` bl
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide `expansion_factor` belongs here rather than in `insert`.
 
 ```python
-while index.on(pool).refine(expansion_factor=128) > len(index) // 100:
+while index.on(pool).refine(expansion_factor=128).changed > len(index) // 100:
     pass  # Loop until fewer than one node in a hundred still moves an edge
 ```
 
-The return is how many nodes changed edges, so a caller loops until it falls below whatever change rate they consider settled.
-Searches may run throughout on a RAM handle but not on a VRAM one, and a stopped sweep leaves the graph correct for the next call to sweep again, which is what makes a whole-graph pass affordable under a time budget.
+The return is a `RefineReport`: the nodes re-selected and, of those, `changed`; the islands found and reconnected; and the `reachability` audit closing the heal.
+A caller loops until `changed` falls below whatever change rate they consider settled.
+Searches may run throughout on a RAM handle but not on a VRAM one, and a stopped sweep still re-links its islands before raising `CancelledError`, leaving the graph correct for the next call to sweep again, which is what makes a whole-graph pass affordable under a time budget.
 
 ### Absorbing & Splitting
 
 ```python
 first.on(pool).absorb(second, third)  # both donors are consumed and must not be used afterwards
+first.on(pool).split(left, right, seed=7)  # two empty receivers take a part each, `first` is left empty
 ```
 
 Donors are absorbed one after another, each keeping its graph and linked in by walks across the appended part.
-A later verb on a consumed donor raises `UninitializedError`, and a stopped `absorb` hands every donor it never reached back to its wrapper.
+A later verb on a consumed donor raises `UninitializedError`, and a stopped `absorb` cuts only its closing refinement, every donor already consumed.
+Both answer a `RefineReport` of their closing refinements.
+
+### Sampling
+
+```python
+drawn = index.on(pool).sample(256, arena, shown=shown, shown_coordinates=xyz, focus=near, seed=42)
+```
+
+`sample` draws keys around `focus`, each hanging from a shown or earlier draw, and places them in three dimensions beside the `shown` keys.
+The `Sample` it answers holds `keys`, `entry_ordinals`, `parents` and `coordinates` in the arena, and a larger `wanted` under the same seed draws a superset.
 
 ### Sparse Multiplication
 

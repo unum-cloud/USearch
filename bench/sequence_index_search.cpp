@@ -24,11 +24,13 @@
  *  --alphabet       none      dna, protein or text, which Needleman-Wunsch alone takes
  *  --search-costs   alphabet  alphabet, or uniform to search a Needleman-Wunsch index under unit costs
  *  --weights        none      65,536 int8 similarities and an int8 gap cost replacing the alphabet's
+ *  --classes        none      256 bytes, each byte's class code, replacing the alphabet's fold
  *  --query-targets  none      The base row each held-out query intends, one decimal per line
+ *  --matches-output none      A file per search breadth, <path>.<breadth>, each query's matched base rows on a line
  *  @endverbatim
  */
 #include <cstdint> // `std::uint8_t` - the codes, `std::int8_t` - the alphabets' scores
-#include <cstdio>  // `std::remove` - the reloaded checkpoint
+#include <cstdio>  // `std::remove` - the reloaded checkpoint, `std::fopen` - the matches output
 #include <cstring> // `std::memset`, `std::memcpy` - the unit scores' blank matrix, the weights
 
 #include <array>       // `std::array` - the flags, the byte-to-class fold
@@ -194,19 +196,23 @@ inline sequence_tape_t lines_of(bytes_view_t text, std::string& characters) {
 /** Runs the sequence search benchmark over the flags in @p argv. */
 int bench_sequence_index_search(int argc, char const* const* argv) {
     search_bench_settings_t search;
-    std::string_view base_texts_path, alphabet_name, search_costs = "alphabet", weights_path, query_targets_path;
+    std::string_view base_texts_path, alphabet_name, search_costs = "alphabet", weights_path, classes_path,
+                                                     query_targets_path, matches_output_path;
     counts_t window_widths {.minimum_size = 0};
     std::array<flag_t, 9> const shared = search_bench_flags(search);
     std::vector<flag_t> flags(shared.begin(), shared.end());
-    std::array<flag_t, 6> const own {{
+    std::array<flag_t, 8> const own {{
         {"--base-texts", "path", "entries, one per line", &base_texts_path},
         {"--window-widths", "bytes", "window widths for the overlap kind, like 3,5", &window_widths},
         {"--alphabet", "name", "dna, protein or text, which the needleman-wunsch kind alone takes", &alphabet_name},
         {"--search-costs", "name", "alphabet, or uniform to search a needleman-wunsch index under unit costs",
          &search_costs},
         {"--weights", "path", "256x256 int8 similarities and an int8 gap cost replacing the alphabet's", &weights_path},
+        {"--classes", "path", "256 bytes, each byte's class code, replacing the alphabet's fold", &classes_path},
         {"--query-targets", "path", "the base row each query intends, one per line, judged at rank 1 and top-k",
          &query_targets_path},
+        {"--matches-output", "path", "a file per search breadth, <path>.<breadth>, each query's matched base rows",
+         &matches_output_path},
     }};
     flags.insert(flags.end(), own.begin(), own.end());
     settings_t const settings = read_settings(argc, argv,
@@ -230,6 +236,19 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     bool const aligned = metric == usearch_sequence_metric_needleman_wunsch_k;
     alphabet_t alphabet = alphabet_of(alphabet_name, false);
     alphabet_t searched_alphabet = alphabet_of(alphabet_name, search_costs == "uniform");
+    if (!classes_path.empty()) {
+        auto [classes_file, classes_status] = mapped_file_t::read(classes_path);
+        if (failed(classes_status) || classes_file.view().size() != alphabet.codes.size() || !aligned)
+            return fmt::println(stderr, "--classes=\"{}\" must hold 256 bytes for needleman-wunsch", classes_path), 1;
+        std::memcpy(alphabet.codes.data(), classes_file.view().data(), alphabet.codes.size());
+        alphabet.classes = 0;
+        for (std::uint8_t const code : alphabet.codes)
+            if (code + 1u > alphabet.classes) alphabet.classes = code + 1u;
+        searched_alphabet.codes = alphabet.codes, searched_alphabet.classes = alphabet.classes;
+        if (search_costs == "uniform")
+            for (std::size_t code = 0; code != searched_alphabet.classes; ++code)
+                searched_alphabet.similarities[code * 256 + code] = 1;
+    }
     if (!weights_path.empty()) {
         auto [weights_file, weights_status] = mapped_file_t::read(weights_path);
         if (failed(weights_status) || weights_file.view().size() != alphabet.similarities.size() + 1 || !aligned)
@@ -286,9 +305,25 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                                 search.queries.value),
                    1;
     }
-    auto const judge_task = [&](std::size_t expansion, landed_matches_t const& found) {
-        if (query_targets.empty()) return;
+    auto const judge_task = [&](std::size_t expansion, copied_matches_t const& found) {
         std::vector<std::size_t> const offsets = match_offsets(found);
+        if (!matches_output_path.empty()) {
+            std::string rows;
+            for (std::size_t query = 0; query + 1 < offsets.size(); ++query) {
+                for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match) {
+                    if (match != offsets[query]) rows += ' ';
+                    rows += fmt::format("{}",
+                                        offset_of_key(settings.seed, std::bit_cast<usearch_key_t>(found.keys[match]))
+                                            .value_or(~u64_t {0}));
+                }
+                rows += '\n';
+            }
+            std::string const path = fmt::format("{}.{}", matches_output_path, expansion);
+            std::FILE* const file = std::fopen(path.c_str(), "wb");
+            if (!file) fmt::println(stderr, "--matches-output=\"{}\" could not be written", path);
+            else std::fwrite(rows.data(), 1, rows.size(), file), std::fclose(file);
+        }
+        if (query_targets.empty()) return;
         std::size_t task_first = 0, task_kept = 0;
         for (std::size_t query = 0; query != query_targets.size(); ++query)
             for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match)

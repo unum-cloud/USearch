@@ -7,5 +7,5 @@
  */
 #include "shapes_specializations.cuh"
 
-template struct basic_class_tables<shapes_traits_t, dense_home_t::ram_k, cpu_class_t::alibaba_c930_k>;
-template struct basic_class_tables<shapes_traits_t, dense_home_t::nvme_k, cpu_class_t::alibaba_c930_k>;
+template struct basic_class_tables<shapes_traits_t, vendored_residency_t::ram_k, cpu_class_t::alibaba_c930_k>;
+template struct basic_class_tables<shapes_traits_t, vendored_residency_t::nvme_k, cpu_class_t::alibaba_c930_k>;

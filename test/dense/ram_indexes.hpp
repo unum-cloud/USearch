@@ -13,6 +13,12 @@
  */
 #pragma once
 
+#include <cmath>   // `std::isfinite` - every draw's coordinates
+#include <cstring> // `std::memcmp` - the repeated draws' coordinates
+
+#include <algorithm> // `std::find` - a draw among the shown keys
+#include <vector>    // `std::vector` - a draw's outputs
+
 #include <fmt/format.h>
 
 #include <numkong/numkong.hpp>
@@ -47,8 +53,8 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
 
 /**
  *  @brief An insertion arriving while an absorb into the index runs answers @c contended_k and
- *      lands nothing, and an absorb meeting a batch in flight answers the same and leaves the
- *      donor whole; every entry that did land resolves exactly once.
+ *      places nothing, and an absorb meeting a batch in flight answers the same and leaves the
+ *      donor whole; every entry that was placed resolves exactly once.
  *
  *  One thread absorbs, retrying while a racing insertion holds a batch in flight, while another
  *  inserts single entries until the absorb returns. A round that sees no refusal refills the donor
@@ -78,8 +84,8 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     failures += expect(succeeded(recipient.insert(keys_of(0), rows_of(0), drivers[0].executor).status));
     failures += expect(succeeded(donor.insert(keys_of(part), rows_of(part), drivers[1].executor).status));
 
-    // Racing entries take keys past every part's, so each resolves to the one entry it landed.
-    std::vector<key_t> landed_keys;
+    // Racing entries take keys past every part's, so each resolves to the one entry it placed.
+    std::vector<key_t> inserted_keys;
     u64_t next_number = keys.size() + 1;
     key_t next_key = dense_key<key_t>(next_number);
     {
@@ -88,10 +94,10 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
         failures += expect_eq(plan.insert(0, std::span<key_t const> {&next_key, 1}, vectors(nk::range(0, 1), nk::slice),
                                           to_writable_span(drivers[0].traversals)),
                               status_t::success_k);
-        failures += expect_eq(recipient.absorb(donor, drivers[1].executor).status, status_t::contended_k);
+        failures += expect_eq(recipient.absorb(donor, {}, drivers[1].executor).status, status_t::contended_k);
         failures += expect_eq(donor.size(), part);
         failures += expect(succeeded(plan.finish().status));
-        landed_keys.push_back(next_key);
+        inserted_keys.push_back(next_key);
         next_key = dense_key<key_t>(++next_number);
     }
 
@@ -99,7 +105,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
     failures += expect(succeeded(rows_driver.status));
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(2))) return failures + expect(false);
-    std::size_t refused = 0, unexpected = 0, absorbed_rows = 0;
+    std::size_t refused = 0, unexpected = 0, absorbed_entries = 0;
     for (std::size_t round = 0; round != rounds && !refused; ++round) {
         // A consumed donor stays closed and sealed, so every round absorbs a fresh one.
         if (round) {
@@ -115,7 +121,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 fu::standard_atomic_ref<bool>(absorbing).store(true, std::memory_order_release);
-                do absorb_status = recipient.absorb(donor, drivers[1].executor).status;
+                do absorb_status = recipient.absorb(donor, {}, drivers[1].executor).status;
                 while (absorb_status == status_t::contended_k);
                 fu::standard_atomic_ref<bool>(absorbed).store(true, std::memory_order_release);
             }
@@ -127,7 +133,7 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
                     status_t const status =
                         recipient.insert(next_key, vectors.view().row(row).as_vector(), rows_driver.handle()).status;
                     if (status == status_t::success_k) {
-                        landed_keys.push_back(next_key);
+                        inserted_keys.push_back(next_key);
                         next_key = dense_key<key_t>(++next_number);
                     }
                     else if (status == status_t::contended_k) ++refused;
@@ -138,20 +144,21 @@ static std::size_t test_ram_indexes_absorb_refusals(u64_t seed) {
         });
         failures += expect_eq(absorb_status, status_t::success_k);
         failures += expect_eq(donor.size(), 0u);
-        absorbed_rows += part;
+        absorbed_entries += part;
     }
     failures += expect(refused > 0);
     failures += expect_eq(unexpected, 0u);
-    failures += expect_eq(recipient.size(), part + absorbed_rows + landed_keys.size());
+    failures += expect_eq(recipient.size(), part + absorbed_entries + inserted_keys.size());
     std::size_t miscounted = 0;
-    for (std::size_t row = 0; row != part + absorbed_rows; ++row) miscounted += recipient.count(keys[row]) != 1;
-    for (key_t const key : landed_keys) miscounted += recipient.count(key) != 1;
+    for (std::size_t entry = 0; entry != part + absorbed_entries; ++entry)
+        miscounted += recipient.count(keys[entry]) != 1;
+    for (key_t const key : inserted_keys) miscounted += recipient.count(key) != 1;
     failures += expect_eq(miscounted, 0u);
     return failures;
 }
 
 /** A batch planned and dropped before its first step gives back the executor and every shard's
- *  claim, so planning the same batch again grows no shard and the entries then land. */
+ *  claim, so planning the same batch again grows no shard and the entries then are placed. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
@@ -182,9 +189,87 @@ static std::size_t test_ram_indexes_abandoned_plan(u64_t seed) {
     return failures;
 }
 
+/** SAMPLE over shards: one seed draws the same keys at the same bits twice; a focus key draws
+ *  first; a call wanting fewer draws a prefix of one wanting more, parents included; and a call
+ *  shown the first one's draws never draws them again, hanging every draw from a shown point or
+ *  from an earlier draw. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_sample(u64_t seed) {
+    using scalar_t = typename indexes_type_::index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t const rows = 192;
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows}).status));
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_sample"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
+    failures += expect(succeeded(indexes.insert(keys, vectors.view(), driver.executor).status));
+
+    struct drawn_t {
+        std::vector<key_t> keys, parents;
+        std::vector<std::size_t> entry_ordinals;
+        std::vector<f32_t> distances, coordinates;
+        std::size_t written = 0;
+    };
+    u64_t const sample_seed = seed ^ 0x5A5Au;
+    auto draw = [&](std::size_t wanted, std::span<key_t const> shown, std::span<f32_t const> shown_coordinates,
+                    std::span<key_t const> focus) {
+        drawn_t drawn {std::vector<key_t>(wanted), std::vector<key_t>(wanted),     std::vector<std::size_t>(wanted),
+                       std::vector<f32_t>(wanted), std::vector<f32_t>(wanted * 3), 0};
+        sample_outputs<key_t> const outputs {drawn.keys, drawn.entry_ordinals, drawn.parents, drawn.distances,
+                                             drawn.coordinates};
+        auto const [result, status] = indexes.sample({shown, shown_coordinates, focus}, outputs, {sample_seed, 0},
+                                                     driver.executor);
+        failures += expect(succeeded(status));
+        drawn.written = result.written;
+        for (std::size_t draw = 0; draw != drawn.written; ++draw) {
+            failures += expect_eq(drawn.entry_ordinals[draw], 0u);
+            for (std::size_t column = 0; column != 3; ++column)
+                failures += expect(std::isfinite(drawn.coordinates[draw * 3 + column]));
+        }
+        return drawn;
+    };
+    auto among = [](std::span<key_t const> haystack, key_t const& key) {
+        return std::find(haystack.begin(), haystack.end(), key) != haystack.end();
+    };
+
+    drawn_t const first = draw(64, {}, {}, {}), again = draw(64, {}, {}, {});
+    failures += expect(first.written > 0);
+    failures += expect_eq(again.written, first.written);
+    failures += expect(first.keys == again.keys && first.parents == again.parents);
+    failures += expect(
+        std::memcmp(first.coordinates.data(), again.coordinates.data(), first.coordinates.size() * sizeof(f32_t)) == 0);
+
+    key_t const focus = keys[7];
+    drawn_t const narrow = draw(16, {}, {}, std::span<key_t const>(&focus, 1));
+    drawn_t const wide = draw(48, {}, {}, std::span<key_t const>(&focus, 1));
+    failures += expect(narrow.written > 0 && narrow.keys[0] == focus && wide.keys[0] == focus);
+    failures += expect(narrow.written <= wide.written);
+    for (std::size_t draw = 0; draw != min_of(narrow.written, wide.written); ++draw)
+        failures += expect(narrow.keys[draw] == wide.keys[draw] && narrow.parents[draw] == wide.parents[draw] &&
+                           narrow.distances[draw] == wide.distances[draw]);
+
+    std::size_t const shown_count = min_of<std::size_t>(16, first.written);
+    std::span<key_t const> const shown_keys(first.keys.data(), shown_count);
+    std::span<f32_t const> const shown_coordinates(first.coordinates.data(), shown_count * 3);
+    drawn_t const zoomed = draw(32, shown_keys, shown_coordinates, {});
+    failures += expect(zoomed.written > 0);
+    for (std::size_t draw = 0; draw != zoomed.written; ++draw) {
+        failures += expect(!among(shown_keys, zoomed.keys[draw]));
+        std::span<key_t const> const earlier(zoomed.keys.data(), draw);
+        failures += expect(among(shown_keys, zoomed.parents[draw]) || among(earlier, zoomed.parents[draw]));
+    }
+    return failures;
+}
+
 /** Past @c shard_capacity, entries open generations of shards on the same placements: one batch
- *  fills as many as it needs, a batch crossing the bound tops the open generation up and lands
- *  whole, one entry past a full generation opens the next, and a load of the filled index lands
+ *  fills as many as it needs, a batch crossing the bound tops the open generation up and is placed
+ *  whole, one entry past a full generation opens the next, and a load of the filled index places
  *  each part on a shard of its own, as many generations as it saved. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_generations(u64_t seed) {
@@ -243,8 +328,9 @@ static std::size_t test_ram_indexes_generations(u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k) {
         std::array<key_t, 8> found_keys {};
         std::array<typename indexes_type_::distance_t, 8> found_distances {};
-        auto const [result, status] = crossed.search(vectors.view().row(2499).as_vector(), rows_driver.handle(), {},
-                                                     std::span<key_t> {found_keys}, std::span {found_distances});
+        auto const [result, status] = crossed.search(vectors.view().row(2499).as_vector(),
+                                                     std::span<key_t> {found_keys}, std::span {found_distances}, {},
+                                                     rows_driver.handle());
         failures += expect(succeeded(status) && result.count > 0);
         failures += expect(std::find(found_keys.begin(), found_keys.begin() + result.count, keys[2499]) !=
                            found_keys.begin() + result.count);
@@ -338,9 +424,9 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
             std::array<distance_t, 8> found_distances {};
             for (std::size_t sample = 0; sample != samples_k; ++sample) {
                 std::size_t const row = sample * (rows / samples_k);
-                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(), walker.handle(), {},
-                                                             std::span<key_t> {found_keys},
-                                                             std::span {found_distances});
+                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(),
+                                                             std::span<key_t> {found_keys}, std::span {found_distances},
+                                                             {}, walker.handle());
                 failures += expect(succeeded(status));
                 hits += std::find(found_keys.begin(), found_keys.begin() + result.count, keys[row]) !=
                         found_keys.begin() + result.count;
@@ -357,7 +443,7 @@ static std::size_t test_ram_indexes_compact(u64_t seed) {
     std::size_t const hits_before = self_hits(indexes);
 
     // In place: each kept shard takes one other, the only entries that move and re-select. A looker
-    // counts keys throughout, and each moved entry's key lands and its old shard forgets it inside
+    // counts keys throughout, and each moved entry's key moves and its old shard forgets it inside
     // one window, so every key counts exactly once.
     std::array<indexes_type_*, 1> const in_place {&indexes};
     compact_config_t halves;
@@ -452,9 +538,9 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
             std::array<distance_t, 8> found_distances {};
             for (std::size_t row = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
                  row = (row + searchers_k) % rows) {
-                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(), walker.handle(), {},
-                                                             std::span<key_t> {found_keys},
-                                                             std::span {found_distances});
+                auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(),
+                                                             std::span<key_t> {found_keys}, std::span {found_distances},
+                                                             {}, walker.handle());
                 if (status == status_t::contended_k) refused.add(1);
                 else if (failed(status)) foreign.add(1);
                 else
@@ -477,36 +563,38 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
         auto [plan, plan_status] = indexes.plan_insert(1, drivers[0].executor);
         failures += expect(succeeded(plan_status));
         failures += expect_eq(indexes.clear(), status_t::contended_k);
-        failures += expect_eq(indexes.absorb(donor, drivers[1].executor).status, status_t::contended_k);
+        failures += expect_eq(indexes.absorb(donor, {}, drivers[1].executor).status, status_t::contended_k);
     }
     failures += expect_eq(indexes.size(), rows);
 
     // A cursor reads under the epoch it opened in, and a clear since ends it.
-    typename indexes_type_::cursor_t cursor {indexes};
+    typename indexes_type_::cursor_t cursor {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(cursor.open(indexes, {})));
     std::array<key_t, 4> read_keys {};
-    auto const [before, before_status] = cursor.read(indexes, std::span<key_t> {read_keys}, rows_span_t {});
+    auto const [before, before_status] = cursor.pull(indexes, std::span<key_t> {read_keys}, nullptr, nullptr);
     failures += expect(succeeded(before_status) && before == read_keys.size());
     failures += expect_eq(indexes.clear(), status_t::success_k);
-    auto const [after, after_status] = cursor.read(indexes, std::span<key_t> {read_keys}, rows_span_t {});
+    auto const [after, after_status] = cursor.pull(indexes, std::span<key_t> {read_keys}, nullptr, nullptr);
     failures += expect(after_status == status_t::contended_k && after == 0);
     return failures;
 }
 
 /** The filtered algebra verbs keep only what their predicate admits: products name even documents
- *  alone and refuse a scan, MaxSim ranks even documents at their exact scores under a walk and a
- *  scan alike, and attention folds no key a predicate rejects. */
+ *  alone under a walk and a scan alike, MaxSim ranks even documents at their exact scores under a
+ *  walk and a scan alike, and attention folds no key a predicate rejects. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
+    using dot_result_t = typename indexes_type_::dot_result_t;
     using vector_view_t = typename index_t::vector_view_t;
     using search_config_t = typename indexes_type_::search_config_t;
     if constexpr (kernel_ != nk_kernel_dot_k) return 0;
     else {
         constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4;
         constexpr std::size_t documents_count = rows_count / tokens_per_document;
-        constexpr std::size_t rows_per_query = 4, queries_count = 2, wanted = 5;
+        constexpr std::size_t tokens_per_query = 4, queries_count = 2, wanted = 5;
         std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
         std::size_t failures = 0;
         dense_indexes_executor<indexes_type_> driver;
@@ -521,67 +609,73 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
             succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
         auto const admit_even = quad_predicate(
             [](key_t key) noexcept { return key % 2 ? admission_t::reject_k : admission_t::admit_k; });
-        search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(rows_count)};
-
-        auto const left = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
-        auto product_keys = nk::matrix<key_t>::zeros({queries_count, rows_count}).value;
-        auto products = nk::matrix<typename indexes_type_::dot_result_t>::zeros({queries_count, rows_count}).value;
-        std::array<std::size_t, queries_count> counts;
-        failures += expect(
-            succeeded(indexes
-                          .multiply_if(left, driver.executor, to_writable_span(driver.traversals), exhaustive,
-                                       product_keys.span(), products.span(), std::span {counts}, admit_even)
-                          .status));
-        for (std::size_t row = 0; row != queries_count; ++row) {
-            failures += expect(counts[row] > 0 && counts[row] <= rows_count / 2);
-            for (std::size_t pair = 0; pair != min_of(counts[row], rows_count); ++pair)
-                failures += expect(product_keys(row, pair) % 2 == 0);
-        }
-        // No exact product scan exists, so a scan refuses rather than walk.
+        search_config_t const exhaustive {static_cast<typename index_t::candidates_count_t>(rows_count)};
         search_config_t scan;
         scan.traversal = traversal_t::scan_k;
-        failures += expect(indexes
-                               .multiply_if(left, driver.executor, to_writable_span(driver.traversals), scan,
-                                            product_keys.span(), products.span(), std::span {counts}, admit_even)
-                               .status == status_t::unsupported_k);
+
+        auto const left = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+        std::vector<key_t> product_keys(queries_count * rows_count);
+        std::vector<dot_result_t> products(queries_count * rows_count);
+        std::array<std::size_t, queries_count + 1> offsets {};
+        std::array<std::size_t, queries_count> scored {};
+        products_tape<key_t, dot_result_t> const pairs {std::span {product_keys}, std::span {products},
+                                                        std::span {offsets}, rows_count};
+        for (search_config_t const config : {exhaustive, scan}) {
+            offsets[0] = 0;
+            failures += expect(succeeded(indexes
+                                             .multiply_if(left, pairs, std::span {scored}, config, admit_even,
+                                                          driver.executor, to_writable_span(driver.traversals))
+                                             .status));
+            for (std::size_t query = 0; query != queries_count; ++query) {
+                std::size_t const first = offsets[query], kept = offsets[query + 1] - first;
+                failures += expect(scored[query] > 0 && scored[query] <= rows_count / 2);
+                failures += expect_eq(kept, min_of(scored[query], rows_count));
+                for (std::size_t pair = 0; pair != kept; ++pair)
+                    failures += expect(product_keys[first + pair] % 2 == 0);
+            }
+        }
 
         // Every even document's exact score: each query row's best dot among its tokens, summed.
-        auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
+        auto const queries = vectors(nk::range(std::size_t {0}, queries_count * tokens_per_query), nk::slice);
         std::array<std::array<f64_t, documents_count>, queries_count> exact {};
-        for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
+        for (std::size_t row = 0; row != queries_count * tokens_per_query; ++row)
             for (std::size_t document = 0; document != documents_count; ++document) {
                 f64_t best = 0;
                 for (std::size_t token = 0; token != tokens_per_document; ++token)
                     best = max_of(best, static_cast<f64_t>(dense_native_dot(
                                             queries.row(row).as_vector(),
                                             vectors.view().row(document * tokens_per_document + token).as_vector())));
-                exact[row / rows_per_query][document] += best;
+                exact[row / tokens_per_query][document] += best;
             }
-        auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
-        auto found_scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
+        std::vector<key_t> found_keys(queries_count * wanted);
+        std::vector<f64_t> found_scores(queries_count * wanted);
         std::array<std::size_t, queries_count + 1> query_offsets;
         for (std::size_t query = 0; query != query_offsets.size(); ++query)
-            query_offsets[query] = query * rows_per_query;
+            query_offsets[query] = query * tokens_per_query;
+        products_tape<key_t, f64_t> const matches {std::span {found_keys}, std::span {found_scores},
+                                                   std::span {offsets}, wanted};
         // An exhaustive walk and a scan nominate every even document alike.
+        error_stats_t score_errors;
         for (search_config_t const config : {exhaustive, scan}) {
-            counts.fill(0);
-            std::array<std::size_t, queries_count> scored;
-            maxsim_rows<key_t, f64_t> const land {found_keys.span(), found_scores.span(), std::span {counts}};
+            offsets[0] = 0;
             failures += expect(succeeded(indexes
                                              .maxsim_if(queries, std::span<std::size_t const> {query_offsets},
-                                                        driver.executor, to_writable_span(driver.traversals), config,
-                                                        wanted, std::span {scored}, land, admit_even)
+                                                        std::span {scored}, matches, {config, wanted}, admit_even,
+                                                        driver.executor, to_writable_span(driver.traversals))
                                              .status));
             for (std::size_t query = 0; query != queries_count; ++query) {
-                failures += expect_eq(counts[query], wanted) + expect_eq(scored[query], (documents_count + 1) / 2);
-                for (std::size_t rank = 0; rank != counts[query]; ++rank) {
-                    std::size_t const document = static_cast<std::size_t>(found_keys(query, rank));
+                std::size_t const first = offsets[query], kept = offsets[query + 1] - first;
+                failures += expect_eq(kept, wanted) + expect_eq(scored[query], (documents_count + 1) / 2);
+                for (std::size_t rank = 0; rank != kept; ++rank) {
+                    std::size_t const document = static_cast<std::size_t>(found_keys[first + rank]);
                     failures += expect(document < documents_count && document % 2 == 0);
                     if (document < documents_count)
-                        failures += expect_near(found_scores(query, rank), exact[query][document]);
+                        score_errors.add(found_scores[first + rank], exact[query][document]);
                 }
             }
         }
+        failures += expect_errors("filtered maxsim scores", comparison_family_t::approximate_k,
+                                  comparison_verdict_t::assert_k, score_errors, 0);
 
         // A lookup that never resolves would refuse any key that folds.
         auto const no_rows = [](std::span<key_t const>, std::span<vector_view_t>) noexcept {};
@@ -590,8 +684,8 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         std::array<softmax_state_t, queries_count> carry;
         failures += expect(
             succeeded(indexes
-                          .attend_if(left, 1, no_rows, 1.0f, outputs.span(), std::span {carry}, driver.executor,
-                                     to_writable_span(driver.traversals), exhaustive, reject_all)
+                          .attend_if(left, 1, no_rows, 1.0f, outputs.span(), std::span {carry}, exhaustive, reject_all,
+                                     driver.executor, to_writable_span(driver.traversals))
                           .status));
         for (softmax_state_t const& state : carry) failures += expect_eq(state.partition, 0.0f);
         return failures;
@@ -599,7 +693,7 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
 }
 
 /** A MaxSim scan scores every key exactly once though its rows span shards: keeping every key, it
- *  lands each document once at its exact total and counts each once. */
+ *  writes each document once at its exact total and counts each once. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -608,7 +702,7 @@ static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
     using search_config_t = typename indexes_type_::search_config_t;
     if constexpr (kernel_ != nk_kernel_dot_k) return 0;
     else {
-        constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4, rows_per_query = 4;
+        constexpr std::size_t rows_count = dense_thread_nodes_k, tokens_per_document = 4, tokens_per_query = 4;
         constexpr std::size_t documents_count = rows_count / tokens_per_document;
         std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
         std::size_t failures = 0;
@@ -628,8 +722,8 @@ static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
         failures += expect_eq(spanning, documents_count);
 
         std::array<f64_t, documents_count> exact {};
-        auto const queries = vectors(nk::range(std::size_t {0}, rows_per_query), nk::slice);
-        for (std::size_t row = 0; row != rows_per_query; ++row)
+        auto const queries = vectors(nk::range(std::size_t {0}, tokens_per_query), nk::slice);
+        for (std::size_t row = 0; row != tokens_per_query; ++row)
             for (std::size_t document = 0; document != documents_count; ++document) {
                 f64_t best = std::numeric_limits<f64_t>::lowest();
                 for (std::size_t token = 0; token != tokens_per_document; ++token)
@@ -640,25 +734,115 @@ static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
             }
         search_config_t scan;
         scan.traversal = traversal_t::scan_k;
-        auto found_keys = nk::matrix<key_t>::zeros({1, rows_count}).value;
-        auto found_scores = nk::matrix<f64_t>::zeros({1, rows_count}).value;
-        std::array<std::size_t, 1> counts {}, scored {};
-        std::array<std::size_t, 2> const query_offsets {0, rows_per_query};
-        maxsim_rows<key_t, f64_t> const land {found_keys.span(), found_scores.span(), std::span {counts}};
-        failures += expect(succeeded(indexes
-                                         .maxsim(queries, std::span<std::size_t const> {query_offsets}, driver.executor,
-                                                 to_writable_span(driver.traversals), scan, 0, std::span {scored}, land)
-                                         .status));
-        failures += expect_eq(scored[0], documents_count) + expect_eq(counts[0], documents_count);
-        std::array<std::size_t, documents_count> landed {};
-        for (std::size_t rank = 0; rank != min_of(counts[0], documents_count); ++rank) {
-            std::size_t const document = dense_key_number(found_keys(0, rank)) - 1;
+        std::vector<key_t> found_keys(rows_count);
+        std::vector<f64_t> found_scores(rows_count);
+        std::array<std::size_t, 1> scored {};
+        std::array<std::size_t, 2> offsets {};
+        std::array<std::size_t, 2> const query_offsets {0, tokens_per_query};
+        products_tape<key_t, f64_t> const matches {std::span {found_keys}, std::span {found_scores},
+                                                   std::span {offsets}, rows_count};
+        failures += expect(
+            succeeded(indexes
+                          .maxsim(queries, std::span<std::size_t const> {query_offsets}, std::span {scored}, matches,
+                                  {scan, 0}, driver.executor, to_writable_span(driver.traversals))
+                          .status));
+        failures += expect_eq(scored[0], documents_count) + expect_eq(offsets[1], documents_count);
+        std::array<std::size_t, documents_count> placed {};
+        error_stats_t score_errors;
+        for (std::size_t rank = 0; rank != min_of(offsets[1], documents_count); ++rank) {
+            std::size_t const document = dense_key_number(found_keys[rank]) - 1;
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            ++landed[document];
-            failures += expect_near(found_scores(0, rank), exact[document]);
+            ++placed[document];
+            score_errors.add(found_scores[rank], exact[document]);
         }
-        for (std::size_t const times : landed) failures += expect_eq(times, 1u);
+        for (std::size_t const times : placed) failures += expect_eq(times, 1u);
+        return failures + expect_errors("spanning maxsim scores", comparison_family_t::approximate_k,
+                                        comparison_verdict_t::assert_k, score_errors, 0);
+    }
+}
+
+/** Exact scans of the algebra verbs against brute force: a scan's products keep the widest dots,
+ *  each exactly the native dot of a distinct stored row, largest first, and a scan's attention
+ *  matches exact full attention, every query row its own head; only the dot kernel offers both. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_exact_scans(u64_t seed) {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using dot_result_t = typename indexes_type_::dot_result_t;
+    using vector_view_t = typename index_t::vector_view_t;
+    using search_config_t = typename indexes_type_::search_config_t;
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 16, wanted = 8, attended_count = 8;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        std::size_t failures = 0;
+        dense_indexes_executor<indexes_type_> driver;
+        if (failed(driver.status)) return failures + expect(false);
+        indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(indexes)));
+        failures += expect(succeeded(indexes.reserve({rows_count}).status));
+        auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "exact_scans"));
+        std::array<key_t, rows_count> keys;
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row);
+        failures += expect(
+            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+        search_config_t scan;
+        scan.traversal = traversal_t::scan_k;
+
+        // As wide as a matrix engine's tile, so a tiled class streams the batch through it.
+        auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
+        std::vector<key_t> product_keys(left_count * wanted);
+        std::vector<dot_result_t> products(left_count * wanted);
+        std::array<std::size_t, left_count + 1> offsets {};
+        std::array<std::size_t, left_count> scored {};
+        products_tape<key_t, dot_result_t> const pairs {std::span {product_keys}, std::span {products},
+                                                        std::span {offsets}, wanted};
+        failures += expect(succeeded(
+            indexes
+                .multiply(left, pairs, std::span {scored}, scan, driver.executor, to_writable_span(driver.traversals))
+                .status));
+        for (std::size_t row = 0; row != left_count; ++row) {
+            std::size_t const first = offsets[row];
+            failures += expect_eq(scored[row], wanted) + expect_eq(offsets[row + 1] - first, wanted);
+            if (offsets[row + 1] - first != wanted) continue;
+            failures += dense_expect_product_row<rows_count>(
+                left.row(row).as_vector(), vectors.view(),
+                nk::vector_view<key_t> {std::span {product_keys}.subspan(first, wanted)},
+                nk::vector_view<dot_result_t> {std::span {products}.subspan(first, wanted)},
+                [](key_t key) noexcept { return dense_key_number(key); });
+            // The ranking reads the finalized distance, so only a near tie at the cut may swap.
+            std::array<f64_t, rows_count> exact;
+            for (std::size_t stored = 0; stored != rows_count; ++stored)
+                exact[stored] = static_cast<f64_t>(
+                    dense_native_dot(left.row(row).as_vector(), vectors.view().row(stored).as_vector()));
+            std::sort(exact.begin(), exact.end(), std::greater<f64_t> {});
+            for (std::size_t rank = 0; rank != wanted; ++rank) {
+                f64_t const kept = static_cast<f64_t>(products[first + rank]);
+                failures += expect(kept + 1e-3 * max_of(std::fabs(exact[wanted - 1]), 1.0) >= exact[wanted - 1]);
+                if (rank) failures += expect(static_cast<f64_t>(products[first + rank - 1]) >= kept);
+            }
+        }
+
+        auto const values = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "exact_scans", 1));
+        auto const queries = make_vectors<scalar_t>(attended_count, dimensions, stream_key(seed, "exact_scans", 2));
+        auto value_of = [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); };
+        auto lookup = [&](std::span<key_t const> batch, std::span<vector_view_t> rows) noexcept {
+            for (std::size_t lane = 0; lane != batch.size(); ++lane)
+                rows[lane] = value_of(dense_key_number(batch[lane]));
+        };
+        f32_t const score_scale = dense_attend_scale(
+            dense_oracle_dots(dense_widened_rows(queries.view(), index_t::vector_dtype_k),
+                              dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
+        auto outputs = nk::matrix<f32_t>::zeros({attended_count, dimensions}).value;
+        std::vector<softmax_state_t> carry(attended_count);
+        auto const [attended, attend_status] = drive_attend(indexes, queries.view(), 1, lookup, score_scale,
+                                                            outputs.span(), std::span {carry}, scan, driver);
+        failures += expect(succeeded(attend_status));
+        failures += expect_eq(attended.count, attended_count);
+        failures += dense_expect_full_attention(vectors.view(), queries.view(), 1, value_of, score_scale,
+                                                outputs.view(), std::span<softmax_state_t const> {carry});
         return failures;
     }
 }
@@ -680,6 +864,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     std::size_t failures_count = 0;
     failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed);
+    failures_count += dense_expect_duplicates_build<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_part_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_pooled_save<indexes_t, kernel_>(seed);
@@ -694,6 +879,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_absorb_many<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_absorb_refusals<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_abandoned_plan<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_sample<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_generations<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_compact<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_clear_race<indexes_t, kernel_>(seed);
@@ -705,6 +891,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_dense_indexes_attend<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_filtered_algebra<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_maxsim_spanning<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_exact_scans<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 

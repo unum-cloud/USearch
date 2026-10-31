@@ -2,7 +2,7 @@
  *  @file verification/dense_ram_indexes_gate/cursor.pml
  *  @author Ash Vardanian
  *  @date October 22, 2026
- *  @brief A cursor reading one row, a clear landing, and the cursor reading the next row.
+ *  @brief A cursor reading one row, a clear arriving, and the cursor reading the next row.
  *
  *  The index holds two rows on one shard. The cursor records the epoch and the watermark at
  *  construction, then reads one row per call; each read ends with `still_valid` against the epoch it

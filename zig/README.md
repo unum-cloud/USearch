@@ -362,11 +362,12 @@ A drained walk answers an empty query, as the C interface does, so a loop ends o
 
 ### Refinement
 
-`refine` re-selects the neighbors of every stored entry against the finished graph and returns how many nodes changed edges, so a cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
-Zero means the graph has settled, and on a RAM index searches may run throughout.
+`refine` re-selects the neighbors of every stored entry against the finished graph and returns a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing audit.
+A cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
+Zero `changed` means the graph has settled, and on a RAM index searches may run throughout.
 
 ```zig
-while (try index.on(executor).refine(.{ .expansion_factor = 128 }) != 0) {}
+while ((try index.on(executor).refine(.{ .expansion_factor = 128 })).changed != 0) {}
 ```
 
 ### Absorbing
@@ -377,8 +378,29 @@ Each donor it absorbs is consumed and nulled in place, so freeing every donor af
 
 ```zig
 var donors = [_]usearch.DenseIndex{ first, second };
-try index.on(executor).absorb(&donors, .{});
+_ = try index.on(executor).absorb(&donors, .{});
 for (&donors) |*donor| donor.deinit(); // frees only the donors a stop or a failure left live
+```
+
+`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+It reports the receivers' closing refines as `refine` does.
+
+```zig
+const report = try index.on(executor).split(&receivers, .{ .seed = 42 });
+```
+
+### Sampling
+
+`sample` draws keys around `focus`, or across the whole index, each hanging from a shown or earlier draw and placed in three dimensions beside the `shown` keys already on screen, so a view grows one connected sample as it zooms.
+Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a superset.
+
+```zig
+const draws = try index.on(executor).sample(256, &arena, .{ .shown = shown, .shown_coordinates = places, .focus = near, .seed = 42 });
+for (try draws.keys(), try draws.entryOrdinals(), 0..) |key, entry_ordinal, position| {
+    const parent = try draws.parents.query(position); // empty for a root
+    const point = try draws.coordinates.row(f32, position);
+    _ = .{ key, entry_ordinal, parent, point };
+}
 ```
 
 ### Sparse Multiplication
@@ -419,7 +441,7 @@ The index stores no values, so a `ValueLookup` resolves each scored key to its r
 Its trampoline checks the kind and width every batch states, so a missing row, or one of another kind or width, refuses the call with `Error.ShapeMismatch`.
 It runs on the executor's threads, so it must tolerate concurrent calls.
 That trampoline is a host function, which serves RAM and NVMe indexes; a VRAM walk calls the lookup on the device, so a VRAM index takes a `ValueLookup` whose `callback` is device-callable, set directly.
-The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a carry of one `DenseSoftmaxState` per query row, lent rather than landed, folds this branch into another over the same queries.
+The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a carry of one `DenseSoftmaxState` per query row, lent rather than written in the arena, folds this branch into another over the same queries.
 The attended rows land in the arena as the queries' own scalar type, or as the config's `outputs_scalar`.
 
 ```zig

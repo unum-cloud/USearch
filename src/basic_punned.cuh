@@ -4,12 +4,13 @@
  *  @date October 25, 2026
  *  @brief What the basic dispatch units and the class units agree on: the verb table one variant
  *      compiles, the class tables each class unit instantiates, and the traits each modality's
- *      verbs differ in, spelled in C argument structures alone.
+ *      verbs differ in, with the composites they lower each C argument structure onto once.
  *
- *  It includes no tower: a modality's dispatch unit reaches its variant only through its home's
- *  verb table, and @c basic_specializations.cuh with each @c <modality>_specializations.cuh fills
- *  those tables from the towers. What a verb does to one variant, as freezing a geometry into it or
- *  landing its values, is a @c variant_bodies specialization beside the variants.
+ *  It includes no tower: a modality's dispatch unit reaches its variant only through its
+ *  residency's verb table, and @c basic_specializations.cuh with each
+ *  @c <modality>_specializations.cuh fills those tables from the towers. What a verb does to one
+ *  variant, as adopting a geometry or writing its values, is a @c variant_bodies specialization
+ *  beside the variants.
  */
 #pragma once
 
@@ -88,20 +89,36 @@ inline std::size_t decimal_in(std::string_view text) noexcept {
 
 #pragma endregion Crossings
 
-#pragma region Home Tables
+#pragma region Variant Tables
 
-/** What a refinement reports, as the C outputs take it: the walks' telemetry, the nodes it visited
- *  and changed, and the closing audit's reach. */
-struct basic_refined_t {
-    usearch_traversal_stats_t stats {};
-    std::size_t visited = 0;
-    std::size_t changed = 0;
-    usearch_reachability_t reachability {};
+/** @c count entries of a caller's tape, as its C view holds them: bytes, or points in its
+ *  scalar. */
+struct counted_tape_t {
+    usearch_tape_view_t tape {};
+    std::size_t count = 0;
 };
 
-/** What a modality's verbs do to one variant beyond its index: freezing a geometry into it,
- *  describing it, and landing, keeping and tallying its values; each modality's specializations
- *  define it beside their variants. */
+/** Where a radius walk writes: a tape of matches per query in the arena, and how many it wrote. */
+struct within_outputs_t {
+    usearch_matches_tape_view_t matches {};
+    std::size_t written = 0;
+};
+
+/** What a reservation asks room for: entries, and the bytes or points their values take where a
+ *  residency reserves those too. */
+struct reserve_capacity_t {
+    std::size_t entries = 0;
+    std::size_t bytes = 0;
+    std::size_t points = 0;
+};
+
+/** What a basic SAMPLE reads and writes, in the keys every basic index stores. */
+using basic_sample_inputs_t = sample_inputs<us::utilities::uuid_t>;
+using basic_sample_outputs_t = sample_outputs<us::utilities::uuid_t>;
+
+/** What a modality's verbs do to one variant beyond its index: adopting a geometry, describing it,
+ *  and writing, keeping and tallying its values; each modality's specializations define it
+ *  alongside their own variants. */
 template <typename traits_type_>
 struct variant_bodies;
 
@@ -109,109 +126,172 @@ struct variant_bodies;
  *  @brief The verbs one basic variant compiles in its class unit, as function pointers over the
  *      variant passed as @c void*, which only these entries cast back to its type.
  *
- *  Every home fills every entry, answering @c read_only_k or @c unsupported_k where it serves none,
- *  so a modality's dispatch unit visits three homes and never a variant. A modality's verbs differ
- *  in the C argument structures @p traits_type_ names, and in the geometry a variant @c serves.
+ *  Every entry takes <tt>(variant, inputs, outputs, config, executor, ticks)</tt>, as much of it as
+ *  the verb reads, with a walk's @c predicate_t beside its config, in the C++ composites
+ *  @p traits_type_ names. Every residency fills every entry, answering @c read_only_k or
+ *  @c unsupported_k where it serves none, so a modality's dispatch unit visits three residencies
+ *  and never a variant. Errors only return; the dispatch unit alone writes outcomes.
  */
-template <typename traits_type_, dense_home_t home_>
+template <typename traits_type_, vendored_residency_t residency_>
 struct basic_verbs {
     using traits_t = traits_type_;
-    using executor_t = typename dense_home_executor<home_>::type;
+    using executor_t = typename vendored_residency_executor<residency_>::type;
     using geometry_t = typename traits_type_::geometry_t;
-    using walked_t = expected<usearch_traversal_stats_t>;
+    using values_t = typename traits_type_::values_t;
+    using queries_t = typename traits_type_::queries_t;
+    using within_queries_t = typename traits_type_::within_queries_t;
+    using get_outputs_t = typename traits_type_::get_outputs_t;
 
-    bool (*serves)(geometry_t const& geometry) noexcept;
+    /** The scalar the variant stores values in, or unknown where it stores any. */
+    nk_dtype_t dtype;
 
-    /** Builds an unplaced variant: a host one over the heap's domain, a device one for the device's
-     *  vendor ordinal @p device and the @p geometry it scores under. */
-    void* (*create)(int device, geometry_t const& geometry) noexcept;
+    /** The kind the variant's kernels fix, as the modality's C enumerator, or zero where it scores
+     *  any. */
+    u32_t metric;
+
+    // Lifetime
+
+    /** Builds an unplaced variant of @p geometry, which adopts @p adopted: a host one over the
+     *  heap's domain, a device one on @p residency 's device. */
+    expected<void*> (*create)(geometry_t geometry, typename traits_type_::geometry_extras_t const& adopted,
+                              arena_residency_t residency) noexcept;
     void (*destroy)(void* variant) noexcept;
-    bool (*freeze)(void* variant, geometry_t& geometry, typename traits_type_::freeze_t const& input,
-                   usearch_outcome_t* outcome) noexcept;
     void (*bound_shards)(void* variant, std::size_t nodes) noexcept;
 
-    /** Appends one shard on a host memory domain or a device's vendor ordinal. */
-    status_t (*emplace)(void* variant, int placement) noexcept;
+    /** Appends one shard on a host memory domain or a device. */
+    status_t (*emplace)(void* variant, arena_residency_t residency) noexcept;
 
     /** Serves a checkpoint in place, an NVMe view through @p executor, which a host variant does
      *  without. */
     status_t (*view)(void* variant, std::string_view path, std::span<std::string_view const> paths,
                      executor_t* executor) noexcept;
-    status_t (*load)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t (*save)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** The device the variant computes on, where a call's arena must live, or @c host_device_k. */
-    int (*device)(void const* variant) noexcept;
+    // Shape
+
+    /** Where the variant computes, and where a call's arena must live. */
+    arena_residency_t (*residency)(void const* variant) noexcept;
 
     /** The distinct devices the shards sit on into @p listed, as many as fit; answers how many. */
-    std::size_t (*devices)(void const* variant, std::span<int> listed) noexcept;
-    status_t (*reserve)(void* variant, typename traits_type_::reserve_t const& arguments) noexcept;
-    status_t (*clear)(void* variant) noexcept;
+    std::size_t (*devices)(void const* variant, std::span<arena_residency_t> listed) noexcept;
     void (*describe)(void const* variant, typename traits_type_::description_t& description) noexcept;
-    void (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,
-                  usearch_executor_t executor, usearch_outcome_t* outcome) noexcept;
-    void (*get)(void* variant, typename traits_type_::get_t const& arguments,
-                growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept;
-    walked_t (*insert)(void* variant, typename traits_type_::insert_t const& arguments, progress_ticks_t& ticks,
-                       executor_t& executor) noexcept;
-    bool (*accepts_search)(void const* variant, typename traits_type_::search_t const& arguments,
-                           usearch_outcome_t* outcome) noexcept;
-    walked_t (*search)(void* variant, typename traits_type_::search_t const& arguments,
-                       growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing, progress_ticks_t& ticks,
-                       executor_t& executor) noexcept;
-    bool (*accepts_within)(void const* variant, typename traits_type_::within_t const& arguments,
-                           usearch_outcome_t* outcome) noexcept;
-    walked_t (*within)(void* variant, typename traits_type_::within_t const& arguments,
-                       growing_arena<forkunion_allocator_t>& memory, usearch_matches_tape_view_t& matches,
-                       std::size_t& written, progress_ticks_t& ticks, executor_t& executor) noexcept;
-    status_t (*sample)(void* variant, typename traits_type_::sample_t const& arguments) noexcept;
 
     /** Whether the variant at @p donor shares the geometry of the one at @p variant. */
     bool (*matches)(void const* variant, void const* donor) noexcept;
-    expected<void*> (*refinement_open)(void* variant, std::span<void* const> donors, std::size_t expansion) noexcept;
+
+    // Writes
+    status_t (*reserve)(void* variant, reserve_capacity_t capacity) noexcept;
+    status_t (*clear)(void* variant) noexcept;
+    expected<traversal_stats_t> (*insert)(void* variant, usearch_keys_view_t keys, values_t values,
+                                          insert_config_t config, executor_t& executor,
+                                          progress_ticks_t& ticks) noexcept;
+
+    // Refining
+
+    /** Audits the reachability of every shard. */
+    expected<reachability_t> (*health)(void* variant, executor_t& executor) noexcept;
+
+    // Refinements
+
+    /** Opens a refinement absorbing @p donors first, or splitting into @p receivers first, its part
+     *  roots drawn from the config's seed. */
+    expected<void*> (*refinement_init)(void* variant, variants_view_t donors, variants_view_t receivers,
+                                       split_config_t config, executor_t& executor) noexcept;
     std::size_t (*refinement_population)(void const* refinement) noexcept;
-    status_t (*refinement_run)(void* variant, void* refinement, progress_ticks_t& ticks, executor_t& executor) noexcept;
+    status_t (*refinement_next)(void* variant, void* refinement, executor_t& executor,
+                                progress_ticks_t& ticks) noexcept;
 
     /** Whether the refinement consumed its donor at @p donor, which its owner may then free. */
-    bool (*refinement_landed)(void const* refinement, std::size_t donor) noexcept;
-    void (*absorbed)(void* variant, void const* donor) noexcept;
-    basic_refined_t (*refinement_running)(void* refinement) noexcept;
-    expected<basic_refined_t> (*refinement_finish)(void* variant, void* refinement, executor_t& executor) noexcept;
+    bool (*refinement_consumed)(void const* refinement, std::size_t donor) noexcept;
+    void (*count_absorbed_donor)(void* variant, void const* donor) noexcept;
+
+    /** Hands @p receiver what the variant counted of the part it took, once the split's parts
+     *  are filled. */
+    void (*count_split_receiver)(void* variant, void const* refinement, void* receiver) noexcept;
+    refine_report_t (*refinement_running)(void* refinement) noexcept;
+    expected<refine_report_t> (*refinement_finish)(void* variant, void* refinement, executor_t& executor) noexcept;
     void (*refinement_free)(void* refinement) noexcept;
 
-    void* (*cursor_open)(void* variant, usearch_outcome_t* outcome) noexcept;
-    void (*cursor_next)(void* variant, void* cursor, typename traits_type_::cursor_next_t const& arguments,
-                        growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept;
+    // Lookups
+    status_t (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,
+                      executor_t& executor) noexcept;
+
+    /** Writes the entries of @p key to @p outputs, carved from @p memory; answers how many. */
+    expected<std::size_t> (*get)(void* variant, usearch_key_t key, get_outputs_t outputs,
+                                 growing_arena<forkunion_allocator_t>& memory, executor_t& executor) noexcept;
+
+    // Walks
+
+    /** Whether the variant serves @p queries, past what the traits check without it. */
+    status_t (*serves_search)(void const* variant, queries_t const& queries) noexcept;
+
+    /** A device walk stages its queries on the arena's host @p pages, where it writes its
+     *  matches. */
+    expected<traversal_stats_t> (*search)(void* variant, queries_t queries, matches_outputs_t& outputs,
+                                          search_config_t config, predicate_t predicate,
+                                          growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
+                                          progress_ticks_t& ticks) noexcept;
+    status_t (*serves_within)(void const* variant, within_queries_t const& queries,
+                              predicate_t const& predicate) noexcept;
+    expected<traversal_stats_t> (*within)(void* variant, within_queries_t queries, within_outputs_t& outputs,
+                                          search_config_t config, predicate_t predicate,
+                                          growing_arena<forkunion_allocator_t>& memory, executor_t& executor,
+                                          progress_ticks_t& ticks) noexcept;
+
+    // Exploration
+
+    /** Opens a walk over every entry as stored, or breadth-first from @p starts. */
+    expected<void*> (*cursor_init)(void* variant, std::span<usearch_key_t const> starts) noexcept;
+
+    /** Pulls up to @p wanted next keys into @p memory, gathering their links into @p links where
+     *  named. */
+    expected<std::span<usearch_key_t const>> (*cursor_next)(void* variant, void* cursor, links_outputs_t* links,
+                                                            std::size_t wanted,
+                                                            growing_arena<forkunion_allocator_t>& memory,
+                                                            executor_t& executor) noexcept;
     void (*cursor_free)(void* cursor) noexcept;
+
+    /** Draws up to the outputs' length around the focus keys, beside and placed among the shown
+     *  ones, never scanning; only a RAM variant samples yet. */
+    expected<sample_result_t> (*sample)(void* variant, basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                        sample_config_t config, executor_t& executor) noexcept;
+
+    // Persistence
+    status_t (*load)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    status_t (*save)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
 };
 
-/** The variants one modality's class unit compiles for one home: @c find answers the verb table of
- *  the first variant serving the geometry, or null where none of the class's does. */
-template <typename traits_type_, dense_home_t home_, auto class_>
+/** The variants one modality's class unit compiles for one residency: @c find answers the verb
+ *  table of the first variant whose scalar and kind the geometry names, or null where none of the
+ *  class's variants does. */
+template <typename traits_type_, vendored_residency_t residency_, auto class_>
 struct basic_class_tables {
-    static basic_verbs<traits_type_, home_> const* find(typename traits_type_::geometry_t const& geometry) noexcept;
+    static basic_verbs<traits_type_, residency_> const* find(
+        typename traits_type_::geometry_t const& geometry) noexcept;
 };
 
-/** One picked variant as a modality's dispatch unit holds it for one call: its home's verbs, and
- *  the variant they serve. */
-template <typename traits_type_, dense_home_t home_>
+/** One picked variant as a modality's dispatch unit holds it for one call: its residency's verbs,
+ *  and the variant they serve. */
+template <typename traits_type_, vendored_residency_t residency_>
 struct punned_basic_index {
-    using executor_t = typename basic_verbs<traits_type_, home_>::executor_t;
+    using executor_t = typename basic_verbs<traits_type_, residency_>::executor_t;
 
-    basic_verbs<traits_type_, home_> const& verbs;
+    basic_verbs<traits_type_, residency_> const& verbs;
     void* variant;
 };
 
 /** The executor a null handle runs a device variant's work on: a stream of its own on every device
  *  its shards sit on, never a legacy default stream. */
-template <typename traits_type_, dense_home_t home_>
-    requires is_gpu_executor<typename punned_basic_index<traits_type_, home_>::executor_t>
-usearch_executor_t call_executor_for(punned_basic_index<traits_type_, home_> const& punned,
+template <typename traits_type_, vendored_residency_t residency_>
+    requires is_gpu_executor<typename punned_basic_index<traits_type_, residency_>::executor_t>
+usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_> const& punned,
                                      usearch_executor_handle_t& call_executor, usearch_outcome_t* outcome) noexcept {
+    std::array<arena_residency_t, gpu_devices_capacity_k> residencies;
+    std::size_t devices_count = punned.verbs.devices(punned.variant, residencies);
+    if (!devices_count) residencies[devices_count++] = punned.verbs.residency(punned.variant);
     std::array<int, gpu_devices_capacity_k> devices;
-    std::size_t devices_count = punned.verbs.devices(punned.variant, devices);
-    if (!devices_count) devices[devices_count++] = punned.verbs.device(punned.variant);
-    using executor_t = typename punned_basic_index<traits_type_, home_>::executor_t;
+    for (std::size_t device = 0; device != devices_count; ++device)
+        devices[device] = static_cast<int>(residencies[device].device);
+    using executor_t = typename punned_basic_index<traits_type_, residency_>::executor_t;
     auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
                                              std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
@@ -230,7 +310,7 @@ inline gpu_device_t const* basic_device_at(std::size_t ordinal, usearch_outcome_
     return &listed[ordinal];
 }
 
-#pragma endregion Home Tables
+#pragma endregion Variant Tables
 
 #pragma region Sequence Traits
 
@@ -285,9 +365,9 @@ inline bool accepts_sequences(usearch_tape_view_t const& sequences, std::size_t 
     return true;
 }
 
-/** The sequence variants one class unit compiles in each home, which
+/** The sequence variants one class unit compiles in each residency, which
  *  @c sequence_specializations.cuh lists. */
-template <dense_home_t home_, auto class_>
+template <vendored_residency_t residency_, auto class_>
 struct sequence_variants_of {
     using type = type_list<>;
 };
@@ -297,23 +377,24 @@ struct sequence_variants_of {
 struct sequence_traits_t {
     using geometry_t = sequence_geometry_t;
     using description_t = usearch_sequence_index_description_t;
-    using reserve_t = usearch_sequence_reserve_t;
-    using insert_t = usearch_sequence_insert_t;
-    using search_t = usearch_sequence_search_t;
-    using get_t = usearch_sequence_get_t;
     using key_stats_t = usearch_sequence_key_stats_t;
-    using cursor_next_t = usearch_sequence_cursor_next_t;
-    using sample_t = usearch_sequence_sample_t;
+
+    /** The strings an insertion writes and a search ranks. */
+    using values_t = counted_tape_t;
+    using queries_t = counted_tape_t;
 
     /** No radius walk serves strings. */
-    using within_t = std::monostate;
+    using within_queries_t = std::monostate;
 
-    /** What a freeze reads past the geometry: the weights an alignment kind folds, or null. */
-    using freeze_t = usearch_sequence_weights_t const*;
+    /** Where a get writes its strings. */
+    using get_outputs_t = usearch_tape_view_t*;
 
-    /** The variants each class unit compiles per home. */
-    template <dense_home_t home_, auto class_>
-    using variants = typename sequence_variants_of<home_, class_>::type;
+    /** What a variant adopts past its geometry: the weights an alignment kind folds, or null. */
+    using geometry_extras_t = usearch_sequence_weights_t const*;
+
+    /** The variants each class unit compiles per residency. */
+    template <vendored_residency_t residency_, auto class_>
+    using variants = typename sequence_variants_of<residency_, class_>::type;
 
     /** The GPU classes with a unit of sequence kits, newest first. */
     using gpu_ladder_t = gpu_ladder<gpu_class_t::nvidia_ampere_k>;
@@ -389,9 +470,9 @@ struct sequence_traits_t {
         return true;
     }
 
-    /** The weights an init, a load or a view names, which a freeze folds. */
+    /** The weights an init, a load or a view names, which a variant folds. */
     template <typename arguments_type_>
-    static freeze_t freeze_input(arguments_type_ const& arguments) noexcept {
+    static geometry_extras_t geometry_extras_of(arguments_type_ const& arguments) noexcept {
         return arguments.weights;
     }
 
@@ -401,6 +482,23 @@ struct sequence_traits_t {
 
     static bool accepts(usearch_sequence_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
         return accepts_sequences(arguments.sequences, arguments.count, outcome);
+    }
+
+    static bool accepts(usearch_sequence_search_t const& arguments, usearch_outcome_t* outcome) noexcept {
+        return accepts_sequences(arguments.queries, arguments.count, outcome);
+    }
+
+    static values_t values_of(usearch_sequence_insert_t const& arguments) noexcept {
+        return {arguments.sequences, arguments.count};
+    }
+    static queries_t queries_of(usearch_sequence_search_t const& arguments) noexcept {
+        return {arguments.queries, arguments.count};
+    }
+    static reserve_capacity_t capacity_of(usearch_sequence_reserve_t const& arguments) noexcept {
+        return {arguments.entries, arguments.payload_bytes, 0};
+    }
+    static get_outputs_t get_outputs_of(usearch_sequence_get_t const& arguments) noexcept {
+        return arguments.sequences;
     }
 
     /** Where a get hands its strings out. */
@@ -461,9 +559,15 @@ inline bool accepts_shapes(usearch_tape_view_t const& shapes, std::size_t count,
     return true;
 }
 
-/** The shapes variants one class unit compiles in each home, which @c shapes_specializations.cuh
- *  lists. */
-template <dense_home_t home_, auto class_>
+/** Where a get writes its clouds, and the scalar it exports their points in. */
+struct shapes_get_outputs_t {
+    usearch_tape_view_t* shapes = nullptr;
+    usearch_scalar_t scalar = usearch_scalar_unknown_k;
+};
+
+/** The shapes variants one class unit compiles in each residency, which
+ *  @c shapes_specializations.cuh lists. */
+template <vendored_residency_t residency_, auto class_>
 struct shapes_variants_of {
     using type = type_list<>;
 };
@@ -472,23 +576,22 @@ struct shapes_variants_of {
 struct shapes_traits_t {
     using geometry_t = shapes_geometry_t;
     using description_t = usearch_shapes_index_description_t;
-    using reserve_t = usearch_shapes_reserve_t;
-    using insert_t = usearch_shapes_insert_t;
-    using search_t = usearch_shapes_search_t;
-    using get_t = usearch_shapes_get_t;
     using key_stats_t = usearch_shapes_key_stats_t;
-    using cursor_next_t = usearch_shapes_cursor_next_t;
-    using sample_t = usearch_shapes_sample_t;
+
+    /** The clouds an insertion writes and a search ranks. */
+    using values_t = counted_tape_t;
+    using queries_t = counted_tape_t;
 
     /** No radius walk serves clouds. */
-    using within_t = std::monostate;
+    using within_queries_t = std::monostate;
+    using get_outputs_t = shapes_get_outputs_t;
 
-    /** A freeze reads nothing past the geometry. */
-    using freeze_t = std::monostate;
+    /** A variant adopts nothing past its geometry. */
+    using geometry_extras_t = std::monostate;
 
-    /** The variants each class unit compiles per home. */
-    template <dense_home_t home_, auto class_>
-    using variants = typename shapes_variants_of<home_, class_>::type;
+    /** The variants each class unit compiles per residency. */
+    template <vendored_residency_t residency_, auto class_>
+    using variants = typename shapes_variants_of<residency_, class_>::type;
 
     /** The GPU classes with a unit of shapes kits, newest first: datacenter Blackwell's packed f16
      *  kit, then the Ampere floor. */
@@ -541,9 +644,9 @@ struct shapes_traits_t {
         return true;
     }
 
-    /** Nothing an init, a load or a view names past the geometry reaches a freeze. */
+    /** Nothing an init, a load or a view names past the geometry reaches a variant. */
     template <typename arguments_type_>
-    static freeze_t freeze_input(arguments_type_ const&) noexcept {
+    static geometry_extras_t geometry_extras_of(arguments_type_ const&) noexcept {
         return {};
     }
 
@@ -553,6 +656,23 @@ struct shapes_traits_t {
 
     static bool accepts(usearch_shapes_insert_t const& arguments, usearch_outcome_t* outcome) noexcept {
         return accepts_shapes(arguments.shapes, arguments.count, outcome);
+    }
+
+    static bool accepts(usearch_shapes_search_t const& arguments, usearch_outcome_t* outcome) noexcept {
+        return accepts_shapes(arguments.queries, arguments.count, outcome);
+    }
+
+    static values_t values_of(usearch_shapes_insert_t const& arguments) noexcept {
+        return {arguments.shapes, arguments.count};
+    }
+    static queries_t queries_of(usearch_shapes_search_t const& arguments) noexcept {
+        return {arguments.queries, arguments.count};
+    }
+    static reserve_capacity_t capacity_of(usearch_shapes_reserve_t const& arguments) noexcept {
+        return {arguments.entries, 0, arguments.points};
+    }
+    static get_outputs_t get_outputs_of(usearch_shapes_get_t const& arguments) noexcept {
+        return {arguments.shapes, arguments.outputs_scalar};
     }
 
     /** Whether the points a get asks for export to a whole-byte scalar; false once
@@ -615,9 +735,28 @@ inline bool accepts_observations(usearch_geospatial_observation_t const* observa
     return true;
 }
 
-/** The geospatial variants one class unit compiles in each home, which
+/** The caller's observations, as an insertion writes them or a query batch asks with them. */
+using observations_view_t = std::span<usearch_geospatial_observation_t const>;
+
+/** What a geospatial search or containment walk asks of each query observation: the relation and
+ *  the tolerance it admits entries under. */
+struct geospatial_queries_t {
+    observations_view_t observations;
+    usearch_geospatial_relation_t relation = usearch_geospatial_relation_near_k;
+    usearch_geospatial_tolerance_t tolerance {};
+};
+
+/** Whether @p relation is one the geospatial kind knows; false once @p outcome records why not. */
+inline bool accepts_relation(usearch_geospatial_relation_t relation, usearch_outcome_t* outcome) noexcept {
+    if (relation == usearch_geospatial_relation_near_k || relation == usearch_geospatial_relation_visible_k ||
+        relation == usearch_geospatial_relation_sees_k || relation == usearch_geospatial_relation_seen_k)
+        return true;
+    return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown geospatial relation");
+}
+
+/** The geospatial variants one class unit compiles in each residency, which
  *  @c geospatial_specializations.cuh lists. */
-template <dense_home_t home_, auto class_>
+template <vendored_residency_t residency_, auto class_>
 struct geospatial_variants_of {
     using type = type_list<>;
 };
@@ -626,21 +765,20 @@ struct geospatial_variants_of {
 struct geospatial_traits_t {
     using geometry_t = geospatial_geometry_t;
     using description_t = usearch_geospatial_index_description_t;
-    using reserve_t = usearch_geospatial_reserve_t;
-    using insert_t = usearch_geospatial_insert_t;
-    using search_t = usearch_geospatial_search_t;
-    using get_t = usearch_geospatial_get_t;
     using key_stats_t = usearch_geospatial_key_stats_t;
-    using cursor_next_t = usearch_geospatial_cursor_next_t;
-    using sample_t = usearch_geospatial_sample_t;
-    using within_t = usearch_geospatial_within_t;
+    using values_t = observations_view_t;
+    using queries_t = geospatial_queries_t;
+    using within_queries_t = geospatial_queries_t;
 
-    /** What a freeze reads past the geometry: the terrain the variant adopts. */
-    using freeze_t = usearch_geospatial_terrain_t;
+    /** Where a get writes its observations. */
+    using get_outputs_t = usearch_geospatial_observation_t const**;
 
-    /** The variants each class unit compiles per home. */
-    template <dense_home_t home_, auto class_>
-    using variants = typename geospatial_variants_of<home_, class_>::type;
+    /** What a variant adopts past its geometry: the terrain. */
+    using geometry_extras_t = usearch_geospatial_terrain_t;
+
+    /** The variants each class unit compiles per residency. */
+    template <vendored_residency_t residency_, auto class_>
+    using variants = typename geospatial_variants_of<residency_, class_>::type;
 
     /** The GPU classes with a unit of the geospatial kit, newest first. */
     using gpu_ladder_t = gpu_ladder<gpu_class_t::nvidia_ampere_k>;
@@ -676,9 +814,9 @@ struct geospatial_traits_t {
                                "A GPU terrain needs its heights, not a callback");
     }
 
-    /** The terrain an init, a load or a view names, which a freeze adopts. */
+    /** The terrain an init, a load or a view names, which a variant adopts. */
     template <typename arguments_type_>
-    static freeze_t freeze_input(arguments_type_ const& arguments) noexcept {
+    static geometry_extras_t geometry_extras_of(arguments_type_ const& arguments) noexcept {
         return arguments.terrain;
     }
 
@@ -691,12 +829,32 @@ struct geospatial_traits_t {
     }
 
     /** Whether a containment walk names a positive radius and, when it has queries, observations
-     *  each with a position and an interval in order. */
+     *  each with a position and an interval in order, under a relation the kind knows. */
     static bool accepts(usearch_geospatial_within_t const& arguments, usearch_outcome_t* outcome) noexcept {
         if (!(arguments.tolerance.metres > 0))
             return propagate_error(usearch_status_invalid_argument_k, outcome,
                                    "A containment walk needs a positive radius in metres");
-        return !arguments.count || accepts_observations(arguments.queries, arguments.count, outcome);
+        return accepts_relation(arguments.relation, outcome) &&
+               (!arguments.count || accepts_observations(arguments.queries, arguments.count, outcome));
+    }
+
+    static bool accepts(usearch_geospatial_search_t const& arguments, usearch_outcome_t* outcome) noexcept {
+        return accepts_observations(arguments.queries, arguments.count, outcome) &&
+               accepts_relation(arguments.relation, outcome);
+    }
+
+    static values_t values_of(usearch_geospatial_insert_t const& arguments) noexcept {
+        return {arguments.observations, arguments.count};
+    }
+    template <typename arguments_type_>
+    static queries_t queries_of(arguments_type_ const& arguments) noexcept {
+        return {{arguments.queries, arguments.count}, arguments.relation, arguments.tolerance};
+    }
+    static reserve_capacity_t capacity_of(usearch_geospatial_reserve_t const& arguments) noexcept {
+        return {arguments.entries, 0, 0};
+    }
+    static get_outputs_t get_outputs_of(usearch_geospatial_get_t const& arguments) noexcept {
+        return arguments.observations;
     }
 
     /** Where a get hands its observations out. */

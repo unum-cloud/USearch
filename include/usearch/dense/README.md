@@ -13,20 +13,21 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 - `vram_apple_index.hpp` - the Apple sibling over unified memory: the same verbs, with the walk and insert kernels in `vram_apple_index.metal` and the kits in `vram_apple_metric.metal`, compiled from embedded source at first use.
 - `nvme_index.hpp` - the persisted sibling: one SafeGraphs part walked as a pure state machine of reads, which the engines of `utilities/nvme_device.hpp` submit, from blocking reads through Linux AIO and `io_uring` to SPDK.
 
-## The Plural Layer
+The kits stay in one file per residency, `ram_metric.hpp` and the `vram_*_metric.*` files, since the class units already compile them apart.
 
-The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
+## Sharded Indexes
 
-- `utilities/ram_shards.hpp` - the shard table every plural but the NVMe one owns, basic ones included: shards each tower builds, reserves and shape-checks, each owning its keys, the reads spanning them, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
-- `shard_checkpoints.hpp` - the SafeGraphs save and load plans those plurals open over their shard set, one monolith or a manifest of parts, with what differs per residency handed in as a policy object.
-- `utilities/vram_shards.hpp` - `utilities::vram_shard_fanout`, one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible entries, and the host-landed merge.
-- `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
-- `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, any number of shards per device.
+A `*_index` is a mono-index and a `*_indexes` the sharded index over shards of it, so `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
+
+- `utilities/ram_shards.hpp` - the shard table every sharded index but the NVMe one owns, basic ones included: shards each tower builds, reserves and shape-checks, each owning its keys, the reads spanning them, rotation-balanced routing, and the commit word a reader spanning the shards snapshots by.
+- `shard_checkpoints.hpp` - the SafeGraphs save and load plans those sharded indexes open over their shard set, one monolith or a manifest of parts, with what differs per residency handed in as a policy object.
+- `utilities/vram_shards.hpp` - `utilities::vram_shard_fanout`, one batched read over NVIDIA or AMD shards: the executor's claim, one context per shard, one snapshot of the visible entries, and the await on the first shard's stream, where every shard's rankings merge before the host sleeps once.
+- `ram_indexes.hpp` - the sharded index over CPU-resident shards with compute-domain routing and merged cross-shard search, one shard per memory domain.
+- `vram_nvidia_indexes.hpp` and `vram_amd_indexes.hpp` - the sharded indexes over NVIDIA and AMD shards with round-robin ingestion and merged cross-shard search, any number of shards per device.
 - `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
-- `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM group saved, every query's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns.
+- `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM sharded index saved, every query's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns.
+- `ram_compaction.hpp`, `vram_nvidia_compaction.hpp` and `vram_amd_compaction.hpp` - the freestanding compactions of a sharded index's sources into a RAM target under a shard capacity, in place when the RAM target is one of its sources.
 - `nvme_compaction.hpp` - the freestanding `compact`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends, each target part holding at most a shard capacity of entries.
-
-Capability files split beside the residency pairs as they grow - `icelake.hpp`, `sapphireamx.hpp`, `hopper.cuh`, and their siblings.
 
 ## Construction
 
@@ -36,11 +37,11 @@ Every residency builds through the same two verbs, in this order:
 - `refine` re-selects a node range's neighbors against the finished graph, back-linking as an insertion does, then heals whatever no search can reach: the audit's islands re-select from scratch, and whatever the diversity judgment still drops is reconnected into a reached pick, round after round while the island population shrinks.
   It claims no identity and moves no watermark, so a stopped pass merely leaves the graph less improved.
   Call it until a pass re-wires nothing; the first two passes carry most of the gain.
-  A `refine` over no nodes is the heal alone, which the plural layer names `heal`.
+  A `refine` over no nodes is the heal alone.
 
 `health` is the read-only audit the heal starts from - the same landmark sweep, reporting the reachable population and the levels it took, with no edit.
 Use it to judge a graph without changing it.
 
-Every layer and residency reports one `dense::refine_result_t`, whose counts mean the same everywhere.
-The plural layer fans the passes over one executor.
-The singular CPU layer hands out plans instead - `plan_refine` and `plan_health` cut each phase into disjoint ID ranges any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.
+Every sharded index and residency reports one `utilities::refine_report_t`, whose counts mean the same everywhere.
+The sharded index fans the passes over one executor.
+The RAM mono-index hands out plans instead - `plan_refine` and `plan_health` cut each phase into disjoint ID ranges any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.

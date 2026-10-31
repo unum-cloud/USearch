@@ -179,10 +179,6 @@ struct geospatial_ladder<caps_> {
     static constexpr nk_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-#pragma endregion Kits
-
-#pragma region Face
-
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
 std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::rung_serving_(std::size_t longest) noexcept {
     using kit_t = typename geospatial_ladder<capability_>::kit_t;
@@ -203,23 +199,13 @@ std::size_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::span_by
 }
 
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::load_kernels_(cuda_api_t const& api,
-                                                                                    int device) noexcept {
-    auto [module, status] = cuda_module_t::load(api, device, kernels_type_::bytes());
-    if (failed(status)) return status;
-    module_ = std::move(module);
-    vram_kernel_symbol_t symbol;
-    for (basic::cuda_rung_t const instantiated : basic::cuda_rungs) {
-        vram_kernel_symbol(symbol, "geospatial", "cuda_kernel", {"vram_arguments", 2, itanium_scope_t::basic_k},
-                           instantiated.kernel, capability_, itanium_type<node_id_type_> {}, instantiated.slots);
-        cuda_function_handle_t& function =
-            kernels_[0][static_cast<u32_t>(instantiated.kernel)][gpu_rung_index(instantiated.slots)];
-        if (!(function = module_.function(symbol.text))) return status_t::device_error_k;
-    }
-    return status_t::success_k;
+void vram_nvidia_kits<node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+    vram_kernel_symbol_t& symbol, std::size_t, basic::cuda_rung_t instantiated) noexcept {
+    vram_kernel_symbol(symbol, "geospatial", "cuda_kernel", {"vram_arguments", 2, itanium_scope_t::basic_k},
+                       instantiated.kernel, capability_, itanium_type<node_id_type_> {}, instantiated.slots);
 }
 
-#pragma endregion Face
+#pragma endregion Kits
 
 #pragma region Kernels
 
@@ -339,62 +325,136 @@ __device__ __forceinline__ bool cuda_clears(nk_terrain_grid_cuda_t const& grid,
     return !(nk_clearance_f32_cuda_(&grid, &sight, 0, 0) < 0);
 }
 
+/** Whether a relation's walks judge sight lines over the terrain, or admit on the chord alone. */
+enum class line_of_sight_t : bool { chord_alone_k, over_terrain_k };
+
+/** Whether the candidate @p node_id of the walk answering @p query is admitted under @p arguments,
+ *  its chord to the query in square centimetres written to @p chord; past @c near, its sight line
+ *  must also clear the terrain of @p grid, when @p line_of_sight is @c over_terrain_k, from or to
+ *  @p query_point. */
+template <typename node_id_type_>
+__device__ __forceinline__ bool cuda_admits_over_terrain(cuda_admit_arguments<node_id_type_> const& arguments,
+                                                         nk_terrain_grid_cuda_t const& grid,
+                                                         line_of_sight_t line_of_sight,
+                                                         earth_observation_t const& query, f32_t const* query_point,
+                                                         node_id_type_ node_id, i64_t& chord) noexcept {
+    earth_observation_t const entry = *reinterpret_cast<earth_observation_t const*>(arguments.storage.values +
+                                                                                    arguments.storage.offsets[node_id]);
+    chord = chord_squared(query.position, entry.position);
+    if (!cuda_admits(arguments.relation, arguments.radius_metres, arguments.slack_milliseconds, query, entry, chord))
+        return false;
+    if (line_of_sight == line_of_sight_t::chord_alone_k) return true;
+    f32_t entry_point[3];
+    cuda_grid_point(arguments, entry.position, entry_point);
+    // Under `sees` the entry looks at the query, otherwise the query at the entry.
+    return arguments.relation == relation_t::sees_k ? cuda_clears(grid, arguments, entry_point, query_point)
+                                                    : cuda_clears(grid, arguments, query_point, entry_point);
+}
+
+/**
+ *  @brief Judges every walk's candidates in rank order, a warp-width of ranks at a time, one warp
+ *      per query, handing @p on_round each round's lanes: the candidate, whether it was admitted,
+ *      the chord, and the round's admitted mask; the warp stops once @p on_round answers false.
+ *
+ *  Every warp reads the shape of the terrain's pyramid, which one thread fills per block, so every
+ *  thread of the block reaches the barrier before any warp judges.
+ */
+template <typename warp_type_, typename node_id_type_, typename on_query_type_>
+__device__ __forceinline__ void cuda_judge_walks(cuda_admit_arguments<node_id_type_> const& arguments,
+                                                 on_query_type_&& on_query) noexcept {
+    __shared__ nk_terrain_grid_cuda_t grid;
+    line_of_sight_t const line_of_sight = arguments.terrain_heights && arguments.relation != relation_t::near_k
+                                              ? line_of_sight_t::over_terrain_k
+                                              : line_of_sight_t::chord_alone_k;
+    if (line_of_sight == line_of_sight_t::over_terrain_k && threadIdx.x == 0)
+        nk_terrain_grid_f32_cuda_(arguments.terrain_heights, arguments.terrain_pack, &grid);
+    __syncthreads();
+    u32_t const lane = threadIdx.x % warp_type_::width_k;
+    u32_t const warps = gridDim.x * vram_warps_per_block_k;
+    for (u32_t query_index = blockIdx.x * vram_warps_per_block_k + threadIdx.x / warp_type_::width_k;
+         query_index < arguments.queries_count; query_index += warps) {
+        earth_observation_t const query = arguments.queries[query_index];
+        f32_t query_point[3];
+        if (line_of_sight == line_of_sight_t::over_terrain_k) cuda_grid_point(arguments, query.position, query_point);
+        node_id_type_ const* const candidate_ids = arguments.candidate_ids +
+                                                   u64_t {query_index} * arguments.candidates_count;
+        auto judge = [&](u32_t rank, i64_t& chord) noexcept {
+            constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+            node_id_type_ const node_id = rank < arguments.candidates_count ? candidate_ids[rank] : unknown_k;
+            return node_id != unknown_k &&
+                   cuda_admits_over_terrain(arguments, grid, line_of_sight, query, query_point, node_id, chord);
+        };
+        on_query(query_index, lane, judge);
+    }
+}
+
 /** One warp per query keeps, in rank order, the candidates the relation admits, a warp-width of
- *  ranks at a time, until @c wanted landed or the candidates ran out; past @c near, a sight line
+ *  ranks at a time, until @c wanted arrived or the candidates ran out; past @c near, a sight line
  *  must also clear the terrain when one is given. */
 template <nk_capability_t capability_, typename node_id_type_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32)
     cuda_admit(cuda_admit_arguments<node_id_type_> arguments) {
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
     using warp_t = typename geospatial_ladder<capability_>::kit_t::warp_t;
-    // Every warp reads the shape of the terrain's pyramid, which one thread fills per block.
-    __shared__ nk_terrain_grid_cuda_t grid;
-    bool const sighted = arguments.terrain_heights && arguments.relation != relation_t::near_k;
-    if (sighted && threadIdx.x == 0)
-        nk_terrain_grid_f32_cuda_(arguments.terrain_heights, arguments.terrain_pack, &grid);
-    __syncthreads();
-    u32_t const lane = threadIdx.x % warp_t::width_k;
-    u32_t const warps = gridDim.x * vram_warps_per_block_k;
-    for (u32_t query_index = blockIdx.x * vram_warps_per_block_k + threadIdx.x / warp_t::width_k;
-         query_index < arguments.queries_count; query_index += warps) {
-        earth_observation_t const query = arguments.queries[query_index];
-        f32_t query_point[3];
-        if (sighted) cuda_grid_point(arguments, query.position, query_point);
-        node_id_type_ const* const candidate_ids = arguments.candidate_ids +
-                                                   u64_t {query_index} * arguments.candidates_count;
+    cuda_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
         node_id_type_* const matched_ids = arguments.matched_ids + u64_t {query_index} * arguments.wanted;
         f64_t* const matched_metres = arguments.matched_metres + u64_t {query_index} * arguments.wanted;
-        u32_t landed = 0;
-        for (u32_t base = 0; base < arguments.candidates_count && landed < arguments.wanted; base += warp_t::width_k) {
-            u32_t const rank = base + lane;
-            node_id_type_ const node_id = rank < arguments.candidates_count ? candidate_ids[rank] : unknown_k;
-            bool admitted = false;
+        u32_t written = 0;
+        for (u32_t base = 0; base < arguments.candidates_count && written < arguments.wanted; base += warp_t::width_k) {
             i64_t chord = 0;
-            if (node_id != unknown_k) {
-                earth_observation_t const entry = *reinterpret_cast<earth_observation_t const*>(
-                    arguments.storage.values + arguments.storage.offsets[node_id]);
-                chord = chord_squared(query.position, entry.position);
-                admitted = cuda_admits(arguments.relation, arguments.radius_metres, arguments.slack_milliseconds, query,
-                                       entry, chord);
-                if (admitted && sighted) {
-                    f32_t entry_point[3];
-                    cuda_grid_point(arguments, entry.position, entry_point);
-                    // Under `sees` the entry looks at the query, otherwise the query at the entry.
-                    admitted = arguments.relation == relation_t::sees_k
-                                   ? cuda_clears(grid, arguments, entry_point, query_point)
-                                   : cuda_clears(grid, arguments, query_point, entry_point);
-                }
-            }
+            bool const admitted = judge(base + lane, chord);
             typename warp_t::mask_t const admitted_mask = warp_t::ballot(admitted);
-            u32_t const position = landed + warp_t::count(admitted_mask & warp_t::below(lane));
+            u32_t const position = written + warp_t::count(admitted_mask & warp_t::below(lane));
             if (admitted && position < arguments.wanted) {
-                matched_ids[position] = node_id;
+                matched_ids[position] =
+                    arguments.candidate_ids[u64_t {query_index} * arguments.candidates_count + base + lane];
                 matched_metres[position] = nk_sqrt_f64_cuda_(static_cast<f64_t>(chord)) / centimetres_per_metre_k;
             }
-            landed += warp_t::count(admitted_mask);
+            written += warp_t::count(admitted_mask);
         }
-        if (lane == 0) arguments.matched_counts[query_index] = min_of(landed, arguments.wanted);
-    }
+        if (lane == 0) arguments.matched_counts[query_index] = min_of(written, arguments.wanted);
+    });
+}
+
+/**
+ *  @brief One pass of a radius walk's judging, one warp per query over every candidate its walk
+ *      found: @c within_count_k counts the admitted ones into @c matched_counts, and
+ *      @c within_write_k writes them, in rank order, from the query's offset on.
+ *
+ *  The writing pass places each query past every earlier one's count, from the base
+ *  @c matched_offsets holds first, which each warp sums for its own query, so no warp waits on
+ *  another, and files the offset one past it.
+ */
+template <nk_capability_t capability_, typename node_id_type_, vram_kernel_t kernel_>
+__global__ void __launch_bounds__(vram_warps_per_block_k * 32)
+    cuda_within(cuda_admit_arguments<node_id_type_> arguments) {
+    using warp_t = typename geospatial_ladder<capability_>::kit_t::warp_t;
+    cuda_judge_walks<warp_t>(arguments, [&](u32_t query_index, u32_t lane, auto&& judge) noexcept {
+        u64_t start = 0;
+        if constexpr (kernel_ == vram_kernel_t::within_write_k) {
+            for (u32_t earlier = lane; earlier < query_index; earlier += warp_t::width_k)
+                start += arguments.matched_counts[earlier];
+            for (u32_t mask = warp_t::width_k / 2; mask; mask >>= 1) start += warp_t::shuffle_xor(start, mask);
+            start += arguments.matched_offsets[0];
+            if (lane == 0) arguments.matched_offsets[query_index + 1] = start + arguments.matched_counts[query_index];
+        }
+        u64_t written = 0;
+        for (u32_t base = 0; base < arguments.candidates_count; base += warp_t::width_k) {
+            i64_t chord = 0;
+            bool const admitted = judge(base + lane, chord);
+            typename warp_t::mask_t const admitted_mask = warp_t::ballot(admitted);
+            if constexpr (kernel_ == vram_kernel_t::within_write_k)
+                if (admitted) {
+                    u64_t const position = start + written + warp_t::count(admitted_mask & warp_t::below(lane));
+                    arguments.matched_ids[position] =
+                        arguments.candidate_ids[u64_t {query_index} * arguments.candidates_count + base + lane];
+                    arguments.matched_metres[position] = nk_sqrt_f64_cuda_(static_cast<f64_t>(chord)) /
+                                                         centimetres_per_metre_k;
+                }
+            written += warp_t::count(admitted_mask);
+        }
+        if constexpr (kernel_ == vram_kernel_t::within_count_k)
+            if (lane == 0) arguments.matched_counts[query_index] = written;
+    });
 }
 
 /** Every NVIDIA geospatial kernel: @p kernel_ picks the walk, @p capability_ the kit through
@@ -414,13 +474,15 @@ __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept 
      ...);
 }
 
-/** Instantiates every kernel under @p capability_ with @p node_id_type_ IDs, the judging one too;
+/** Instantiates every kernel under @p capability_ with @p node_id_type_ IDs, the judging ones too;
  *  the unit compiling the fatbin names it once per node-ID type. Taking the kernels' addresses in
  *  device code makes NVCC emit them, while a host-only pass emits no launch stub. */
 template <nk_capability_t capability_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_rungs<capability_, node_id_type_>(std::make_index_sequence<std::size(basic::cuda_rungs)> {});
     static_cast<void>(&cuda_admit<capability_, node_id_type_>);
+    static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_count_k>);
+    static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_write_k>);
 }
 
 #pragma endregion Kernels

@@ -72,7 +72,7 @@ static std::size_t expect_gets(handle<geospatial_verbs_t>& index, std::size_t co
 /** A containment walk on the refined graph, at the median tenth-nearest distance, reports every
  *  entry of the exact scan's top ten inside that radius, where the residency serves a scan. */
 static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_queries_t queries) {
-    landed_matches_t oracle;
+    copied_matches_t oracle;
     usearch_outcome_t const scanned = scan_oracle(index, queries, geospatial_queries_k, cell_wanted_k, cell_batch_k,
                                                   oracle);
     if (scanned.status == usearch_status_unsupported_k) return 0;
@@ -137,7 +137,8 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     if (failures) return failures;
     failures += expect_gets(index, geospatial_entries_k);
     failures += expect_walk_recall(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8);
-    failures += expect_refined(index, usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k,
+                               usearch_status_unsupported_k);
     failures += expect_within(index, queries);
     std::string const stem = fmt::format("/tmp/usearch-abi-geospatial-{:016x}", stream_key(seed, name));
     failures += expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k,

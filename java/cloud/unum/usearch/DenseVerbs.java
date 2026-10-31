@@ -22,10 +22,14 @@ import cloud.unum.usearch.DenseIndex.DenseMultiplyConfig;
 import cloud.unum.usearch.DenseIndex.DenseProducts;
 import cloud.unum.usearch.DenseIndex.DenseReachability;
 import cloud.unum.usearch.DenseIndex.DenseRefineConfig;
+import cloud.unum.usearch.DenseIndex.DenseSampleConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchStream;
 import cloud.unum.usearch.DenseIndex.DenseSoftmaxState;
+import cloud.unum.usearch.DenseIndex.DenseSplitConfig;
 import cloud.unum.usearch.DenseIndex.DenseVectors;
+import cloud.unum.usearch.DenseIndex.RefineReport;
+import cloud.unum.usearch.DenseIndex.Sample;
 import cloud.unum.usearch.DenseIndex.ValueLookup;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.Call;
@@ -154,7 +158,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      *
      * @throws USearchException the statuses {@link #refine(DenseRefineConfig)} names.
      */
-    public long refine() {
+    public RefineReport refine() {
         return block(refining(new DenseRefineConfig()));
     }
 
@@ -165,13 +169,14 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * <p>
      * Searches may run throughout on a RAM handle, since re-selection publishes one node at a time
      * and never removes one; insertions may not. Re-selecting a settled node changes nothing, so a
-     * caller loops until the changed-node count falls below whatever rate it considers settled.
+     * caller loops until the report's {@code changed} falls below whatever rate it considers settled.
      * Calls {@code usearch_dense_refine}.
      *
-     * @return the nodes whose neighbors the pass re-selected; zero means the graph has settled.
+     * @return the nodes re-selected and changed, the islands found and reconnected, and the audit
+     *     closing the heal; {@code changed} at zero means the graph has settled.
      * @throws USearchException READ_ONLY on a view.
      */
-    public long refine(DenseRefineConfig config) {
+    public RefineReport refine(DenseRefineConfig config) {
         return block(refining(config));
     }
 
@@ -279,7 +284,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
 
     /**
      * Softmax attention of every query row over every indexed key its walk scores, folded as Flash
-     * Attention folds key tiles, with no top-k cut, landing one row per query in {@code arena}
+     * Attention folds key tiles, with no top-k cut, writing one row per query into {@code arena}
      * already divided by the partition. Runs on the inner-product kinds alone, since a softmax needs
      * logits.
      *
@@ -301,14 +306,43 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * re-inserting their vectors and linking each in across the appended part. Every donor refuses
      * every verb until the call is final; then each one absorbed stays closed, and one it did not
      * absorb is a live index again, which the caller still owns, though its entries may already have
-     * landed here. Calls {@code usearch_dense_absorb}.
+     * moved here. Calls {@code usearch_dense_absorb}.
      *
+     * @return what the closing refinement did to the graph.
      * @throws USearchException READ_ONLY on a view, CONFIG_MISMATCH on a donor of another residency,
      *     scalar, metric or geometry, and INVALID_ARGUMENT when the index is among its own donors or a
      *     donor is named twice, which consumes none.
      */
-    public void absorb(DenseIndex... donors) {
-        block(absorbing(donors));
+    public RefineReport absorb(DenseIndex... donors) {
+        return block(absorbing(donors));
+    }
+
+    /**
+     * Splits this index into the empty receivers, the inverse of {@link #absorb}: the entries are
+     * partitioned along the graph, each part lands in one receiver with its edges kept, and a closing
+     * refinement re-links every receiver, leaving this index empty and live. Calls
+     * {@code usearch_dense_split}.
+     *
+     * @return what the closing refinements did, across the receivers.
+     * @throws USearchException INVALID_ARGUMENT on fewer than two receivers, and CONFIG_MISMATCH on a
+     *     receiver of another residency, scalar, metric, geometry or shard count, one holding entries,
+     *     or this index itself.
+     */
+    public RefineReport split(DenseSplitConfig config, DenseIndex... receivers) {
+        return block(splitting(config, receivers));
+    }
+
+    /**
+     * Draws keys around the focus, or across the whole index, each hanging from a shown or earlier
+     * draw and placed in three dimensions beside the shown ones - so a view grows one connected
+     * sample as it zooms. Writes up to {@code wanted} draws, and a larger count under the same seed
+     * draws a superset; only a RAM index samples yet. Calls {@code usearch_dense_sample}.
+     *
+     * @throws USearchException INVALID_ARGUMENT on a negative count, UNSUPPORTED on a GPU or NVMe
+     *     handle, and CONTENDED when the arena serves another call.
+     */
+    public Sample sample(long wanted, Arena arena, DenseSampleConfig config) {
+        return block(sampling(wanted, arena, config));
     }
 
     /**
@@ -438,12 +472,12 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Long> refining(DenseRefineConfig config) {
+    static Request<RefineReport> refining(DenseRefineConfig config) {
         return new Request<>(DenseIndex.REFINE, call -> {
-            MemorySegment changed = call.output("changed", Library.SIZE);
+            MemorySegment report = call.output("report", DenseIndex.REFINE_REPORT);
             call.size("expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
-            return () -> changed.get(Library.SIZE, 0);
+            return () -> RefineReport.lift(report);
         });
     }
 
@@ -545,7 +579,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Void> absorbing(DenseIndex[] donors) {
+    static Request<RefineReport> absorbing(DenseIndex[] donors) {
         return new Request<>(DenseIndex.ABSORB, call -> {
             long index = call.arguments
                     .get(Library.POINTER, DenseIndex.ABSORB.at("index"))
@@ -576,7 +610,47 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             }
             call.size("count", donors.length);
             call.pointer("donors", slots);
-            return NOTHING;
+            MemorySegment report = call.output("report", DenseIndex.REFINE_REPORT);
+            return () -> RefineReport.lift(report);
+        });
+    }
+
+    static Request<RefineReport> splitting(DenseSplitConfig config, DenseIndex[] receivers) {
+        return new Request<>(DenseIndex.SPLIT, call -> {
+            MemorySegment handles = call.memory.allocate(Library.POINTER, Math.max(receivers.length, 1));
+            for (int order = 0; order != receivers.length; ++order) {
+                handles.setAtIndex(Library.POINTER, order, receivers[order].handle.address());
+                call.lend(receivers[order]);
+            }
+            call.size("count", receivers.length);
+            call.pointer("receivers", handles);
+            MemorySegment report = call.output("report", DenseIndex.REFINE_REPORT);
+            call.size("expansion_factor", config.expansionFactor);
+            call.size("seed", config.seed);
+            call.stats("stats", config.stats);
+            return () -> RefineReport.lift(report);
+        });
+    }
+
+    static Request<Sample> sampling(long wanted, Arena arena, DenseSampleConfig config) {
+        long bound = DenseIndex.nonNegative(wanted, "the wanted count is negative");
+        return new Request<>(DenseIndex.SAMPLE, call -> {
+            call.size("shown_count", config.shown.length);
+            call.keys("shown", config.shown);
+            call.rows("shown_coordinates", RowsView.of(config.shownCoordinates, 3));
+            call.size("focus_count", config.focus.length);
+            call.keys("focus", config.focus);
+            MemorySegment keys = call.output("keys", Library.KEYS_VIEW);
+            MemorySegment entryOrdinals = call.output("entry_ordinals", Library.POINTER);
+            MemorySegment parents = call.output("parents", Library.MATCHES_VIEW);
+            MemorySegment coordinates = call.output("coordinates", Library.ROWS_VIEW);
+            MemorySegment written = call.output("written", Library.SIZE);
+            call.arena("arena", arena);
+            call.size("wanted", bound);
+            call.size("seed", config.seed);
+            call.size("expansion_factor", config.expansionFactor);
+            call.stats("stats", config.stats);
+            return () -> Sample.lift(call, keys, entryOrdinals, parents, coordinates, written.get(Library.SIZE, 0));
         });
     }
 

@@ -78,12 +78,12 @@ struct vram_scored_node;
  *      unsigned words: bits [63:33] hold the top 31 bits of the sign-flipped @c f32
  *      distance, bit 32 carries the "already expanded" flag, bits [31:0] the full node ID.
  *
- *  The all-ones pattern is the empty slot: its distance prefix is the flipped NaN that
- *  sorts last, it reads as expanded, and its ID is @c node_id_unknown_k - so
- *  traversal loops need no emptiness guards. Dropping the distance LSB costs one ulp of
- *  ordering precision: candidates are "sorted by @c distance_bits(), tie order unspecified",
- *  which is the practical semantic of approximate search either way, and in exchange IDs
- *  keep all 32 bits - the ID ceiling matches the CPU-resident index exactly.
+ *  The all-ones pattern is the empty slot: its distance prefix is the flipped NaN that sorts last,
+ *  it reads as expanded, and its ID is the all-ones unknown ID - so traversal loops need no
+ *  emptiness guards. Dropping the distance LSB costs one ulp of ordering precision: candidates are
+ *  "sorted by @c distance_bits(), tie order unspecified", which is the practical semantic of
+ *  approximate search either way, and in exchange IDs keep all 32 bits - the ID ceiling matches the
+ *  CPU-resident index exactly.
  */
 template <>
 struct vram_scored_node<u32_t> {
@@ -439,7 +439,7 @@ struct vram_register_frontier {
         else ranks_.insert_batch(nearer ? staged : scored_node_t::sentinel(), lane);
     }
 
-    /** The nearest undiscovered-from candidate, already marked expanded - or the
+    /** The nearest undiscovered-from candidate, already flagged as expanded - or the
      *  sentinel when every rank is spent. */
     __device__ __forceinline__ scored_node_t pop_nearest(u32_t) noexcept {
         scored_node_t const nearest = ranks_.nearest_unexpanded();
@@ -648,7 +648,7 @@ struct vram_arena_frontier {
             rank -= below;
         }
 
-        // In place: a kept entry lands at or before its own slot,
+        // In place: a kept entry moves to its own slot or an earlier one,
         // after the ballot over its batch's loads.
         u32_t kept = 0;
         for (u32_t base = 0; base < tail_.size_; base += warp_t::width_k) {
@@ -712,7 +712,7 @@ struct vram_arena_frontier {
  *
  *  Lanes carrying the same ID in one call collapse to their lowest lane via value matching, so a
  *  batch can never stage intra-batch duplicates; the compare-exchange only arbitrates two distinct
- *  IDs landing on one empty slot - scratch bookkeeping, not part of the graph's all-RMW protocol. A
+ *  IDs claiming one empty slot - scratch bookkeeping, not part of the graph's all-RMW protocol. A
  *  saturated set - the probe budget exhausted on a full neighborhood - reports the ID fresh, so it
  *  re-scores rather than starving the walk, counts every such claim as the receipt the telemetry
  *  reports, and leaves the walk to skip IDs its frontier already holds.
@@ -724,7 +724,7 @@ struct vram_visited_set {
     /** Packed @b {epoch,ID} slots: an entry is live only when its epoch matches this walk's, so
      *  "resetting" is bumping one register - the host zeroes the arena once per launch batch, and
      *  epoch zero marks never-used. 16-byte aligned, since a probe loads the aligned pair of slots
-     *  it lands in at once. A @c u64_t ID takes a slot of two words, the epoch and then the ID, and
+     *  it claims at once. A @c u64_t ID takes a slot of two words, the epoch and then the ID, and
      *  a probe loads that one slot. */
     u64_t* slots_;
 
@@ -754,7 +754,7 @@ struct vram_visited_set {
         bool probing = fresh;
         u32_t const mask = 0xFFFFFFFFu >> hash_shift_;
         // The slice is warp-private, so the only contention is two lanes of THIS warp
-        // landing on one empty slot in the same round - arbitrated in registers, no
+        // claiming one empty slot in the same round - arbitrated in registers, no
         // atomics: the lowest rival lane stores, the warp barrier publishes the store,
         // and losers re-read the slot, see a foreign epoch-current ID, and probe on.
         if constexpr (std::is_same_v<node_id_type_, u64_t>) {
@@ -1068,7 +1068,8 @@ struct vram_sorted_buffer {
             u32_t shift = 0;
             for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
                 shift += (shuffle_from<warp_t>(value, source) < moved) && active;
-            warp_t::sync(); // The whole lane-width is in registers before any of its writes lands.
+            // The whole lane-width is in registers before any of its writes reaches memory.
+            warp_t::sync();
             if (active && index + shift < capacity_) entries_[index + shift] = moved;
             warp_t::sync();
         }

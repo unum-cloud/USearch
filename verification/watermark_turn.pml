@@ -2,7 +2,7 @@
  *  @file verification/watermark_turn.pml
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief The watermark turn every dense index takes once its rows land.
+ *  @brief The watermark turn every dense index takes once its rows are placed.
  *
  *  A wait until the watermark holds the turn's first ID, acquired, then one store that moves it past
  *  the turn's last row. Turns go strictly in dispensed order, so the prefix below the watermark

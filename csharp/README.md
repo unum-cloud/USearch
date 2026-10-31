@@ -77,7 +77,7 @@ Matches matches = await call;                                       // Or: call.
 
 Waiting again answers the same result or raises the same failure.
 Disposing a call nobody waited for waits for it, discards what it produced, and lets its arena serve the next call.
-One left unfinished and unreachable keeps its landing and pins alive until a collection finds it final, rather than freeing memory the library still writes.
+One left unfinished and unreachable keeps its outputs and pins alive until a collection finds it final, rather than freeing memory the library still writes.
 Disposing an index or an arena that a deferred call names waits for that call first.
 A submission finding the executor's deferred table full finishes at once with `Status.Contended`.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
@@ -283,22 +283,34 @@ Every pull takes its arena, so one arena serves a scan and any other verb betwee
 ### Refinement
 
 ```csharp
-ulong changed = index.On(pool).Refine(expansionFactor: 256);
+RefineReport report = index.On(pool).Refine(expansionFactor: 256);
 ```
 
 Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
 It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `Insert`.
-The return is the number of nodes whose edges changed, and zero means the graph has settled, so a caller under a time budget loops until the return falls below whatever rate it considers settled.
+The return is a `RefineReport` of the nodes re-selected and `Changed`, the islands found and reconnected, and the `Reachability` audit closing the heal; `Changed` at zero means the graph has settled, so a caller under a time budget loops until it falls below whatever rate it considers settled.
 Searches may run throughout.
 
-### Absorbing
+### Absorbing & Splitting
 
 ```csharp
 index.On(pool).Absorb(donor);
+index.On(pool).Split([left, right], seed: 7); // two empty receivers take a part each
 ```
 
 Bigger indexes come from absorbing, never mutating: `Absorb` appends each donor in turn, keeping its graph and linking it in across the appended part.
-Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have landed.
+Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have moved.
+`Split` is its inverse, partitioning the entries along the graph into empty receivers and leaving the source empty and live; both answer a `RefineReport` of their closing refinements.
+
+### Sampling
+
+```csharp
+Sample drawn = index.On(pool).Sample(
+    256, arena, new DenseSampleConfig { Shown = shown, ShownCoordinates = shownXyz, Focus = near, Seed = 42 });
+```
+
+`Sample` draws keys around a focus, each hanging from a shown or earlier draw, and places them in three dimensions beside the keys already shown, so a view grows one connected sample as it zooms.
+Its `Keys`, `EntryOrdinals`, `Parents` and `Coordinates` read in place from the arena.
 
 ### Sparse Multiplication
 
@@ -347,7 +359,7 @@ ReadOnlySpan<float> first = attended.Row<float>(0);
 
 With `headCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A key resolving outside the values, or values of another kind or width than the library reads, refuses the call with `Status.ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
-The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than landing in the arena.
+The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than written into the arena.
 An `outputsScalar` argument lands the attended rows as another kind than the queries' own.
 `rowOf` is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and an `Attend` into a VRAM arena refuses with `Status.Device`.
 
@@ -371,7 +383,7 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 ## What This Binding Does Not Expose
 
 - __Progress handlers.__
-  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Absorb` or `Save` runs to its end, and `Status.Cancelled` never arises.
+  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Absorb`, `Split`, `Sample` or `Save` runs to its end, and `Status.Cancelled` never arises.
 - __Deferred cursors and streams.__
   `Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them.
 - __Constructors on receivers.__
@@ -394,6 +406,6 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
 - __Blocking calls stay on the stack.__
-  A blocking call keeps its landing on the stack, fixes its buffers in place without a pinning handle, and answers a view by value; a deferred one allocates its handle and one pinned landing.
+  A blocking call keeps its outputs on the stack, fixes its buffers in place without a pinning handle, and answers a view by value; a deferred one allocates its handle and one pinned outputs struct.
 - __Exceptions never cross the native boundary.__
   A predicate or `rowOf` delegate that throws is captured on the worker thread and rethrown with its own type once the call is final.

@@ -219,7 +219,7 @@ class growing_hash_set {
         std::memset((void*)new_slots, 0xFF, new_capacity * sizeof(element_t));
         std::size_t new_count = count_;
         // Re-place through the very same probe walk `contains` & `insert` use - the target slot
-        // of a not-yet-present element is exactly where the kit's `locate_slot` lands.
+        // of a not-yet-present element is exactly where the kit's `locate_slot` points.
         if (count_)
             for (std::size_t old_index = 0; old_index != capacity_; ++old_index) {
                 if (slots_[old_index] == unused_hash_slot_value<element_t>()) continue;
@@ -239,7 +239,7 @@ class growing_hash_set {
  *      an entry: its chunks are fixed tables appended on a doubling @ref chunk_schedule, so inserts
  *      and lookups run while it grows.
  *
- *  Node @c n lands in the chunk the schedule locates it in, whose slots are twice its nodes, so
+ *  Node @c n goes in the chunk the schedule locates it in, whose slots are twice its nodes, so
  *  every probe chain terminates. Each chunk has one writer at a time, the one filing the nodes it
  *  holds, so an insert claims nothing: it finds an empty slot, writes the key and node, then
  *  releases the slot's probe tag. Duplicate keys coexist as separate slots. The chunks are two

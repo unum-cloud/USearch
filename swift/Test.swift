@@ -1,11 +1,13 @@
-//
-//  Test.swift
-//  USearch
-//
-//  The boundary suite: what the binding itself decides - key byte order, row lowering, handle
-//  lifetime, the rows a call wrote, the streaming handles, the callback trampolines, the arena
-//  views, and how blocking and deferred calls complete. That vector search returns near neighbors
-//  is the engine's contract and is tested where the engine lives.
+/**
+ *  @file swift/Test.swift
+ *  @author Ash Vardanian
+ *  @date May 11, 2023
+ *  @brief The boundary suite: what the binding itself decides.
+ *
+ *  Key byte order, row lowering, handle lifetime, the rows a call wrote, the streaming handles, the
+ *  callback trampolines, the arena views, and how blocking and deferred calls complete. That vector
+ *  search returns near neighbors is the engine's contract and is tested where the engine lives.
+ */
 //
 //  Suites run in parallel and every test gets a fresh instance, so nothing here is shared: each
 //  test spawns the one executor it drives, and the helpers below are free functions rather than
@@ -797,10 +799,38 @@ struct LinearAlgebraTests {
     @Test func refinementSettlesAndHealthAuditsEveryEntry() throws {
         let index = try triangle()
         let executor = try executor()
-        #expect(try index.refine(config: DenseRefineConfig(expansionFactor: 64)) == 0)
+        let report = try index.refine(config: DenseRefineConfig(expansionFactor: 64))
+        #expect(report.changed == 0)
+        #expect(report.changed <= report.reselected)
         let reachability = try index.on(executor).health()
         #expect(reachability.audited == 3)
         #expect(reachability.reachable == 3)
         #expect(try index.health() == reachability)
+        #expect(report.reachability == reachability)
+    }
+
+    /// A split hands every entry to the receivers and leaves the source empty but live.
+    @Test func splitEmptiesTheSourceIntoItsReceivers() throws {
+        let index = try triangle()
+        let receivers = try (0 ..< 2).map { _ in
+            let receiver = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
+            try receiver.reserve(3)
+            return receiver
+        }
+        try index.on(try executor()).split(into: receivers, config: DenseSplitConfig(seed: 7))
+        #expect(try index.describe().size == 0)
+        #expect(try receivers.map { try $0.describe().size }.reduce(0, +) == 3)
+    }
+
+    /// A sample draws held keys placed in three dimensions, refusing shown keys it cannot place.
+    @Test func sampleDrawsHeldKeysWithPlaces() throws {
+        let index = try triangle()
+        let arena = try Arena()
+        let draws = try index.sample(wanted: 2, arena: arena, config: DenseSampleConfig(seed: 42))
+        #expect(draws.count <= 2)
+        for key in draws.keys { #expect([Key](arrayLiteral: 1, 2, 3).contains(key)) }
+        if draws.count != 0 { #expect(draws.coordinates.columns == 3) }
+        let unplaced = DenseSampleConfig(shown: [1])
+        #expect(failureStatus(of: try index.sample(wanted: 2, arena: arena, config: unplaced)) == .shapeMismatch)
     }
 }

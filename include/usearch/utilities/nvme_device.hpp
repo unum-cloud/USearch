@@ -215,7 +215,7 @@ enum class io_wait_t : u32_t {
     /** Submit, and return without sleeping. */
     nonblocking_k,
 
-    /** Submit, then hold until a completion lands, unless nothing is in flight. */
+    /** Submit, then hold until a completion arrives, unless nothing is in flight. */
     blocking_k,
 };
 
@@ -232,7 +232,7 @@ struct io_request_t {
     /** Which attached medium the read targets. */
     io_medium_id_t medium = 0;
 
-    /** The staging buffer the bytes land in, serving no other read until the completion is
+    /** The staging buffer the bytes arrive in, serving no other read until the completion is
      *  polled. */
     io_buffer_id_t buffer = 0;
 
@@ -285,7 +285,8 @@ enum class io_transport_t : u32_t {
     windows_ioring_k,
 };
 
-/** Whether io_uring reads land in buffers registered once or at plain addresses pinned per read. */
+/** Whether io_uring reads arrive in buffers registered once or at plain addresses the kernel pins
+ *  on every read. */
 enum class linux_uring_buffer_registration_t : u32_t {
 
     /** Plain addresses, which the kernel pins on every read. */
@@ -736,23 +737,24 @@ struct spdk_medium_t {
         u64_t const begin = byte_base + offset, first = begin - begin % block_bytes;
         u64_t const bound = round_up_to_multiple<u64_t>(begin + bytes.size(), block_bytes);
         void* const staging = spdk_dma_malloc(bound - first, io_alignment_k, nullptr);
-        // The command's callback writes the outcome; until then the read is still landing.
-        status_t landed = status_t::uninitialized_k;
-        if (!staging) landed = status_t::bad_alloc_k;
+        // The command's callback writes the outcome; until then the read is still arriving.
+        status_t read_status = status_t::uninitialized_k;
+        if (!staging) read_status = status_t::bad_alloc_k;
         else if (spdk_nvme_ns_cmd_read(name_space, queue_pair, staging, first / block_bytes,
-                                       static_cast<u32_t>((bound - first) / block_bytes), &spdk_medium_t::landed_,
-                                       &landed, 0) != 0)
-            landed = status_t::io_k;
-        while (landed == status_t::uninitialized_k)
-            if (spdk_nvme_qpair_process_completions(queue_pair, 0) < 0) landed = status_t::io_k;
-        if (succeeded(landed)) std::memcpy(bytes.data(), static_cast<byte_t*>(staging) + (begin - first), bytes.size());
+                                       static_cast<u32_t>((bound - first) / block_bytes),
+                                       &spdk_medium_t::read_finished_, &read_status, 0) != 0)
+            read_status = status_t::io_k;
+        while (read_status == status_t::uninitialized_k)
+            if (spdk_nvme_qpair_process_completions(queue_pair, 0) < 0) read_status = status_t::io_k;
+        if (succeeded(read_status))
+            std::memcpy(bytes.data(), static_cast<byte_t*>(staging) + (begin - first), bytes.size());
         spdk_nvme_ctrlr_free_io_qpair(queue_pair);
         if (staging) spdk_dma_free(staging);
-        return landed;
+        return read_status;
     }
 
   private:
-    static void landed_(void* context, spdk_nvme_cpl const* completion) noexcept {
+    static void read_finished_(void* context, spdk_nvme_cpl const* completion) noexcept {
         *static_cast<status_t*>(context) = spdk_nvme_cpl_is_error(completion) ? status_t::io_k : status_t::success_k;
     }
 };
@@ -802,8 +804,8 @@ struct io_engine_config_t {
     /** The transport an engine set opens. */
     io_transport_t transport = io_transport_t::automatic_k;
 
-    /** Whether io_uring reads land in registered buffers; passthrough honors @c fixed_k from Linux
-     *  6.14. */
+    /** Whether io_uring reads arrive in registered buffers; passthrough honors @c fixed_k from
+     *  Linux 6.14. */
     linux_uring_buffer_registration_t buffer_registration = linux_uring_buffer_registration_t::fixed_k;
 
     /** Whether io_uring learns of completions by interrupt or by polling the device's queues. */
@@ -841,7 +843,7 @@ inline status_t io_request_vet_(io_request_t const& request, std::size_t media_c
  *  request medium IDs index the given media until @c detach; @c enqueue_read only encodes;
  *  @c submit hands every encoded read to the device and, under @c blocking_k, holds for a
  *  completion; @c poll_completions moves finished reads out; @c buffer maps an index to the memory
- *  a read landed in.
+ *  a read arrived in.
  *
  *  Every read @c enqueue_read accepts yields exactly one completion, naming its buffer and its
  *  context, and that buffer serves no other read until the completion is polled. A failed
@@ -1033,7 +1035,7 @@ inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const n
     if (status_t const reserved = staging.reserve(1, bound - first); failed(reserved)) return reserved;
     i32_t const moved = blocking_reader_t {}.read(descriptor, staging.buffer(0), static_cast<u32_t>(bound - first),
                                                   first);
-    // The file may end inside its last block, so only the bytes asked for must land.
+    // The file may end inside its last block, so only the bytes asked for must arrive.
     if (moved < 0 || static_cast<u64_t>(moved) < begin + bytes.size() - first) return status_t::io_k;
     std::memcpy(bytes.data(), staging.buffer(0) + (begin - first), bytes.size());
     return status_t::success_k;
@@ -1139,7 +1141,7 @@ class blocking_files_engine {
 
   private:
 
-    /** The staging buffers reads land in. */
+    /** The staging buffers reads arrive in. */
     io_buffers<allocator_t> buffers_;
 
     /** The attached media's descriptors, indexed by medium ID. */
@@ -1323,7 +1325,7 @@ class linux_aio_files_engine {
         return status_t::io_k;
     }
 
-    /** The staging buffers reads land in. */
+    /** The staging buffers reads arrive in. */
     io_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
@@ -1338,13 +1340,13 @@ class linux_aio_files_engine {
     /** The pointer array @c io_submit takes, one per staged control block. */
     growing_buffer<struct iocb*, allocator_t> control_pointers_;
 
-    /** The landing array of @c io_getevents, one slot per read the context admits. */
+    /** The completion array of @c io_getevents, one slot per read the context admits. */
     growing_buffer<struct io_event, allocator_t> events_;
 
     /** Reads finished and not yet polled. */
     growing_buffer<io_completion_t, allocator_t> completions_;
 
-    /** The context, declared after the buffers so it dies first and waits out reads still landing
+    /** The context, declared after the buffers so it dies first and waits out reads still arriving
      *  in them. */
     linux_aio_context_t context_;
 
@@ -1570,7 +1572,7 @@ class linux_uring_ring_t {
 
     /** Claims the next SQE slot, or returns null when the ring is full or holds its queue depth of
      *  reads. The caller fills the returned entry in place; @ref submit publishes it. The claim
-     *  cursor is @c pending_tail_ rather than the kernel-visible tail, so a batch of claims lands
+     *  cursor is @c pending_tail_ rather than the kernel-visible tail, so a batch of claims arrives
      *  in consecutive slots before one publication. */
     struct io_uring_sqe* next_submission() noexcept {
         if (outstanding_ == queue_depth_) return nullptr;
@@ -1585,7 +1587,7 @@ class linux_uring_ring_t {
 
     /** The full submit-and-wait discipline shared by every ring engine: nonblocking submits &
      *  returns; blocking on an async-posting ring pays one capped @p wait_type_ monitor on the CQ
-     *  tail before the blocking enter, so a completion landing in that window costs zero syscalls,
+     *  tail before the blocking enter, so a completion arriving in that window costs zero syscalls,
      *  while deferred & polled rings fuse the pending batch and the wait into a single enter, and
      *  with nothing outstanding it returns at once. A refused enter withdraws what the kernel never
      *  consumed and waits out what it did, leaving nothing to poll. */
@@ -1678,7 +1680,7 @@ class linux_uring_ring_t {
         return fu::standard_atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
     }
 
-    /** True only when CQEs land in shared memory between syscalls: immediate posting under
+    /** True only when CQEs arrive in shared memory between syscalls: immediate posting under
      *  interrupt-driven reaping. Deferred task-run and IOPOLL rings post CQEs strictly inside
      *  @c io_uring_enter, so a user-space tail monitor can never observe them and the submit & wait
      *  pair fuses into one enter. */
@@ -1826,7 +1828,7 @@ class linux_uring_files_engine {
 
   private:
 
-    /** The staging buffers reads land in. */
+    /** The staging buffers reads arrive in. */
     io_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
@@ -1838,7 +1840,7 @@ class linux_uring_files_engine {
     /** The ring, declared after the buffers so it dies first and releases its pins on them. */
     linux_uring_ring_t ring_;
 
-    /** Whether reads land in the registered region, until the kernel refuses to pin it. */
+    /** Whether reads arrive in the registered region, until the kernel refuses to pin it. */
     linux_uring_buffer_registration_t buffer_registration_ = linux_uring_buffer_registration_t::plain_k;
 };
 
@@ -1985,7 +1987,7 @@ class linux_uring_nvme_engine {
         u32_t lba_shift;
     };
 
-    /** The staging buffers reads land in. */
+    /** The staging buffers reads arrive in. */
     io_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
@@ -2145,7 +2147,7 @@ class windows_ioring_files_engine {
         return SUCCEEDED(entry.ResultCode) ? status_t::success_k : status_t::io_k;
     }
 
-    /** The staging buffers reads land in. */
+    /** The staging buffers reads arrive in. */
     io_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
@@ -2325,13 +2327,13 @@ class linux_spdk_engine {
         u32_t block_bytes;
     };
 
-    /** What a command's callback receives: its engine, the buffer it lands in, and its length. */
+    /** What a command's callback receives: its engine, the buffer it arrives in, and its length. */
     struct command_t {
 
         /** The engine whose completion queue the callback fills. */
         linux_spdk_engine* engine;
 
-        /** The buffer the command lands in, which its completion names. */
+        /** The buffer the command arrives in, which its completion names. */
         io_buffer_id_t buffer;
 
         /** The bytes a successful command moved. */
@@ -2386,7 +2388,7 @@ class linux_spdk_engine {
      *  last. */
     linux_spdk_driver_t driver_;
 
-    /** The DMA staging buffers reads land in. */
+    /** The DMA staging buffers reads arrive in. */
     io_buffers<linux_spdk_dma_allocator<>> buffers_;
 
     /** One queue pair per controller this thread has read. */

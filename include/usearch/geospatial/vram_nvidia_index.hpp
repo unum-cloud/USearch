@@ -80,20 +80,23 @@ struct vram_nvidia_kits {
      */
     static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
 
-    /** Loads the fatbin onto @p device and finds every kernel by its symbol. */
-    status_t load_kernels_(cuda_api_t const& api, int device) noexcept;
+    /** The fatbin holding the kits' kernels. */
+    static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
 
-    cuda_function_handle_t kernel_function_(std::size_t rung, vram_kernel_t kernel, u32_t slots) const noexcept {
-        return kernels_[rung][static_cast<u32_t>(kernel)][gpu_rung_index(slots)];
-    }
+    /** Spells into @p symbol the kits' kernel @p instantiated on kit rung @p rung, as the fatbin
+     *  exports it. */
+    static void spell_kits_kernel_(vram_kernel_symbol_t& symbol, std::size_t rung,
+                                   basic::cuda_rung_t instantiated) noexcept;
+
+    /** The kits read no parameters on the device, so none upload. */
+    static status_t upload_parameters_(cuda_api_t const&) noexcept { return status_t::success_k; }
 
     /** The kit reads no parameters on the device. */
     byte_t const* parameters_() const noexcept { return nullptr; }
-
-    /** The fatbin on this device, and its kernels in @c vram_kernel_t order. */
-    cuda_module_t module_;
-    cuda_function_handle_t kernels_[rungs_k][static_cast<u32_t>(vram_kernel_t::count_k)][gpu_rungs_per_kernel_k] = {};
 };
+
+template <typename node_id_type_>
+struct cuda_admit_arguments;
 
 /** Similarity Search over observations on NVIDIA GPUs, under the squared chord the kit
  *  @c geospatial_ladder picks under @p capability_ scores: a lane scores each candidate, a warp
@@ -102,14 +105,19 @@ struct vram_nvidia_kits {
  *  over its kits and forwards its verbs, types and constants, which that graph documents. */
 template <typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
 struct vram_nvidia_index {
+    /* Components */
     using kits_t = vram_nvidia_kits<node_id_type_, capability_, kernels_type_>;
     using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
+
+    /* IDs and Keys */
     using node_id_t = typename graph_t::node_id_t;
     using key_t = typename graph_t::key_t;
     using keyed_t = typename graph_t::keyed_t;
     using distance_t = typename graph_t::distance_t;
-    using small_size_t = typename graph_t::small_size_t;
+    using candidates_count_t = typename graph_t::candidates_count_t;
+
+    /* Configs and Results */
     using reserve_capacity_t = typename graph_t::reserve_capacity_t;
     using insert_config_t = typename graph_t::insert_config_t;
     using insert_result_t = typename graph_t::insert_result_t;
@@ -117,8 +125,11 @@ struct vram_nvidia_index {
     using search_config_t = typename graph_t::search_config_t;
     using search_result_t = typename graph_t::search_result_t;
     using refine_config_t = typename graph_t::refine_config_t;
-    using refine_result_t = typename graph_t::refine_result_t;
-    using health_result_t = typename graph_t::health_result_t;
+    using split_config_t = typename graph_t::split_config_t;
+    using refine_report_t = typename graph_t::refine_report_t;
+    using reachability_t = typename graph_t::reachability_t;
+
+    /* Plans */
     using refine_plan_t = typename graph_t::refine_plan_t;
     using save_plan_t = typename graph_t::save_plan_t;
     using load_plan_t = typename graph_t::load_plan_t;
@@ -158,9 +169,9 @@ struct vram_nvidia_index {
         return graph_.traversal_memory_usage(queries, config, extra_bytes);
     }
     expected<search_result_t> search(tape_view<byte_t const> queries, nk::matrix_span<node_id_t> result_ids,
-                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
-                                     search_config_t config = {}) noexcept {
-        return graph_.search(queries, result_ids, result_distances, context, config);
+                                     nk::matrix_span<distance_t> result_distances, search_config_t config,
+                                     traversal_context_t& context) noexcept {
+        return graph_.search(queries, result_ids, result_distances, config, context);
     }
 
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t entries) const noexcept {
@@ -170,23 +181,23 @@ struct vram_nvidia_index {
                                        std::size_t receivers) const noexcept {
         return graph_.traversal_memory_usage(config, entries, receivers);
     }
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                        refine_config_t config = {}) noexcept {
-        return graph_.plan_refine(nodes, context, config);
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, refine_config_t config,
+                                        traversal_context_t& context) noexcept {
+        return graph_.plan_refine(nodes, config, context);
     }
-    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        return graph_.refine(nodes, context, config);
+    expected<refine_report_t> refine(iota_view<node_id_t> nodes, refine_config_t config,
+                                     traversal_context_t& context) noexcept {
+        return graph_.refine(nodes, config, context);
     }
-    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_index*> donors, traversal_context_t& context,
-                                        refine_config_t config = {}) noexcept {
-        return graph_.plan_absorb(donors, &vram_nvidia_index::graph_, context, config);
+    expected<refine_plan_t> plan_absorb(std::span<vram_nvidia_index*> donors, refine_config_t config,
+                                        traversal_context_t& context) noexcept {
+        return graph_.plan_absorb(donors, &vram_nvidia_index::graph_, config, context);
     }
-    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, traversal_context_t& context,
-                                       refine_config_t config = {}, u64_t seed = 0) noexcept {
-        return graph_.plan_split(receivers, &vram_nvidia_index::graph_, context, config, seed);
+    expected<refine_plan_t> plan_split(std::span<vram_nvidia_index*> receivers, split_config_t config,
+                                       traversal_context_t& context) noexcept {
+        return graph_.plan_split(receivers, &vram_nvidia_index::graph_, config, context);
     }
-    expected<health_result_t> health(traversal_context_t& context) noexcept { return graph_.health(context); }
+    expected<reachability_t> health(traversal_context_t& context) noexcept { return graph_.health(context); }
 
     expected<basic::columns_extents_t> columns_extents(traversal_context_t& context) noexcept {
         return graph_.columns_extents(context);
@@ -213,24 +224,83 @@ struct vram_nvidia_index {
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
         graph_.find_each(key, callback);
     }
+    status_t neighbors(node_id_t first, std::span<node_id_t> rows) const noexcept {
+        return graph_.neighbors(first, rows);
+    }
     std::size_t count(key_t const& key) const noexcept { return graph_.count(key); }
     bool contains(key_t const& key) const noexcept { return graph_.contains(key); }
 
+    /**
+     *  @brief Counts on @p context 's stream the candidates of every walk @p arguments judges that
+     *      it admits, into its @c matched_counts, without a cap: a radius walk's first pass, over
+     *      the candidates a @ref search of the call's breadth found.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k The fatbin lacks the pass.
+     */
+    status_t launch_within_count_(cuda_admit_arguments<node_id_t> const& arguments,
+                                  traversal_context_t const& context) noexcept {
+        return launch_within_(vram_kernel_t::within_count_k, arguments, context);
+    }
+
+    /**
+     *  @brief Writes on @p context 's stream the candidates of every walk @p arguments judges that
+     *      it admits, as the first pass counted them.
+     *
+     *  They go back to back into @c matched_ids and @c matched_metres from each query's offset,
+     *  filing the offsets past the base @c matched_offsets holds first.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k The fatbin lacks the pass.
+     */
+    status_t launch_within_write_(cuda_admit_arguments<node_id_t> const& arguments,
+                                  traversal_context_t const& context) noexcept {
+        return launch_within_(vram_kernel_t::within_write_k, arguments, context);
+    }
+
+    /** Copies on @p context 's stream the values of the @p listed nodes back to back into
+     *  @p outputs, their offsets into @p output_offsets from the base its first holds, as the
+     *  graph's gather does. */
+    status_t launch_gather_tape_(std::span<node_id_t const> listed, byte_t* outputs, std::span<u64_t> output_offsets,
+                                 traversal_context_t const& context) noexcept {
+        return graph_.launch_gather_tape_(listed, outputs, output_offsets, context);
+    }
+
   private:
 
-    /** A plural's shard table measures, closes and reopens the graph's claims. */
+    /** A sharded index's shard table measures, closes and reopens the graph's claims. */
     template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
-    /** A plural walks the graph below its snapshot and publishes its batches inside one commit. */
+    /** A sharded index walks the graph below its snapshot and publishes its batches inside one
+     *  commit. */
     template <typename index_type_, typename, typename, typename, typename>
-        requires std::same_as<typename index_type_::node_id_t, utilities::node_id_t>
+        requires std::same_as<typename index_type_::node_id_t, u32_t>
     friend struct basic::vram_nvidia_indexes;
 
     std::size_t claimed_() const noexcept { return graph_.claimed_(); }
     status_t close_() noexcept { return graph_.close_(); }
     void reopen_() noexcept { graph_.reopen_(); }
     void retire_() noexcept { graph_.retire_(); }
+
+    /** Launches the radius walk's pass @p kernel over @p arguments on @p context 's stream, found
+     *  in the kits' table there by symbol, a warp per query, oversubscribing every multiprocessor
+     *  eight times at most. */
+    status_t launch_within_(vram_kernel_t kernel, cuda_admit_arguments<node_id_t> const& arguments,
+                            traversal_context_t const& context) noexcept {
+        auto const [kits, kits_status] = graph_t::kits_kernels_(context);
+        if (failed(kits_status)) return kits_status;
+        vram_kernel_symbol_t symbol;
+        vram_kernel_symbol(symbol, "geospatial", "cuda_within", {"cuda_admit_arguments", 1}, capability_,
+                           itanium_type<node_id_type_> {}, kernel);
+        cuda_function_handle_t const function = graph_t::kits_symbol_function_(*kits, symbol.text);
+        if (!function) return status_t::unsupported_k;
+        if (!arguments.queries_count) return status_t::success_k;
+        u32_t const blocks = min_of<u32_t>(divide_round_up<u32_t>(arguments.queries_count, vram_warps_per_block_k),
+                                           device_specs().multiprocessor_count * 8);
+        return cuda_launch(api(), function, blocks, vram_warps_per_block_k * 32, 0, context.stream(),
+                           cuda_overlap_t::serialized_k, arguments);
+    }
 
     graph_t graph_;
 };
@@ -242,7 +312,7 @@ template <typename node_id_type_>
 struct cuda_admit_arguments {
     basic::vram_ragged_storage<node_id_type_> storage;
 
-    /** The queries, @b [queries], and the candidates their walks landed,
+    /** The queries, @b [queries], and the candidates their walks found,
      *  @b [queries,candidates_count] IDs. */
     earth_observation_t const* queries = nullptr;
     node_id_type_ const* candidate_ids = nullptr;
@@ -266,10 +336,12 @@ struct cuda_admit_arguments {
     f64_t column_step_degrees = 0;
     f64_t drop_scale = 0;
 
-    /** The landing, @b [queries,wanted] IDs and metres, and a count per query. */
+    /** The outputs, @b [queries,wanted] IDs and metres, and a count per query; a radius walk's
+     *  run back to back instead, from the offsets one past each query, the base at the first. */
     node_id_type_* matched_ids = nullptr;
     f64_t* matched_metres = nullptr;
     u64_t* matched_counts = nullptr;
+    u64_t* matched_offsets = nullptr;
 };
 
 } // namespace unum::usearch::geospatial

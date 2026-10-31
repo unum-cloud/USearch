@@ -36,7 +36,7 @@
 
 #include "basic_punned.cuh"
 
-using basic::traversal_telemetry_t;
+using basic::traversal_stats_t;
 
 /** The SmashTable row kit one CPU class pairs for the scans its NVMe directories run: picked here
  *  per class, never by a unit's own flags, so every class unit spells one index type with one kit
@@ -174,13 +174,12 @@ struct thread_scratch {
         : traversals(thread_allocator_t {executor.arena(0)}), metrics(thread_allocator_t {executor.arena(0)}) {}
 
     /** Rewinds every arena, keeping the high-water mark of earlier calls, and builds one context
-     *  sized for @p connectivity and @p expansion plus one metric from @p make_metric per
-     *  thread. */
+     *  sized for @p connectivity and @p expansion plus one metric from @p make_metric for each
+     *  of the first @p threads threads. */
     template <typename make_metric_type_>
-    status_t prepare(forkunion_executor_t& executor, std::size_t connectivity, std::size_t expansion, u64_t seed,
-                     make_metric_type_&& make_metric) noexcept {
+    status_t prepare(forkunion_executor_t& executor, std::size_t threads, std::size_t connectivity,
+                     std::size_t expansion, u64_t seed, make_metric_type_&& make_metric) noexcept {
         if (status_t const rewound = executor.reserve(0); failed(rewound)) return rewound;
-        std::size_t const threads = executor.size();
         if (failed(traversals.reserve_exactly(threads)) || failed(metrics.reserve_exactly(threads)))
             return status_t::bad_alloc_k;
         typename index_type_::insert_config_t const walk {expansion};
@@ -199,8 +198,8 @@ struct thread_scratch {
     }
 
     /** The counters every thread's walks accumulated. */
-    traversal_telemetry_t telemetry() const noexcept {
-        traversal_telemetry_t total;
+    traversal_stats_t telemetry() const noexcept {
+        traversal_stats_t total;
         for (traversal_context_t const& context : traversals) total += context.telemetry;
         return total;
     }
@@ -208,26 +207,27 @@ struct thread_scratch {
 
 /**
  *  @brief Inserts @p count entries under their keys as one batch: every thread builds its share of
- *      the values from the index's allocator, then one plan lands them on every thread and
+ *      the values from the index's allocator, then one plan writes them on every thread and
  *      publishes once.
  *
  *  Everything fallible runs before the plan dispenses: the keys and values, the traversals and the
  *  metrics. A refused build frees every value built so far and leaves the index untouched. Once the
- *  plan dispensed, every position lands and the progress handler can no longer cancel. The plan
+ *  plan dispensed, every position is written and the progress handler cannot cancel. The plan
  *  routes the entries over the shards of @p indexes, and their walks run on each shard's own
- *  scratch.
+ *  scratch, never on a shared one.
  */
 template <typename indexes_type_, typename make_metric_type_, typename build_type_>
-expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, std::size_t count,
-                                               std::size_t connectivity, std::size_t expansion,
-                                               make_metric_type_&& make_metric, build_type_&& build,
-                                               progress_ticks_t& ticks, forkunion_executor_t& executor) noexcept {
+expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, std::size_t count,
+                                           std::size_t connectivity, std::size_t expansion,
+                                           make_metric_type_&& make_metric, build_type_&& build,
+                                           progress_ticks_t& ticks, forkunion_executor_t& executor) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using value_t = typename indexes_type_::value_t;
     using key_t = typename indexes_type_::key_t;
     using metric_t = made_metric<make_metric_type_>;
     thread_scratch<shard_t, metric_t> scratch {executor};
-    if (status_t const prepared = scratch.prepare(executor, connectivity, expansion, index.size(), make_metric);
+    if (status_t const prepared = scratch.prepare(executor, executor.size(), connectivity, expansion, index.size(),
+                                                  make_metric);
         failed(prepared))
         return {{}, prepared};
 
@@ -262,7 +262,8 @@ expected<traversal_telemetry_t> insert_entries(indexes_type_& index, usearch_key
     return {scratch.telemetry(), status_t::success_k};
 }
 
-/** The scratch of one call driving the plural @p plan over shards of @p shard_type_, a metric from
+/** The scratch of one call driving a sharded index's @p plan over shards of @p shard_type_, a
+ *  metric from
  *  @p make_metric per thread, sized for @p widest_list, the widest neighbor list a walk copies, or
  *  the plan's connectivity when that is wider. */
 template <typename shard_type_, typename plan_type_, typename make_metric_type_>
@@ -270,7 +271,7 @@ expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_re
     plan_type_ const& plan, std::size_t widest_list, make_metric_type_&& make_metric,
     forkunion_executor_t& executor) noexcept {
     thread_scratch<shard_type_, made_metric<make_metric_type_>> scratch {executor};
-    status_t const prepared = scratch.prepare(executor, max_of(widest_list, plan.connectivity()),
+    status_t const prepared = scratch.prepare(executor, executor.size(), max_of(widest_list, plan.connectivity()),
                                               plan.walk().expansion_factor, plan.audit().visible + plan.ticked,
                                               make_metric);
     return {std::move(scratch), prepared};
@@ -291,7 +292,7 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
                           forkunion_executor_t& executor) noexcept {
     using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
     using flag_ref_t = typename shard_type_::template atomic_ref<bool>;
-    std::size_t const population = plan.audit().visible;
+    std::size_t const population = plan.planned_nodes();
     // Every step bumps them, so they take their own lines, away from the locals every thread reads.
     alignas(default_alignment_k) std::size_t ticked = plan.ticked;
     alignas(default_alignment_k) std::size_t taken = plan.taken;
@@ -324,28 +325,27 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
 }
 
 /** What one unit of @p metric_type_'s distance is worth on the C scale: one, unless a modality's
- *  fixed-point metric, or a GPU index scoring with one, specializes it so that its full scale lands
- *  as one. */
+ *  fixed-point metric, or a GPU index scoring with one, specializes it so that its full scale
+ *  reaches the value one. */
 template <typename metric_type_>
 inline constexpr usearch_distance_t distance_unit = 1;
 
 /** Hands @p body a callable building the key predicate an executor thread asks, which a walk asks
- *  about its nodes through their records: the dummy without a handler, @p predicate asked a quad at
- *  a time when cheap, and when expensive, over that thread's own buffers, reserved for rounds of
+ *  about its nodes through their records: the dummy without a predicate, a cheap one asked a quad
+ *  at a time, and an expensive one over that thread's own buffers, reserved for rounds of
  *  @p round_capacity candidates gathered beside @p payload_type_. */
 template <typename payload_type_, typename body_type_>
-status_t with_key_predicates(usearch_predicate_t predicate, std::size_t round_capacity, forkunion_executor_t& executor,
+status_t with_key_predicates(predicate_t const& predicate, std::size_t round_capacity, forkunion_executor_t& executor,
                              body_type_&& body) noexcept {
-    if (!predicate.callback) {
+    if (std::holds_alternative<no_predicate_t>(predicate)) {
         body([](std::size_t) noexcept { return dummy_predicate_t {}; });
         return status_t::success_k;
     }
-    if (predicate.cost != usearch_predicate_cost_expensive_k) {
-        predicate_t const cheap {predicate};
-        body([&](std::size_t) noexcept { return cheap; });
+    if (cheap_predicate_t const* const cheap = std::get_if<cheap_predicate_t>(&predicate)) {
+        body([&](std::size_t) noexcept { return *cheap; });
         return status_t::success_k;
     }
-    expensive_predicates<payload_type_> expensive {predicate};
+    expensive_predicates<payload_type_> expensive {std::get<expensive_predicate_t>(predicate).predicate};
     if (status_t const opened = open_predicate(expensive, executor); failed(opened)) return opened;
     for (std::size_t thread = 0; thread != executor.size(); ++thread)
         if (status_t const reserved = reserve_predicate(expensive.of_thread(thread), round_capacity); failed(reserved))
@@ -369,22 +369,21 @@ status_t snapshot_shards(indexes_type_ const& indexes, watermarks_type_& waterma
 
 /**
  *  @brief Searches @p count queries on the executor's threads, each built by @p query_of, which
- *      hands the query it prepared to a continuation, and lands every query's matches in
- *      @p landing.
+ *      hands the query it prepared to a continuation, and writes every query's matches in
+ *      @p outputs.
  *
  *  A predicate narrows each query to the entries it admits: a walk routes past the rest until the
  *  admitted ones fill its breadth, and a scan asks only about entries that would enter the ranking.
  *  Every query walks each shard of @p indexes below one snapshot taken for the whole call, so a
- *  batch counts in every query on all its shards or none, and lands the merged ranking. A handler
+ *  batch counts in every query on all its shards or none, and writes the merged ranking. A handler
  *  answering cancel stops the queries no thread has taken yet.
  */
 template <typename indexes_type_, typename make_metric_type_, typename query_of_type_>
-expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size_t count, std::size_t wanted,
-                                               std::size_t connectivity, std::size_t expansion,
-                                               usearch_traversal_t traversal, usearch_predicate_t predicate,
-                                               make_metric_type_&& make_metric, query_of_type_&& query_of,
-                                               matches_landing_t& landing, progress_ticks_t& ticks,
-                                               forkunion_executor_t& executor) noexcept {
+expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t count, std::size_t connectivity,
+                                           make_metric_type_&& make_metric, query_of_type_&& query_of,
+                                           matches_outputs_t& outputs, search_config_t search,
+                                           predicate_t const& predicate, forkunion_executor_t& executor,
+                                           progress_ticks_t& ticks) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using key_t = typename indexes_type_::key_t;
     using node_id_t = typename indexes_type_::node_id_t;
@@ -392,10 +391,12 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
     using metric_t = made_metric<make_metric_type_>;
     using traversal_context_t = typename thread_scratch<shard_t, metric_t>::traversal_context_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the merges resolve them");
+    std::size_t const wanted = outputs.wanted, expansion = search.expansion_factor;
     // Pools narrower than the ranking they fill would short every query.
     std::size_t const breadth = max_of(expansion ? expansion : std::size_t(connectivity_32_k) * 2, wanted);
     thread_scratch<shard_t, metric_t> scratch {executor};
-    if (status_t const prepared = scratch.prepare(executor, connectivity, breadth, indexes.size(), make_metric);
+    if (status_t const prepared = scratch.prepare(executor, executor.size(), connectivity, breadth, indexes.size(),
+                                                  make_metric);
         failed(prepared))
         return {{}, prepared};
     typename indexes_type_::search_config_t const config {breadth};
@@ -404,7 +405,7 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
     growing_buffer<distance_t, thread_allocator_t> distances {caller};
     if (failed(distances.resize_uninitialized(executor.size() * wanted))) return {{}, status_t::bad_alloc_k};
     if (status_t const taken = snapshot_shards(indexes, watermarks); failed(taken)) return {{}, taken};
-    bool const scanning = traversal == usearch_traversal_scan_k;
+    bool const scanning = search.traversal == traversal_t::scan_k;
     status_t searched = status_t::success_k;
     status_t const asked = with_key_predicates<typename shard_t::scored_node_t>(
         predicate, scratch.round_capacity, executor,
@@ -418,19 +419,19 @@ expected<traversal_telemetry_t> search_entries(indexes_type_& indexes, std::size
                     traversal_context_t& context = scratch.traversals[thread];
                     metric_t& metric = scratch.metrics[thread];
                     admits_t admits = admits_of(thread);
-                    std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys) + query_index * wanted, wanted};
+                    std::span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys) + query_index * wanted, wanted};
                     std::span<distance_t> const scores {distances.data() + thread * wanted, wanted};
                     status_t const answered = query_of(query_index, thread, [&](auto const& query) noexcept {
                         auto const [found, status] = scanning
-                                                         ? indexes.scan(query, metric, admits, context,
-                                                                        to_span(watermarks), keys, scores)
-                                                         : indexes.search_if(query, metric, admits, context, config,
-                                                                             to_span(watermarks), keys, scores);
+                                                         ? indexes.scan(query, to_span(watermarks), keys, scores,
+                                                                        admits, metric, context)
+                                                         : indexes.search_if(query, to_span(watermarks), keys, scores,
+                                                                             config, admits, metric, context);
                         if (failed(status)) return status;
                         for (std::size_t match = 0; match != found; ++match)
-                            landing.scores[query_index * wanted + match] =
+                            outputs.scores[query_index * wanted + match] =
                                 static_cast<usearch_distance_t>(scores[match]) * distance_unit<metric_t>;
-                        landing.counts[query_index] = found;
+                        outputs.counts[query_index] = found;
                         return status;
                     });
                     keep_first_failure<indexes_type_::template atomic_ref>(searched, answered);
@@ -467,8 +468,8 @@ void entries_under(indexes_type_ const& indexes, usearch_key_t key,
 
 /**
  *  @brief Ranks @p count queries on an NVMe view a progress step at a time, each step one call of
- *      the view with the walks of many queries in flight on every thread of @p executor, and lands
- *      every query's matches in @p landing; a handler answering cancel stops the steps not begun.
+ *      the view with the walks of many queries in flight on every thread of @p executor, and writes
+ *      every query's matches in @p outputs; a handler answering cancel stops the steps not begun.
  *
  *  Query @c i is built by @p query_of, and @p relation tests the stored values a query would admit;
  *  a per-thread relation family is rebuilt every step, as every step rewinds the arenas. A
@@ -477,27 +478,27 @@ void entries_under(indexes_type_ const& indexes, usearch_key_t key,
  *  executor thread's walks, or once per staged round of each thread's scan.
  */
 template <typename index_type_, typename make_metric_type_, typename query_of_type_, typename relation_type_>
-expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_t count, std::size_t wanted,
-                                                  std::size_t expansion, usearch_traversal_t traversal,
-                                                  usearch_predicate_t predicate, make_metric_type_& make_metric,
-                                                  query_of_type_& query_of, relation_type_& relation,
-                                                  matches_landing_t& landing, progress_ticks_t& ticks,
-                                                  nvme_executor_t& executor) noexcept {
+expected<traversal_stats_t> rank_nvme_queries(index_type_& index, std::size_t count, make_metric_type_& make_metric,
+                                              query_of_type_& query_of, relation_type_& relation,
+                                              matches_outputs_t& outputs, search_config_t search,
+                                              predicate_t const& predicate, nvme_executor_t& executor,
+                                              progress_ticks_t& ticks) noexcept {
     using key_t = typename index_type_::key_t;
     using search_result_t = typename index_type_::search_result_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walks resolve them");
+    std::size_t const wanted = outputs.wanted;
     // Pools narrower than the ranking they fill would short every query.
-    typename index_type_::search_config_t const config {max_of(index.non_zero_expansion_factor({expansion}), wanted)};
-    bool const scanning = traversal == usearch_traversal_scan_k;
-    dummy_predicate_t unfiltered;
-    predicate_t cheap {predicate};
-    traversal_telemetry_t telemetry;
+    typename index_type_::search_config_t const config {
+        max_of(index.non_zero_expansion_factor({search.expansion_factor}), wanted)};
+    bool const scanning = search.traversal == traversal_t::scan_k;
+    dummy_predicate_t no_predicate;
+    traversal_stats_t telemetry;
     std::size_t const step = ticks.slice();
     for (std::size_t first = 0; first != count;) {
         std::size_t const taking = min_of(step, count - first);
-        std::span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys) + first * wanted, taking * wanted};
-        std::span<usearch_distance_t> const scores {landing.scores + first * wanted, taking * wanted};
-        std::span<std::size_t> const counts {landing.counts + first, taking};
+        std::span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys) + first * wanted, taking * wanted};
+        std::span<usearch_distance_t> const scores {outputs.scores + first * wanted, taking * wanted};
+        std::span<std::size_t> const counts {outputs.counts + first, taking};
         auto step_query_of = [&](std::size_t query_index, thread_allocator_t const& allocator) noexcept {
             return query_of(first + query_index, allocator);
         };
@@ -505,24 +506,28 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
             if (status_t const prepared = relation.prepare(executor); failed(prepared)) return {telemetry, prepared};
         auto rank = [&]<typename predicate_type_>(predicate_type_& admits) noexcept {
             if (scanning)
-                return index.scan(taking, make_metric, step_query_of, executor, keys, scores, counts, admits, relation);
-            return index.search(taking, make_metric, step_query_of, executor, config, keys, scores, counts, admits,
-                                relation);
+                return index.scan(taking, make_metric, step_query_of, keys, scores, counts, admits, relation, executor);
+            return index.search(taking, make_metric, step_query_of, keys, scores, counts, config, admits, relation,
+                                executor);
         };
         expected<search_result_t> ranked {};
-        if (!predicate.callback) ranked = rank(unfiltered);
-        else if (predicate.cost != usearch_predicate_cost_expensive_k) ranked = rank(cheap);
+        cheap_predicate_t cheap {};
+        if (std::holds_alternative<no_predicate_t>(predicate)) ranked = rank(no_predicate);
+        else if (std::holds_alternative<cheap_predicate_t>(predicate))
+            ranked = rank(cheap = std::get<cheap_predicate_t>(predicate));
         else if (scanning) {
             // The scan opens the family after its rewind and reserves it for the widest batch it
             // settles.
-            expensive_predicates<typename index_type_::scan_payload_t> expensive {predicate};
-            ranked = index.scan(taking, make_metric, step_query_of, executor, keys, scores, counts, expensive,
-                                relation);
+            expensive_predicates<typename index_type_::scan_payload_t> expensive {
+                std::get<expensive_predicate_t>(predicate).predicate};
+            ranked = index.scan(taking, make_metric, step_query_of, keys, scores, counts, expensive, relation,
+                                executor);
         }
         else {
-            expensive_predicates<typename index_type_::walk_payload_t> expensive {predicate};
-            ranked = index.search(taking, make_metric, step_query_of, executor, config, keys, scores, counts, expensive,
-                                  relation);
+            expensive_predicates<typename index_type_::walk_payload_t> expensive {
+                std::get<expensive_predicate_t>(predicate).predicate};
+            ranked = index.search(taking, make_metric, step_query_of, keys, scores, counts, config, expensive, relation,
+                                  executor);
         }
         if (failed(ranked.status)) return {telemetry, ranked.status};
         telemetry.computed_distances += ranked.value.computed_distances;
@@ -537,28 +542,27 @@ expected<traversal_telemetry_t> rank_nvme_queries(index_type_& index, std::size_
 
 /**
  *  @brief Searches @p count queries on an NVMe view, the walks of many in flight on every thread of
- *      @p executor, each query built by @p query_of as the view takes it, and lands every query's
- *      matches in @p landing; progress lands a step at a time, as @ref rank_nvme_queries ranks
+ *      @p executor, each query built by @p query_of as the view takes it, and writes every query's
+ *      matches in @p outputs; progress reports a step at a time, as @ref rank_nvme_queries ranks
  *      them.
  *
  *  A predicate narrows each query to the entries it admits, while every entry still routes the
  *  walks.
  */
 template <typename index_type_, typename make_metric_type_, typename query_of_type_>
-expected<traversal_telemetry_t> search_entries(index_type_& index, std::size_t count, std::size_t wanted,
-                                               std::size_t expansion, usearch_traversal_t traversal,
-                                               usearch_predicate_t predicate, make_metric_type_&& make_metric,
-                                               query_of_type_&& query_of, matches_landing_t& landing,
-                                               progress_ticks_t& ticks, nvme_executor_t& executor) noexcept {
+expected<traversal_stats_t> search_entries(index_type_& index, std::size_t count, make_metric_type_&& make_metric,
+                                           query_of_type_&& query_of, matches_outputs_t& outputs,
+                                           search_config_t search, predicate_t const& predicate,
+                                           nvme_executor_t& executor, progress_ticks_t& ticks) noexcept {
     using metric_t = made_metric<make_metric_type_>;
+    std::size_t const wanted = outputs.wanted;
     dummy_predicate_t relation;
-    expected<traversal_telemetry_t> const ranked = rank_nvme_queries(index, count, wanted, expansion, traversal,
-                                                                     predicate, make_metric, query_of, relation,
-                                                                     landing, ticks, executor);
+    expected<traversal_stats_t> const ranked = rank_nvme_queries(index, count, make_metric, query_of, relation, outputs,
+                                                                 search, predicate, executor, ticks);
     if (failed(ranked.status)) return ranked;
     for (std::size_t query = 0; query != count; ++query)
-        for (std::size_t match = 0; match != landing.counts[query]; ++match)
-            landing.scores[query * wanted + match] *= distance_unit<metric_t>;
+        for (std::size_t match = 0; match != outputs.counts[query]; ++match)
+            outputs.scores[query * wanted + match] *= distance_unit<metric_t>;
     return ranked;
 }
 
@@ -574,7 +578,7 @@ status_t values_under(index_type_ const& index, usearch_key_t key, nvme_executor
     if (status_t const counted = index.count(identities, entries, executor); failed(counted)) return counted;
     std::size_t const held = entries[0];
     if (status_t const prepared = on_count(held); failed(prepared) || !held) return prepared;
-    return index.get(identities, held, entries, executor, on_value);
+    return index.get(identities, entries, held, executor, on_value);
 }
 
 /** Copies @p entry, borrowed for one read, into thread @p thread 's arena as @p kept, which
@@ -590,21 +594,50 @@ inline status_t keep_entry(nvme_executor_t& executor, std::size_t thread, bytes_
     return status_t::success_k;
 }
 
-/** The GPU ordinal @p variant computes on, its first shard's, where a call's arena must live, or
- *  the host's. */
+/** Where @p variant computes, its first shard's device or the host, where a call's arena must
+ *  live. */
 template <typename variant_type_>
-int device_of(variant_type_ const& variant) noexcept {
-    if constexpr (is_vram_index<variant_type_>) return variant.index.first_device();
-    else return host_device_k;
+arena_residency_t arena_residency_of(variant_type_ const& variant) noexcept {
+    if constexpr (is_vram_index<variant_type_>)
+        return vram_residency(static_cast<std::size_t>(variant.index.first_device()));
+    else return ram_residency_k;
+}
+
+/**
+ *  @brief Samples @p indexes below one snapshot on the calling thread, scored by the metric
+ *      @p make_metric builds over the executor's first arena, placed by @p coordinates_of, and
+ *      writes each parent's distance in the units search reports.
+ *
+ *  The walks are as wide as @p connectivity asks; the plan itself never scans.
+ */
+template <typename indexes_type_, typename make_metric_type_, typename coordinates_type_ = no_fixed_coordinates_t>
+expected<sample_result_t> sample_entries(indexes_type_& indexes, std::size_t connectivity,
+                                         make_metric_type_&& make_metric, basic_sample_inputs_t inputs,
+                                         basic_sample_outputs_t outputs, sample_config_t config,
+                                         forkunion_executor_t& executor,
+                                         coordinates_type_ const& coordinates_of = {}) noexcept {
+    using shard_t = typename indexes_type_::index_t;
+    using node_id_t = typename indexes_type_::node_id_t;
+    using metric_t = made_metric<make_metric_type_>;
+    thread_scratch<shard_t, metric_t> scratch {executor};
+    // The draw runs on the calling thread alone, so only its context and metric are built.
+    if (status_t const prepared = scratch.prepare(executor, 1, connectivity, connectivity * 2, config.seed,
+                                                  make_metric);
+        failed(prepared))
+        return {{}, prepared};
+    growing_buffer<node_id_t, thread_allocator_t> watermarks {thread_allocator_t {executor.arena(0)}};
+    if (status_t const taken = snapshot_shards(indexes, watermarks); failed(taken)) return {{}, taken};
+    expected<sample_result_t> const sampled = indexes.sample(inputs, to_span(watermarks), outputs, config,
+                                                             scratch.metrics[0], scratch.traversals[0], coordinates_of);
+    if (failed(sampled.status)) return sampled;
+    for (f32_t& distance : outputs.parent_distances.first(sampled.value.written))
+        distance = static_cast<f32_t>(distance * distance_unit<metric_t>);
+    return sampled;
 }
 
 #pragma endregion Fan Outs
 
 #pragma region Lookups and Cursors
-
-/** The cursor over every shard of the RAM variant @p variant_type_, in placement order. */
-template <typename variant_type_>
-using ram_cursor_of = typename variant_type_::index_t::cursor_t;
 
 /** Whether @p traits_type_ measures a key's entries from their values of @p value_type_, which a
  *  count then reads. */
@@ -623,77 +656,67 @@ void tally_entry(stats_type_& stats, value_type_ const& value) noexcept {
  *  @p traits_type_ measures any. */
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_ram_index<variant_type_>
-void count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, usearch_executor_t,
-                   usearch_outcome_t* outcome) noexcept {
-    using shard_t = typename variant_type_::index_t::index_t;
+status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, forkunion_executor_t&) noexcept {
+    using shard_t = typename variant_type_::shard_t;
     variant.index.find_each(uuid_of(key), [&](shard_t const& shard, typename shard_t::node_id_t node) noexcept {
         ++stats.entries;
         tally_entry<traits_type_>(stats, shard.published_value_of(node));
     });
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    return status_t::success_k;
 }
 
 /** Counts the entries an NVMe view stores under @p key into @p stats, reading them only where
  *  @p traits_type_ measures their sizes. */
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_nvme_index<variant_type_>
-void count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, usearch_executor_t executor_handle,
-                   usearch_outcome_t* outcome) noexcept {
-    usearch_executor_handle_t call_executor;
-    nvme_executor_t* const executor = executor_of(variant, executor_handle, call_executor, outcome);
-    if (!executor) return;
+status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats,
+                       nvme_executor_t& executor) noexcept {
     using view_t = typename variant_type_::index_t::codec_t::view_t;
     if constexpr (tallies<traits_type_, stats_type_, view_t>) {
         auto take_count = [&](std::size_t entries) noexcept { return stats.entries = entries, status_t::success_k; };
         auto measure = [&](std::size_t, std::size_t, std::size_t, view_t const& value) noexcept {
             tally_entry<traits_type_>(stats, value);
         };
-        propagate_error(values_under(variant.index, key, *executor, take_count, measure), outcome);
+        return values_under(variant.index, key, executor, take_count, measure);
     }
     else {
         std::array<us::utilities::uuid_t, 1> const identities {uuid_of(key)};
         std::array<std::size_t, 1> entries {};
-        status_t const counted = variant.index.count(identities, entries, *executor);
+        status_t const counted = variant.index.count(identities, entries, executor);
         stats.entries = entries[0];
-        propagate_error(counted, outcome);
+        return counted;
     }
 }
 
-/** Lands the entries a RAM variant stores under the key @p arguments name into @p memory, in
- *  insertion order, as @p traits_type_ lands values. */
-template <typename traits_type_, typename variant_type_, typename arguments_type_>
+/** Writes the entries a RAM variant stores under @p key to @p outputs, carved from @p memory, in
+ *  insertion order, as @p traits_type_ writes values; answers how many. */
+template <typename traits_type_, typename variant_type_>
     requires is_ram_index<variant_type_>
-void get_entries(variant_type_& variant, arguments_type_ const& arguments, growing_arena<forkunion_allocator_t>& memory,
-                 usearch_outcome_t* outcome) noexcept {
-    usearch_executor_handle_t call_executor;
-    forkunion_executor_t* const executor = executor_of(variant, arguments.executor, call_executor, outcome);
-    if (!executor) return;
-    if (status_t const rewound = executor->reserve(0); failed(rewound))
-        return propagate_error(rewound, outcome), void();
-    using shard_t = typename variant_type_::index_t::index_t;
-    thread_allocator_t const allocator {executor->arena(0)};
+expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
+                                  typename traits_type_::get_outputs_t outputs,
+                                  growing_arena<forkunion_allocator_t>& memory,
+                                  forkunion_executor_t& executor) noexcept {
+    if (status_t const rewound = executor.reserve(0); failed(rewound)) return {0, rewound};
+    using shard_t = typename variant_type_::shard_t;
+    thread_allocator_t const allocator {executor.arena(0)};
     growing_buffer<shard_t const*, thread_allocator_t> holders {allocator};
     growing_buffer<typename shard_t::node_id_t, thread_allocator_t> ids {allocator};
-    entries_under(variant.index, arguments.key, holders, ids);
-    if (ids.empty()) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+    entries_under(variant.index, key, holders, ids);
+    if (ids.empty()) return {0, status_t::success_k};
     auto value_at = [&](std::size_t entry) noexcept ->
         typename shard_t::value_t const& { return holders[entry]->published_value_of(ids[entry]); };
-    if (!variant_bodies<traits_type_>::land(variant, ids.size(), value_at, memory, arguments, outcome)) return;
-    if (arguments.written) *arguments.written = ids.size();
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    return {ids.size(), variant_bodies<traits_type_>::write_values(variant, ids.size(), value_at, memory, outputs)};
 }
 
-/** Lands the entries an NVMe view stores under the key @p arguments name into @p memory, in
+/** Writes the entries an NVMe view stores under @p key to @p outputs, carved from @p memory, in
  *  insertion order; the values land in its threads' arenas first, as their sizes are unknown until
  *  read. */
-template <typename traits_type_, typename variant_type_, typename arguments_type_>
+template <typename traits_type_, typename variant_type_>
     requires is_nvme_index<variant_type_>
-void get_entries(variant_type_& variant, arguments_type_ const& arguments, growing_arena<forkunion_allocator_t>& memory,
-                 usearch_outcome_t* outcome) noexcept {
+expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
+                                  typename traits_type_::get_outputs_t outputs,
+                                  growing_arena<forkunion_allocator_t>& memory, nvme_executor_t& executor) noexcept {
     using kept_t = typename variant_bodies<traits_type_>::kept_t;
-    usearch_executor_handle_t call_executor;
-    nvme_executor_t* const executor = executor_of(variant, arguments.executor, call_executor, outcome);
-    if (!executor) return;
     std::size_t held = 0;
     kept_t* kept = nullptr;
     auto carve_entries = [&](std::size_t entries) noexcept {
@@ -705,81 +728,57 @@ void get_entries(variant_type_& variant, arguments_type_ const& arguments, growi
     status_t keeping = status_t::success_k;
     auto keep = [&](std::size_t, std::size_t rank, std::size_t thread, auto const& value) noexcept {
         keep_first_failure<variant_type_::index_t::template atomic_ref>(
-            keeping, variant_bodies<traits_type_>::keep(*executor, thread, value, kept[rank]));
+            keeping, variant_bodies<traits_type_>::keep(executor, thread, value, kept[rank]));
     };
-    if (status_t const read = values_under(variant.index, arguments.key, *executor, carve_entries, keep); failed(read))
-        return propagate_error(read, outcome), void();
-    if (failed(keeping)) return propagate_error(keeping, outcome), void();
-    if (!held) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-    auto kept_at = [&](std::size_t entry) noexcept -> decltype(auto) { return kept[entry]; };
-    if (!variant_bodies<traits_type_>::land(variant, held, kept_at, memory, arguments, outcome)) return;
-    if (arguments.written) *arguments.written = held;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    if (status_t const read = values_under(variant.index, key, executor, carve_entries, keep); failed(read))
+        return {0, read};
+    if (failed(keeping)) return {0, keeping};
+    if (!held) return {0, status_t::success_k};
+    auto kept_at = [&](std::size_t entry) noexcept -> kept_t const& { return kept[entry]; };
+    return {held, variant_bodies<traits_type_>::write_values(variant, held, kept_at, memory, outputs)};
 }
 
-/** Pulls the next keys of a RAM variant's shards into @p memory, shard after shard; a destructive
- *  window since the cursor opened answers @c contended_k and lands none. */
-template <typename traits_type_, typename variant_type_, typename arguments_type_>
-    requires is_ram_index<variant_type_>
-void pull_entries(variant_type_& variant, ram_cursor_of<variant_type_>& cursor, arguments_type_ const& arguments,
-                  growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
+/** Pulls the next keys of a RAM or GPU variant's walk into @p memory, gathering their links into
+ *  @p links where named. */
+template <typename variant_type_>
+expected<std::span<usearch_key_t const>> pull_entries(variant_type_& variant,
+                                                      typename variant_type_::index_t::cursor_t& walk,
+                                                      links_outputs_t* links, std::size_t wanted,
+                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
     using key_t = typename variant_type_::index_t::key_t;
-    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the cursor reads them");
+    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
     // No more entries remain than every shard publishes now, so the carve never outgrows the read.
-    std::size_t const taking = min_of(variant.index.size(), arguments.wanted);
+    std::size_t const taking = min_of(variant.index.size(), wanted);
     usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
-    if (taking && !keys)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-    auto const [written, status] = cursor.read(variant.index,
-                                               std::span<key_t> {reinterpret_cast<key_t*>(keys), taking});
-    if (failed(status)) return propagate_error(status, outcome), void();
-    *arguments.keys = {keys, sizeof(usearch_key_t)};
-    *arguments.written = written;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    if (taking && !keys) return {{}, status_t::bad_alloc_k};
+    auto const [written, status] = walk.pull(variant.index, std::span<key_t> {reinterpret_cast<key_t*>(keys), taking},
+                                             links ? &links->keys : nullptr, links ? &links->offsets : nullptr);
+    return {{keys, written}, status};
 }
 
 /** Pulls the next keys of an NVMe view into @p memory through the executor. */
-template <typename traits_type_, typename variant_type_, typename arguments_type_>
+template <typename variant_type_>
     requires is_nvme_index<variant_type_>
-void pull_entries(variant_type_& variant, std::size_t& offset, arguments_type_ const& arguments,
-                  growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
-    usearch_executor_handle_t call_executor;
-    nvme_executor_t* const executor = executor_of(variant, arguments.executor, call_executor, outcome);
-    if (!executor) return;
-    std::size_t const taking = min_of(variant.index.size() - offset, arguments.wanted);
-    if (!taking) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+expected<std::span<usearch_key_t const>> pull_entries(variant_type_& variant, std::size_t& offset, std::size_t wanted,
+                                                      growing_arena<forkunion_allocator_t>& memory,
+                                                      nvme_executor_t& executor) noexcept {
+    std::size_t const taking = min_of(variant.index.size() - offset, wanted);
+    if (!taking) return {{}, status_t::success_k};
     usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
-    if (!keys) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-    // The values the read passes along stay unread, as a pull lands keys alone.
+    if (!keys) return {{}, status_t::bad_alloc_k};
+    // The values the read passes along stay unread, as a pull writes keys alone.
     auto skip = [](std::size_t, std::size_t, auto const&) noexcept {};
     std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-    if (status_t const read = variant.index.read_entries(offset, identities, *executor, skip); failed(read))
-        return propagate_error(read, outcome), void();
+    if (status_t const read = variant.index.read_entries(offset, identities, executor, skip); failed(read))
+        return {{}, read};
     offset += taking;
-    *arguments.keys = {keys, sizeof(usearch_key_t)};
-    *arguments.written = taking;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    return {{keys, taking}, status_t::success_k};
 }
 
 #pragma endregion Lookups and Cursors
 
 #if USEARCH_ARCH_CUDA_
 #pragma region GPU Variants
-
-/** The plan of a GPU variant's refinement, which no GPU variant opens yet: each one's
- *  @c plan_refine answers @c unsupported_k, so no call ever runs one. */
-struct vram_nvidia_refine_plan_t {
-    struct audit_t {
-        std::size_t visible = 0;
-    };
-    audit_t audit() const noexcept { return {}; }
-    bool landing() const noexcept { return false; }
-    bool consumed(std::size_t) const noexcept { return false; }
-    bool reselecting() const noexcept { return false; }
-    void stop() noexcept {}
-    std::span<std::size_t const> steps() const noexcept { return {}; }
-    expected<basic::refine_result_t> finish() const noexcept { return {{}, status_t::unsupported_k}; }
-};
 
 /** Reserves @p entries nodes of @p connectivity neighbors and @p bytes of values over every shard
  *  of a GPU variant's @p index, freezing the connectivity. */
@@ -806,10 +805,10 @@ status_t vram_nvidia_save(indexes_type_& index, std::string_view path, codec_typ
 /** Inserts the entries of @p tape under the keys of @p keys_view as one batch over the shards of
  *  @p index, freezing @p connectivity first unless a reservation did. */
 template <typename indexes_type_>
-expected<traversal_telemetry_t> vram_nvidia_insert(indexes_type_& index, usearch_keys_view_t keys_view,
-                                                   tape_view<byte_t const> tape, std::size_t connectivity,
-                                                   std::size_t expansion, progress_ticks_t& ticks,
-                                                   cuda_executor_t& executor) noexcept {
+expected<traversal_stats_t> vram_nvidia_insert(indexes_type_& index, usearch_keys_view_t keys_view,
+                                               tape_view<byte_t const> tape, std::size_t connectivity,
+                                               std::size_t expansion, progress_ticks_t& ticks,
+                                               cuda_executor_t& executor) noexcept {
     std::size_t const count = tape.size();
     if (!index.capacity())
         if (status_t const reserved = vram_nvidia_reserve(index, count, connectivity,
@@ -830,34 +829,33 @@ expected<traversal_telemetry_t> vram_nvidia_insert(indexes_type_& index, usearch
 }
 
 /** Searches the queries of @p queries a progress step at a time, each step one merged search over
- *  every shard of @p index, landing each query's matches in @p landing on host pages; a handler
+ *  every shard of @p index, outputs each query's matches in @p outputs on host pages; a handler
  *  answering cancel stops the steps not begun. A search wanting no matches answers before reading
  *  a query. */
 template <typename indexes_type_>
-expected<traversal_telemetry_t> vram_nvidia_search(indexes_type_& index, tape_view<byte_t const> queries,
-                                                   std::size_t wanted, std::size_t expansion,
-                                                   matches_landing_t& landing, progress_ticks_t& ticks,
-                                                   cuda_executor_t& executor) noexcept {
+expected<traversal_stats_t> vram_nvidia_search(indexes_type_& index, tape_view<byte_t const> queries,
+                                               std::size_t wanted, std::size_t expansion, matches_outputs_t& outputs,
+                                               progress_ticks_t& ticks, cuda_executor_t& executor) noexcept {
     using face_t = typename indexes_type_::index_t;
     std::size_t const count = queries.size();
     if (!wanted) {
-        for (std::size_t query = 0; query != count; ++query) landing.counts[query] = 0;
+        for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
         return {{}, status_t::success_k};
     }
     using key_t = us::utilities::uuid_t;
-    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land whole in the caller's landing");
+    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land whole in the caller's outputs");
     typename face_t::search_config_t const config {static_cast<u32_t>(expansion), static_cast<u32_t>(wanted)};
     std::size_t const step = ticks.slice();
-    traversal_telemetry_t total;
+    traversal_stats_t total;
     for (std::size_t first = 0; first != count;) {
         std::size_t const taking = min_of(step, count - first);
         std::size_t const first_match = first * wanted, matches = taking * wanted;
-        usearch_distance_t* const scores = landing.scores + first_match;
+        usearch_distance_t* const scores = outputs.scores + first_match;
         auto const [found, status] = index.search(
-            queries.subview(first, taking), executor, config,
-            nk::matrix_span<key_t> {reinterpret_cast<key_t*>(landing.keys + first_match), {taking, wanted}},
+            queries.subview(first, taking),
+            nk::matrix_span<key_t> {reinterpret_cast<key_t*>(outputs.keys + first_match), {taking, wanted}},
             nk::matrix_span<usearch_distance_t> {scores, {taking, wanted}},
-            std::span<std::size_t> {landing.counts + first, taking});
+            std::span<std::size_t> {outputs.counts + first, taking}, config, executor);
         if (failed(status)) return {total, status};
         total.visited_members += found.visited_members;
         total.computed_distances += found.computed_distances;
@@ -869,20 +867,108 @@ expected<traversal_telemetry_t> vram_nvidia_search(indexes_type_& index, tape_vi
     return {total, status_t::success_k};
 }
 
-/** A GPU variant counts no key's entries yet. */
+/** Counts the entries a GPU variant stores under @p key on every shard's host key map; their
+ *  values stay on the devices, so the extents stay zero. */
 template <typename traits_type_, typename variant_type_, typename stats_type_>
     requires is_vram_index<variant_type_>
-void count_entries(variant_type_&, usearch_key_t, stats_type_&, usearch_executor_t,
-                   usearch_outcome_t* outcome) noexcept {
-    propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet");
+status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& stats, cuda_executor_t&) noexcept {
+    stats.entries = variant.index.count(uuid_of(key));
+    return status_t::success_k;
 }
 
-/** A GPU variant exports no key's entries yet. */
-template <typename traits_type_, typename variant_type_, typename arguments_type_>
+/**
+ *  @brief Writes the entries a GPU variant stores under @p key to @p outputs, carved from
+ *      @p memory: each shard's node list crosses down at its node width, @c gather_tape_k packs
+ *      its values back to back in the shard's output staging, and one copy brings the tape back,
+ *      where the modality reads each stored value back as it writes it.
+ *
+ *  A modality whose bodies spell no @c keep_stored cannot read its stored bytes back, and a face
+ *  that keeps its gather to its sharded index lends none, so both answer @c unsupported_k; shards
+ *  on a device @p executor drives no stream on refuse with @c config_mismatch_k.
+ */
+template <typename traits_type_, typename variant_type_>
     requires is_vram_index<variant_type_>
-void get_entries(variant_type_&, arguments_type_ const&, growing_arena<forkunion_allocator_t>&,
-                 usearch_outcome_t* outcome) noexcept {
-    propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet");
+expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
+                                  typename traits_type_::get_outputs_t outputs,
+                                  growing_arena<forkunion_allocator_t>& memory, cuda_executor_t& executor) noexcept {
+    using bodies_t = variant_bodies<traits_type_>;
+    using kept_t = typename bodies_t::kept_t;
+    using graph_t = typename variant_type_::index_t::index_t;
+    using node_id_t = typename graph_t::node_id_t;
+    if constexpr (!requires(kept_t& kept, graph_t& graph, cuda_executor_t::traversal_context_t const& context) {
+                      bodies_t::keep_stored(bytes_view_t {}, kept);
+                      graph.launch_gather_tape_(std::span<node_id_t const> {}, nullptr, std::span<u64_t> {}, context);
+                  })
+        return {0, status_t::unsupported_k};
+    else {
+        us::utilities::uuid_t const identity = uuid_of(key);
+        std::size_t const held = variant.index.count(identity);
+        if (!held) return {0, status_t::success_k};
+        node_id_t* const listed = carve<node_id_t>(memory, held);
+        kept_t* const kept = carve<kept_t>(memory, held);
+        if (!listed || !kept) return {0, status_t::bad_alloc_k};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {0, claim_status};
+        std::size_t found = 0;
+        for (graph_t& graph : variant.index.live_shards()) {
+            std::size_t const first = found;
+            graph.find_each(identity, [&](node_id_t node) noexcept {
+                if (found != held) listed[found++] = node;
+            });
+            std::size_t const count = found - first;
+            if (!count) continue;
+            std::size_t stream = 0;
+            while (stream != executor.size() && executor.device(stream) != graph.device_specs().ordinal) ++stream;
+            if (stream == executor.size()) return {0, status_t::config_mismatch_k};
+            cuda_api_t const& api = graph.api();
+            // Each node's extent comes off the device's offsets column, so the tape is sized first.
+            u64_t const* const stored_offsets = graph.storage().offsets;
+            std::size_t tape_bytes = 0;
+            for (std::size_t entry = first; entry != found; ++entry) {
+                std::array<u64_t, 2> extent {};
+                if (cuda_copy(api, extent.data(), stored_offsets + listed[entry], sizeof(extent)) != cuda_success_k)
+                    return {0, status_t::device_error_k};
+                tape_bytes += static_cast<std::size_t>(extent[1] - extent[0]);
+            }
+            std::size_t const listed_bytes = round_up_to_multiple(count * sizeof(node_id_t), default_alignment_k);
+            std::size_t const offsets_bytes = round_up_to_multiple((count + 1) * sizeof(u64_t), default_alignment_k);
+            // The last gather was awaited, so its run rewinds for this carve, which grows it at
+            // most once per call; a stream's first context is born on its device.
+            std::size_t const staging_bytes = listed_bytes + offsets_bytes + tape_bytes;
+            if (status_t const reserved = executor.reserve(staging_bytes, 1); failed(reserved)) return {0, reserved};
+            if (cuda_set_device(api, graph.device_specs().ordinal) != cuda_success_k)
+                return {0, status_t::device_error_k};
+            std::span<cuda_executor_t::traversal_context_t> const stream_traversals = executor.traversals(stream);
+            cuda_executor_t::traversal_context_t& context = stream_traversals[0];
+            byte_t* const staging = context.allocator().allocate(staging_bytes);
+            u64_t* const host_offsets = carve<u64_t>(memory, count + 1);
+            byte_t* const host_tape = carve<byte_t>(memory, tape_bytes);
+            if (!staging || !host_offsets || (tape_bytes && !host_tape)) return {0, status_t::bad_alloc_k};
+            node_id_t* const device_listed = reinterpret_cast<node_id_t*>(staging);
+            u64_t* const device_offsets = reinterpret_cast<u64_t*>(staging + listed_bytes);
+            byte_t* const device_tape = staging + listed_bytes + offsets_bytes;
+            host_offsets[0] = 0;
+            if (cuda_copy(api, device_listed, listed + first, count * sizeof(node_id_t)) != cuda_success_k ||
+                cuda_copy(api, device_offsets, host_offsets, sizeof(u64_t)) != cuda_success_k)
+                return {0, status_t::device_error_k};
+            if (status_t const gathered = graph.launch_gather_tape_({device_listed, count}, device_tape,
+                                                                    {device_offsets, count + 1}, context);
+                failed(gathered))
+                return {0, gathered};
+            if (status_t const waited = context.wait(); failed(waited)) return {0, waited};
+            if (cuda_copy(api, host_offsets, device_offsets, (count + 1) * sizeof(u64_t)) != cuda_success_k ||
+                (tape_bytes && cuda_copy(api, host_tape, device_tape, tape_bytes) != cuda_success_k))
+                return {0, status_t::device_error_k};
+            for (std::size_t entry = 0; entry != count; ++entry) {
+                bytes_view_t const stored {host_tape + host_offsets[entry],
+                                           static_cast<std::size_t>(host_offsets[entry + 1] - host_offsets[entry])};
+                if (status_t const read = bodies_t::keep_stored(stored, kept[first + entry]); failed(read))
+                    return {0, read};
+            }
+        }
+        auto kept_at = [&](std::size_t entry) noexcept -> kept_t const& { return kept[entry]; };
+        return {found, bodies_t::write_values(variant, found, kept_at, memory, outputs)};
+    }
 }
 
 #pragma endregion GPU Variants
@@ -890,50 +976,20 @@ void get_entries(variant_type_&, arguments_type_ const&, growing_arena<forkunion
 
 #pragma region Variant Bodies
 
-/** Whether @p variant_type_ serves @p geometry: it stores values in the scalar the geometry names,
- *  if it stores one, and scores by the metric the geometry names, if its kernels fix one. */
-template <typename variant_type_, typename geometry_type_>
-bool serves_geometry(geometry_type_ const& geometry) noexcept {
-    if constexpr (requires { variant_type_::dtype_k; })
-        if (nk_dtype_of(geometry.quantization) != variant_type_::dtype_k) return false;
-    if constexpr (requires { variant_type_::metric_k; })
-        if (geometry.metric != variant_type_::metric_k) return false;
-    return true;
-}
-
-/** A refinement in flight: each donor's index, which the plan nulls as it lands it whole, and the
- *  plan itself, which also says where the calls stand. */
+/** A refinement in flight: each donor's or receiver's index, which the plan nulls as it consumes
+ *  it whole, and the plan itself, which also says where the calls stand. */
 template <typename variant_type_>
 struct basic_refinement_state {
-    growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> landing;
+    growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> others;
     typename variant_type_::refine_plan_t plan;
 };
-
-/** The C report of one walk's @p walked telemetry, or its failure; static, as each class unit
- *  compiles its own under its flags. */
-static expected<usearch_traversal_stats_t> walked_stats(expected<traversal_telemetry_t> const& walked) noexcept {
-    usearch_traversal_stats_t stats {};
-    accumulate_stats(&stats, walked.value);
-    return {stats, walked.status};
-}
-
-/** The C report of a refinement's @p refined result. */
-static basic_refined_t refined_report(basic::refine_result_t const& refined) noexcept {
-    basic_refined_t report;
-    accumulate_stats(&report.stats, refined.telemetry);
-    report.visited = refined.reselected_nodes;
-    report.changed = refined.changed_nodes;
-    report.reachability = {refined.health.audited_nodes, refined.health.reachable_nodes, refined.health.sweeps,
-                           refined.health.back_sweeps};
-    return report;
-}
 
 /**
  *  @brief One basic variant's bodies, every one a static member its verb table points at, taking
  *      the variant as @c void* and casting it back to @p variant_type_.
  *
  *  An NVMe view serves its checkpoint in place, so its mutating bodies answer @c read_only_k; a
- *  device variant answers @c unsupported_k for what only a host walk takes, as cursors.
+ *  device variant answers @c unsupported_k for what only a host walk takes.
  */
 template <typename traits_type_, typename variant_type_>
 struct specialized_variant {
@@ -941,33 +997,41 @@ struct specialized_variant {
     using bodies_t = variant_bodies<traits_type_>;
     using variant_t = variant_type_;
     using executor_t = typename variant_type_::executor_t;
-    using verbs_t = basic_verbs<traits_type_, home_of<executor_t>>;
+    using verbs_t = basic_verbs<traits_type_, vendored_residency_of<executor_t>>;
     using geometry_t = typename traits_type_::geometry_t;
-    using walked_t = typename verbs_t::walked_t;
+    using values_t = typename verbs_t::values_t;
+    using queries_t = typename verbs_t::queries_t;
+    using within_queries_t = typename verbs_t::within_queries_t;
+    using get_outputs_t = typename verbs_t::get_outputs_t;
 
     static constexpr bool viewed_k = is_nvme_index<variant_type_>;
 
     static variant_t& of(void* variant) noexcept { return *static_cast<variant_t*>(variant); }
     static variant_t const& of(void const* variant) noexcept { return *static_cast<variant_t const*>(variant); }
 
-    static bool serves(geometry_t const& geometry) noexcept { return serves_geometry<variant_t>(geometry); }
-    static void* create(int device, geometry_t const& geometry) noexcept {
-        if constexpr (is_vram_index<variant_t>) return new (std::nothrow) variant_t(device, geometry);
-        else return new (std::nothrow) variant_t(forkunion_allocator_t {no_memory_domain_k});
+    /** The variant of @p geometry, which adopts @p adopted, a default connectivity taking its
+     *  place; a device one on @p residency 's device. */
+    static expected<void*> create(geometry_t geometry, typename traits_t::geometry_extras_t const& adopted,
+                                  arena_residency_t residency) noexcept {
+        variant_t* created = nullptr;
+        if constexpr (is_vram_index<variant_t>)
+            created = new (std::nothrow) variant_t(static_cast<int>(residency.device), geometry);
+        else created = new (std::nothrow) variant_t(forkunion_allocator_t {no_memory_domain_k});
+        if (!created) return {nullptr, status_t::bad_alloc_k};
+        if (status_t const adopting = bodies_t::adopt(*created, geometry, adopted); failed(adopting))
+            return delete created, expected<void*> {nullptr, adopting};
+        return {created, status_t::success_k};
     }
     static void destroy(void* variant) noexcept { delete static_cast<variant_t*>(variant); }
-    static bool freeze(void* variant, geometry_t& geometry, typename traits_t::freeze_t const& input,
-                       usearch_outcome_t* outcome) noexcept {
-        return bodies_t::freeze(of(variant), geometry, input, outcome);
-    }
     static void bound_shards(void* variant, std::size_t nodes) noexcept {
         if constexpr (requires(variant_t& typed) { typed.index.bound_shards(nodes); })
             of(variant).index.bound_shards(nodes);
     }
-    static status_t emplace(void* variant, int placement) noexcept {
+    static status_t emplace(void* variant, arena_residency_t residency) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else if constexpr (is_vram_index<variant_t>) return of(variant).index.emplace(placement);
-        else return of(variant).index.emplace(static_cast<fu_memory_domain_id_t>(placement));
+        else if constexpr (is_vram_index<variant_t>)
+            return of(variant).index.emplace(static_cast<int>(residency.device));
+        else return of(variant).index.emplace(static_cast<fu_memory_domain_id_t>(residency.numa_domain));
     }
     static status_t view(void* variant, std::string_view path, std::span<std::string_view const> paths,
                          executor_t* executor) noexcept {
@@ -982,20 +1046,21 @@ struct specialized_variant {
     static status_t save(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
         return of(variant).save(path, executor, ticks);
     }
-    static int device(void const* variant) noexcept { return device_of(of(variant)); }
-    static std::size_t devices(void const* variant, std::span<int> listed) noexcept {
+    static arena_residency_t residency(void const* variant) noexcept { return arena_residency_of(of(variant)); }
+    static std::size_t devices(void const* variant, std::span<arena_residency_t> listed) noexcept {
         std::size_t count = 0;
         if constexpr (is_vram_index<variant_t>)
             of(variant).index.for_each_device([&](int device) noexcept {
+                arena_residency_t const placed = vram_residency(static_cast<std::size_t>(device));
                 for (std::size_t earlier = 0; earlier != count; ++earlier)
-                    if (listed[earlier] == device) return;
-                if (count != listed.size()) listed[count++] = device;
+                    if (listed[earlier] == placed) return;
+                if (count != listed.size()) listed[count++] = placed;
             });
         return count;
     }
-    static status_t reserve(void* variant, typename traits_t::reserve_t const& arguments) noexcept {
+    static status_t reserve(void* variant, reserve_capacity_t capacity) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else return of(variant).reserve(arguments);
+        else return of(variant).reserve(capacity);
     }
     static status_t clear(void* variant) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
@@ -1017,199 +1082,290 @@ struct specialized_variant {
         else description.shards_count = typed.index.shards_count();
         bodies_t::describe(typed, description);
     }
-    static void count(void* variant, usearch_key_t key, typename traits_t::key_stats_t& stats,
-                      usearch_executor_t executor, usearch_outcome_t* outcome) noexcept {
-        count_entries<traits_t>(of(variant), key, stats, executor, outcome);
+    static status_t count(void* variant, usearch_key_t key, typename traits_t::key_stats_t& stats,
+                          executor_t& executor) noexcept {
+        return count_entries<traits_t>(of(variant), key, stats, executor);
     }
-    static void get(void* variant, typename traits_t::get_t const& arguments,
-                    growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
-        get_entries<traits_t>(of(variant), arguments, memory, outcome);
+    static expected<std::size_t> get(void* variant, usearch_key_t key, get_outputs_t outputs,
+                                     growing_arena<forkunion_allocator_t>& memory, executor_t& executor) noexcept {
+        return get_entries<traits_t>(of(variant), key, outputs, memory, executor);
     }
-    static walked_t insert(void* variant, typename traits_t::insert_t const& arguments, progress_ticks_t& ticks,
-                           executor_t& executor) noexcept {
+    static expected<traversal_stats_t> insert(void* variant, usearch_keys_view_t keys, values_t values,
+                                              insert_config_t config, executor_t& executor,
+                                              progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
-        else return walked_stats(of(variant).insert(arguments, ticks, executor));
+        else return of(variant).insert(keys, values, config, executor, ticks);
     }
-    static bool accepts_search(void const* variant, typename traits_t::search_t const& arguments,
-                               usearch_outcome_t* outcome) noexcept {
-        return bodies_t::accepts(of(variant), arguments, outcome);
+    static status_t serves_search(void const* variant, queries_t const& queries) noexcept {
+        if constexpr (requires { bodies_t::serves_search(of(variant), queries); })
+            return bodies_t::serves_search(of(variant), queries);
+        else return status_t::success_k;
     }
-
-    /** A device walk stages its queries on the arena's host @p pages, where its matches land. */
-    static walked_t search(void* variant, typename traits_t::search_t const& arguments,
-                           growing_arena<forkunion_allocator_t>& pages, matches_landing_t& landing,
-                           progress_ticks_t& ticks, executor_t& executor) noexcept {
+    static expected<traversal_stats_t> search(void* variant, queries_t queries, matches_outputs_t& outputs,
+                                              search_config_t config, predicate_t predicate,
+                                              growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
+                                              progress_ticks_t& ticks) noexcept {
         variant_t& typed = of(variant);
-        if constexpr (requires { typed.search(arguments, pages, landing, ticks, executor); })
-            return walked_stats(typed.search(arguments, pages, landing, ticks, executor));
-        else return walked_stats(typed.search(arguments, landing, ticks, executor));
+        if constexpr (requires { typed.search(queries, outputs, config, pages, executor, ticks); })
+            return typed.search(queries, outputs, config, pages, executor, ticks);
+        else if constexpr (is_vram_index<variant_t>) return typed.search(queries, outputs, config, executor, ticks);
+        else return typed.search(queries, outputs, config, predicate, executor, ticks);
     }
-    static bool accepts_within(void const* variant, typename traits_t::within_t const& arguments,
-                               usearch_outcome_t* outcome) noexcept {
-        if constexpr (requires { bodies_t::accepts_within(of(variant), arguments, outcome); })
-            return bodies_t::accepts_within(of(variant), arguments, outcome);
-        else return propagate_error(usearch_status_unsupported_k, outcome, "This modality walks no radius");
+    static status_t serves_within(void const* variant, within_queries_t const& queries,
+                                  predicate_t const& predicate) noexcept {
+        if constexpr (requires { bodies_t::serves_within(of(variant), queries, predicate); })
+            return bodies_t::serves_within(of(variant), queries, predicate);
+        else return status_t::unsupported_k;
     }
-    static walked_t within(void* variant, typename traits_t::within_t const& arguments,
-                           growing_arena<forkunion_allocator_t>& memory, usearch_matches_tape_view_t& matches,
-                           std::size_t& written, progress_ticks_t& ticks, executor_t& executor) noexcept {
-        if constexpr (requires { bodies_t::within(of(variant), arguments, memory, matches, written, ticks, executor); })
-            return walked_stats(bodies_t::within(of(variant), arguments, memory, matches, written, ticks, executor));
+    static expected<traversal_stats_t> within(void* variant, within_queries_t queries, within_outputs_t& outputs,
+                                              search_config_t config, predicate_t predicate,
+                                              growing_arena<forkunion_allocator_t>& memory, executor_t& executor,
+                                              progress_ticks_t& ticks) noexcept {
+        if constexpr (requires { of(variant).within(queries, outputs, config, predicate, memory, executor, ticks); })
+            return of(variant).within(queries, outputs, config, predicate, memory, executor, ticks);
         else return {{}, status_t::unsupported_k};
     }
-    static status_t sample(void* variant, typename traits_t::sample_t const& arguments) noexcept {
-        return of(variant).sample(arguments);
+    static expected<sample_result_t> sample(void* variant, basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                            sample_config_t config, executor_t& executor) noexcept {
+        return of(variant).sample(inputs, outputs, config, executor);
     }
 
     /** Whether the variant at @p donor shares this one's geometry, so its nodes land here. */
     static bool matches(void const* variant, void const* donor) noexcept {
         return bodies_t::matches(of(variant), of(donor));
     }
-    static expected<void*> refinement_open(void* variant, std::span<void* const> donors,
-                                           std::size_t expansion) noexcept {
+
+    /** Opens a refinement of the variant, an absorb of @p donors or a split into @p receivers: a
+     *  RAM variant's own plan, or a GPU one's sharded index's on the streams of @p executor. */
+    static expected<void*> refinement_init(void* variant, variants_view_t donors, variants_view_t receivers,
+                                           split_config_t config, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
         else {
             using refining_t = basic_refinement_state<variant_t>;
-            growing_buffer<typename variant_t::index_t*, forkunion_allocator_t> landing {
-                forkunion_allocator_t {no_memory_domain_k}};
-            if (failed(landing.reserve_exactly(donors.size()))) return {nullptr, status_t::bad_alloc_k};
-            for (void* const donor : donors) landing.push_back_reserved(&of(donor).index);
-            // The plan borrows the landing slots, whose storage moves along with the buffer.
-            auto [plan, status] = donors.empty() ? of(variant).plan_refine(expansion)
-                                                 : of(variant).plan_absorb(to_writable_span(landing), expansion);
+            using index_t = typename variant_t::index_t;
+            using refine_plan_t = typename variant_t::refine_plan_t;
+            variants_view_t const others = receivers.empty() ? donors : receivers;
+            growing_buffer<index_t*, forkunion_allocator_t> typed_indexes {forkunion_allocator_t {no_memory_domain_k}};
+            if (failed(typed_indexes.reserve_exactly(others.size()))) return {nullptr, status_t::bad_alloc_k};
+            for (std::size_t position = 0; position != others.size(); ++position)
+                typed_indexes.push_back_reserved(&of(others[position]).index);
+            std::span<index_t*> const typed = to_writable_span(typed_indexes);
+            variant_t& refined = of(variant);
+            // A RAM plan borrows these slots, whose storage moves along with the buffer.
+            auto [plan, status] = [&]() noexcept -> expected<refine_plan_t> {
+                if constexpr (is_vram_index<variant_t>) {
+                    typename index_t::refine_config_t const refine_config {config.refine.expansion_factor};
+                    if (!receivers.empty())
+                        return refined.index.plan_split(typed, {refine_config, config.seed}, executor);
+                    if (!donors.empty()) return refined.index.plan_absorb(typed, refine_config, executor);
+                    return refined.index.plan_refine(refine_config, executor);
+                }
+                else {
+                    if (!receivers.empty()) return refined.plan_split(typed, config);
+                    if (!donors.empty()) return refined.plan_absorb(typed, config.refine);
+                    return refined.plan_refine(config.refine);
+                }
+            }();
             if (failed(status)) return {nullptr, status};
-            refining_t* const opened = new (std::nothrow) refining_t {std::move(landing), std::move(plan)};
+            refining_t* const opened = new (std::nothrow) refining_t {std::move(typed_indexes), std::move(plan)};
             if (!opened) return {nullptr, status_t::bad_alloc_k};
             return {opened, status_t::success_k};
         }
     }
-    static std::size_t refinement_population(void const* refining) noexcept {
+    static std::size_t refinement_population(void const* refinement) noexcept {
         if constexpr (viewed_k) return 0;
-        else return static_cast<basic_refinement_state<variant_t> const*>(refining)->plan.audit().visible;
+        else if constexpr (is_vram_index<variant_t>)
+            return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.population();
+        else return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.audit().visible;
     }
-    static status_t refinement_run(void* variant, void* refining, progress_ticks_t& ticks,
-                                   executor_t& executor) noexcept {
+    static status_t refinement_next(void* variant, void* refinement, executor_t& executor,
+                                    progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else
-            return of(variant).refine(static_cast<basic_refinement_state<variant_t>*>(refining)->plan, ticks, executor);
+        else {
+            typename variant_t::refine_plan_t& plan = static_cast<basic_refinement_state<variant_t>*>(refinement)->plan;
+            if constexpr (is_vram_index<variant_t>) return plan.run(executor, ticks);
+            else return of(variant).refine(plan, executor, ticks);
+        }
     }
-    static bool refinement_landed(void const* refining, std::size_t donor) noexcept {
+    static bool refinement_consumed(void const* refinement, std::size_t donor) noexcept {
         if constexpr (viewed_k) return false;
-        else return static_cast<basic_refinement_state<variant_t> const*>(refining)->plan.consumed(donor);
+        else return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.consumed(donor);
     }
 
-    /** Folds what a landed @p donor counts into the variant, as the points of the clouds it
+    /** Folds what a consumed @p donor counts into the variant, as the points of the clouds it
      *  held. */
-    static void absorbed(void* variant, void const* donor) noexcept {
-        if constexpr (requires(variant_t& typed) { typed.absorbed(typed); }) of(variant).absorbed(of(donor));
+    static void count_absorbed_donor(void* variant, void const* donor) noexcept {
+        if constexpr (requires(variant_t& typed) { typed.count_absorbed_donor(typed); })
+            of(variant).count_absorbed_donor(of(donor));
     }
-    static basic_refined_t refinement_running(void* refining) noexcept {
+    static void count_split_receiver(void* variant, void const* refinement, void* receiver) noexcept {
+        if constexpr (requires(variant_t& typed) { typed.count_split_receiver(typed); })
+            if (!static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.moving())
+                of(variant).count_split_receiver(of(receiver));
+    }
+    static refine_report_t refinement_running(void* refinement) noexcept {
         if constexpr (viewed_k) return {};
-        else return refined_report(static_cast<basic_refinement_state<variant_t>*>(refining)->plan.finish().value);
+        else if constexpr (is_vram_index<variant_t>)
+            return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.running();
+        else return static_cast<basic_refinement_state<variant_t>*>(refinement)->plan.finish().value;
     }
 
     /** Skips the re-selection the refinement left, heals the islands it leaves, and reports; one
-     *  whose donors have not all landed heals nothing and reports zeros. */
-    static expected<basic_refined_t> refinement_finish(void* variant, void* refining, executor_t& executor) noexcept {
+     *  whose donors have not all moved in heals nothing and reports zeros. */
+    static expected<refine_report_t> refinement_finish(void* variant, void* refinement, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
         else {
-            typename variant_t::refine_plan_t& plan = static_cast<basic_refinement_state<variant_t>*>(refining)->plan;
-            if (plan.landing()) return {{}, status_t::success_k};
-            // The re-selection a cancel left is skipped rather than finished.
-            plan.stop();
-            progress_ticks_t heal_alone {{}, 0};
-            if (status_t const healed = of(variant).refine(plan, heal_alone, executor); failed(healed))
-                return {{}, healed};
-            auto const [refined, status] = plan.finish();
-            return {refined_report(refined), status};
+            typename variant_t::refine_plan_t& plan = static_cast<basic_refinement_state<variant_t>*>(refinement)->plan;
+            if (plan.moving()) return {{}, status_t::success_k};
+            if constexpr (is_vram_index<variant_t>) return plan.finish(executor);
+            else {
+                // The re-selection a cancel left is skipped rather than finished.
+                plan.stop();
+                progress_ticks_t heal_alone {{}, 0};
+                if (status_t const healed = of(variant).refine(plan, executor, heal_alone); failed(healed))
+                    return {{}, healed};
+                return plan.finish();
+            }
         }
     }
-    static void refinement_free(void* refining) noexcept {
-        if constexpr (!viewed_k) delete static_cast<basic_refinement_state<variant_t>*>(refining);
+    static void refinement_free(void* refinement) noexcept {
+        if constexpr (!viewed_k) delete static_cast<basic_refinement_state<variant_t>*>(refinement);
     }
 
-    /** Opens a cursor on a RAM variant's snapshot or an NVMe view's first entry; null once
-     *  @p outcome records why not. */
-    static void* cursor_open(void* variant, usearch_outcome_t* outcome) noexcept {
-        void* opened = nullptr;
-        if constexpr (is_ram_index<variant_t>) opened = new (std::nothrow) ram_cursor_of<variant_t>(of(variant).index);
-        else if constexpr (viewed_k) opened = new (std::nothrow) std::size_t {0};
-        else
-            return propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet"),
-                   nullptr;
-        if (!opened) propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor");
-        return opened;
+    /** Audits every shard of the variant: a RAM one on the calling thread, a GPU one on its
+     *  shards' streams; an NVMe view audits nothing yet. */
+    static expected<reachability_t> health(void* variant, executor_t& executor) noexcept {
+        if constexpr (is_ram_index<variant_t>) {
+            typename variant_t::index_t& index = of(variant).index;
+            if (!index.shards_count()) return {{}, status_t::uninitialized_k};
+            if (status_t const rewound = executor.reserve(0); failed(rewound)) return {{}, rewound};
+            typename variant_t::index_t::template traversal_context_over<thread_allocator_t> context {
+                0, thread_allocator_t {executor.arena(0)}};
+            return index.health(context);
+        }
+        else if constexpr (is_vram_index<variant_t>) return of(variant).index.health(executor);
+        else return {{}, status_t::unsupported_k};
     }
-    static void cursor_next(void* variant, void* cursor, typename traits_t::cursor_next_t const& arguments,
-                            growing_arena<forkunion_allocator_t>& memory, usearch_outcome_t* outcome) noexcept {
-        if constexpr (is_ram_index<variant_t>)
-            pull_entries<traits_t>(of(variant), *static_cast<ram_cursor_of<variant_t>*>(cursor), arguments, memory,
-                                   outcome);
-        else if constexpr (viewed_k)
-            pull_entries<traits_t>(of(variant), *static_cast<std::size_t*>(cursor), arguments, memory, outcome);
-        else propagate_error(usearch_status_unsupported_k, outcome, "A GPU index serves no such verb yet");
+
+    /** Opens a walk over a RAM or GPU variant's shards, breadth-first from @p starts when it names
+     *  any, or an NVMe view's cursor at its first entry, which walks no links. */
+    static expected<void*> cursor_init(void* variant, std::span<usearch_key_t const> starts) noexcept {
+        if constexpr (viewed_k) {
+            if (!starts.empty()) return {nullptr, status_t::unsupported_k};
+            std::size_t* const opened = new (std::nothrow) std::size_t {0};
+            return {opened, opened ? status_t::success_k : status_t::bad_alloc_k};
+        }
+        else {
+            using cursor_t = typename variant_t::index_t::cursor_t;
+            using key_t = typename variant_t::index_t::key_t;
+            cursor_t* const opened = new (std::nothrow) cursor_t(forkunion_allocator_t {no_memory_domain_k});
+            if (!opened) return {nullptr, status_t::bad_alloc_k};
+            std::span<key_t const> const keys {reinterpret_cast<key_t const*>(starts.data()), starts.size()};
+            if (status_t const walking = opened->open(of(variant).index, keys); failed(walking))
+                return delete opened, expected<void*> {nullptr, walking};
+            return {opened, status_t::success_k};
+        }
+    }
+    static expected<std::span<usearch_key_t const>> cursor_next(void* variant, void* cursor, links_outputs_t* links,
+                                                                std::size_t wanted,
+                                                                growing_arena<forkunion_allocator_t>& memory,
+                                                                executor_t& executor) noexcept {
+        if constexpr (viewed_k) {
+            if (links) return {{}, status_t::unsupported_k};
+            return pull_entries(of(variant), *static_cast<std::size_t*>(cursor), wanted, memory, executor);
+        }
+        else
+            return pull_entries(of(variant), *static_cast<typename variant_t::index_t::cursor_t*>(cursor), links,
+                                wanted, memory);
     }
     static void cursor_free(void* cursor) noexcept {
-        if constexpr (is_ram_index<variant_t>) delete static_cast<ram_cursor_of<variant_t>*>(cursor);
-        else if constexpr (viewed_k) delete static_cast<std::size_t*>(cursor);
+        if constexpr (viewed_k) delete static_cast<std::size_t*>(cursor);
+        else delete static_cast<typename variant_t::index_t::cursor_t*>(cursor);
     }
 
     /** The verb table of the variant, every entry one of the bodies above. */
     static constexpr verbs_t verbs() noexcept {
+        nk_dtype_t dtype = nk_dtype_unknown_k;
+        u32_t metric = 0;
+        if constexpr (requires { variant_t::dtype_k; }) dtype = variant_t::dtype_k;
+        if constexpr (requires { variant_t::metric_k; }) metric = static_cast<u32_t>(variant_t::metric_k);
         return {
-            .serves = &serves,
+            .dtype = dtype,
+            .metric = metric,
+            // Lifetime
             .create = &create,
             .destroy = &destroy,
-            .freeze = &freeze,
             .bound_shards = &bound_shards,
             .emplace = &emplace,
             .view = &view,
-            .load = &load,
-            .save = &save,
-            .device = &device,
+            // Shape
+            .residency = &residency,
             .devices = &devices,
+            .describe = &describe,
+            .matches = &matches,
+            // Writes
             .reserve = &reserve,
             .clear = &clear,
-            .describe = &describe,
-            .count = &count,
-            .get = &get,
             .insert = &insert,
-            .accepts_search = &accepts_search,
-            .search = &search,
-            .accepts_within = &accepts_within,
-            .within = &within,
-            .sample = &sample,
-            .matches = &matches,
-            .refinement_open = &refinement_open,
+            // Refining
+            .health = &health,
+            // Refinements
+            .refinement_init = &refinement_init,
             .refinement_population = &refinement_population,
-            .refinement_run = &refinement_run,
-            .refinement_landed = &refinement_landed,
-            .absorbed = &absorbed,
+            .refinement_next = &refinement_next,
+            .refinement_consumed = &refinement_consumed,
+            .count_absorbed_donor = &count_absorbed_donor,
+            .count_split_receiver = &count_split_receiver,
             .refinement_running = &refinement_running,
             .refinement_finish = &refinement_finish,
             .refinement_free = &refinement_free,
-            .cursor_open = &cursor_open,
+            // Lookups
+            .count = &count,
+            .get = &get,
+            // Walks
+            .serves_search = &serves_search,
+            .search = &search,
+            .serves_within = &serves_within,
+            .within = &within,
+            // Exploration
+            .cursor_init = &cursor_init,
             .cursor_next = &cursor_next,
             .cursor_free = &cursor_free,
+            .sample = &sample,
+            // Persistence
+            .load = &load,
+            .save = &save,
         };
     }
 };
 
 /** The verb tables of the variants in the list, in its order. */
-template <typename traits_type_, dense_home_t home_, typename... variant_types_>
-static consteval std::array<basic_verbs<traits_type_, home_>, sizeof...(variant_types_)> basic_tables_for(
+template <typename traits_type_, vendored_residency_t residency_, typename... variant_types_>
+static consteval std::array<basic_verbs<traits_type_, residency_>, sizeof...(variant_types_)> basic_tables_for(
     type_list<variant_types_...>) noexcept {
     return {specialized_variant<traits_type_, variant_types_>::verbs()...};
 }
 
-template <typename traits_type_, dense_home_t home_, auto class_>
-basic_verbs<traits_type_, home_> const* basic_class_tables<traits_type_, home_, class_>::find(
+/** Whether the variant @p verbs serves @p geometry: it stores values in the scalar the geometry
+ *  names, if it fixes one, and scores by the kind the geometry names, if its kernels fix one. */
+template <typename traits_type_, vendored_residency_t residency_>
+bool serves_geometry(basic_verbs<traits_type_, residency_> const& verbs,
+                     typename traits_type_::geometry_t const& geometry) noexcept {
+    if constexpr (requires { geometry.quantization; })
+        if (verbs.dtype != nk_dtype_unknown_k && verbs.dtype != nk_dtype_of(geometry.quantization)) return false;
+    if constexpr (requires { geometry.metric; })
+        if (verbs.metric && verbs.metric != static_cast<u32_t>(geometry.metric)) return false;
+    return true;
+}
+
+template <typename traits_type_, vendored_residency_t residency_, auto class_>
+basic_verbs<traits_type_, residency_> const* basic_class_tables<traits_type_, residency_, class_>::find(
     typename traits_type_::geometry_t const& geometry) noexcept {
-    using variants_t = typename traits_type_::template variants<home_, class_>;
-    static constexpr std::array<basic_verbs<traits_type_, home_>, variants_t::size_k> tables_k =
-        basic_tables_for<traits_type_, home_>(variants_t {});
-    for (basic_verbs<traits_type_, home_> const& verbs : tables_k)
-        if (verbs.serves(geometry)) return &verbs;
+    using variants_t = typename traits_type_::template variants<residency_, class_>;
+    static constexpr std::array<basic_verbs<traits_type_, residency_>, variants_t::size_k> tables_k =
+        basic_tables_for<traits_type_, residency_>(variants_t {});
+    for (basic_verbs<traits_type_, residency_> const& verbs : tables_k)
+        if (serves_geometry(verbs, geometry)) return &verbs;
     return nullptr;
 }
 

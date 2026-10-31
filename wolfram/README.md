@@ -46,7 +46,7 @@ DenseReserve[index, 10];
 rows = {{0.2, 0.6, 0.4}, {0.4, 0.6, 0.2}};
 DenseInsert[index, {FromDigits["5f9c2b718e4d4a63b2f10c7a9d3e6b58", 16], 43}, rows];
 
-(* Search on the kernel's own thread, five matches per query, landing in an arena *)
+(* Search on the kernel's own thread, five matches per query, written in an arena *)
 local = ArenaInit[];
 matches = DenseSearch[index, rows, 5, local]
 matches["Keys"]       (* {{key, key}, {key, key}}, nearest first *)

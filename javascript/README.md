@@ -25,7 +25,7 @@ The addon carries the dense storage types its CMake configure compiled: `npm run
 
 ## Quickstart
 
-Create an index, insert a vector, and search it on an executor, landing the matches in an arena:
+Create an index, insert a vector, and search it on an executor, writing the matches into an arena:
 
 ```js
 const assert = require('node:assert');
@@ -310,7 +310,7 @@ for (const expansionFactor of [16, 32, 64, 128]) {
 }
 ```
 
-Telemetry travels through the reading rather than the return value, so `refine` still answers with the nodes it changed and a ranked verb with its matches, and passing none costs nothing.
+Telemetry travels through the reading rather than the return value, so `refine` still answers with its report and a ranked verb with its matches, and passing none costs nothing.
 A reading is a pure output that each call fully overwrites, so one `DenseTraversalStats` handed to several calls holds the last of them, and a deferred call writes it once it settles.
 Use `accumulate` to fold readings together: `expansionFactor` buys recall in distance computations, and only the counters say how many, so a sweep reusing one arena allocates once and reads its cost between the points.
 
@@ -365,8 +365,10 @@ A cheap insertion pass followed by one refinement reaches a better graph, in les
 ```js
 const pool = index.on(executor);
 pool.insert(keys, vectors, { expansionFactor: 32 });
-while (pool.refine({ expansionFactor: 128 }) > vectors.rows / 100) {}
+while (pool.refine({ expansionFactor: 128 }).changed > vectors.rows / 100) {}
 ```
+
+Each call answers a `DenseRefineReport`: the entries re-selected and changed, the islands found and reconnected, and the closing `reachability` audit.
 
 Refinement is a build step rather than a repair.
 It adds and removes nothing, and searches may run throughout.
@@ -374,11 +376,32 @@ It adds and removes nothing, and searches may run throughout.
 ### Absorbing & Splitting
 
 Bigger indexes come from absorbing, never mutating: `absorb` appends every donor in turn, keeping its graph and linking it in across the appended part, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
-A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have landed.
+A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its entries may already have moved.
 A deferred absorb holds its donors until it is final, so meanwhile they refuse every verb and no other absorb can name them.
 
 ```js
 index.on(executor).absorb([shard]);
+```
+
+`split` is the inverse: it hands graph-local parts of the index to empty receivers of the same configuration, one part each, keeping their edges and leaving the index empty but live.
+Both answer the closing refines' report, as `refine` does.
+
+```js
+index.on(executor).split([left, right], { seed: 42 });
+```
+
+### Sampling
+
+`sample` draws keys around `focus`, or across the whole index, each hanging from a shown or earlier draw and placed in three dimensions beside the `shown` keys already on screen, so a view grows one connected sample as it zooms.
+Equal seeds, shown keys and focus draw equally, and a larger `wanted` draws a superset.
+The shown keys, their coordinates and the focus are read in place, so a deferred sample holds those arrays until it is final.
+
+```js
+const drawn = index.on(executor).sample(256, arena, { shown, shownCoordinates: places, focus: near, seed: 42 });
+drawn.keys; // sixteen bytes per draw
+drawn.entryOrdinals; // which of its key's entries each draw is
+drawn.parents.get(0); // the shown or earlier draw it hangs from, empty for a root
+drawn.coordinates.data; // three f32 values per draw
 ```
 
 ### Sparse Multiplication

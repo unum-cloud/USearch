@@ -20,6 +20,18 @@
 namespace unum::usearch::dense {
 using namespace unum::usearch::utilities;
 
+/** Graph node identifier within one dense shard - 32 bits, the 4-billion ceiling every dense tower
+ *  and the C ABI share. */
+using node_id_t = u32_t;
+
+/** Reserved all-ones value, never a valid node ID within a shard; the lock & empty-slot sentinel
+ *  of every dense neighbor list. */
+inline constexpr node_id_t node_id_unknown_k = node_id_limits<node_id_t>::unknown_k;
+
+/** The form every dense tower names its entries by. */
+using shard_node_t = shard_node<node_id_t>;
+static_assert(sizeof(shard_node_t) == 8);
+
 /** Capability cascade for every scalar, shared by all its metrics: each capability group - the
  *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_nvidia_metric.cuh - specializes it under a
  *  constraint on @p caps_. Reading order is the priority order; the first kit this build compiled
@@ -39,7 +51,7 @@ enum class vram_dense_kernel_t : u32_t {
     /** Scores every visible row against each query, without walking the graph. */
     scan_k,
 
-    /** A walk landing every scored pair, rather than ranked matches. */
+    /** A walk keeping every scored pair, rather than ranked matches. */
     multiply_k,
 
     /** A walk folding the values of the rows it attends to, per head. */
@@ -183,7 +195,111 @@ struct [[nodiscard]] compact_result_t {
     std::size_t moved_entries = 0, cut_edges = 0;
 
     /** The re-selections and the heal, counted as every refine counts them. */
-    refine_result_t graph;
+    refine_report_t graph;
+};
+
+/** The breadth every graph engine counts its candidates in. */
+using candidates_count_t = u32_t;
+
+/** Optional tuning knobs for an insertion's walks; zeros mean "derive from connectivity". */
+struct insert_config_t {
+
+    /** How many candidates a walk keeps during wiring; defaults to twice the connectivity. */
+    candidates_count_t expansion_factor = 0;
+};
+
+/** Optional tuning knobs for a refinement's re-selection walks; zeros mean "derive from
+ *  connectivity". */
+struct refine_config_t {
+
+    /** How many candidates a re-selection keeps; defaults to twice the connectivity, like every
+     *  walk. */
+    candidates_count_t expansion_factor = 0;
+};
+
+/** Optional tuning knobs for every ranking walk; zeros mean "derive from connectivity". */
+struct search_config_t {
+
+    /** How many candidates a walk keeps; defaults to twice the connectivity. Raise it to trade
+     *  latency for recall - the caller reranks anyway. */
+    candidates_count_t expansion_factor = 0;
+
+    /** Reader contract; @c immutable_k - or stronger - drops every atomic in the traversal when
+     *  the caller certifies no concurrent mutators. */
+    synchronization_t synchronization = synchronization_t::concurrent_k;
+
+    /** How entries are reached; @c scan_k scores every published entry exactly, keeping the
+     *  breadth's nearest. */
+    traversal_t traversal = traversal_t::walk_k;
+
+    /** Bytes of cache each executor thread keeps to itself: a RAM scan streams its rows in blocks
+     *  that stay there while every pack of its queries scores them, and zero streams every chunk
+     *  whole; ignored elsewhere. */
+    std::size_t cache_bytes = 0;
+};
+
+/** Where a ranking writes: up to as many keys and scores per query as the matrices are wide, and
+ *  how many each query kept. */
+template <typename key_type_, typename score_type_>
+struct ranked_matches_span {
+    nk::matrix_span<key_type_> keys;
+    nk::matrix_span<score_type_> scores;
+    std::span<std::size_t> counts;
+};
+
+/**
+ *  @brief Where a product or MaxSim writes, in host or device memory: each query's keys and
+ *      scores back to back from its offset, one more offset than queries, the first offset
+ *      written by the caller.
+ *
+ *  The offsets index the keys and scores, so a window of a batch keeps the whole keys and scores
+ *  and cuts its own offsets, the first holding where the window before it ended. A host tower
+ *  stages every query's run at @ref staging_of, each thread owning whole queries, and
+ *  @ref publish_runs lays the window out once the threads are done; a device tower appends on the
+ *  device from the first offset.
+ */
+template <typename key_type_, typename score_type_>
+struct products_tape {
+    std::span<key_type_> keys;
+    std::span<score_type_> scores;
+    std::span<std::size_t> offsets;
+
+    /** Room per query in the keys and scores: how many pairs a query keeps at most. */
+    std::size_t stride = 0;
+
+    /** The queries the window cuts. */
+    std::size_t count() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
+
+    /** Where query @p query 's run stages on a host tape before @ref publish_runs: its stride past
+     *  the window's first offset, which the runs of a window published fit under. */
+    std::size_t staging_of(std::size_t query) const noexcept { return offsets.front() + query * stride; }
+
+    /**
+     *  @brief Why the window cannot take @p queries queries counted in @p scored.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The offsets or @p scored are not one per query, or the scores hold
+     *    less room than the keys.
+     */
+    status_t refusal(std::size_t queries, std::span<std::size_t const> scored) const noexcept {
+        if (count() != queries || scored.size() != queries || scores.size() < keys.size())
+            return status_t::config_mismatch_k;
+        return status_t::success_k;
+    }
+
+    /** Publishes every offset after the first from the one before it, each query keeping the
+     *  @p scored pairs it ranked, at most a stride, and moves each run from its staging down to
+     *  its offset, in order, so a move overwrites only runs already moved. */
+    void publish_runs(std::span<std::size_t const> scored) const noexcept {
+        for (std::size_t query = 0; query != count(); ++query) {
+            std::size_t const kept = min_of(scored[query], stride), start = offsets[query];
+            std::size_t const staged = staging_of(query);
+            offsets[query + 1] = start + kept;
+            if (!kept || start == staged) continue;
+            std::memmove(keys.data() + start, keys.data() + staged, kept * sizeof(key_type_));
+            std::memmove(scores.data() + start, scores.data() + staged, kept * sizeof(score_type_));
+        }
+    }
 };
 
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of
@@ -272,21 +388,21 @@ struct dummy_heads_t {
 /** Runs @p window over every @p window_rows rows of a batch of @p rows in order, as
  *  <tt>window(first, taking)</tt>, summing what each reports; each window writes its own rows'
  *  counts, wherever they live, and the first refusal stops the batch, keeping every window already
- *  landed and leaving the rows past it unwritten. */
+ *  written and leaving the rows past it unwritten. */
 template <typename search_result_type_, typename window_type_>
 expected<search_result_type_> for_each_window(std::size_t rows, std::size_t window_rows,
                                               window_type_&& window) noexcept {
     search_result_type_ total;
     for (std::size_t first = 0; first < rows; first += window_rows) {
-        expected<search_result_type_> const landed = window(first, min_of(window_rows, rows - first));
-        total.count += landed.value.count;
-        total.visited_members += landed.value.visited_members;
-        total.computed_distances += landed.value.computed_distances;
-        total.restarts += landed.value.restarts;
-        total.tail_compactions += landed.value.tail_compactions;
-        total.tail_dropped += landed.value.tail_dropped;
-        total.visited_saturations += landed.value.visited_saturations;
-        if (!landed) return {total, landed.status};
+        expected<search_result_type_> const searched = window(first, min_of(window_rows, rows - first));
+        total.count += searched.value.count;
+        total.visited_members += searched.value.visited_members;
+        total.computed_distances += searched.value.computed_distances;
+        total.restarts += searched.value.restarts;
+        total.tail_compactions += searched.value.tail_compactions;
+        total.tail_dropped += searched.value.tail_dropped;
+        total.visited_saturations += searched.value.visited_saturations;
+        if (!searched) return {total, searched.status};
     }
     return {total, status_t::success_k};
 }
@@ -306,8 +422,8 @@ status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::
     return status_t::success_k;
 }
 
-/** Whether @p first and @p second walk by one kernel over one geometry, as two shards of a plural
- *  or the two sides of a copy between indexes must. */
+/** Whether @p first and @p second walk by one kernel over one geometry, as two shards of a sharded
+ *  index or the two sides of a copy between indexes must. */
 template <typename index_type_>
 bool same_geometry(index_type_ const& first, index_type_ const& second) noexcept {
     return first.kernel() == second.kernel() && first.geometry() == second.geometry();
@@ -453,8 +569,8 @@ struct maxsim_entry {
 };
 
 /**
- *  @brief Late-interaction scores from per-row rankings: each row's best dot per key, summed per key over
- *      its query, the largest an output row holds landing largest first.
+ *  @brief Late-interaction scores from per-row rankings: each row's best dot per key, summed per
+ *      key over its query, the largest an output row holds written largest first.
  *
  *  Every row is one query token's ranking under the inner kind, where a distance is @c 1 @c - @c dot, so a
  *  key a row never ranked adds nothing for that row. The staging is sized once by @c reserve, and both the

@@ -3,17 +3,17 @@
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief An absorb planning against a donor beside an insert into its room: the absorb closes
- *      its donors at plan time, so no row lands after the packing.
+ *      its donors at plan time, so no row is placed after the packing.
  *
  *  The donor's one shard is empty, with room for one row. The absorber closes the donor at plan
- *  time under its unique side, through the claim-aware `close` and the seal, packs its landings
+ *  time under its unique side, through the claim-aware `close` and the seal, packs its moves
  *  against the count and the watermarks, and at `run` finds every row the donor holds among them.
  *  The inserter, holding the donor's gate shared, claims the room and dispenses, or a closed
  *  dispenser refuses it and it gives the claim back.
  *
  *  @verify pass sc
- *  @verify fail sc donor_close=at_run: an insert between the packing and the landing adds a row the
- *      landings miss, which `landings_of_` then reads past
+ *  @verify fail sc donor_close=at_run: an insert between the packing and the move adds a row the
+ *      moves miss, which `moves_of_` then reads past
  */
 #define thread_count 2
 #define location_count 5

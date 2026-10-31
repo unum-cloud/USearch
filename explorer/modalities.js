@@ -14,18 +14,16 @@
 /** @typedef {{ink: string, muted: string, paper: string, accent: string, danger: string, partial: string}} Palette */
 /** @typedef {{label: string, payload: Payload | null, palette: Palette}} GlyphItem */
 /** A development index: its `init_ram` arguments, and entries under the integer identities of their keys. @typedef {{options: Record<string, any>, identities: Uint32Array, payload: Payload}} Dataset */
-/**
- *  @typedef {{
+/** @typedef {{
  *    name: string,
  *    tapeColumns?: number,
  *    search?: Record<string, string>,
  *    develop: (parameters: URLSearchParams, report: (message: string) => void) => Promise<Dataset>,
- *    place?: (payload: Payload, entry: number) => [number, number, number],
+ *    place?: (coordinates: ArrayLike<number>) => [number, number, number],
  *    scenery?: () => number[][][],
  *    glyphSize: [number, number],
  *    glyph: (context: CanvasRenderingContext2D, item: GlyphItem, x: number, y: number) => void
- *  }} Modality
- */
+ *  }} Modality */
 
 const posterSide = 64;
 const posterGap = 8;
@@ -354,10 +352,10 @@ export const geospatial = {
   search: { relation: "usearch_geospatial_relation_near_k" },
   glyphSize: [300, 64],
 
-  /** On a sphere of the Earth's radius in kilometres, x east and y north at the meridian, so the globe reads north-up. */
-  place(payload, entry) {
-    const record = /** @type {Records} */ (payload).records[entry];
-    return onGlobe(record.latitude_degrees, record.longitude_degrees);
+  /** The engine's Earth-fixed position in Earth radii, turned as `onGlobe` turns the globe, so it
+   *  reads north-up. */
+  place(coordinates) {
+    return [coordinates[1] * earthKilometres, coordinates[2] * earthKilometres, coordinates[0] * earthKilometres];
   },
 
   /** A graticule every 15 degrees. */

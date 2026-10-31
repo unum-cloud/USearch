@@ -90,7 +90,7 @@ struct save_config_t {
     }
 };
 
-/** How much room a load leaves; each part lands on a shard of its own. */
+/** How much room a load leaves; each part loads into a shard of its own. */
 struct load_config_t {
 
     /** Entries to reserve across the shards; zero fits the checkpoint exactly and leaves
@@ -566,8 +566,7 @@ status_t safegraphs_print_(yyjson_mut_doc* document, yyjson_alc const& allocator
 }
 
 /**
- *  Where a header lands its data segment: the prefix and JSON rounded up to the declared
- *  alignment.
+ *  @brief Where a header's data segment starts: the prefix and JSON rounded up to its alignment.
  *
  *  @par Statuses:
  *  - @c config_mismatch_k The header's alignment is not a power of two.
@@ -982,6 +981,38 @@ status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callb
                              });
 }
 
+/**
+ *  @brief Parses @p json, the manifest leading a buffer of @p buffer_bytes: @p per_part fires once
+ *      per entry in file order with its offset, every part past the manifest and inside the buffer.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k The manifest is not a JSON object, or an entry's offset or counts are
+ *    unreadable or fall outside the buffer.
+ */
+template <typename allocator_type_, typename callback_type_>
+status_t safegraphs_manifest_entries_(bytes_view_t json, std::size_t buffer_bytes, allocator_type_ allocator,
+                                      callback_type_&& per_part) noexcept {
+    safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
+    auto [document, parse_status] = safegraphs_read_document_(json, trampoline);
+    if (failed(parse_status)) return parse_status;
+    yyjson_val* files = yyjson_obj_get(yyjson_doc_get_root(document), "files");
+    for (std::size_t part = 0, parts = yyjson_arr_size(files); part != parts; ++part) {
+        yyjson_val* entry = yyjson_arr_get(files, part);
+        safegraphs_part_t found;
+        if (!yyjson_is_uint(yyjson_obj_get(entry, "offset")) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "offset")), found.offset) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "bytes")), found.bytes) ||
+            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), found.nodes) ||
+            found.offset < json.size() || found.offset > buffer_bytes || found.bytes > buffer_bytes - found.offset) {
+            yyjson_doc_free(document);
+            return status_t::malformed_k;
+        }
+        per_part(found);
+    }
+    yyjson_doc_free(document);
+    return status_t::success_k;
+}
+
 /** Reads the manifest leading @p buffer, which ends at its first zero byte: @p per_part fires once
  *  per entry in file order with its offset, every part inside the buffer, and the metadata comes
  *  from the first part's header.
@@ -999,29 +1030,15 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(bytes_view_t buffer, al
     void const* const ending = std::memchr(buffer.data(), 0, buffer.size());
     if (!ending) return {metadata, status_t::malformed_k};
     std::size_t const json_bytes = static_cast<std::size_t>(static_cast<byte_t const*>(ending) - buffer.data());
-    safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
-    auto [document, parse_status] = safegraphs_read_document_(buffer.first(json_bytes), trampoline);
-    if (failed(parse_status)) return {metadata, parse_status};
-
-    yyjson_val* files = yyjson_obj_get(yyjson_doc_get_root(document), "files");
-    metadata.parts = yyjson_arr_size(files);
     bytes_view_t first;
-    for (std::size_t part = 0; part != metadata.parts; ++part) {
-        yyjson_val* entry = yyjson_arr_get(files, part);
-        safegraphs_part_t found;
-        if (!yyjson_is_uint(yyjson_obj_get(entry, "offset")) ||
-            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "offset")), found.offset) ||
-            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "bytes")), found.bytes) ||
-            !safegraphs_addressable_(yyjson_get_uint(yyjson_obj_get(entry, "nodes")), found.nodes) ||
-            found.offset < json_bytes || found.offset > buffer.size() || found.bytes > buffer.size() - found.offset) {
-            yyjson_doc_free(document);
-            return {metadata, status_t::malformed_k};
-        }
-        if (!part) first = buffer.subspan(found.offset, found.bytes);
-        metadata.nodes += found.nodes;
-        per_part(found);
-    }
-    yyjson_doc_free(document);
+    status_t const listed = safegraphs_manifest_entries_(buffer.first(json_bytes), buffer.size(), allocator,
+                                                         [&](safegraphs_part_t found) noexcept {
+                                                             if (!metadata.parts++)
+                                                                 first = buffer.subspan(found.offset, found.bytes);
+                                                             metadata.nodes += found.nodes;
+                                                             per_part(found);
+                                                         });
+    if (failed(listed)) return {metadata, listed};
     if (first.empty()) return {metadata, status_t::malformed_k};
 
     // The schema lives in the parts, so the first one's header answers every question about it.
@@ -1106,21 +1123,21 @@ status_t safegraphs_keep_path(growing_buffer<char, allocator_type_>& buffer, std
 }
 
 /**
- *  Reads @p part 's header and metric token out of the bytes it carries, parsing on
- *  @p allocator, its producer columns appended to @p extra_columns.
+ *  @brief Reads @p part 's header and metric token out of @p leading, the part's first bytes as the
+ *      host reads them, parsing on @p allocator, its producer columns appended to @p extra_columns.
  *
  *  @par Statuses:
  *  - @c malformed_k The header does not parse.
  *  - @c malformed_k The header spans more bytes than the part carries.
  */
 template <typename allocator_type_>
-status_t safegraphs_describe_part(safegraphs_catalog_part_t& part,
+status_t safegraphs_describe_part(safegraphs_catalog_part_t& part, bytes_view_t leading,
                                   growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
                                   allocator_type_ allocator) noexcept {
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
     };
-    auto const [header, status] = safegraphs_read_header(part.monolith, allocator, per_custom_field, &extra_columns);
+    auto const [header, status] = safegraphs_read_header(leading, allocator, per_custom_field, &extra_columns);
     if (failed(status)) return status;
     if (header.monolith_bytes() > part.monolith.size()) return status_t::malformed_k;
     part.header = header;
@@ -1142,7 +1159,8 @@ status_t safegraphs_catalog_monolith(bytes_view_t monolith,
                                      allocator_type_ allocator) noexcept {
     safegraphs_catalog_part_t part;
     part.monolith = monolith;
-    if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
+    if (status_t const described = safegraphs_describe_part(part, monolith, extra_columns, allocator);
+        failed(described))
         return described;
     return parts.push_back(part);
 }
@@ -1213,7 +1231,8 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
         auto [part_mapping, part_mapping_status] = mapped_file_t::read(sibling);
         if (failed(part_mapping_status)) return part_mapping_status;
         part.monolith = part_mapping.view();
-        if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
+        if (status_t const described = safegraphs_describe_part(part, part.monolith, extra_columns, allocator);
+            failed(described))
             return described;
         mappings.push_back_reserved(std::move(part_mapping));
     }
@@ -1221,36 +1240,158 @@ status_t safegraphs_catalog(std::string_view path, growing_buffer<mapped_file_t,
     return status_t::success_k;
 }
 
+/** The ordinal of host memory beside the vendor ordinals a device's memory carries, as the CUDA and
+ *  HIP runtimes number the host. */
+inline constexpr int host_device_k = -1;
+
+/** The copy a reader of host bytes takes: no host read calls it, and it reaches no device. */
+struct no_device_copy_t {
+    status_t operator()(bytes_span_t, bytes_view_t) const noexcept { return status_t::unsupported_k; }
+};
+
 /**
- *  Lists the parts of the checkpoint held in @p buffer: the magic makes a lone monolith, anything
- *  else the manifest leading the buffer, whose every part's header is read now, its producer
- *  columns into @p extra_columns.
+ *  @brief A checkpoint's bytes and where they sit: host memory a reader parses in place, or one
+ *      device's memory, which only a copy the caller passes reaches.
+ *
+ *  A device's bytes are sliced like host ones, so a part or a column keeps viewing them, and only
+ *  @ref read_header and @ref copy_column ever read them. Every copy has the shape
+ *  <tt>status_t copy(bytes_span_t destination, bytes_view_t source)</tt> and returns once the bytes
+ *  arrived, since this header names no vendor runtime.
+ */
+struct checkpoint_source_t {
+
+    /** The checkpoint, from its magic or its manifest onward. */
+    bytes_view_t bytes;
+
+    /** The vendor ordinal of the device holding @c bytes, or @c host_device_k. */
+    int device = host_device_k;
+
+    /**
+     *  @brief Lists the checkpoint's parts as the path form of @ref safegraphs_catalog does,
+     *      reading only the manifest and every part's header, so every part's bytes stay in place.
+     *
+     *  Host bytes are parsed in place; a device's cross into host memory through @p copy: a part's
+     *  prefix, then the header it measures, and a manifest in windows doubling from the default
+     *  alignment until its zero byte.
+     *
+     *  @param[out] parts Takes one entry per part, each viewing its own slice of @c bytes.
+     *  @param[out] extra_columns Takes every part's producer columns, which their headers view.
+     *  @param[in] copy Copies device bytes into host memory; never called for host bytes.
+     *  @param[in] allocator Backs the parsing and the bytes a device's copy stages.
+     *
+     *  @par Statuses:
+     *  - @c malformed_k The manifest does not parse or lists no part, or a header does not parse or
+     *    spans more bytes than its part.
+     *  - @c bad_alloc_k The host bytes a device's copy stages cannot be allocated.
+     *  - Whatever @p copy answers.
+     */
+    template <typename copy_type_, typename allocator_type_>
+    status_t read_header(growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
+                         growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns, copy_type_&& copy,
+                         allocator_type_ allocator) const noexcept {
+        growing_buffer<byte_t, allocator_type_> staged {allocator};
+        // Each staged view lives until the next one, which reuses the same bytes.
+        auto readable = [&](bytes_view_t slice) noexcept -> expected<bytes_view_t> {
+            if (device == host_device_k) return {slice, status_t::success_k};
+            if (failed(staged.resize_uninitialized(slice.size()))) return {{}, status_t::bad_alloc_k};
+            status_t const copied = copy(to_writable_span(staged), slice);
+            return {to_span(staged), copied};
+        };
+        auto describe = [&](safegraphs_catalog_part_t& part) noexcept {
+            safegraphs_prefix_t prefix;
+            if (part.monolith.size() < sizeof(prefix)) return status_t::malformed_k;
+            auto const [leading, leading_status] = readable(part.monolith.first(sizeof(prefix)));
+            if (failed(leading_status)) return leading_status;
+            std::memcpy(&prefix, leading.data(), sizeof(prefix));
+            std::size_t const header_length = static_cast<std::size_t>(little_endian(prefix.header_length));
+            if (prefix.magic != safegraphs_prefix_t::magic_k || header_length > part.monolith.size() - sizeof(prefix))
+                return status_t::malformed_k;
+            auto const [header, header_status] = readable(part.monolith.first(sizeof(prefix) + header_length));
+            if (failed(header_status)) return header_status;
+            return safegraphs_describe_part(part, header, extra_columns, allocator);
+        };
+
+        auto const [magic, magic_status] = readable(bytes.first(min_of(bytes.size(), sizeof(safegraphs_prefix_t))));
+        if (failed(magic_status)) return magic_status;
+        if (safegraphs_is_monolith(magic)) {
+            safegraphs_catalog_part_t part;
+            part.monolith = bytes;
+            if (status_t const described = describe(part); failed(described)) return described;
+            return parts.push_back(part);
+        }
+        // The manifest ends at its first zero byte, at the latest before the first part's aligned
+        // start, so one default alignment holds it unless a producer declared a wider one.
+        bytes_view_t manifest;
+        for (std::size_t window = min_of(bytes.size(), safegraphs_alignment_default_k);;
+             window = min_of(bytes.size(), 2 * window)) {
+            auto const [leading, leading_status] = readable(bytes.first(window));
+            if (failed(leading_status)) return leading_status;
+            if (void const* const ending = std::memchr(leading.data(), 0, leading.size())) {
+                manifest = leading.first(static_cast<std::size_t>(static_cast<byte_t const*>(ending) - leading.data()));
+                break;
+            }
+            if (window == bytes.size()) return status_t::malformed_k;
+        }
+        status_t kept = status_t::success_k;
+        status_t const listed = safegraphs_manifest_entries_(
+            manifest, bytes.size(), allocator, [&](safegraphs_part_t entry) noexcept {
+                safegraphs_catalog_part_t part;
+                part.monolith = bytes.subspan(entry.offset, entry.bytes);
+                if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
+            });
+        if (failed(listed)) return listed;
+        if (failed(kept)) return kept;
+        if (parts.empty()) return status_t::malformed_k;
+        for (safegraphs_catalog_part_t& part : parts)
+            if (status_t const described = describe(part); failed(described)) return described;
+        safegraphs_bind_extra_columns(parts, extra_columns);
+        return status_t::success_k;
+    }
+
+    /**
+     *  @brief Copies rows @p rows of the regular @p column, which @p header frames over @c bytes,
+     *      into @p destination.
+     *
+     *  By @c memcpy from host bytes into host memory, or through @p copy from a device's, into
+     *  whatever memory @p copy reaches, another device's, a peer's or the host's own.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The column is ragged, the rows fall outside it, or @p destination
+     *    holds another byte count.
+     *  - Whatever @p copy answers.
+     */
+    template <typename copy_type_>
+    status_t copy_column(safegraphs_header_t const& header, safegraphs_column_t const& column,
+                         iota_view<std::size_t> rows, bytes_span_t destination, copy_type_&& copy) const noexcept {
+        bytes_view_t const slice = header.rows_of(bytes, column, rows.first, rows.size());
+        if (slice.size() != destination.size() || (slice.empty() && !rows.empty())) return status_t::config_mismatch_k;
+        if (device == host_device_k) return copy_bytes(destination, slice);
+        return copy(destination, slice);
+    }
+};
+
+/**
+ *  @brief The metadata of the checkpoint @p source holds, every part's header read through the
+ *      source's @ref checkpoint_source_t::read_header, so a device's columns never cross into the
+ *      memory of the host.
  *
  *  @par Statuses:
  *  - @c malformed_k The manifest does not parse or lists no part, or a header does not parse or
  *    spans more bytes than its part.
- *  - @c overflow_k The grown capacity of @p parts wraps.
+ *  - Whatever @p copy answers.
  */
-template <typename allocator_type_>
-status_t safegraphs_catalog(bytes_view_t buffer, growing_buffer<safegraphs_catalog_part_t, allocator_type_>& parts,
-                            growing_buffer<safegraphs_named_column_t, allocator_type_>& extra_columns,
-                            allocator_type_ allocator) noexcept {
-    if (safegraphs_is_monolith(buffer)) return safegraphs_catalog_monolith(buffer, parts, extra_columns, allocator);
-    status_t kept = status_t::success_k;
-    auto per_part = [&](safegraphs_part_t entry) noexcept {
-        safegraphs_catalog_part_t part;
-        part.monolith = buffer.subspan(entry.offset, entry.bytes);
-        if (failed(parts.push_back(part))) kept = status_t::bad_alloc_k;
-    };
-    auto const [summary, summary_status] = safegraphs_read_manifest(buffer, allocator, per_part);
-    if (failed(summary_status)) return summary_status;
-    if (failed(kept)) return kept;
-    if (parts.empty()) return status_t::malformed_k;
-    for (safegraphs_catalog_part_t& part : parts)
-        if (status_t const described = safegraphs_describe_part(part, extra_columns, allocator); failed(described))
-            return described;
-    safegraphs_bind_extra_columns(parts, extra_columns);
-    return status_t::success_k;
+template <typename copy_type_, typename allocator_type_ = std::allocator<byte_t>>
+expected<safegraphs_metadata_t> safegraphs_read_metadata(checkpoint_source_t source, copy_type_&& copy,
+                                                         allocator_type_ allocator = {}) noexcept {
+    growing_buffer<safegraphs_catalog_part_t, allocator_type_> parts {allocator};
+    growing_buffer<safegraphs_named_column_t, allocator_type_> extra_columns {allocator};
+    if (status_t const read = source.read_header(parts, extra_columns, copy, allocator); failed(read))
+        return {safegraphs_metadata_t {}, read};
+    safegraphs_metadata_t metadata = safegraphs_metadata_of_(parts[0].header, parts[0].metric);
+    metadata.parts = parts.size();
+    metadata.nodes = 0;
+    for (safegraphs_catalog_part_t const& part : parts) metadata.nodes += part.nodes;
+    return {metadata, status_t::success_k};
 }
 
 #pragma endregion Parts
@@ -1408,13 +1549,13 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_
  *  @brief Frames a columned index as one monolith: a regular key column, a value column shaped
  *      by the codec, and a ragged neighbors column, the metric in the metadata.
  *
- *  A target lending its bytes in place hands the plan its data segment directly, so regions
- *  write zero-copy; any other target stages the segment and writes it once. The index counts
- *  value bytes, the interchange counts elements, so the value prefix sums stage beside the
- *  segment and land re-expressed once every region finished. The header lands last, so a
- *  failed or cancelled save leaves no magic behind.
+ *  A target lending its bytes in place hands the plan its data segment directly, so regions write
+ *  zero-copy; any other target stages the segment and writes it once. The index counts value bytes,
+ *  the interchange counts elements, so the value prefix sums stage beside the segment and are
+ *  written re-expressed once every region finished. The header is written last, so a failed or
+ *  cancelled save leaves no magic behind.
  *
- *  @param[in,out] monolith The bytes the checkpoint lands in - a buffer, or a file's mapping.
+ *  @param[in,out] monolith The bytes the checkpoint is written into: a buffer or a file mapping.
  *  @param[in] index Anything with @c columns_extents, @c plan_save and their column types.
  *  @param[in] codec Encodes each stored value into its slice and names the column's dtype and shape.
  *  @param[in,out] executor Runs one region per thread through @c for_tasks.
@@ -1464,7 +1605,7 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
 
     // Neighbor sums count IDs on both sides, so the plan writes the monolith's own buffer. Value
     // sums count bytes here and elements on the wire, so a fixed column has none to write and a
-    // ragged one of wider elements stages them and lands them scaled after the plan.
+    // ragged one of wider elements stages them and writes them scaled after the plan.
     std::span<u64_t> const neighbor_sums = safegraphs_typed_span_<u64_t>(segment, header.neighbors.offsets->bytes.first,
                                                                          nodes + 1);
     growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
@@ -1524,8 +1665,8 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec
 }
 
 /**
- *  Writes the monolith at @p path: sized from the index, created fresh, mapped, and flushed once
- *  every region landed. A refusal of @p codec passes through.
+ *  @brief Writes the monolith at @p path: sized from the index, created fresh, mapped, and flushed
+ *      once every region is written. A refusal of @p codec passes through.
  *
  *  @par Statuses:
  *  - @c contended_k A mutator, a batch or an open plan holds @p index, or the pool of
@@ -1699,7 +1840,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     auto const [header, parse_status] = safegraphs_read_header(monolith, allocator);
     if (failed(parse_status)) return parse_status;
 
-    // Every column's dtype, layout and extent is vetted before a payload byte lands. Neighbors
+    // Every column's dtype, layout and extent is vetted before a payload byte is written. Neighbors
     // without prefix sums are fixed-degree rows.
     constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
     safegraphs_column_t const& value = header.value;

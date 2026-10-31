@@ -271,7 +271,7 @@ std::size_t check_hash_set_arena_growth() noexcept {
         std::ptrdiff_t const grown_bytes = ledger.live_bytes;
         set.reset();
         arena.clear();
-        // The rewind drops the seed and keeps the widest chunk, so the next reservation lands in it.
+        // The rewind drops the seed and keeps the widest chunk, so the next reservation goes in it.
         failures += expect(ledger.live_bytes < grown_bytes && ledger.live_bytes > seed_bytes);
         failures += expect(arena.capacity() > 1024u);
     }
@@ -453,24 +453,24 @@ std::size_t check_max_heap_pop_many() noexcept {
 
 #pragma endregion Max Heap
 
-/** A row owning one ledgered word drawn from the column's allocator, so the ledger counts every
- *  row built and balances only once every one is destroyed. */
-struct ledgered_row_t {
+/** An entry owning one ledgered word drawn from the column's allocator, so the ledger counts every
+ *  entry built and balances only once every one is destroyed. */
+struct ledgered_entry_t {
     counting_allocator<u32_t> allocator;
     u32_t* word = nullptr;
 
-    explicit ledgered_row_t(counting_allocator_t const& column_allocator) noexcept
+    explicit ledgered_entry_t(counting_allocator_t const& column_allocator) noexcept
         : allocator(column_allocator), word(allocator.allocate(1)) {}
-    ledgered_row_t(ledgered_row_t const&) = delete;
-    ledgered_row_t& operator=(ledgered_row_t const&) = delete;
-    ~ledgered_row_t() noexcept {
+    ledgered_entry_t(ledgered_entry_t const&) = delete;
+    ledgered_entry_t& operator=(ledgered_entry_t const&) = delete;
+    ~ledgered_entry_t() noexcept {
         if (word) allocator.deallocate(word, 1);
     }
 };
 
-/** Covered rows start zeroed and keep their addresses as the column grows, and a bulk walk visits
- *  every row once, run by run; rows that are not trivially copyable are built from the column's
- *  allocator and destroyed with their chunks. */
+/** Covered entries start zeroed and keep their addresses as the column grows, and a bulk walk
+ *  visits every entry once, run by run; entries that are not trivially copyable are built from the
+ *  column's allocator and destroyed with their chunks. */
 std::size_t check_chunked_column() noexcept {
     using schedule_t = chunk_schedule<4, 6>;
     std::size_t failures = 0;
@@ -479,11 +479,11 @@ std::size_t check_chunked_column() noexcept {
         chunked_column<u32_t, schedule_t, 1024, counting_allocator_t> column {counting_allocator_t {ledger}};
         failures += expect(succeeded(column.cover(20)));
         failures += expect_eq(column[19], 0u); // A covered chunk starts zeroed.
-        for (u32_t row = 0; row != 20; ++row) column[row] = row;
+        for (u32_t entry = 0; entry != 20; ++entry) column[entry] = entry;
         u32_t const* const early = &column[3];
         failures += expect(succeeded(column.cover(500)));
         failures += expect(early == &column[3]);
-        for (u32_t row = 20; row != 500; ++row) column[row] = row;
+        for (u32_t entry = 20; entry != 500; ++entry) column[entry] = entry;
         std::size_t visited = 0, runs = 0;
         column.for_each_span({7, 487}, [&](std::span<u32_t> run) noexcept {
             for (u32_t const value : run) failures += expect_eq(value, static_cast<u32_t>(7 + visited++));
@@ -497,10 +497,10 @@ std::size_t check_chunked_column() noexcept {
 
     allocation_ledger_t built_ledger;
     {
-        chunked_column<ledgered_row_t, schedule_t, 1024, counting_allocator_t> column {
+        chunked_column<ledgered_entry_t, schedule_t, 1024, counting_allocator_t> column {
             counting_allocator_t {built_ledger}};
         failures += expect(succeeded(column.cover(20)));
-        // Two chunks, then one word per row: every row was built, and from the column's allocator.
+        // Two chunks, then one word per entry: every entry was built, from the column's allocator.
         failures += expect_eq(built_ledger.total_allocations, 2 + column.capacity());
         failures += expect(column[19].allocator.ledger_ == &built_ledger);
         column.reset();

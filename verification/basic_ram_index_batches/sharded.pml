@@ -15,7 +15,7 @@
  *  - A count the looker accepts holds the first batch's key on both shards or on neither.
  *
  *  @verify pass sc,rc11
- *  @verify stuck sc await_every_turn=true: awaiting both turns before filing, as the dense plural
+ *  @verify stuck sc await_every_turn=true: awaiting both turns before filing, as the dense sharded index
  *      does under its dispensing mutex, each crossed batch waits for a turn only the other's store
  *      gives
  *  @verify fail sc,rc11 sequence=false: without it, the looker probes one shard before the batch's

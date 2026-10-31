@@ -19,4 +19,4 @@ template <>
 std::span<byte_t const* const> bundle_bounds<gpu_class_t::nvidia_ada_k>() noexcept {
     return {dense_nvidia_ada_bundles, 2 * dense_dtypes_t::size_k};
 }
-template struct dense_class_tables<dense_home_t::vram_nvidia_k, gpu_class_t::nvidia_ada_k>;
+template struct dense_class_tables<vendored_residency_t::vram_nvidia_k, gpu_class_t::nvidia_ada_k>;

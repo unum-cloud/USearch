@@ -6,7 +6,7 @@
  *      turn makes it visible whole, with no new atomics.
  *
  *  Two commits of two rows each. A commit's leader dispenses, hands the range to a helper as the
- *  executor's fan-out would, each wires one row, the helper joins with a release the leader
+ *  executor's fan-out would, each wires one row, the helper arrives with a release the leader
  *  acquires, and the leader takes one turn from the range's first ID to its end. A row's wirer
  *  stores its payload relaxed ahead of the release of slot zero that publishes it. The searcher
  *  acquires the watermark, which never lies strictly inside a range, and reads every row below it.
@@ -137,7 +137,7 @@ inline wire(t, id, sibling) {
     fi
 }
 
-// a commit's leader: the whole range from one add, its own row, the helper's join, then one turn
+// a commit's leader: the whole range from one add, its own row, the helper's arrival, then one turn
 proctype committer(byte t; byte commit) {
     int first, joins, watermark;
     read_modify_write(t, next_dispensed_id, order_acq_rel, first, first + range_rows);
@@ -162,7 +162,7 @@ proctype committer(byte t; byte commit) {
     fi
 }
 
-// the executor's second worker on a commit's range: the range's second row, then the join
+// the executor's second worker on a commit's range: the range's second row, then the arrival
 proctype helper(byte t; byte commit) {
     int first, watermark;
     dispatched[commit];

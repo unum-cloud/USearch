@@ -13,6 +13,7 @@
 
 #include <cassert> // `assert` - a per-thread family is opened before it is asked
 #include <cstddef> // `std::size_t`
+#include <cstring> // `std::memcpy` - strided keys and coordinates packed into the arena
 
 #include <array>            // `std::array` - the predicate's batch
 #include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
@@ -33,9 +34,12 @@
 #include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves
 
 #include "usearch/usearch.h"                 // every modality's argument structures
+#include "usearch/dense/types.hpp"           // `dense::search_config_t` & kin - the configs every verb lowers
 #include "usearch/utilities/nvme_device.hpp" // `nvme_executor_t`, `io_engine_config_t`
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
-#include "usearch/utilities/vram_device.hpp" // `gpu_executor_t`, `gpu_arena_t`
+#include "usearch/utilities/sample.hpp"      // `sample_inputs`, `sample_outputs` - what SAMPLE reads and writes
+#include "usearch/utilities/safegraphs_format.hpp" // `checkpoint_source_t` - a checkpoint on a device
+#include "usearch/utilities/vram_device.hpp"       // `gpu_executor_t`, `gpu_arena_t`
 
 using namespace unum::usearch;
 using namespace unum::usearch::utilities;
@@ -123,10 +127,27 @@ inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char co
 template <typename result_type_>
 inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ const& result) noexcept {
     if constexpr (requires { result.telemetry.visited_members; }) accumulate_stats(stats, result.telemetry);
+    else if constexpr (requires { result.traversal_stats.visited_members; })
+        accumulate_stats(stats, result.traversal_stats);
     else if (stats) {
         stats->visited_members += result.visited_members;
         stats->computed_distances += result.computed_distances;
         stats->restarts += result.restarts;
+    }
+}
+
+/** The traversal stats @p result carries: itself, the telemetry it holds, or its own counters. */
+template <typename result_type_>
+inline traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept {
+    if constexpr (std::is_same_v<result_type_, traversal_stats_t>) return result;
+    else if constexpr (requires { result.telemetry.visited_members; }) return traversal_stats_of(result.telemetry);
+    else if constexpr (requires { result.traversal_stats.visited_members; }) return result.traversal_stats;
+    else {
+        traversal_stats_t stats;
+        stats.computed_distances = result.computed_distances;
+        stats.visited_members = result.visited_members;
+        stats.restarts = result.restarts;
+        return stats;
     }
 }
 
@@ -158,7 +179,8 @@ status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
 /** Whether a result carries traversal telemetry - one probe both crossings read. */
 template <typename value_type_>
 concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; } ||
-                            requires(value_type_ const& value) { value.telemetry.visited_members; };
+                            requires(value_type_ const& value) { value.telemetry.visited_members; } ||
+                            requires(value_type_ const& value) { value.traversal_stats.visited_members; };
 
 /** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
  *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
@@ -172,9 +194,12 @@ inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats
 /** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
 inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
 
-/** The predicate lifted onto the index's key vocabulary, asked a quad at a time through arrays of
- *  its own key and admission types on the stack. */
-struct predicate_t {
+/** Admits every candidate, for a call that names no predicate. */
+struct no_predicate_t {};
+
+/** The C predicate over keys, asked per scored quad through arrays of its own key and admission
+ *  types on the stack. */
+struct cheap_predicate_t {
     usearch_predicate_t predicate;
 
     template <std::size_t extent_>
@@ -188,6 +213,21 @@ struct predicate_t {
             admissions[lane] = static_cast<admission_t>(c_admissions[lane]);
     }
 };
+
+/** The C predicate over keys, asked once per round a thread settles, over the keys it gathers. */
+struct expensive_predicate_t {
+    usearch_predicate_t predicate;
+};
+
+/** The caller's predicate, settled once per call and named by its cost, as C's
+ *  @c usearch_predicate_cost_t names it. */
+using predicate_t = std::variant<no_predicate_t, cheap_predicate_t, expensive_predicate_t>;
+
+inline predicate_t predicate_of(usearch_predicate_t predicate) noexcept {
+    if (!predicate.callback) return no_predicate_t {};
+    if (predicate.cost == usearch_predicate_cost_expensive_k) return expensive_predicate_t {predicate};
+    return cheap_predicate_t {predicate};
+}
 
 /** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, at
  *  the batch's static extent, a NULL row answering an empty view that refuses the call. A GPU walk
@@ -344,6 +384,78 @@ struct progress_ticks_t {
 
 #pragma endregion Scaffolding
 
+#pragma region Composites
+
+using dense::candidates_count_t;
+using dense::insert_config_t;
+using dense::refine_config_t;
+using dense::search_config_t;
+
+/** A split's knobs as the C layer lowers them: its refine's, and the seed ordering the parts. */
+struct split_config_t {
+    refine_config_t refine {};
+    u64_t seed = 0;
+};
+
+/** The variants behind a call's other handles, a split's receivers or a refinement's donors, read
+ *  through the caller's own array, so a verb builds its one typed list straight from them. */
+struct variants_view_t {
+    void const* handles = nullptr;
+    std::size_t count = 0;
+    void* (*variant_at)(void const* handles, std::size_t position) noexcept = nullptr;
+
+    std::size_t size() const noexcept { return count; }
+    bool empty() const noexcept { return !count; }
+    void* operator[](std::size_t position) const noexcept { return variant_at(handles, position); }
+};
+
+/** The engine config a C call's breadth and traversal name. */
+inline search_config_t search_config_of(std::size_t expansion_factor, usearch_traversal_t traversal) noexcept {
+    search_config_t config;
+    config.expansion_factor = static_cast<candidates_count_t>(expansion_factor);
+    config.traversal = traversal == usearch_traversal_scan_k ? traversal_t::scan_k : traversal_t::walk_k;
+    return config;
+}
+
+/** Where an arena lives, and where the walks it serves compute: RAM in a NUMA domain, or one
+ *  device's VRAM, the only residencies an arena takes. */
+struct arena_residency_t {
+    usearch_residency_t residency = usearch_residency_ram_k;
+
+    /** The host memory domain, on RAM. */
+    u32_t numa_domain = 0;
+
+    /** The vendor ordinal, on VRAM. */
+    u32_t device = 0;
+
+    bool operator==(arena_residency_t const&) const noexcept = default;
+};
+
+/** The residency every host walk and host arena names, whatever domain its memory sits in. */
+inline constexpr arena_residency_t ram_residency_k {};
+
+inline constexpr arena_residency_t vram_residency(std::size_t device) noexcept {
+    return {usearch_residency_vram_k, 0, static_cast<u32_t>(device)};
+}
+
+inline constexpr arena_residency_t ram_residency(fu_memory_domain_id_t domain) noexcept {
+    return {usearch_residency_ram_k, static_cast<u32_t>(domain), 0};
+}
+
+/** Writes what a refinement @p refined counts into the caller's @p report, if it names one. */
+template <typename refined_type_>
+inline void write_refine_report(usearch_refine_report_t* report, refined_type_ const& refined) noexcept {
+    if (!report) return;
+    report->reselected = refined.reselected_nodes;
+    report->changed = refined.changed_nodes;
+    report->islands_found = refined.islands_found;
+    report->islands_reconnected = refined.islands_reconnected;
+    report->reachability = {refined.reachability.audited_nodes, refined.reachability.reachable_nodes,
+                            refined.reachability.sweeps, refined.reachability.back_sweeps};
+}
+
+#pragma endregion Composites
+
 #pragma region Type Lists
 
 /** How many storage dtypes the dense variants cover, from the front of the ladder bf16, u1, i8,
@@ -356,7 +468,7 @@ struct progress_ticks_t {
 #error "USEARCH_DENSE_DTYPES must be an integer from 1 to 11"
 #endif
 
-/** Types in order, the variants one basic class unit compiles in one home. */
+/** Types in order, the variants one basic class unit compiles in one residency. */
 template <typename... types_>
 struct type_list {
     static constexpr std::size_t size_k = sizeof...(types_);
@@ -368,8 +480,8 @@ struct dtype_list {
     static constexpr std::size_t size_k = sizeof...(dtypes_);
     static constexpr std::array<nk_dtype_t, sizeof...(dtypes_)> dtypes_k {dtypes_...};
 
-    /** The position of @p dtype in the list, or @c size_k when it is absent. */
-    static constexpr std::size_t position_of(nk_dtype_t dtype) noexcept {
+    /** The index of @p dtype in the list, or @c size_k when it is absent. */
+    static constexpr std::size_t index_of(nk_dtype_t dtype) noexcept {
         std::size_t position = 0;
         while (position != size_k && dtypes_k[position] != dtype) ++position;
         return position;
@@ -1071,7 +1183,7 @@ template <typename multi_type_>
 inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
 
 /** Where a variant runs and which executor it takes, the dense and basic modalities alike. */
-enum class dense_home_t : u32_t {
+enum class vendored_residency_t : u32_t {
     ram_k,
     nvme_k,
     vram_nvidia_k,
@@ -1079,37 +1191,38 @@ enum class dense_home_t : u32_t {
     vram_apple_k,
 };
 
-/** The executor each home's verbs take. */
-template <dense_home_t home_>
-struct dense_home_executor;
+/** The executor each residency's verbs take. */
+template <vendored_residency_t residency_>
+struct vendored_residency_executor;
 template <>
-struct dense_home_executor<dense_home_t::ram_k> {
+struct vendored_residency_executor<vendored_residency_t::ram_k> {
     using type = forkunion_executor_t;
 };
 template <>
-struct dense_home_executor<dense_home_t::nvme_k> {
+struct vendored_residency_executor<vendored_residency_t::nvme_k> {
     using type = nvme_executor_t;
 };
 template <>
-struct dense_home_executor<dense_home_t::vram_nvidia_k> {
+struct vendored_residency_executor<vendored_residency_t::vram_nvidia_k> {
     using type = cuda_executor_t;
 };
 template <>
-struct dense_home_executor<dense_home_t::vram_amd_k> {
+struct vendored_residency_executor<vendored_residency_t::vram_amd_k> {
     using type = hip_executor_t;
 };
 template <>
-struct dense_home_executor<dense_home_t::vram_apple_k> {
+struct vendored_residency_executor<vendored_residency_t::vram_apple_k> {
     using type = metal_executor_t;
 };
 
-/** The home whose verbs take @p executor_type_. */
+/** The residency whose verbs take @p executor_type_. */
 template <typename executor_type_>
-inline constexpr dense_home_t home_of = std::is_same_v<executor_type_, forkunion_executor_t> ? dense_home_t::ram_k
-                                        : std::is_same_v<executor_type_, nvme_executor_t>    ? dense_home_t::nvme_k
-                                        : std::is_same_v<executor_type_, cuda_executor_t> ? dense_home_t::vram_nvidia_k
-                                        : std::is_same_v<executor_type_, hip_executor_t>  ? dense_home_t::vram_amd_k
-                                                                                          : dense_home_t::vram_apple_k;
+inline constexpr vendored_residency_t vendored_residency_of =
+    std::is_same_v<executor_type_, forkunion_executor_t> ? vendored_residency_t::ram_k
+    : std::is_same_v<executor_type_, nvme_executor_t>    ? vendored_residency_t::nvme_k
+    : std::is_same_v<executor_type_, cuda_executor_t>    ? vendored_residency_t::vram_nvidia_k
+    : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
+                                                         : vendored_residency_t::vram_apple_k;
 
 /** The class whose kernels run on an AMD GPU of @c gfx version @p major. @p minor: 9.4 is MI300's
  *  @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251; any other
@@ -1172,24 +1285,31 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
     return {runtime.devices, runtime.devices_count};
 }
 
-/** Copies @p source into @p staged when it lives on an NVIDIA or AMD device, whose memory no host
- *  read reaches, and points @p source at the copy; host pages and Apple's unified memory are read
- *  in place. */
-inline status_t stage_on_host(bytes_view_t& source, growing_buffer<byte_t>& staged) noexcept {
+/** The checkpoint in @p bytes and where it sits: on the NVIDIA or AMD device whose memory holds it,
+ *  which no host read reaches, or on the host, as host pages and Apple's unified memory are. */
+inline checkpoint_source_t checkpoint_source_of(bytes_view_t bytes) noexcept {
     gpu_drivers_t const& drivers = gpu_drivers();
-    int const nvidia = cuda_device_of(drivers.cuda, source.data()),
-              amd = nvidia < 0 ? hip_device_of(drivers.hip, source.data()) : -1;
-    if (nvidia < 0 && amd < 0) return status_t::success_k;
-    if (failed(staged.resize_uninitialized(source.size()))) return status_t::bad_alloc_k;
-    bool const copied = nvidia >= 0
-                            ? cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
-                                  cuda_copy(drivers.cuda, staged.data(), source.data(), source.size()) == cuda_success_k
-                            : hip_set_device(drivers.hip, amd) == hip_success_k &&
-                                  drivers.hip.copy(staged.data(), source.data(), source.size(),
-                                                   hip_copy_device_to_host_k) == hip_success_k;
-    if (!copied) return status_t::device_error_k;
-    source = to_span(staged);
-    return status_t::success_k;
+    int const nvidia = cuda_device_of(drivers.cuda, bytes.data());
+    return {bytes, nvidia >= 0 ? nvidia : hip_device_of(drivers.hip, bytes.data())};
+}
+
+/** Copies the NVIDIA or AMD device bytes @p source into the host's @p destination through the
+ *  driver whose device holds them, returning once they arrived, as a checkpoint's headers cross. */
+inline status_t copy_off_device(bytes_span_t destination, bytes_view_t source) noexcept {
+    if (destination.size() != source.size()) return status_t::config_mismatch_k;
+    gpu_drivers_t const& drivers = gpu_drivers();
+    if (int const nvidia = cuda_device_of(drivers.cuda, source.data()); nvidia >= 0)
+        return cuda_set_device(drivers.cuda, nvidia) == cuda_success_k &&
+                       cuda_copy(drivers.cuda, destination.data(), source.data(), source.size()) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    if (int const amd = hip_device_of(drivers.hip, source.data()); amd >= 0)
+        return hip_set_device(drivers.hip, amd) == hip_success_k &&
+                       drivers.hip.copy(destination.data(), source.data(), source.size(), hip_copy_device_to_host_k) ==
+                           hip_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    return status_t::device_error_k;
 }
 
 /** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
@@ -1316,42 +1436,55 @@ static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_cl
 
 /** Every argument structure that names an executor, so a deferred submission keeps its call by
  *  value; whatever the copy points to stays the caller's until final. */
-using deferred_arguments_t = std::variant<                                                               //
-    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
-    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                              //
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,       //
-    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t, //
-    usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t,                                  //
-    usearch_dense_search_stream_next_t, usearch_dense_cursor_next_t, usearch_dense_sample_t,             //
-    usearch_dense_save_t, usearch_dense_save_buffer_t,                                                   //
-    usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,       //
-    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,                            //
-    usearch_sequence_load_ram_t, usearch_sequence_load_vram_t, usearch_sequence_view_nvme_t,             //
-    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,                     //
-    usearch_sequence_refine_t, usearch_sequence_absorb_t, usearch_sequence_split_t,                      //
-    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t,                              //
-    usearch_sequence_refinement_finish_t,                                                                //
-    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,                         //
-    usearch_sequence_cursor_next_t, usearch_sequence_sample_t,                                           //
-    usearch_sequence_save_t, usearch_sequence_metadata_read_t, usearch_sequence_describe_t,              //
-    usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,                   //
-    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,                           //
-    usearch_shapes_refine_t, usearch_shapes_absorb_t, usearch_shapes_split_t,                            //
-    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t,                                  //
-    usearch_shapes_refinement_finish_t,                                                                  //
-    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t,                               //
-    usearch_shapes_cursor_next_t, usearch_shapes_sample_t,                                               //
-    usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,                    //
-    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_view_nvme_t,       //
-    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t,               //
-    usearch_geospatial_refine_t, usearch_geospatial_absorb_t, usearch_geospatial_split_t,                //
-    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                          //
-    usearch_geospatial_refinement_finish_t,                                                              //
-    usearch_geospatial_search_t, usearch_geospatial_within_t,                                            //
-    usearch_geospatial_count_t, usearch_geospatial_get_t,                                                //
-    usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                                       //
-    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
+using deferred_arguments_t = std::variant< //
+
+    /* Loading */
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,          //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                   //
+    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t, usearch_sequence_load_vram_t,       //
+    usearch_shapes_load_ram_t, usearch_shapes_view_nvme_t, usearch_shapes_load_vram_t,             //
+    usearch_geospatial_load_ram_t, usearch_geospatial_view_nvme_t, usearch_geospatial_load_vram_t, //
+
+    /* Building */
+    usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
+    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,       //
+    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t,             //
+    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t, //
+
+    /* Refining */
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,             //
+    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
+    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
+    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
+    usearch_geospatial_split_t,                                                                                //
+
+    /* Refinements */
+    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t,          //
+    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t, usearch_sequence_refinement_finish_t, //
+    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t, usearch_shapes_refinement_finish_t,       //
+    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                                   //
+    usearch_geospatial_refinement_finish_t,                                                                       //
+
+    /* Reading */
+    usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
+    usearch_dense_cursor_next_t, usearch_dense_sample_t, usearch_dense_describe_t,                               //
+    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t, usearch_sequence_cursor_next_t, //
+    usearch_sequence_sample_t, usearch_sequence_describe_t,                                                      //
+    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t, usearch_shapes_cursor_next_t,         //
+    usearch_shapes_sample_t, usearch_shapes_describe_t,                                                          //
+    usearch_geospatial_search_t, usearch_geospatial_within_t, usearch_geospatial_count_t,                        //
+    usearch_geospatial_get_t, usearch_geospatial_cursor_next_t, usearch_geospatial_sample_t,                     //
+    usearch_geospatial_describe_t,                                                                               //
+
+    /* Persisting */
+    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, //
+    usearch_dense_metadata_read_buffer_t,                                             //
+    usearch_sequence_save_t, usearch_sequence_metadata_read_t,                        //
+    usearch_shapes_save_t, usearch_shapes_metadata_read_t,                            //
+    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,                    //
+
+    /* Products */
+    usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
 
 /** Where one slot of a deferred table stands. */
 enum class deferred_stage_t : unsigned char {
@@ -1505,18 +1638,15 @@ inline typename multi_type_::executor_t* executor_of(multi_type_& variant, usear
     return typed;
 }
 
-/** The device an arena of host pages names, which no GPU ordinal does. */
-inline constexpr int host_device_k = -1;
-
 /** Whether @p traversal names a walk, a scan, or nothing, which derives the walk, and @p predicate
- *  leaves @p device 's walks alone, since a host callback cannot narrow a device walk; false once
- *  @p outcome records why not. */
-inline bool accepts_traversal(int device, usearch_traversal_t traversal, usearch_predicate_t predicate,
+ *  leaves the walks at @p residency alone, since a host callback cannot narrow a device walk; false
+ *  once @p outcome records why not. */
+inline bool accepts_traversal(arena_residency_t residency, usearch_traversal_t traversal, usearch_predicate_t predicate,
                               usearch_outcome_t* outcome) noexcept {
     if (traversal != usearch_traversal_unknown_k && traversal != usearch_traversal_walk_k &&
         traversal != usearch_traversal_scan_k)
         return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal");
-    if (predicate.callback && device != host_device_k)
+    if (predicate.callback && residency != ram_residency_k)
         return propagate_error(usearch_status_unsupported_k, outcome, "A host predicate cannot narrow a device walk");
     return true;
 }
@@ -1533,8 +1663,8 @@ struct usearch_arena_handle_t {
      *  null for host pages, which serve any. */
     usearch_executor_t executor = nullptr;
 
-    /** The GPU ordinal the memory lives on, or @c host_device_k. */
-    int device = host_device_k;
+    /** Where the memory lives: host pages, or a device's VRAM. */
+    arena_residency_t residency = ram_residency_k;
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
      *  before its final store; touched through a reference, since a held call finishes on whichever
@@ -1565,16 +1695,16 @@ inline bool arena_contains(usearch_arena_handle_t const& arena, void const* addr
 }
 
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
- *  outputs, so an input of @p inputs still inside it is refused, as is an arena on another device
- *  than @p device or device memory another @p executor made. The call's @c call_outcome_t lets go
- *  of it before the final store. */
+ *  outputs, so an input of @p inputs still inside it is refused, as is an arena elsewhere than
+ *  @p residency or device memory another @p executor made. The call's @c call_outcome_t lets go of
+ *  it before the final store. */
 inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call,
-                                           usearch_executor_t executor, int device,
+                                           usearch_executor_t executor, arena_residency_t residency,
                                            std::initializer_list<void const*> inputs,
                                            usearch_outcome_t* outcome) noexcept {
     if (!arena)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
-    if (arena->device != device)
+    if (arena->residency != residency)
         return propagate_error(usearch_status_device_k, outcome, "The arena lives where the call does not compute"),
                nullptr;
     if (arena->device_memory && arena->executor != executor)
@@ -1614,9 +1744,9 @@ inline value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcep
 template <typename value_type_>
 inline expected<value_type_*> publish(usearch_arena_handle_t& arena, value_type_* output, std::size_t count) noexcept {
     if (!arena.device_memory || !output || !count) return {output, status_t::success_k};
-    value_type_* const landed = carve<value_type_>(arena.device_memory, count);
-    if (!landed) return {nullptr, status_t::bad_alloc_k};
-    return {landed, arena.device_memory.upload(landed, output, count * sizeof(value_type_))};
+    value_type_* const uploaded = carve<value_type_>(arena.device_memory, count);
+    if (!uploaded) return {nullptr, status_t::bad_alloc_k};
+    return {uploaded, arena.device_memory.upload(uploaded, output, count * sizeof(value_type_))};
 }
 
 /** The first failure of the steps of one call, or success. */
@@ -1662,57 +1792,201 @@ class call_outcome_t {
     usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
 };
 
-/** Where a ranked run lands inside a claimed arena: @c wanted keys and scores per query, and a
+/** Where a ranked run is written inside a claimed arena: @c wanted keys and scores per query, and a
  *  count per query. */
-struct matches_landing_t {
+struct matches_outputs_t {
     usearch_key_t* keys = nullptr;
     usearch_distance_t* scores = nullptr;
     std::size_t* counts = nullptr;
     std::size_t wanted = 0;
 
-    /** The view the call publishes once every query landed. */
+    /** The view the call publishes once every query published. */
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** The landing of @p count queries of @p wanted matches, carved out of a claimed arena's host pages
+/** The outputs of @p count queries of @p wanted matches, carved out of a claimed arena's host pages
  *  or device memory, @p memory; a zero @p wanted carves only the counts. */
 template <typename memory_type_>
-inline expected<matches_landing_t> carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted) noexcept {
-    matches_landing_t landing;
-    landing.wanted = wanted;
-    landing.counts = carve<std::size_t>(memory, count);
+inline expected<matches_outputs_t> carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted) noexcept {
+    matches_outputs_t outputs;
+    outputs.wanted = wanted;
+    outputs.counts = carve<std::size_t>(memory, count);
     if (wanted) {
-        landing.keys = carve<usearch_key_t>(memory, count * wanted);
-        landing.scores = carve<usearch_distance_t>(memory, count * wanted);
+        outputs.keys = carve<usearch_key_t>(memory, count * wanted);
+        outputs.scores = carve<usearch_distance_t>(memory, count * wanted);
     }
-    bool const carved = landing.counts && (!wanted || (landing.keys && landing.scores));
-    return {landing, carved ? status_t::success_k : status_t::bad_alloc_k};
+    bool const carved = outputs.counts && (!wanted || (outputs.keys && outputs.scores));
+    return {outputs, carved ? status_t::success_k : status_t::bad_alloc_k};
 }
 
-/** The @p count queries @ref carve_matches put in @p landing as the caller reads them, where
+/** The @p count queries @ref carve_matches put in @p outputs as the caller reads them, where
  *  @p arena hands outputs out, once its uploads drained. */
-inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena, matches_landing_t const& landing,
+inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& arena, matches_outputs_t const& outputs,
                                                         std::size_t count) noexcept {
-    std::size_t const entries = count * landing.wanted;
-    auto const [counts, counts_status] = publish(arena, landing.counts, count);
-    auto const [keys, keys_status] = publish(arena, landing.keys, entries);
-    auto const [scores, scores_status] = publish(arena, landing.scores, entries);
-    status_t const landed = drained(arena, first_failure({counts_status, keys_status, scores_status}));
-    return {{keys, scores, counts, landing.wanted}, landed};
+    std::size_t const entries = count * outputs.wanted;
+    auto const [counts, counts_status] = publish(arena, outputs.counts, count);
+    auto const [keys, keys_status] = publish(arena, outputs.keys, entries);
+    auto const [scores, scores_status] = publish(arena, outputs.scores, entries);
+    status_t const published = drained(arena, first_failure({counts_status, keys_status, scores_status}));
+    return {{keys, scores, counts, outputs.wanted}, published};
 }
 
-/** The ragged run of @p count queries @ref carve put on host pages, @p keys and @p scores cut by
- *  @p offsets, as the caller reads it where @p arena hands outputs out, once its uploads drained;
- *  an empty run hands out no keys or scores. */
-inline expected<usearch_matches_tape_view_t> publish_matches(usearch_arena_handle_t& arena, usearch_key_t* keys,
-                                                             usearch_distance_t* scores, std::size_t* offsets,
-                                                             std::size_t count) noexcept {
-    std::size_t const written = offsets[count];
-    auto const [landed_keys, keys_status] = publish(arena, written ? keys : nullptr, written);
-    auto const [landed_scores, scores_status] = publish(arena, written ? scores : nullptr, written);
-    auto const [landed_offsets, offsets_status] = publish(arena, offsets, count + 1);
-    status_t const landed = drained(arena, first_failure({keys_status, scores_status, offsets_status}));
-    return {{landed_keys, landed_scores, landed_offsets}, landed};
+/** Where a cursor pull gathers its entries' links, straight in the call's arena: their keys end to
+ *  end, and the offset where each entry's run starts, one more than the entries, as the C tape
+ *  reads them out. */
+struct links_outputs_t {
+    growing_buffer<us::utilities::uuid_t, thread_allocator_t> keys;
+    growing_buffer<std::size_t, thread_allocator_t> offsets;
+
+    explicit links_outputs_t(growing_arena<forkunion_allocator_t>& memory) noexcept
+        : keys(thread_allocator_t {memory}), offsets(thread_allocator_t {memory}) {}
+
+    /** Opens the first run; @c bad_alloc_k when the arena cannot grow. */
+    status_t open() noexcept { return offsets.push_back(0); }
+
+    /** The C tape over the gathered links. */
+    usearch_keys_tape_view_t tape() const noexcept {
+        static_assert(sizeof(us::utilities::uuid_t) == sizeof(usearch_key_t), "Links land as the walk reads them");
+        return {reinterpret_cast<usearch_key_t const*>(keys.data()), offsets.data()};
+    }
+};
+
+/** Where a sample is written on a claimed arena's host pages, @c wanted rows each: the plan writes
+ *  its keys, ordinals, parents, f32 parent distances and coordinates, and @ref publish_sample
+ *  widens the distances into the parents' scores and counts. */
+struct sample_staging_t {
+    usearch_key_t* keys = nullptr;
+    std::size_t* ordinals = nullptr;
+    usearch_key_t* parents = nullptr;
+    f32_t* parent_distances = nullptr;
+    usearch_distance_t* scores = nullptr;
+    std::size_t* counts = nullptr;
+    f32_t* coordinates = nullptr;
+    std::size_t wanted = 0;
+
+    /** The plan's outputs over these rows, in the key type @p key_type_ the index stores. */
+    template <typename key_type_>
+    sample_outputs<key_type_> outputs() const noexcept {
+        static_assert(sizeof(key_type_) == sizeof(usearch_key_t), "Keys land in the arena as the plan writes them");
+        return {{reinterpret_cast<key_type_*>(keys), wanted},
+                {ordinals, wanted},
+                {reinterpret_cast<key_type_*>(parents), wanted},
+                {parent_distances, wanted},
+                {coordinates, wanted * 3}};
+    }
+};
+
+/** Carves the staging of @p wanted draws out of the host pages @p memory. */
+inline expected<sample_staging_t> carve_sample(growing_arena<forkunion_allocator_t>& memory,
+                                               std::size_t wanted) noexcept {
+    sample_staging_t staging;
+    staging.wanted = wanted;
+    staging.keys = carve<usearch_key_t>(memory, wanted);
+    staging.ordinals = carve<std::size_t>(memory, wanted);
+    staging.parents = carve<usearch_key_t>(memory, wanted);
+    staging.parent_distances = carve<f32_t>(memory, wanted);
+    staging.scores = carve<usearch_distance_t>(memory, wanted);
+    staging.counts = carve<std::size_t>(memory, wanted);
+    staging.coordinates = carve<f32_t>(memory, wanted * 3);
+    bool const carved = staging.keys && staging.ordinals && staging.parents && staging.parent_distances &&
+                        staging.scores && staging.counts && staging.coordinates;
+    return {staging, carved || !wanted ? status_t::success_k : status_t::bad_alloc_k};
+}
+
+/** The @p count keys of @p keys as the plan reads them: the caller's own when packed, otherwise
+ *  copied onto the host pages @p memory. */
+template <typename key_type_>
+inline expected<std::span<key_type_ const>> view_keys(usearch_keys_view_t keys, std::size_t count,
+                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
+    static_assert(sizeof(key_type_) == sizeof(usearch_key_t), "The plan reads the caller's keys as they are");
+    if (count <= 1 || keys.stride == sizeof(usearch_key_t))
+        return {{reinterpret_cast<key_type_ const*>(keys.data), count}, status_t::success_k};
+    key_type_* const packed = carve<key_type_>(memory, count);
+    if (!packed) return {{}, status_t::bad_alloc_k};
+    for (std::size_t offset = 0; offset != count; ++offset)
+        std::memcpy(packed + offset, reinterpret_cast<byte_t const*>(keys.data) + offset * keys.stride,
+                    sizeof(usearch_key_t));
+    return {{packed, count}, status_t::success_k};
+}
+
+/** The @p count rows of three f32 values of @p rows as the plan reads them: the caller's own when
+ *  packed, otherwise copied onto the host pages @p memory. */
+inline expected<std::span<f32_t const>> view_coordinates(usearch_rows_view_t rows, std::size_t count,
+                                                         growing_arena<forkunion_allocator_t>& memory) noexcept {
+    std::size_t const row_bytes = 3 * sizeof(f32_t);
+    if (count <= 1 || rows.stride == row_bytes)
+        return {{static_cast<f32_t const*>(rows.data), count * 3}, status_t::success_k};
+    f32_t* const packed = carve<f32_t>(memory, count * 3);
+    if (!packed) return {{}, status_t::bad_alloc_k};
+    for (std::size_t row = 0; row != count; ++row)
+        std::memcpy(packed + row * 3, static_cast<byte_t const*>(rows.data) + row * rows.stride, row_bytes);
+    return {{packed, count * 3}, status_t::success_k};
+}
+
+/** A sample's shown keys, their coordinates and its focus, viewed in place where packed and copied
+ *  onto the host pages @p memory otherwise. */
+template <typename key_type_, typename arguments_type_>
+inline expected<sample_inputs<key_type_>> view_sample(arguments_type_ const& arguments,
+                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
+    auto const [shown, shown_status] = view_keys<key_type_>(arguments.shown, arguments.shown_count, memory);
+    auto const [coordinates, coordinates_status] = view_coordinates(arguments.shown_coordinates, arguments.shown_count,
+                                                                    memory);
+    auto const [focus, focus_status] = view_keys<key_type_>(arguments.focus, arguments.focus_count, memory);
+    if (failed(first_failure({shown_status, coordinates_status, focus_status}))) return {{}, status_t::bad_alloc_k};
+    return {{shown, coordinates, focus}, status_t::success_k};
+}
+
+/** Resets every output of a sample's @p arguments, so a refused call leaves nothing behind. */
+template <typename arguments_type_>
+inline void reset_sample(arguments_type_ const& arguments) noexcept {
+    *arguments.keys = {};
+    *arguments.entry_ordinals = nullptr;
+    *arguments.parents = {};
+    *arguments.coordinates = {};
+    *arguments.written = 0;
+    if (arguments.stats) *arguments.stats = {};
+}
+
+/** Whether a sample's @p arguments name their shown keys and focus as the header asks; false once
+ *  @p outcome records why not. */
+template <typename arguments_type_>
+inline bool accepts_sample(arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
+    usearch_rows_view_t const& coordinates = arguments.shown_coordinates;
+    if ((arguments.shown_count && !arguments.shown.data) || (arguments.focus_count && !arguments.focus.data))
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The shown keys and focus must name keys");
+    if ((arguments.shown.stride && arguments.shown.stride < sizeof(usearch_key_t)) ||
+        (arguments.focus.stride && arguments.focus.stride < sizeof(usearch_key_t)))
+        return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key");
+    if (arguments.shown_count &&
+        (!coordinates.data || coordinates.columns != 3 || coordinates.scalar != usearch_scalar_f32_k ||
+         (coordinates.stride && coordinates.stride < 3 * sizeof(f32_t))))
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The shown coordinates must be three f32 values per key");
+    return true;
+}
+
+/** Hands the @p sampled draws of @p staging out through a sample's @p arguments, their parents'
+ *  distances widened into the scores; the self-parent of a first draw without shown points counts
+ *  as no parent. */
+template <typename arguments_type_>
+inline void publish_sample(arguments_type_ const& arguments, sample_staging_t const& staging,
+                           sample_result_t const& sampled) noexcept {
+    std::size_t const written = sampled.written;
+    if (arguments.stats)
+        arguments.stats->visited_members += sampled.visited_members,
+            arguments.stats->computed_distances += sampled.computed_distances;
+    for (std::size_t draw = 0; draw != written; ++draw) {
+        bool const own = staging.parent_distances[draw] == 0 &&
+                         !std::memcmp(&staging.parents[draw], &staging.keys[draw], sizeof(usearch_key_t));
+        staging.scores[draw] = static_cast<usearch_distance_t>(staging.parent_distances[draw]);
+        staging.counts[draw] = own ? 0 : 1;
+    }
+    if (!written) return;
+    *arguments.keys = {staging.keys, sizeof(usearch_key_t)};
+    *arguments.entry_ordinals = staging.ordinals;
+    *arguments.parents = {staging.parents, staging.scores, staging.counts, 1};
+    *arguments.coordinates = {staging.coordinates, 3 * sizeof(f32_t), 3, usearch_scalar_f32_k};
+    *arguments.written = written;
 }
 
 /** The run read as text - a path, which is bytes that happen to decode. The ABI spells a byte

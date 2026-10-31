@@ -768,7 +768,7 @@ impl fmt::Debug for Key {
 /// Scalar types the indexes store and exchange, named by width and encoding.
 ///
 /// Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell. The C enum
-/// reserves the numbering gaps for kinds that have not landed yet, so this one is open.
+/// reserves the numbering gaps for kinds not yet implemented, so this one is open.
 ///
 /// Mirrors `usearch_scalar_t`.
 #[repr(i32)]

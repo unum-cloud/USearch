@@ -6,7 +6,7 @@
  *      exported entry point as one forward apiece.
  *
  *  The variants' bodies compile in the shapes class units, never here: a handle reaches its variant
- *  only through the home table the ladder picked.
+ *  only through the residency table the ladder picked.
  */
 #include "basic_index.cuh"
 
@@ -55,6 +55,9 @@ USEARCH_EXPORT void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
 }
 USEARCH_EXPORT void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
     basic_refine<usearch_shapes_refine>(arguments);
+}
+USEARCH_EXPORT void usearch_shapes_health(usearch_shapes_health_t* arguments) {
+    basic_health<usearch_shapes_health>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_search(usearch_shapes_search_t* arguments) {
     basic_search<usearch_shapes_search>(arguments);

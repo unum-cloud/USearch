@@ -175,6 +175,9 @@ typedef enum usearch_js_slot_t {
     /** The @c DenseTraversalStats reading its telemetry lands in. */
     usearch_js_slot_stats_k,
 
+    /** The keys a sample looks around, beside the shown ones it reads through the keys slot. */
+    usearch_js_slot_focus_k,
+
     /** Slots in every call. */
     usearch_js_slots_k,
 } usearch_js_slot_t;

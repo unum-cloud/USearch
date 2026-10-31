@@ -6,9 +6,10 @@
  *      universally-representable synthetic data generation.
  *
  *  Checks return their own failure counts and roll up to @c main without global mutable
- *  state. Four verbs cover every case: @c expect for a condition, @c expect_eq and
- *  @c expect_near when diagnosis needs the values, and @c report for the verdict column.
- *  A status becomes a condition through @c succeeded(), so no fifth verb is needed.
+ *  state. Four verbs cover every case: @c expect for a condition, @c expect_eq when diagnosis
+ *  needs the values, @c expect_errors for a numeric pipeline's errors against its exact
+ *  reference, and @c report for the verdict column. A status becomes a condition through
+ *  @c succeeded(), so no fifth verb is needed.
  *
  *  The suite reads its settings once, at the top of @c main, into the one @c settings_t the
  *  benchmarks and tools read too, with @c USEARCH_SEED, @c USEARCH_FILTER, @c USEARCH_DEVICES and
@@ -16,13 +17,14 @@
  */
 #pragma once
 
-#include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
+#include <cmath>   // `std::fabs`, `std::fmax`, `std::sqrt` - the statistics of `expect_errors`
 #include <cstdio>  // `std::remove` - a viewed checkpoint's files
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
 #include <cstring> // `std::memset` - the scribble over a freed block
 
 #include <algorithm>   // `std::sort`, `std::unique` - the dispensed-ID density check
 #include <array>       // `std::array` - one latent point of the sign sketches
+#include <bit>         // `std::bit_cast` - the units in the last place of `error_stats_t`
 #include <chrono>      // `std::chrono::microseconds` - the flaky waiter's oversleep
 #include <limits>      // `std::numeric_limits` - the unbounded allocation budget
 #include <span>        // `std::span` - the dispensed-ID density check
@@ -39,7 +41,7 @@
 #include "usearch/types.h" // `usearch_version_name`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
 #include "usearch/utilities/types.hpp"
 
-#include "abi.hpp" // `tools::settings_t`, `tools::landed_matches_t` - what every suite shares
+#include "abi.hpp" // `tools::settings_t`, `tools::copied_matches_t` - what every suite shares
 
 /** The short spelling every test reaches the library through where its `using` directive is
  *  ambiguous - Darwin declares a global `uuid_t` too - or unwanted, as inside foreign specializations. */
@@ -63,16 +65,93 @@ inline std::size_t expect_eq_(actual_type_ const& actual, wanted_type_ const& wa
     return 1;
 }
 
-/** The @c expect_eq twin for floats, at the 1e-3 relative tolerance a @c -ffast-math
- *  build needs: it re-derives finalizes per inlining context, so bit-equality is wrong. */
-#define expect_near(actual, wanted) expect_near_((actual), (wanted), #actual " ~ " #wanted, __FILE__, __LINE__)
-inline std::size_t expect_near_(f64_t actual, f64_t wanted, char const* expression, char const* file, int line) {
-    f64_t const scale = std::fmax(std::fmax(std::fabs(actual), std::fabs(wanted)), 1.0);
-    f64_t const difference = std::fabs(actual - wanted);
-    if (difference <= 1e-3 * scale) return 0;
-    fmt::print(stderr, "  check failed at {}:{}: {} - expected {:.6g}, got {:.6g}, off by {:.4g}\n", file, line,
-               expression, wanted, actual, difference);
-    return 1;
+/** The relative error a @c -ffast-math build leaves, which @c expect_errors allows. */
+inline constexpr f64_t approximate_tolerance_k = 1e-3;
+
+/** How a cell's results relate to their exact reference, the families NumKong's harness judges its
+ *  kernels by: equal, within rounding, within rounding of the largest reference for weighted
+ *  averages that pass through zero, or only statistically close for paths approximate by design. */
+enum class comparison_family_t { exact_k, approximate_k, normalized_reduction_k, bounded_k };
+
+/** Whether a cell beyond its family's bound fails the suite or only warns: sparse paths warn, exact
+ *  paths assert. */
+enum class comparison_verdict_t { assert_k, warn_k };
+
+/** Errors of one cell against its exact reference: max absolute and relative errors, the absolute
+ *  errors' mean and Welford sum of squares that sigma bounds read, and the largest distance in
+ *  @c f32 units in the last place. */
+struct error_stats_t {
+    std::size_t count = 0;
+    f64_t max_absolute_error = 0;
+    f64_t max_relative_error = 0;
+    f64_t max_reference = 0;
+    f64_t mean = 0;
+    f64_t sum_of_squares = 0;
+    u64_t max_ulp = 0;
+    std::size_t exact_matches = 0;
+
+    void add(f64_t actual, f64_t reference) noexcept {
+        f64_t const difference = actual == reference ? 0.0 : std::fabs(actual - reference);
+        // NaN counts as the largest error, which every family's bound refuses.
+        f64_t const error = std::isnan(difference) ? std::numeric_limits<f64_t>::infinity() : difference;
+        ++count;
+        exact_matches += error == 0;
+        max_absolute_error = std::fmax(max_absolute_error, error);
+        max_relative_error = std::fmax(max_relative_error,
+                                       error / std::fmax(std::fmax(std::fabs(actual), std::fabs(reference)), 1.0));
+        max_reference = std::fmax(max_reference, std::fabs(reference));
+        f64_t const delta = error - mean;
+        mean += delta / static_cast<f64_t>(count);
+        sum_of_squares += delta * (error - mean);
+        max_ulp = std::max(max_ulp, ulp_distance(static_cast<f32_t>(actual), static_cast<f32_t>(reference)));
+    }
+
+    f64_t deviation() const noexcept {
+        return count > 1 ? std::sqrt(sum_of_squares / static_cast<f64_t>(count - 1)) : 0.0;
+    }
+
+    static u64_t ulp_distance(f32_t first, f32_t second) noexcept {
+        auto const ordered = [](f32_t value) noexcept {
+            u32_t const bits = std::bit_cast<u32_t>(value);
+            return bits >> 31 ? -static_cast<i64_t>(bits & 0x7FFFFFFFu) : static_cast<i64_t>(bits);
+        };
+        i64_t const gap = ordered(first) - ordered(second);
+        return static_cast<u64_t>(gap < 0 ? -gap : gap);
+    }
+};
+
+/** Judges the statistics of @p cell by its @p family's bound and, when @p sigmas is positive, by no
+ *  error past rounding lying beyond @p sigmas standard deviations past the mean; on @c warn_k
+ *  prints a warning instead of failing. A cell of no samples judged nothing and always fails.
+ *  Answers the failures to add. */
+inline std::size_t expect_errors(char const* cell, comparison_family_t family, comparison_verdict_t verdict,
+                                 error_stats_t const& errors, double sigmas) {
+    if (!errors.count) {
+        fmt::println(stderr, "  check failed in {}: no samples were compared", cell);
+        return 1;
+    }
+    bool within = std::isfinite(errors.max_absolute_error);
+    switch (family) {
+    case comparison_family_t::exact_k: within = within && errors.exact_matches == errors.count; break;
+    case comparison_family_t::approximate_k:
+        within = within && errors.max_relative_error <= approximate_tolerance_k;
+        break;
+    case comparison_family_t::normalized_reduction_k:
+        within = within && errors.max_absolute_error <= approximate_tolerance_k * std::fmax(errors.max_reference, 1.0);
+        break;
+    case comparison_family_t::bounded_k: break;
+    }
+    // Rounding-level outliers say nothing about a path, so the sigma bound reads only the errors
+    // beyond rounding level.
+    if (sigmas > 0 && errors.max_relative_error > approximate_tolerance_k)
+        within = within && errors.max_absolute_error <= errors.mean + sigmas * errors.deviation();
+    if (within) return 0;
+    fmt::println(stderr,
+                 "  {} {}: {} of {} exact, max abs {:.4g}, max rel {:.4g}, max ulp {}, mean abs {:.4g} ± {:.4g}",
+                 verdict == comparison_verdict_t::warn_k ? "warning in" : "check failed in", cell, errors.exact_matches,
+                 errors.count, errors.max_absolute_error, errors.max_relative_error, errors.max_ulp, errors.mean,
+                 errors.deviation());
+    return verdict == comparison_verdict_t::assert_k;
 }
 
 /** One verdict column, whichever way the case ended; answers the count it was given,
@@ -206,7 +285,7 @@ constexpr u64_t stream_key(u64_t seed, std::string_view name, u64_t index = 0) n
 
 #pragma endregion Settings
 
-/** IDs dispensed to racing lanes must land dense & duplicate-free: sorted in
+/** IDs dispensed to racing lanes must come out dense & duplicate-free: sorted in
  *  place, unique, and running from @p first_id through the half-open bound
  *  @p first_id plus the ID count. */
 template <typename node_id_type_>
@@ -273,7 +352,7 @@ struct allocation_ledger_t {
 
 /**
  *  @brief Byte-counting allocator proving propagation through a container: every allocation and
- *      deallocation lands in the shared ledger, which must balance to zero at scope exit.
+ *      deallocation is tallied in the shared ledger, which must balance to zero at scope exit.
  *
  *  The default constructor exists only because @c nk::tensor requires a default-constructible
  *  allocator for its empty instances; a defaulted copy aborts on any real allocation, so
@@ -388,7 +467,7 @@ nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, st
                                                            allocator_type_ allocator = {}) {
     constexpr std::size_t latent_dimensions_k = 8;
     // One set of hyperplanes for every call, as one embedding model serves every batch: slices drawn under
-    // different seeds, like the concurrent builds', still land in one sketch space.
+    // different seeds, like the concurrent builds', still fall in one sketch space.
     splitmix64_t hyperplanes_generator {0x5E7C4ull}, points_generator {seed};
     uniform_between<f64_t> const centered {-1, 1};
     auto hyperplanes = nk::matrix<f64_t>::zeros({dimensions, latent_dimensions_k}).value;
@@ -429,8 +508,8 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
     return vectors;
 }
 
-using us::tools::landed_matches;
-using us::tools::landed_matches_t;
+using us::tools::copied_matches_t;
+using us::tools::copy_matches;
 
 std::size_t check_dense(settings_t const& settings);
 
@@ -481,10 +560,10 @@ inline constexpr std::size_t cell_batch_k = 384;
 /** Matches a cell judges per query. */
 inline constexpr std::size_t cell_wanted_k = 10;
 
-/** Inserts @p count entries of @p inputs into the empty @p index under their keys, which must land
- *  across the cell's shards and each count once where the residency serves a count. */
+/** Inserts @p count entries of @p inputs into the empty @p index under their keys, which must
+ *  spread across the cell's shards and each count once where the residency serves a count. */
 template <typename verbs_type_>
-std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs,
+std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, typename verbs_type_::values_t inputs,
                          std::size_t count) {
     usearch_traversal_stats_t stats {};
     std::size_t failures = check(insert_entries(index, inputs, count, 0, cell_batch_k, 0, stats));
@@ -507,22 +586,32 @@ std::size_t expect_built(sweep_cell_t const& cell, handle<verbs_type_>& index, t
     return failures + check(miscounted == 0);
 }
 
+/** Writes into @p recall the share of the exact scan's top ten in @p oracle a walk at @p expansion
+ *  keeps over the first @p count queries of @p queries, ties at the cut counting however the scan
+ *  happened to break them. */
+template <typename verbs_type_>
+usearch_outcome_t walk_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                              std::size_t expansion, copied_matches_t const& oracle, double& recall) {
+    copied_matches_t found;
+    usearch_traversal_stats_t stats {};
+    usearch_outcome_t const walked = search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                                    usearch_traversal_walk_k, stats, found);
+    if (walked.status == usearch_status_success_k) recall = recall_at(cell_wanted_k, found, oracle);
+    return walked;
+}
+
 /** A walk at @p expansion keeps @p floor of the exact scan's top ten over the first @p count
- *  queries of @p queries, ties at the cut counting wherever the scan broke them; a residency that
- *  serves no scan yet has no oracle to judge by. */
+ *  queries of @p queries, as @ref walk_recall judges it; a residency that serves no scan yet has no
+ *  oracle to judge by. */
 template <typename verbs_type_>
 std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                                std::size_t expansion, double floor) {
-    landed_matches_t oracle;
+    copied_matches_t oracle;
     usearch_outcome_t const scanned = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
     if (scanned.status == usearch_status_unsupported_k) return 0;
-    std::size_t failures = check(scanned);
-    landed_matches_t found;
-    usearch_traversal_stats_t stats {};
-    failures += check(search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
-                                     usearch_traversal_walk_k, stats, found));
+    double recall = 0;
+    std::size_t const failures = check(scanned) || check(walk_recall(index, queries, count, expansion, oracle, recall));
     if (failures) return failures;
-    double const recall = recall_at(cell_wanted_k, found, oracle);
     if (recall < floor) fmt::println(stderr, "  recall at ten {:.3f} under the floor {:.3f}", recall, floor);
     return check(recall >= floor);
 }
@@ -533,13 +622,13 @@ std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_:
  *  entry of @p inputs included. */
 template <typename verbs_type_>
 std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& index,
-                               typename verbs_type_::inputs_t inputs, typename verbs_type_::queries_t queries,
+                               typename verbs_type_::values_t inputs, typename verbs_type_::queries_t queries,
                                std::size_t count, std::size_t expansion, double floor, std::string const& stem,
                                saved_bytes_t bytes, double score_band) {
     // Entries that round on the way may steer a walk down another path, so they compare by exact
     // scans wherever the residency serves one.
     auto const search = [&](handle<verbs_type_>& searched) {
-        landed_matches_t found;
+        copied_matches_t found;
         usearch_traversal_stats_t stats {};
         usearch_outcome_t outcome {};
         if (score_band)
@@ -548,7 +637,7 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
         if (!score_band || outcome.status == usearch_status_unsupported_k)
             found = {}, outcome = search_queries(searched, queries, count, cell_batch_k, cell_wanted_k, expansion,
                                                  usearch_traversal_walk_k, stats, found);
-        return outcome.status == usearch_status_success_k ? found : landed_matches_t {};
+        return outcome.status == usearch_status_success_k ? found : copied_matches_t {};
     };
     std::size_t failures = check_checkpoint_round_trip(index, stem, cell.shards, bytes, score_band, search);
     if (cell.residency != usearch_residency_nvme_k) return failures;
@@ -568,26 +657,50 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
     return failures;
 }
 
-/** Two refinements settle, the second changing no more than the first; a device index answers
- *  @p on_device instead, where refinement is not implemented yet. */
+/** Two refinements settle: each changes no more entries than it re-selected, the second no more
+ *  than the first, and a walk at @p expansion keeps as much of the exact scan's top ten over the
+ *  first @p count queries of @p queries, so the scan and the walk that judge it must both succeed;
+ *  a VRAM index whose tower still declares its refinement answers @p on_device instead and is left
+ *  out of the judging. */
 template <typename verbs_type_>
-std::size_t expect_refined(handle<verbs_type_>& index, usearch_status_t on_device) {
-    std::size_t changed[2] = {0, 0};
+std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                           std::size_t expansion, usearch_status_t on_device) {
+    copied_matches_t oracle;
+    double recall_before = 0, recall_after = 0;
+    char const* refused = nullptr;
+    usearch_outcome_t oracle_outcome = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
+    if (oracle_outcome.status != usearch_status_success_k) refused = "scan_oracle";
+    else if (oracle_outcome = walk_recall(index, queries, count, expansion, oracle, recall_before);
+             oracle_outcome.status != usearch_status_success_k)
+        refused = "walk_recall";
+    usearch_refine_report_t reports[2] {};
     std::size_t failures = 0;
-    for (std::size_t& pass_changed : changed) {
+    for (usearch_refine_report_t& report : reports) {
         usearch_outcome_t outcome {};
-        verbs_type_::refine(index.get(), index.executor(), &pass_changed, &outcome);
-        if (index.residency == usearch_residency_vram_k) return check(outcome.status == on_device);
-        failures += check(outcome);
+        verbs_type_::refine(index.get(), index.executor(), &report, &outcome);
+        if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
+            return check(outcome.status == on_device);
+        failures += check(outcome) + check(report.changed <= report.reselected);
     }
-    return failures + check(changed[1] <= changed[0]);
+    failures += check(reports[1].changed <= reports[0].changed);
+    if (refused) {
+        fmt::println(stderr, "  the recall oracle's {} refused with {}: {}", refused,
+                     usearch_status_name(oracle_outcome.status),
+                     oracle_outcome.message ? oracle_outcome.message : "no message");
+        return failures + 1;
+    }
+    failures += check(walk_recall(index, queries, count, expansion, oracle, recall_after));
+    if (recall_after < recall_before)
+        fmt::println(stderr, "  recall at ten fell from {:.3f} to {:.3f} over two refinements", recall_before,
+                     recall_after);
+    return failures + check(recall_after >= recall_before);
 }
 
 /** A donor of @p count entries of @p inputs, keyed past the index's own @p first_offset entries,
  *  absorbs whole: its slot is consumed and the sizes add up; a device index answers @p on_device
  *  instead, where absorption is not implemented yet. */
 template <typename verbs_type_>
-std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::inputs_t inputs, std::size_t count,
+std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
                             std::size_t first_offset, usearch_status_t on_device) {
     handle<verbs_type_> donor = open_index<verbs_type_>(*index.session, index.geometry, 1);
     if (!donor) return 1;

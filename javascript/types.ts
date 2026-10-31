@@ -521,29 +521,29 @@ export class Matches extends ArenaView {
   readonly queries: number;
   /** Columns per query the call wrote, at most its `wanted` - the "k" in "kANN". */
   readonly columns: number;
-  readonly #landed: CompiledMatches;
+  readonly #outputs: CompiledMatches;
 
   /** Made by a ranked verb, never directly. */
-  constructor(landed: CompiledMatches, queries: number) {
+  constructor(outputs: CompiledMatches, queries: number) {
     super();
-    this.#landed = landed;
+    this.#outputs = outputs;
     this.queries = queries;
-    this.columns = landed.columns;
+    this.columns = outputs.columns;
   }
 
   /** The `queries × columns` identity matrix, rows contiguous, sixteen bytes per key. */
   get keys(): Uint8Array {
-    return this.live(this.#landed.keys);
+    return this.live(this.#outputs.keys);
   }
 
   /** The `queries × columns` distance matrix, rows contiguous. */
   get scores(): Float64Array {
-    return this.live(this.#landed.scores);
+    return this.live(this.#outputs.scores);
   }
 
   /** Matches written per query, one count per query. */
   get counts(): BigUint64Array {
-    return this.live(this.#landed.counts);
+    return this.live(this.#outputs.counts);
   }
 
   /**
@@ -564,12 +564,10 @@ export class Matches extends ArenaView {
   }
 }
 
-/**
- *  One serialized monolith, viewed inside the arena `saveBuffer` landed it in.
+/** One serialized monolith, viewed inside the arena `saveBuffer` wrote it into.
  *
  *  The bytes are what a checkpoint holds, so a service that keeps its indexes in an object store
- *  never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back.
- */
+ *  never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back. */
 export class Monolith extends ArenaView {
   readonly #bytes: Uint8Array | null;
 

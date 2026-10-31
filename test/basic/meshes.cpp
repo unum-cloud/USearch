@@ -246,7 +246,6 @@ static_assert(value_codec<mesh_codec_t, mesh_t>);
 /** The invariance case: a rigidly moved cloud must sit at spectra distance zero
  *  from its original - the property that makes the metric a GW lower bound. */
 static std::size_t check_meshes_rigid_invariance() {
-    std::size_t failures = 0;
     mesh_t const original = make_tetrahedron(2);
     mesh_t moved = original;
     constexpr f32_t half_k = 0.5f;
@@ -256,24 +255,27 @@ static std::size_t check_meshes_rigid_invariance() {
         point.x += 3.5f, point.y -= 1.25f, point.z += 0.75f;
     }
     refresh_spectrum(moved);
-    failures += expect_near(meshes_fixture_t::oracle(original, moved), 0.0);
-    failures += expect_near(meshes_fixture_t::oracle(original, make_tetrahedron(3)), 1.0);
-    return failures;
+    error_stats_t oracle_errors;
+    oracle_errors.add(meshes_fixture_t::oracle(original, moved), 0.0);
+    oracle_errors.add(meshes_fixture_t::oracle(original, make_tetrahedron(3)), 1.0);
+    return expect_errors("rigid invariance", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                         oracle_errors, 0);
 }
 
 /** Kernel-vs-scalar parity: the NumKong-built metric distance and the scalar
  *  oracle must agree over sampled cloud pairs - each also runs implicitly through
  *  every scenario's per-result audit. */
 static std::size_t check_meshes_kernel_parity(u64_t seed) {
-    std::size_t failures = 0;
     allocation_ledger_t ledger;
     auto values = meshes_fixture_t::make_values(8, stream_key(seed, "kernel_parity"), counting_allocator_t {ledger});
+    error_stats_t kernel_errors;
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         auto const& first = values[pair].spectrum;
         auto const& second = values[pair + 1].spectrum;
-        failures += expect_near(spectra_distance(first, second), scalar_spectra_distance(first, second));
+        kernel_errors.add(spectra_distance(first, second), scalar_spectra_distance(first, second));
     }
-    return failures;
+    return expect_errors("spectra kernel parity", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
+                         kernel_errors, 0);
 }
 
 std::size_t test::basic::check_meshes(settings_t const& settings) {

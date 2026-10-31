@@ -7,7 +7,7 @@
  *      takes.
  *
  *  The variants' bodies compile in the geospatial class units, never here: a handle reaches its
- *  variant only through the home table the ladder picked.
+ *  variant only through the residency table the ladder picked.
  */
 #include "basic_index.cuh"
 
@@ -58,6 +58,9 @@ USEARCH_EXPORT void usearch_geospatial_insert(usearch_geospatial_insert_t* argum
 }
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
     basic_refine<usearch_geospatial_refine>(arguments);
+}
+USEARCH_EXPORT void usearch_geospatial_health(usearch_geospatial_health_t* arguments) {
+    basic_health<usearch_geospatial_health>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
     basic_search<usearch_geospatial_search>(arguments);

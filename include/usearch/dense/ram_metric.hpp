@@ -154,7 +154,7 @@ concept bits_kit = requires {
 
 /** Compile-time concept for every @c quads_kit_t: the inner-product engine, and the throughs of
  *  either the numeric metrics or the bit ones. The trampoline takes only a kit, so substitution
- *  errors land at the call site as a one-line constraint-not-satisfied. */
+ *  errors show at the call site as a one-line constraint-not-satisfied. */
 template <typename kit_>
 concept quads_kit = requires {
     typename kit_::scalar_t;
@@ -2072,7 +2072,7 @@ struct i8_powervsx_quads_kit_t {
 #endif // NUMKONG_TARGET_POWERVSX
 
 /** u4x2 inner-product distance kit - serial reference. Two unsigned nibbles per
- *  byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes land in
+ *  byte, so a step of 16 dimensions rides in a 64-bit vec. The dot lanes end in
  *  @c i32 like every other integral kit, even though @c dot_result_t is unsigned. */
 struct u4x2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
@@ -2536,7 +2536,7 @@ struct u1x8_powervsx_quads_kit_t {
  *      against the element and against the empty sentinel, so a probe touches cache lines rather
  *      than slots.
  *
- *  Placement is group-ordered: an element may land @b before its exact hashed slot inside its
+ *  Placement is group-ordered: an element may sit @b before its exact hashed slot inside its
  *  starting group, and every reader replicates that order, so a group holding any empty lane ends
  *  the walk. Groups are 16-aligned and the capacity is a power of two, so once it reaches 16 no
  *  load straddles the table's end; smaller tables take the serial walk. The scan carries its own
@@ -3004,8 +3004,8 @@ struct no_rmscast_kit_t {
     static constexpr bool compiled_k = true;
 };
 
-/** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products land in f32;
- *  @c no_rmscast_kit_t for a scalar without one. */
+/** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products accumulate in
+ *  f32; @c no_rmscast_kit_t for a scalar without one. */
 template <typename scalar_type_, nk_capability_t caps_>
 struct rmscast_ladder {
     using kit_t = no_rmscast_kit_t;

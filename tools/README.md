@@ -111,7 +111,7 @@ Once every rank reports its part complete, rank 0 writes the manifest at the `--
 That manifest is the commit record: a run that fails anywhere leaves parts and no checkpoint, and a reader sees it as absent.
 
 The result is indistinguishable from what `usearch_dense_save` writes for a sharded index, so `usearch_dense_load_ram`, `usearch_dense_load_vram` and `usearch_dense_view_nvme` all open it.
-A view and a VRAM load keep one shard per part, while a RAM load wants one memory domain named per part, as parts landing in one domain share a shard with no links between their graphs.
+A view and a VRAM load keep one shard per part, while a RAM load wants one memory domain named per part, as parts loaded into one domain share a shard with no links between their graphs.
 Every query walks every shard, so fewer and larger shards serve faster; a rank per GPU is the starting point that later merges compact.
 
 GPUs are assigned to the ranks of a node in turn.

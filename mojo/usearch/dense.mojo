@@ -197,6 +197,30 @@ struct DenseReachability(Defaultable, ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct DenseRefineReport(Defaultable, ImplicitlyCopyable):
+    """What one `refine`, `absorb` or `split` did to the graph - `usearch_refine_report_t`."""
+
+    var reselected: c_size_t
+    """Entries whose neighbors were selected again, the islands of every heal round included."""
+    var changed: c_size_t
+    """Of those, the entries whose neighbor set gained a member it lacked; zero means settled."""
+    var islands_found: c_size_t
+    """Entries the first audit found not reached both ways."""
+    var islands_reconnected: c_size_t
+    """Links written between an island and an entry the audit reached both ways."""
+    var reachability: DenseReachability
+    """The audit closing the heal, as a fresh `health` right after would take it."""
+
+    def __init__(out self):
+        """Zeroes the report, which is what a failed call leaves."""
+        self.reselected = c_size_t(0)
+        self.changed = c_size_t(0)
+        self.islands_found = c_size_t(0)
+        self.islands_reconnected = c_size_t(0)
+        self.reachability = DenseReachability()
+
+
+@fieldwise_init
 struct DenseOptions(ImplicitlyCopyable):
     """The geometry an empty index freezes - what `usearch_dense_init_ram_t` and
     `usearch_dense_init_vram_t` share, without the placement each names its own way.
@@ -434,6 +458,73 @@ struct DenseBatch[origin: MutOrigin](Movable, Sized):
         var begin = Int(offsets[entry])
         return _in_arena[Key, origin_of(self)](
             self.links_view.keys + begin * size_of[Key](), Int(offsets[entry + 1]) - begin
+        )
+
+
+@fieldwise_init
+struct DenseDraws[origin: MutOrigin](Movable, Sized):
+    """The draws `sample` wrote into its arena, read in place: each draw's key, which of that key's
+    entries it is, the shown or earlier draw it hangs from, and where it is placed.
+
+    Parameters:
+        origin: The arena the draws live in, which this result borrows.
+    """
+
+    var arena: Pointer[Arena, Self.origin]
+    """The arena holding the draws."""
+    var generation: Int
+    """The arena's call these draws came from, so a read after a later call is refused."""
+    var outputs: DenseSampleOutputs
+    """Where the engine wrote every output, inside the arena."""
+
+    def __len__(self) -> Int:
+        """The draws written.
+
+        Returns:
+            Fewer than wanted only once the region is exhausted.
+        """
+        return Int(self.outputs.written)
+
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
+        """Every draw's key.
+
+        Returns:
+            The keys, borrowed from the arena this result reads.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseDraws.keys")
+        return _in_arena[Key, origin_of(self)](self.outputs.keys, len(self))
+
+    def entry_ordinals(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
+        """Which of its key's entries each draw is, in the order `get` writes them.
+
+        Returns:
+            The entry ordinals, borrowed from the arena this result reads.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseDraws.entry_ordinals")
+        return _in_arena[c_size_t, origin_of(self)](self.outputs.entry_ordinals, len(self))
+
+    def parents(self) -> Matches[Self.origin]:
+        """Each draw's parent and its distance, one column per draw, a root holding none.
+
+        Returns:
+            The parents, read in place from the same arena.
+        """
+        return Matches[Self.origin](self.arena, self.generation, self.outputs.parents, len(self))
+
+    def coordinates(self) -> DenseVectors[DType.float32, Self.origin]:
+        """Where each draw is placed, one row of three values apiece.
+
+        Returns:
+            The places, read in place from the same arena.
+        """
+        return DenseVectors[DType.float32, Self.origin](
+            self.arena, self.generation, self.outputs.coordinates, len(self)
         )
 
 
@@ -731,6 +822,50 @@ struct DenseAttendConfig[carry_origin: MutOrigin = MutUntrackedOrigin, stats_ori
         self.stats = stats
 
 
+struct DenseSampleConfig[
+    shown_origin: ImmOrigin = ImmUntrackedOrigin,
+    coordinates_origin: ImmOrigin = ImmUntrackedOrigin,
+    focus_origin: ImmOrigin = ImmUntrackedOrigin,
+](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_sample_t`; left alone, it draws across the whole index with nothing shown.
+
+    Parameters:
+        shown_origin: The shown keys' origin, inferred where any are lent.
+        coordinates_origin: Their coordinates' origin, inferred with them.
+        focus_origin: The focus keys' origin, inferred where any are lent.
+    """
+
+    var shown: Span[Key, Self.shown_origin]
+    """The keys already shown, never drawn again; empty shows nothing yet."""
+    var shown_coordinates: Span[Float32, Self.coordinates_origin]
+    """Where each `shown` key sits, three values apiece."""
+    var focus: Span[Key, Self.focus_origin]
+    """The keys to look around; empty looks around the whole index."""
+    var seed: UInt64
+    """Equal seeds, shown keys and focus over an unchanged index draw equally."""
+
+    def __init__(
+        out self,
+        *,
+        shown: Span[Key, Self.shown_origin] = Span[Key, Self.shown_origin](),
+        shown_coordinates: Span[Float32, Self.coordinates_origin] = Span[Float32, Self.coordinates_origin](),
+        focus: Span[Key, Self.focus_origin] = Span[Key, Self.focus_origin](),
+        seed: UInt64 = 0,
+    ):
+        """Names only the knobs that differ from the defaults.
+
+        Args:
+            shown: The keys already shown, never drawn again; empty shows nothing yet.
+            shown_coordinates: Where each `shown` key sits, three values apiece.
+            focus: The keys to look around; empty looks around the whole index.
+            seed: Equal seeds, shown keys and focus over an unchanged index draw equally.
+        """
+        self.shown = shown
+        self.shown_coordinates = shown_coordinates
+        self.focus = focus
+        self.seed = seed
+
+
 struct DenseSearchStreamInitConfig(ImplicitlyCopyable):
     """The knobs of `usearch_dense_search_stream_init_t`; zeroed ones derive what the C interface derives."""
 
@@ -884,8 +1019,7 @@ struct DenseRefineArguments(ImplicitlyCopyable):
     var executor: Address
     var outcome: Address
     var completion: Completion
-    var changed: Address
-    var reachability: Address
+    var report: Address
     var expansion_factor: c_size_t
     var progress: ProgressArguments
     var stats: Address
@@ -912,8 +1046,50 @@ struct DenseAbsorbArguments(ImplicitlyCopyable):
     var completion: Completion
     var count: c_size_t
     var donors: Address
-    var changed: Address
-    var reachability: Address
+    var report: Address
+    var expansion_factor: c_size_t
+    var progress: ProgressArguments
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseSplitArguments(ImplicitlyCopyable):
+    """`usearch_dense_split_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var receivers: Address
+    var report: Address
+    var expansion_factor: c_size_t
+    var seed: UInt64
+    var progress: ProgressArguments
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseSampleArguments(ImplicitlyCopyable):
+    """`usearch_dense_sample_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var shown_count: c_size_t
+    var shown: KeysView[ImmUntrackedOrigin]
+    var shown_coordinates: RowsViewArguments
+    var focus_count: c_size_t
+    var focus: KeysView[ImmUntrackedOrigin]
+    var keys: Address
+    var entry_ordinals: Address
+    var parents: Address
+    var coordinates: Address
+    var written: Address
+    var arena: Address
+    var wanted: c_size_t
+    var seed: UInt64
     var expansion_factor: c_size_t
     var progress: ProgressArguments
     var stats: Address
@@ -970,11 +1146,11 @@ struct DenseGetArguments(ImplicitlyCopyable):
 struct DenseCursorInitArguments(ImplicitlyCopyable):
     """`usearch_dense_cursor_init_t`."""
 
-    var cursor: Address
     var index: Address
     var outcome: Address
     var starts_count: c_size_t
     var starts: Address
+    var cursor: Address
 
 
 @fieldwise_init
@@ -1071,10 +1247,10 @@ struct DenseMultiplyArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: ProgressArguments
-    var stats: Address
     var traversal: Traversal
     var predicate: PredicateArguments
+    var progress: ProgressArguments
+    var stats: Address
 
 
 @fieldwise_init
@@ -1096,10 +1272,10 @@ struct DenseAttendArguments(ImplicitlyCopyable):
     var outputs_scalar: ScalarKind
     var expansion_factor: c_size_t
     var score_scale: Float32
-    var progress: ProgressArguments
-    var stats: Address
     var traversal: Traversal
     var predicate: PredicateArguments
+    var progress: ProgressArguments
+    var stats: Address
 
 
 @fieldwise_init
@@ -1120,10 +1296,10 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: ProgressArguments
-    var stats: Address
     var traversal: Traversal
     var predicate: PredicateArguments
+    var progress: ProgressArguments
+    var stats: Address
 
 
 comptime DenseInitRam = Verb[DenseInitRamArguments]
@@ -1141,6 +1317,8 @@ comptime DenseInsert = Verb[DenseInsertArguments]
 comptime DenseRefine = Verb[DenseRefineArguments]
 comptime DenseHealth = Verb[DenseHealthArguments]
 comptime DenseAbsorb = Verb[DenseAbsorbArguments]
+comptime DenseSplit = Verb[DenseSplitArguments]
+comptime DenseSample = Verb[DenseSampleArguments]
 comptime DenseSearch = Verb[DenseSearchArguments]
 comptime DenseCount = Verb[DenseCountArguments]
 comptime DenseGet = Verb[DenseGetArguments]
@@ -1171,7 +1349,7 @@ def _cross[Arguments: ImplicitlyCopyable & Deinitable, //](arguments: Arguments,
 
 @fieldwise_init
 struct DenseCountOutputs(Defaultable, ImplicitlyCopyable):
-    """The one `size_t` `usearch_dense_count` and `usearch_dense_refine` write."""
+    """The one `size_t` `usearch_dense_count` writes."""
 
     var value: c_size_t
 
@@ -1195,6 +1373,27 @@ struct DenseGetOutputs(Defaultable, ImplicitlyCopyable):
     def __init__(out self):
         """Nothing exported."""
         self.vectors = _no_rows()
+        self.written = c_size_t(0)
+
+
+@fieldwise_init
+struct DenseSampleOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_sample` writes through its pointers; the keys are a `usearch_keys_view_t`."""
+
+    var keys: Address
+    var keys_stride: c_size_t
+    var entry_ordinals: Address
+    var parents: MatchesViewArguments
+    var coordinates: RowsViewArguments
+    var written: c_size_t
+
+    def __init__(out self):
+        """Nothing drawn."""
+        self.keys = NULL_ADDRESS
+        self.keys_stride = c_size_t(0)
+        self.entry_ordinals = NULL_ADDRESS
+        self.parents = MatchesViewArguments()
+        self.coordinates = _no_rows()
         self.written = c_size_t(0)
 
 
@@ -1384,7 +1583,7 @@ struct _DenseGetCall[dtype: DType, origin: MutOrigin](Call):
     ):
         if not self.scalar.stores[Self.dtype]():
             return _refuse(outcome, Status.SHAPE_MISMATCH)
-        var landing = Pointer[DenseGetOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        var typed_outputs = Pointer[DenseGetOutputs, MutAnyOrigin](unsafe_from_address=outputs)
         _cross(
             DenseGetArguments(
                 index,
@@ -1392,8 +1591,8 @@ struct _DenseGetCall[dtype: DType, origin: MutOrigin](Call):
                 outcome,
                 completion,
                 KeyBytes.of(self.key),
-                Int(Pointer(to=landing[].vectors)),
-                Int(Pointer(to=landing[].written)),
+                Int(Pointer(to=typed_outputs[].vectors)),
+                Int(Pointer(to=typed_outputs[].written)),
                 self.arena[]._address,
                 self.scalar,
             ),
@@ -1456,8 +1655,8 @@ struct _DenseInsertCall(Call):
 struct _DenseRefineCall(Call):
     """The crossing of `usearch_dense_refine`."""
 
-    comptime Outputs = DenseCountOutputs
-    comptime Result = Int
+    comptime Outputs = DenseRefineReport
+    comptime Result = DenseRefineReport
     comptime symbol: StaticString = "usearch_dense_refine"
     var expansion_factor: Int
     var stats: Address
@@ -1478,7 +1677,6 @@ struct _DenseRefineCall(Call):
                 outcome,
                 completion,
                 outputs,
-                NULL_ADDRESS,
                 c_size_t(self.expansion_factor),
                 ProgressArguments(),
                 self.stats,
@@ -1486,8 +1684,8 @@ struct _DenseRefineCall(Call):
             library.symbols().dense_refine,
         )
 
-    def conclude(deinit self, outputs: DenseCountOutputs, generation: Int) -> Int:
-        return Int(outputs.value)
+    def conclude(deinit self, outputs: DenseRefineReport, generation: Int) -> DenseRefineReport:
+        return outputs
 
 
 @fieldwise_init
@@ -1516,8 +1714,8 @@ struct _DenseHealthCall(Call):
 struct _DenseAbsorbCall(Call):
     """The crossing of `usearch_dense_absorb`, which owns the donors until the call is final."""
 
-    comptime Outputs = Unwritten
-    comptime Result = NoneType
+    comptime Outputs = DenseRefineReport
+    comptime Result = DenseRefineReport
     comptime symbol: StaticString = "usearch_dense_absorb"
     var donors: List[DenseIndex]
     var addresses: List[Address]
@@ -1545,8 +1743,7 @@ struct _DenseAbsorbCall(Call):
                 completion,
                 c_size_t(len(self.addresses)),
                 Int(self.addresses.unsafe_ptr()),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                outputs,
                 c_size_t(0),
                 ProgressArguments(),
                 NULL_ADDRESS,
@@ -1554,12 +1751,120 @@ struct _DenseAbsorbCall(Call):
             library.symbols().dense_absorb,
         )
 
-    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+    def conclude(deinit self, outputs: DenseRefineReport, generation: Int) -> DenseRefineReport:
         # The engine nulled every donor it consumed, so only the survivors are freed with the list.
         var surviving = Pointer[Address, MutAnyOrigin](unsafe_from_address=Int(self.addresses.unsafe_ptr()))
         for position in range(len(self.donors)):
             self.donors[position].address = surviving[unsafe_offset=position]
-        return None
+        return outputs
+
+
+struct _DenseSplitCall(Call):
+    """The crossing of `usearch_dense_split`; the receivers stay owned by the caller."""
+
+    comptime Outputs = DenseRefineReport
+    comptime Result = DenseRefineReport
+    comptime symbol: StaticString = "usearch_dense_split"
+    var addresses: List[Address]
+    var seed: UInt64
+
+    def __init__(out self, receivers: List[DenseIndex], seed: UInt64):
+        self.addresses = List[Address](capacity=len(receivers))
+        for position in range(len(receivers)):
+            self.addresses.append(receivers[position].address)
+        self.seed = seed
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseSplitArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(len(self.addresses)),
+                Int(self.addresses.unsafe_ptr()),
+                outputs,
+                c_size_t(0),
+                self.seed,
+                ProgressArguments(),
+                NULL_ADDRESS,
+            ),
+            library.symbols().dense_split,
+        )
+
+    def conclude(deinit self, outputs: DenseRefineReport, generation: Int) -> DenseRefineReport:
+        return outputs
+
+
+@fieldwise_init
+struct _DenseSampleCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_sample`, which borrows the arena its draws are written in."""
+
+    comptime Outputs = DenseSampleOutputs
+    comptime Result = DenseDraws[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_sample"
+    var shown: KeysView[ImmUntrackedOrigin]
+    var shown_count: Int
+    var shown_coordinates: RowsViewArguments
+    var shown_coordinates_count: Int
+    var focus: KeysView[ImmUntrackedOrigin]
+    var focus_count: Int
+    var wanted: Int
+    var seed: UInt64
+    var arena: Pointer[Arena, Self.origin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        # The call reads one count for both, so only this side sees the keys and places disagree.
+        if self.shown_coordinates_count != 3 * self.shown_count:
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        var typed_outputs = Pointer[DenseSampleOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        _cross(
+            DenseSampleArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.shown_count),
+                self.shown,
+                self.shown_coordinates,
+                c_size_t(self.focus_count),
+                self.focus,
+                Int(Pointer(to=typed_outputs[].keys)),
+                Int(Pointer(to=typed_outputs[].entry_ordinals)),
+                Int(Pointer(to=typed_outputs[].parents)),
+                Int(Pointer(to=typed_outputs[].coordinates)),
+                Int(Pointer(to=typed_outputs[].written)),
+                self.arena[]._address,
+                c_size_t(self.wanted),
+                self.seed,
+                c_size_t(0),
+                ProgressArguments(),
+                NULL_ADDRESS,
+            ),
+            library.symbols().dense_sample,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseSampleOutputs, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs)
 
 
 @fieldwise_init
@@ -1641,7 +1946,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
     ):
         if self.rows_per_query <= 0 or self.rows % self.rows_per_query != 0:
             return _refuse(outcome, Status.SHAPE_MISMATCH)
-        var landing = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        var typed_outputs = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
         _cross(
             DenseMaxsimArguments(
                 index,
@@ -1652,16 +1957,16 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 self.queries,
                 NULL_ADDRESS,
                 c_size_t(self.rows_per_query),
-                Int(Pointer(to=landing[].products)),
-                Int(Pointer(to=landing[].written)),
-                Int(Pointer(to=landing[].required)),
+                Int(Pointer(to=typed_outputs[].products)),
+                Int(Pointer(to=typed_outputs[].written)),
+                Int(Pointer(to=typed_outputs[].required)),
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                ProgressArguments(),
-                self.stats,
                 Traversal.WALK,
                 PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
+                ProgressArguments(),
+                self.stats,
             ),
             library.symbols().dense_maxsim,
         )
@@ -1699,7 +2004,7 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
         outcome: Address,
         outputs: Address,
     ):
-        var landing = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        var typed_outputs = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
         _cross(
             DenseMultiplyArguments(
                 index,
@@ -1708,16 +2013,16 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
                 completion,
                 c_size_t(self.count),
                 self.left,
-                Int(Pointer(to=landing[].products)),
-                Int(Pointer(to=landing[].written)),
-                Int(Pointer(to=landing[].required)),
+                Int(Pointer(to=typed_outputs[].products)),
+                Int(Pointer(to=typed_outputs[].written)),
+                Int(Pointer(to=typed_outputs[].required)),
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                ProgressArguments(),
-                self.stats,
                 Traversal.WALK,
                 PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
+                ProgressArguments(),
+                self.stats,
             ),
             library.symbols().dense_multiply,
         )
@@ -1782,10 +2087,10 @@ struct _DenseAttendCall[dtype: DType, origin: MutOrigin](Call):
                 ScalarKind.of[Self.dtype](),
                 c_size_t(self.expansion_factor),
                 self.score_scale,
-                ProgressArguments(),
-                self.stats,
                 Traversal.WALK,
                 PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
+                ProgressArguments(),
+                self.stats,
             ),
             library.symbols().dense_attend,
         )
@@ -1877,7 +2182,7 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
         outcome: Address,
         outputs: Address,
     ):
-        var landing = Pointer[DenseCursorNextOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        var typed_outputs = Pointer[DenseCursorNextOutputs, MutAnyOrigin](unsafe_from_address=outputs)
         var links = self.links
         _cross(
             DenseCursorNextArguments(
@@ -1886,9 +2191,9 @@ struct _DenseCursorNextCall[origin: MutOrigin](Call):
                 outcome,
                 completion,
                 self.cursor,
-                Int(Pointer(to=landing[].keys)),
-                Int(Pointer(to=landing[].links)) if links else NULL_ADDRESS,
-                Int(Pointer(to=landing[].written)),
+                Int(Pointer(to=typed_outputs[].keys)),
+                Int(Pointer(to=typed_outputs[].links)) if links else NULL_ADDRESS,
+                Int(Pointer(to=typed_outputs[].written)),
                 self.arena[]._address,
                 c_size_t(self.wanted),
             ),
@@ -2528,7 +2833,7 @@ trait DenseVerbs:
 
     def refine[
         stats_origin: MutOrigin, //
-    ](self, config: DenseRefineConfig[stats_origin] = DenseRefineConfig()) raises Error -> Int:
+    ](self, config: DenseRefineConfig[stats_origin] = DenseRefineConfig()) raises Error -> DenseRefineReport:
         """Re-selects every entry's neighbors against the finished graph. Calls `usearch_dense_refine`.
 
         A build step rather than a repair: a cheap insertion pass followed by one refinement
@@ -2543,7 +2848,8 @@ trait DenseVerbs:
             config: The breadth of the candidates the re-selection walk explores, and the telemetry slot.
 
         Returns:
-            How many nodes' neighbors changed; zero means the graph has settled.
+            The entries re-selected and changed, the islands healed, and the closing audit; zero
+            `changed` means the graph has settled.
 
         Raises:
             `Error` with `READ_ONLY` if the handle serves its checkpoint in place.
@@ -2563,7 +2869,7 @@ trait DenseVerbs:
         """
         return self._route(_DenseHealthCall())
 
-    def absorb(self, var donors: List[DenseIndex]) raises Error:
+    def absorb(self, var donors: List[DenseIndex]) raises Error -> DenseRefineReport:
         """Absorbs every donor into this index, keeping their graphs rather than re-inserting their
         vectors. Calls `usearch_dense_absorb`.
 
@@ -2573,11 +2879,66 @@ trait DenseVerbs:
         Args:
             donors: The handles to absorb, consumed by the call.
 
+        Returns:
+            What the closing refine did to the graph.
+
         Raises:
             `Error` with `CONFIG_MISMATCH` for a donor of another residency, scalar, metric or
             geometry, or with `READ_ONLY` if the handle serves its checkpoint in place.
         """
-        _ = self._route(_DenseAbsorbCall(donors^))
+        return self._route(_DenseAbsorbCall(donors^))
+
+    def split(self, receivers: List[DenseIndex], seed: UInt64 = 0) raises Error -> DenseRefineReport:
+        """Splits this index into the receivers, the inverse of `absorb`: graph-local parts keeping
+        their edges, one per receiver, leaving this index empty but live. Calls `usearch_dense_split`.
+
+        Args:
+            receivers: Two or more empty handles of this index's residency, scalar, class, metric,
+                geometry and shard count, each receiving one part.
+            seed: Picks the part roots; equal seeds over an unchanged index split equally.
+
+        Returns:
+            What the receivers' closing refines did to their graphs.
+
+        Raises:
+            `Error` with `CONFIG_MISMATCH` for a mismatched or non-empty receiver, in which case
+            nothing moves, or with `READ_ONLY` if the handle serves its checkpoint in place.
+        """
+        return self._route(_DenseSplitCall(receivers, seed))
+
+    def sample[
+        shown_origin: ImmOrigin, coordinates_origin: ImmOrigin, focus_origin: ImmOrigin, //
+    ](
+        self,
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin] = DenseSampleConfig(),
+    ) raises Error -> DenseDraws[origin_of(arena)]:
+        """Draws up to `wanted` keys around `config.focus`, or across the whole index, each hanging
+        from a shown or earlier draw and placed in three dimensions beside the shown ones. Calls
+        `usearch_dense_sample`.
+
+        A larger `wanted` draws a superset, so a view grows one connected sample as it zooms. Only
+        RAM samples yet.
+
+        Parameters:
+            shown_origin: The shown keys' origin, inferred from the config.
+            coordinates_origin: Their coordinates' origin, inferred with it.
+            focus_origin: The focus keys' origin, inferred with it.
+
+        Args:
+            wanted: The upper bound on draws.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            config: The shown keys and their coordinates, the focus and the seed.
+
+        Returns:
+            The draws, read in place from the arena.
+
+        Raises:
+            `Error` with `SHAPE_MISMATCH` unless there are three coordinates per shown key, or
+            `UNSUPPORTED` off RAM.
+        """
+        return self._route(_sample_call(wanted, Pointer(to=arena), config))
 
     def search[
         queries_origin: ImmOrigin, stats_origin: MutOrigin, //
@@ -2588,7 +2949,7 @@ trait DenseVerbs:
         mut arena: Arena,
         config: DenseSearchConfig[stats_origin] = DenseSearchConfig(),
     ) raises Error -> Matches[origin_of(arena)]:
-        """Performs k-approximate nearest-neighbor search for a batch of queries, landing the matches
+        """Performs k-approximate nearest-neighbor search for a batch of queries, writing the matches
         in a lent arena. Calls `usearch_dense_search`.
 
         Never writes to the graph, so any number of these may overlap with concurrent insertions.
@@ -2729,7 +3090,7 @@ trait DenseVerbs:
         config: DenseAttendConfig[carry_origin, stats_origin] = DenseAttendConfig(),
     ) raises Error -> DenseVectors[dtype, origin_of(arena)]:
         """Softmax attention of a run of query heads over every indexed key their graph walks score,
-        landing in a lent arena. Calls `usearch_dense_attend`.
+        written in a lent arena. Calls `usearch_dense_attend`.
 
         Every key a walk scores folds into each head's running maximum, partition, and weighted
         value sum, as Flash Attention folds key tiles, with no top-k cut: the long tail the walk
@@ -2782,7 +3143,7 @@ trait DenseVerbs:
         config: DenseMaxsimConfig[stats_origin] = DenseMaxsimConfig(),
     ) raises Error -> DenseProducts[origin_of(arena)]:
         """Late-interaction scoring: every query row takes its best match within a key, and those
-        maxima sum to that key's score, landing in a lent arena. Calls `usearch_dense_maxsim`.
+        maxima sum to that key's score, written in a lent arena. Calls `usearch_dense_maxsim`.
 
         This is what `values_per_key` above one exists for. A document is one key holding its token
         rows, and the walk stays over individual tokens under a plain inner product. Approximate in
@@ -2908,6 +3269,29 @@ def _insert_call[
         Int(vectors.rows),
         config.expansion_factor,
         _stats_address(config.stats),
+    )
+
+
+def _sample_call[
+    origin: MutOrigin, shown_origin: ImmOrigin, coordinates_origin: ImmOrigin, focus_origin: ImmOrigin
+](
+    wanted: Int,
+    arena: Pointer[Arena, origin],
+    config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin],
+) -> _DenseSampleCall[origin]:
+    """Lowers a sample's borrowed inputs into its crossing."""
+    return _DenseSampleCall[origin](
+        KeysView.of(config.shown).untracked(),
+        len(config.shown),
+        RowsViewArguments(
+            Int(config.shown_coordinates.unsafe_ptr()), c_size_t(3 * size_of[Float32]()), c_size_t(3), ScalarKind.F32
+        ),
+        len(config.shown_coordinates),
+        KeysView.of(config.focus).untracked(),
+        len(config.focus),
+        wanted,
+        config.seed,
+        arena,
     )
 
 
@@ -3072,6 +3456,39 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     def absorb(self, var donors: List[DenseIndex]) -> Deferred[_DenseAbsorbCall, Self.origin]:
         """Submits `DenseVerbs.absorb`; the donors are owned by the call. Calls `usearch_dense_absorb`."""
         return {self.index[].library, _DenseAbsorbCall(donors^), self.index[].address, self.executor}
+
+    def split(
+        self, receivers: List[DenseIndex], seed: UInt64 = 0
+    ) -> Deferred[_DenseSplitCall, ImmOrigin(origin_of(_anchor[Self.origin](), receivers))]:
+        """Submits `DenseVerbs.split`; the receivers stay borrowed until final. Calls `usearch_dense_split`."""
+        return {self.index[].library, _DenseSplitCall(receivers, seed), self.index[].address, self.executor}
+
+    def sample[
+        shown_origin: ImmOrigin, coordinates_origin: ImmOrigin, focus_origin: ImmOrigin, //
+    ](
+        self,
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseSampleConfig[shown_origin, coordinates_origin, focus_origin] = DenseSampleConfig(),
+    ) -> Deferred[
+        _DenseSampleCall[origin_of(arena)],
+        ImmOrigin(
+            origin_of(
+                _anchor[Self.origin](),
+                _anchor[shown_origin](),
+                _anchor[coordinates_origin](),
+                _anchor[focus_origin](),
+            )
+        ),
+    ]:
+        """Submits `DenseVerbs.sample`; the shown keys, focus and arena stay borrowed until final.
+        Calls `usearch_dense_sample`."""
+        return {
+            self.index[].library,
+            _sample_call(wanted, Pointer(to=arena), config),
+            self.index[].address,
+            self.executor,
+        }
 
     def search[
         queries_origin: ImmOrigin, stats_origin: MutOrigin, //
@@ -3241,7 +3658,7 @@ struct DenseCursor[origin: ImmOrigin]:
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         _cross(
-            DenseCursorInitArguments(Int(created), index, Int(outcome), c_size_t(starts_count), starts),
+            DenseCursorInitArguments(index, Int(outcome), c_size_t(starts_count), starts, Int(created)),
             library.symbols().dense_cursor_init,
         )
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")

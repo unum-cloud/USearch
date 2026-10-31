@@ -20,8 +20,8 @@
  *  batch: through the kit's @c mma.sync step from registers where the kit has one, and otherwise
  *  through its scalar dots, a lane loading one fragment at once through Hopper and two from
  *  Blackwell on, whose 256-bit loads serve the random row gathers better. The datacenter Blackwell
- *  instead lands the batch's rows four at a time through @c tile::gather4 copies of one tensor map,
- *  scoring each window of four rows while the next lands.
+ *  instead copies the batch's rows four at a time through @c tile::gather4 copies of one tensor
+ *  map, scoring each window of four rows while the next copies in.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -128,7 +128,7 @@ __device__ __forceinline__ float2 cuda_moments_f16x8_ampere(uint4 a, float2 mome
 }
 
 /** The @c bf16 twin of @ref cuda_dot_f16x8_ampere, through the @c bf16x2 instructions that
- *  land exactly at the sm_80 floor. */
+ *  first appear at the sm_80 floor. */
 __device__ __forceinline__ f32_t cuda_dot_bf16x8_ampere(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
 #pragma unroll
@@ -1672,10 +1672,10 @@ struct u1x8_ampere_quads_kit_t {
 /**
  *  @brief Scores a walk's batch through the kit's @c mma.sync step, fed straight from its loads.
  *
- *  A lane's 16-byte chunk is one tile's A fragment as loaded: words 0 and 2 land in row g, words 1
- *  and 3 in row g + 8, and the B columns carry the query's matching words by column parity, so the
- *  query takes the rows' permutation of the dimensions and row g's candidate scores D[g][even] +
- *  D[g + 8][odd]. Each lane loads 32 bytes of a row a step, so @p lanes_per_row_ lanes make one
+ *  A lane's 16-byte chunk is one tile's A fragment as loaded: words 0 and 2 come from row g, words
+ *  1 and 3 in row g + 8, and the B columns carry the query's matching words by column parity, so
+ *  the query takes the rows' permutation of the dimensions and row g's candidate scores D[g][even]
+ *  + D[g + 8][odd]. Each lane loads 32 bytes of a row a step, so @p lanes_per_row_ lanes make one
  *  request of 32 × @p lanes_per_row_ bytes per row: under 4, every group of 4 lanes owns one
  *  candidate; under 8, a candidate's pieces split over two groups and its word halves over their D
  *  entries, which a reduce-scatter folds once per pass of 16 candidates. Rows past a short batch
@@ -1891,10 +1891,10 @@ __device__ __forceinline__ u32_t cuda_keep_diverse_tiles( //
         u32_t const block_row = lane % cuda_tile_rows_k < block_count ? lane % cuda_tile_rows_k : 0;
         u32_t const position = sorted_candidates.at(block_first + block_row).id() & position_mask;
         // Ties visit rows out of staging order, so the wait covers every row the block names.
-        u32_t landed = position + 1;
+        u32_t required_rows = position + 1;
         for (u32_t offset = half_k; offset; offset >>= 1)
-            landed = max_of(landed, cuda_warp_t::shuffle_xor(landed, offset));
-        staged_through = max_of(staged_through, landed);
+            required_rows = max_of(required_rows, cuda_warp_t::shuffle_xor(required_rows, offset));
+        staged_through = max_of(staged_through, required_rows);
         schedule.await_rows(staged_through);
         u32_t const top = cuda_warp_t::shuffle(position, group);
         u32_t const bottom = cuda_warp_t::shuffle(position, group + half_k);
@@ -1994,9 +1994,9 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
 /**
  *  @brief The Ampere and Ada staging: every lane queues register-free @c cp.async copies of the
  *      fragments it strides over, one commit group per stage, so a consumer walking the rows in
- *      order starts on the first stage while the later ones land.
+ *      order starts on the first stage while the later ones copy in.
  *
- *  A @c cp.async lands only for the lane that queued it, so every await ends in a warp barrier.
+ *  A @c cp.async completes only for the lane that queued it, so every await ends in a warp barrier.
  */
 struct ampere_cp_async_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
@@ -2008,8 +2008,8 @@ struct ampere_cp_async_schedule_t {
     /** Nothing shared: the commit groups live in each lane's own pipeline. */
     struct shared_t {};
 
-    /** Rows per stage of the latest staging, and the leading rows landed for every lane. */
-    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+    /** Rows per stage of the latest staging, and the leading rows copied in for every lane. */
+    u32_t rows_per_stage_ = 0, arrived_rows_ = 0;
 
     __device__ __forceinline__ ampere_cp_async_schedule_t(shared_t&, u32_t) noexcept {}
 
@@ -2037,9 +2037,9 @@ struct ampere_cp_async_schedule_t {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        rows_per_stage_ = divide_round_up(rows, stages_k), arrived_rows_ = 0;
         if (cache.ids_) {
-            landed_rows_ = rows;
+            arrived_rows_ = rows;
             return;
         }
         // Every stage commits, empty or not, so the groups a stage waits behind are a constant.
@@ -2057,10 +2057,10 @@ struct ampere_cp_async_schedule_t {
     }
 
     __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
-        if (rows <= landed_rows_) return;
+        if (rows <= arrived_rows_) return;
         u32_t const stages = divide_round_up(rows, rows_per_stage_);
         wait_pending_(stages_k - stages);
-        landed_rows_ = stages * rows_per_stage_;
+        arrived_rows_ = stages * rows_per_stage_;
         __syncwarp();
     }
 
@@ -2123,23 +2123,24 @@ __device__ __forceinline__ void cuda_tma_copy_rows(u64_t* barriers, u32_t rows_p
 
 /** Spins until @p barrier completes the phase of parity @p parity. */
 __device__ __forceinline__ void cuda_tma_wait_barrier(u64_t* barrier, u32_t parity) noexcept {
-    u32_t landed;
+    u32_t phase_ready;
     do {
         asm volatile("{\n.reg .pred ready;\n"                                      //
                      "mbarrier.try_wait.parity.shared::cta.b64 ready, [%1], %2;\n" //
                      "selp.u32 %0, 1, 0, ready;\n}\n"
-                     : "=r"(landed)
+                     : "=r"(phase_ready)
                      : "r"(cuda_shared_address(barrier)), "r"(parity)
                      : "memory");
-    } while (!landed);
+    } while (!phase_ready);
 }
 
-/** One warp's gathered rows in static shared memory: two stages of four-row windows, each landing
+/** One warp's gathered rows in static shared memory: two stages of four-row windows, each staging
  *  on its own barrier, beside the tensor map they come through. */
 template <u32_t window_bytes_>
 struct cuda_gather_stages {
 
-    /** Two stages of four rows' windows of up to @p window_bytes_ each, aligned as copies land. */
+    /** Two stages of four rows' windows of up to @p window_bytes_ each, aligned as copies write
+     * them. */
     alignas(128) byte_t stages[2][4 * window_bytes_];
 
     /** One barrier per stage. */
@@ -2151,7 +2152,7 @@ struct cuda_gather_stages {
     /** Rows the map spans, zero where the warp gathers none. */
     u32_t rows_count;
 
-    /** Bytes of one row a copy lands. */
+    /** Bytes of one row a copy moves. */
     u32_t window_bytes;
 
     /** Bit @b s is the parity of the phase stage @b s is filling. */
@@ -2159,7 +2160,7 @@ struct cuda_gather_stages {
 };
 
 /** Queues @p unit of a batch of @p gathered_count candidates into its stage of @p gather: window
- *  @p unit modulo @p windows of up to @p quads_per_unit quads, every quad's four rows landing back
+ *  @p unit modulo @p windows of up to @p quads_per_unit quads, every quad's four rows copied back
  *  to back at @p quad_bytes apart through one @c tile::gather4 copy its own lane issues. Rows past
  *  the batch re-read its first row. */
 template <u32_t window_bytes_>
@@ -2191,11 +2192,11 @@ __device__ __forceinline__ void cuda_tma_gather_unit(cuda_gather_stages<window_b
 
 /**
  *  @brief Scores a walk's batch from rows the Tensor Memory Accelerator gathers into @p gather,
- *      each @c tile::gather4 copy landing the same window of four candidates' rows.
+ *      each @c tile::gather4 copy filling the same window of four candidates' rows.
  *
  *  A unit is one window of as many quads of candidates as a stage fits and the lanes cover, a
- *  single quad once rows outgrow a window; the warp scores one stage while the next unit lands in
- *  the other. A power-of-two group of lanes owns each quad, every lane a 16-byte column of its
+ *  single quad once rows outgrow a window; the warp scores one stage while the next unit copies
+ *  into the other. A power-of-two group of lanes owns each quad, every lane a 16-byte column of its
  *  window and the quad's four accumulators, so one query fragment serves four rows. Past a quad's
  *  last window, each accumulator folds into the group's first lane. A window reaching past the row
  *  reads zeros, which no query fragment meets.
@@ -2214,7 +2215,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
     u32_t const window_bytes = gather.window_bytes;
     u32_t const window_fragments = window_bytes / sizeof(fragment_t);
     u32_t const windows = divide_round_up(storage.geometry.row_fragments, window_fragments);
-    // Every copy lands on a 128-byte boundary, as tensor copies require.
+    // Every copy writes on a 128-byte boundary, as tensor copies require.
     u32_t const quad_bytes = round_up_to_multiple(4 * window_bytes, 128u);
     u32_t const lanes_per_quad = min_of(1u << (32 - __clz(window_fragments - 1)), width_k);
     u32_t const quads_per_unit = min_of(width_k / lanes_per_quad,
@@ -2290,8 +2291,8 @@ struct hopper_tma_schedule_t {
     /** The stages' barriers. */
     u64_t* barriers_;
 
-    /** Rows per stage of the latest staging, and the leading rows landed. */
-    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+    /** Rows per stage of the latest staging, and the leading rows copied in. */
+    u32_t rows_per_stage_ = 0, arrived_rows_ = 0;
 
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
@@ -2325,17 +2326,17 @@ struct hopper_tma_schedule_t {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        rows_per_stage_ = divide_round_up(rows, stages_k), arrived_rows_ = 0;
         if (cache.ids_) {
-            landed_rows_ = rows;
+            arrived_rows_ = rows;
             return;
         }
         cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
     }
 
     __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
-        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
-            u32_t const stage = landed_rows_ / rows_per_stage_;
+        for (; arrived_rows_ < rows; arrived_rows_ += rows_per_stage_) {
+            u32_t const stage = arrived_rows_ / rows_per_stage_;
             cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
             phases_ ^= 1u << stage;
         }
@@ -2345,12 +2346,12 @@ struct hopper_tma_schedule_t {
 /**
  *  @brief The datacenter Blackwell staging: the Hopper copies, a walking lane loading two adjacent
  *      fragments at once, whose 256-bit loads serve the random row gathers better, and a walk's
- *      batches scored from rows one @c tile::gather4 copy lands four at a time.
+ *      batches scored from rows one @c tile::gather4 copy moves four at a time.
  *
  *  A walking kernel binds each warp's gathers to its parameter's tensor map at entry, through
- *  @ref bind; @ref score_batch then lands the batch through @ref cuda_tma_gather_quads, or loads it
- *  lane by lane where the kernel bound no map or the map misses any of the batch's rows. The stages
- *  of every walking warp live in static shared memory, sized by the kernel's resident blocks
+ *  @ref bind; @ref score_batch then copies the batch through @ref cuda_tma_gather_quads, or loads
+ *  it lane by lane where the kernel bound no map or the map misses any of the batch's rows. The
+ *  stages of every walking warp live in static shared memory, sized by the kernel's resident blocks
  *  through @ref gather_window_bytes.
  */
 struct blackwell_tma_schedule_t {
@@ -2364,7 +2365,7 @@ struct blackwell_tma_schedule_t {
     inline static constexpr u32_t multiprocessor_shared_bytes_k = 228 * 1024;
     inline static constexpr u32_t block_reserved_shared_bytes_k = 1024;
 
-    /** Bytes of one row a gather lands at most under @p resident_blocks blocks per multiprocessor:
+    /** Bytes of one row a gather copies at most under @p resident_blocks blocks per multiprocessor:
      *  one 16-byte column per lane, halved while the two stages of four rows that every warp of a
      *  block keeps outgrow the block's share of the multiprocessor. */
     static constexpr u32_t gather_window_bytes(u32_t resident_blocks) noexcept {
@@ -2387,8 +2388,8 @@ struct blackwell_tma_schedule_t {
     /** The stages' barriers. */
     u64_t* barriers_;
 
-    /** Rows per stage of the latest staging, and the leading rows landed. */
-    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+    /** Rows per stage of the latest staging, and the leading rows copied in. */
+    u32_t rows_per_stage_ = 0, arrived_rows_ = 0;
 
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
@@ -2446,17 +2447,17 @@ struct blackwell_tma_schedule_t {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        rows_per_stage_ = divide_round_up(rows, stages_k), arrived_rows_ = 0;
         if (cache.ids_) {
-            landed_rows_ = rows;
+            arrived_rows_ = rows;
             return;
         }
         cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
     }
 
     __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
-        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
-            u32_t const stage = landed_rows_ / rows_per_stage_;
+        for (; arrived_rows_ < rows; arrived_rows_ += rows_per_stage_) {
+            u32_t const stage = arrived_rows_ / rows_per_stage_;
             cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
             phases_ ^= 1u << stage;
         }
@@ -2489,8 +2490,8 @@ struct blackwellrtx_tma_schedule_t {
     /** The stages' barriers. */
     u64_t* barriers_;
 
-    /** Rows per stage of the latest staging, and the leading rows landed. */
-    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+    /** Rows per stage of the latest staging, and the leading rows copied in. */
+    u32_t rows_per_stage_ = 0, arrived_rows_ = 0;
 
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
@@ -2524,17 +2525,17 @@ struct blackwellrtx_tma_schedule_t {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
-        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        rows_per_stage_ = divide_round_up(rows, stages_k), arrived_rows_ = 0;
         if (cache.ids_) {
-            landed_rows_ = rows;
+            arrived_rows_ = rows;
             return;
         }
         cuda_tma_copy_rows(barriers_, rows_per_stage_, storage, cache, ids, rows, lane);
     }
 
     __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
-        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
-            u32_t const stage = landed_rows_ / rows_per_stage_;
+        for (; arrived_rows_ < rows; arrived_rows_ += rows_per_stage_) {
+            u32_t const stage = arrived_rows_ / rows_per_stage_;
             cuda_tma_wait_barrier(barriers_ + stage, (phases_ >> stage) & 1u);
             phases_ ^= 1u << stage;
         }

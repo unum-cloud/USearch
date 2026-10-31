@@ -46,7 +46,7 @@ struct cache_line_tags<cache_hints_type_> {
 /** The domain ID of a machine without NUMA; ForkUnion asserts on it, so the heap serves. */
 inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
 
-/** Allocates on one ForkUnion memory domain, so storage lands beside the threads that walk
+/** Allocates on one ForkUnion memory domain, so storage is placed beside the threads that walk
  *  it; @c no_memory_domain_k means the plain heap. */
 template <typename value_type_ = byte_t>
 struct forkunion_allocator {

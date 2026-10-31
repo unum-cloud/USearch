@@ -1530,4 +1530,23 @@ static_assert(buffer_allocator<arena_allocator<std::byte>>);
 static_assert(std::same_as<std::allocator_traits<arena_allocator<std::byte>>::rebind_alloc<int>, //
                            arena_allocator<int>>);
 
+/** Whether bit @p index of the run @p bits is set; a plain read, for a run no writer shares, and
+ *  clear past the run's end. */
+inline bool bitset_contains(std::span<u1x64_t const> bits, std::size_t index) noexcept {
+    constexpr std::size_t bits_per_word_k = std::numeric_limits<u1x64_t>::digits;
+    if (index / bits_per_word_k >= bits.size()) return false;
+    return (bits[index / bits_per_word_k] >> (index % bits_per_word_k)) & 1u;
+}
+
+/** Sets bit @p index of the run @p bits through @p atomic_ref_template_, skipping the store when it
+ *  is set already, so hubs pay one load and threads sharing a word never lose a bit. */
+template <template <typename> class atomic_ref_template_>
+inline void bitset_insert(std::span<u1x64_t> bits, std::size_t index) noexcept {
+    constexpr std::size_t bits_per_word_k = std::numeric_limits<u1x64_t>::digits;
+    u1x64_t& word = bits[index / bits_per_word_k];
+    u1x64_t const bit = u1x64_t {1} << (index % bits_per_word_k);
+    if (atomic_ref_template_<u1x64_t const>(word).load(std::memory_order_relaxed) & bit) return;
+    atomic_ref_template_<u1x64_t>(word).set_bits(bit, std::memory_order_relaxed);
+}
+
 } // namespace unum::usearch::utilities

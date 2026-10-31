@@ -91,7 +91,7 @@ constexpr std::size_t gpu_rung_index(u32_t slots) noexcept {
     return slots ? static_cast<std::size_t>(std::countr_zero(slots)) : 0;
 }
 
-/** One bit per node over device-resident words, marked concurrently by a whole grid. */
+/** One bit per node over device-resident words, written concurrently by a whole grid. */
 struct vram_bitset_t {
     u32_t* words = nullptr;
 };

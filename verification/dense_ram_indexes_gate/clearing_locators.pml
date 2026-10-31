@@ -5,7 +5,7 @@
  *  @brief An insert plan's `finish` beside a `clear`: the key filed inside the turn never names a
  *      row the clear forgot.
  *
- *  The one shard holds one row dispensed and landed, short of its watermark turn. `finish`, holding
+ *  The one shard holds one row dispensed and placed, short of its watermark turn. `finish`, holding
  *  the gate's shared side, awaits the turn, files the row's key into shard 0's map, the map's one
  *  writer while it holds the turn, and stores the watermark. The clearer takes the unique side or is
  *  refused, closes the shard, which `close_` refuses while a dispensed row awaits its turn, and

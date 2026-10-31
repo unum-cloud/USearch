@@ -7,11 +7,11 @@
  *
  *  A compaction packs the source shards largest first into target shards of at most a shard
  *  capacity of rows, each into the first with room, so it ends with as few shards as fit. The
- *  shards of one source landing side by side in one target shard form fold bins, which link on the
+ *  shards of one source going side by side into one target shard form fold bins, which link on the
  *  GPUs before anything crosses: every row searches the bin's other shards through the normal
  *  search, re-selects its neighbors from its own and those over the whole bin as one storage, and
  *  every pick in another shard merges back into the picked row. Each bin then crosses to the host
- *  through its shards' save plans and lands in its target shard through one load, its edges in the
+ *  through its shards' save plans and goes into its target shard through one load, its edges in the
  *  bin's dense ID space and its keys beside it, and each target shard heals.
  *
  *  The one header that sees both residencies: it includes the NVIDIA tower and the portable RAM
@@ -38,7 +38,7 @@ namespace unum::usearch::dense {
  *      holding at most @p config.shard_capacity rows.
  *
  *  The target and every source close here, each under its own gate, so the packing never goes
- *  stale: the target stays closed while the plan lives and each source until it lands, and
+ *  stale: the target stays closed while the plan lives and each source until it is copied, and
  *  insertions into any of them answer @c contended_k meanwhile. Searches of the sources run
  *  throughout, since the fold writes only its own buffers, retrying once around the window that
  *  empties each; searches of the target retry around the commits that publish each source's rows.
@@ -73,21 +73,21 @@ expected<vram_nvidia_compact_plan<vram_indexes_type_, ram_indexes_type_>> plan_c
     typename ram_indexes_type_::executor_t& host_executor, compact_config_t const& config = {}) noexcept;
 
 /**
- *  The one-shot @c plan_compact, run and finished on contexts carved for the call; @p on_visited
- *  reports and cancels the fold alone, as in @c vram_nvidia_compact_plan::run.
+ *  @brief The one-shot @c plan_compact, run and finished on contexts carved for the call;
+ *      @p on_visited reports and cancels the fold alone, as in @c vram_nvidia_compact_plan::run.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source is named, the target has no shards, or @p host_executor has no
  *    threads; or a source keeps it, as its @c status says.
  *  - @c config_mismatch_k A null or repeated source, another metric or geometry, a source device
  *    @p device_executor drives no stream on, a bin's device that cannot reach another member's
- *    storage, or a source's rows that never land; or a source keeps it.
+ *    storage, or a source's rows that are never copied; or a source keeps it.
  *  - @c contended_k A call or batch in flight on the target or a source, another refine, absorb,
  *    split, compaction, save or load holding either, or another call holding an executor.
  *  - @c unsupported_k A source shard past the capacity, which would have to be cut first, or a
  *    source keeps it.
  *  - @c overflow_k A fresh target shard generation still has no room for a source shard, the
- *    landed rows pass a target shard's ceiling, or a source keeps it.
+ *    copied rows pass a target shard's ceiling, or a source keeps it.
  *  - @c unsupported_layout_k A source keeps it, as its @c status says.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_, typename progress_type_ = dummy_progress_t>
@@ -101,17 +101,17 @@ expected<compact_result_t> compact(std::span<vram_indexes_type_* const> sources,
  *      index it moves closed meanwhile.
  *
  *  @ref run drives the fold's three phases on the devices - the cross searches, the re-selection
- *  and the merge - then lands the sources still pending, each bin staged on the host once through
+ *  and the merge - then copies the sources still pending, each bin staged on the host once through
  *  columns the plan sized at planning for the widest; a cancel pauses between phases, and a later
- *  call continues there. @ref finish heals every target shard once the sources landed, reopens
+ *  call continues there. @ref finish heals every target shard once the sources were copied, reopens
  *  the target and every source still pending, and reports.
  *
  *  A bin of @b S shards spends the top @c bit_width(S-1) bits of a bin ID on a shard's place and
- *  the rest on its row, so a shard joins a bin only while its rows fit those, and one too large
+ *  the rest on its row, so a shard enters a bin only while its rows fit those, and one too large
  *  starts a bin of its own, as does one that would leave each other member less than one slot of a
- *  row. Every row holds @c cross_count matches from each other shard, one row of newcomers split
- *  evenly, which the re-selection weighs beside its live members, as a back-link round caches a row
- *  of newcomers beside the row it holds.
+ *  row. Every row holds @c cross_count matches from each other shard, one row of cross matches
+ *  split evenly, which the re-selection weighs beside its live members, as a back-link round caches
+ *  a row of appended nodes beside the row it holds.
  */
 template <typename vram_indexes_type_, typename ram_indexes_type_>
 struct [[nodiscard]] vram_nvidia_compact_plan {
@@ -133,7 +133,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
           members_(std::move(other.members_)), bins_(std::move(other.bins_)), folds_(std::move(other.folds_)),
           bin_tables_(std::move(other.bin_tables_)), fold_tables_(std::move(other.fold_tables_)),
           arenas_(std::move(other.arenas_)), walks_(std::move(other.walks_)),
-          sources_(std::exchange(other.sources_, {})), landed_(other.landed_), moved_entries_(other.moved_entries_),
+          sources_(std::exchange(other.sources_, {})), copied_(other.copied_), moved_entries_(other.moved_entries_),
           folded_(other.folded_), phase_(other.phase_) {}
     vram_nvidia_compact_plan& operator=(vram_nvidia_compact_plan&&) = delete;
     vram_nvidia_compact_plan(vram_nvidia_compact_plan const&) = delete;
@@ -143,25 +143,25 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     ~vram_nvidia_compact_plan() noexcept { release_sources_(); }
 
     /**
-     *  @brief Drives the fold's pending phases, then lands the pending sources; @c cancelled_k
+     *  @brief Drives the fold's pending phases, then copies the pending sources; @c cancelled_k
      *      means a later call continues at the next phase.
      *
-     *  A source failing to land stays pending and closed, with every later one, for the next call.
+     *  A source failing to copy stays pending and closed, with every later one, for the next call.
      *
      *  @param[in,out] device_executor The streams the plan was opened over.
      *  @param[in,out] host_executor The threads the plan was opened over.
      *  @param[in,out] traversals The caller's context of every host thread, which @ref finish heals
      *      on; the call checks their count.
-     *  @param[in] on_visited Fires once the re-selection and once the merge landed, with the rows
+     *  @param[in] on_visited Fires once the re-selection and once the merge finished, with the rows
      *      folded so far and the rows moving; a @c cancel_k answer stops before the next phase.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or finished.
      *  - @c config_mismatch_k The @p traversals are not one per host thread, or a source's rows
-     *    never land.
+     *    are never copied.
      *  - @c contended_k Another call holds either executor or a source's gate, or a target shard
      *    has a batch or load in flight.
-     *  - @c overflow_k The landed rows pass a target shard's ceiling.
+     *  - @c overflow_k The copied rows pass a target shard's ceiling.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t run(device_executor_t& device_executor, host_executor_t& host_executor,
@@ -174,16 +174,16 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         auto [host_claim, host_status] = host_executor.claim();
         if (failed(host_status)) return host_status;
         if (status_t const folded = fold_(on_visited); failed(folded)) return folded;
-        if (status_t const landed = land_pending_(*target, device_executor, host_executor); failed(landed))
-            return landed;
+        if (status_t const copied = copy_pending_(*target, device_executor, host_executor); failed(copied))
+            return copied;
         // The fold linked every bin, so each target shard's pass only heals, which `finish` runs.
         if (refining_.shard_plans_.empty()) return refining_.open_shards_();
         return status_t::success_k;
     }
 
     /**
-     *  Heals on the caller's @p traversals, one per host thread, reopens the target and reports. A
-     *  plan whose sources have not all landed heals nothing.
+     *  @brief Heals on the caller's @p traversals, one per host thread, reopens the target and
+     *      reports. A plan whose sources have not all been copied heals nothing.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or finished, or @p host_executor holds no pool or no
@@ -196,7 +196,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         result_t result;
         ram_indexes_t* const target = refining_.owner_;
         if (!target) return {result, status_t::uninitialized_k};
-        result.source_shards = refining_.landings_.size();
+        result.source_shards = refining_.moves_.size();
         result.moved_entries = moved_entries_;
         release_sources_();
         auto [graph, status] = refining_.finish(host_executor, traversals);
@@ -233,17 +233,17 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         bool operator()(vram_shard_t const&) const noexcept { return true; }
     };
 
-    /** One bin: the run of @c members_ from @c first, shards of one source landing side by side in
-     *  one target shard in their landing order, and the first of its members' fold states, which
-     *  only a folding bin holds. */
+    /** One bin: the run of @c members_ from @c first, shards of one source going side by side into
+     *  one target shard in their move order, and the first of its members' fold states, which only
+     *  a folding bin holds. */
     struct bin_t {
         std::size_t first = 0;
         std::size_t count = 0;
         std::size_t state = 0;
     };
 
-    /** The fold's phases, the last one landing what it linked. */
-    enum class phase_t : u8_t { cross_k, reselect_k, merge_k, land_k };
+    /** The fold's phases, the last one copying what it linked. */
+    enum class phase_t : u8_t { cross_k, reselect_k, merge_k, copy_k };
 
     explicit vram_nvidia_compact_plan(forkunion_allocator_t allocator) noexcept
         : refining_(allocator), columns_(allocator), members_(allocator), bins_(allocator), folds_(allocator),
@@ -260,13 +260,13 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     static u32_t row_bits_(std::size_t shards) noexcept { return 32u - static_cast<u32_t>(std::bit_width(shards - 1)); }
 
     /** Matches a row of a bin of @p shards shards holds from each other shard: a row of
-     *  @p connectivity newcomers split evenly, which @c cut_bins_ keeps at one at least, so the
+     *  @p connectivity cross matches split evenly, which @c cut_bins_ keeps at one at least, so the
      *  cross results fit a row and a fold warp caches what a re-selection does. */
     static u32_t cross_count_(std::size_t shards, std::size_t connectivity) noexcept {
         return static_cast<u32_t>(connectivity / (shards - 1));
     }
 
-    /** A source shard as a plural and its place in that plural's shards. */
+    /** A source shard as a sharded index and its place in that index's shards. */
     struct located_shard_t {
         vram_indexes_t* indexes = nullptr;
         std::size_t shard = 0;
@@ -302,7 +302,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
 
     /** Validates @p sources against @p target, closes the target and every source, each under its
      *  own gate, packs every source shard into the target under the tighter of
-     *  @p config.shard_capacity and the target's own bound, cuts the landings into bins, and sizes
+     *  @p config.shard_capacity and the target's own bound, cuts the moves into bins, and sizes
      *  the host columns for the widest bin and every folding bin's buffers and contexts. */
     static expected<vram_nvidia_compact_plan> open_(std::span<vram_indexes_t* const> sources, ram_indexes_t& target,
                                                     device_executor_t& device_executor,
@@ -339,13 +339,13 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
             }
         plan.sources_ = sources;
 
-        // Closed, the sources hold still, so their shards are what the landings pack.
+        // Closed, the sources hold still, so their shards are what the moves pack.
         std::size_t count = 0;
         for (vram_indexes_t const* source : sources) {
             count += source->shards_.size();
             plan.moved_entries_ += source->size();
         }
-        if (failed(refining.landings_.resize(count))) return {{}, status_t::bad_alloc_k};
+        if (failed(refining.moves_.resize(count))) return {{}, status_t::bad_alloc_k};
         auto source_shard = [&](std::size_t from) noexcept -> vram_shard_t const& { return plan.shard_at_(from); };
         auto open = [&]() noexcept {
             // The target is sealed, so the shard generation opens closed like the rest, past the
@@ -354,12 +354,12 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 target.shards_.open_shard_generation(),
                 [&target](ram_shard_t const& built) noexcept { return target.build_shard_(built); });
         };
-        if (status_t const packed = target.shards_.pack(to_writable_span(refining.landings_), 0, capacity, source_shard,
+        if (status_t const packed = target.shards_.pack(to_writable_span(refining.moves_), 0, capacity, source_shard,
                                                         placement_of_t {}, rank_first_fit, open);
             failed(packed))
             return {{}, packed};
-        if (status_t const sized = ram_indexes_t::shards_t::size_parts(
-                to_span(refining.landings_), target.shards_.size(), refining.part_offsets_, refining.part_bases_);
+        if (status_t const sized = ram_indexes_t::shards_t::size_parts(to_span(refining.moves_), target.shards_.size(),
+                                                                       refining.part_offsets_, refining.part_bases_);
             failed(sized))
             return {{}, sized};
         std::size_t const shards = refining.part_offsets_.size() - 1;
@@ -370,12 +370,12 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Cuts the landings into bins: every source's non-empty shards landing in one of the @p shards
-     *  target shards, in landing order, each bin closed once its widest shard outgrows the row bits
+    /** Cuts the moves into bins: every source's non-empty shards going into one of the @p shards
+     *  target shards, in move order, each bin closed once its widest shard outgrows the row bits
      *  one more member would leave, or once one more would leave each other member no slot of a
      *  row; then sizes the host columns for the widest bin. */
     status_t cut_bins_(std::size_t shards) noexcept {
-        std::size_t const count = refining_.landings_.size();
+        std::size_t const count = refining_.moves_.size();
         if (failed(members_.reserve_exactly(count)) || failed(bins_.reserve_exactly(count)))
             return status_t::bad_alloc_k;
         std::size_t first = 0;
@@ -386,7 +386,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 std::size_t widest = 0;
                 for (std::size_t from = first; from != first + source_shards; ++from) {
                     std::size_t const rows = source->shards_[from - first].index->size();
-                    if (refining_.landings_[from].into != into || !rows) continue;
+                    if (refining_.moves_[from].into != into || !rows) continue;
                     if (bin.count && ((max_of(widest, rows) >> row_bits_(bin.count + 1)) || connectivity < bin.count)) {
                         bins_.push_back_reserved(bin);
                         bin = {members_.size(), 0}, widest = 0;
@@ -537,7 +537,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                     failed(cuda_vendor_t::fill(walk.api(), own.heads, 0xFF, heads * sizeof(u32_t), walk.stream())))
                     return status_t::device_error_k;
 
-                // This member's rows search every other member on its device, landing in its picks.
+                // This member's rows search every other member on its device, writing its matches
+                // into its picks.
                 vram_flat_storage_t const storage = index.core().storage();
                 std::size_t const rows = index.size(), row_bytes = index.row_bytes();
                 for (std::size_t other = 0; other != bin.count; ++other) {
@@ -555,7 +556,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                             reinterpret_cast<char*>(own.picks + first * connectivity + block * search.count),
                             rows_shape_of<node_id_t>(window, connectivity * sizeof(node_id_t), search.count)};
                         if (status_t const searched_status =
-                                searched.search(queries, found, {}, searching, search, completion_t::deferred_k).status;
+                                searched.search(queries, found, {}, search, searching, completion_t::deferred_k).status;
                             failed(searched_status))
                             return searched_status;
                     }
@@ -566,15 +567,15 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     }
 
     /** Drives the fold's pending phases, each queued on every folding bin and awaited on every
-     *  member's context before the next, so a phase reads only what the last one landed; the
-     *  tallies of the re-selection and the merge join the report. A phase failing partway leaves
+     *  member's context before the next, so a phase reads only what the last one finished; the
+     *  tallies of the re-selection and the merge enter the report. A phase failing partway leaves
      *  some members past it, so the fold restarts at the cross phase, which refills every head and
      *  pick. */
     template <typename progress_type_>
     status_t fold_(progress_type_& on_visited) noexcept {
-        while (phase_ != phase_t::land_k) {
+        while (phase_ != phase_t::copy_k) {
             status_t const queued = queue_phase_();
-            // Every launch queued so far lands before anything returns, as the buffers die with
+            // Every launch queued so far finishes before anything returns, as the buffers die with
             // the plan.
             status_t waited = status_t::success_k;
             for (walk_context_t& walk : walks_)
@@ -588,7 +589,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 if (phase_ == phase_t::cross_k || bin.count == 1) continue;
                 for (std::size_t place = 0; place != bin.count; ++place) {
                     vram_telemetry_block_t const spent = walks_[bin.state + place].spent();
-                    folded_.telemetry.computed_distances += spent.scored;
+                    folded_.traversal_stats.computed_distances += spent.scored;
                     folded_.changed_nodes += spent.changed_nodes;
                     if (phase_ == phase_t::reselect_k)
                         folded_.reselected_nodes += shard_at_(members_[bin.first + place]).index->size();
@@ -602,53 +603,54 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return status_t::success_k;
     }
 
-    /** Lands every pending source into @p target, each source's landings the run of them its
+    /** Copies every pending source into @p target, each source's moves the run of them its
      *  shards number. */
-    status_t land_pending_(ram_indexes_t& target, device_executor_t& device_executor,
+    status_t copy_pending_(ram_indexes_t& target, device_executor_t& device_executor,
                            host_executor_t& host_executor) noexcept {
         std::size_t first = 0;
-        for (std::size_t source = 0; source != landed_; ++source) first += sources_[source]->shards_.size();
-        for (; landed_ != sources_.size(); ++landed_) {
-            vram_indexes_t& source = *sources_[landed_];
+        for (std::size_t source = 0; source != copied_; ++source) first += sources_[source]->shards_.size();
+        for (; copied_ != sources_.size(); ++copied_) {
+            vram_indexes_t& source = *sources_[copied_];
             std::size_t const count = source.shards_.size();
-            if (status_t const landed = land_(target, source, first, device_executor, host_executor); failed(landed))
-                return landed;
+            if (status_t const copied = copy_(target, source, first, device_executor, host_executor); failed(copied))
+                return copied;
             first += count;
         }
         return status_t::success_k;
     }
 
     /**
-     *  @brief Lands every row of @p source, whose shards number from @p first across the sources,
-     *      where the landings put it, and consumes it.
+     *  @brief Copies every row of @p source, whose shards number from @p first across the sources,
+     *      where the moves put it, and consumes it.
      *
      *  The source's gate and every other fallible step come first, then the copies, then one commit
-     *  bracket publishes and the source shards join the plan's parts. Every target shard claims all
-     *  the rows it takes up front, so a failure before publication releases them. Each bin then
+     *  bracket publishes and the source shards enter the plan's parts. Every target shard claims
+     *  all the rows it takes up front, so a failure before publication releases them. Each bin then
      *  crosses to the host columns side by side: every member's save plan stages its vectors and
      *  neighbors on its device's stream, a folding bin's fold rows replace the neighbors, already
      *  in the bin's dense ID space, and the target shard's load steps covering the bin copy out of
-     *  the columns on the host threads, the keys beside them. Once every bin landed, the target
+     *  the columns on the host threads, the keys beside them. Once every bin was copied, the target
      *  files the keys and publishes them with the rows, and the source forgets its rows in place
      *  inside its window.
      */
-    status_t land_(ram_indexes_t& target, vram_indexes_t& source, std::size_t first, device_executor_t& device_executor,
+    status_t copy_(ram_indexes_t& target, vram_indexes_t& source, std::size_t first, device_executor_t& device_executor,
                    host_executor_t& host_executor) noexcept {
         std::size_t const shards = refining_.cursors_.size();
         if (!source.size()) return status_t::success_k;
-        std::span<landing_t const> const landings = to_span(refining_.landings_).subspan(first, source.shards_.size());
-        // The source empties once its rows land, so its gate precedes anything a refusal undoes.
+        std::span<shard_move_t const> const moves = to_span(refining_.moves_).subspan(first, source.shards_.size());
+        // The source empties once its rows are copied, so its gate comes before anything that a
+        // refusal might undo.
         typename vram_indexes_t::unique_lock_t const emptying {source.gate_, std::try_to_lock};
         if (!emptying) return status_t::contended_k;
 
-        std::size_t const sources = landings.size();
+        std::size_t const sources = moves.size();
         growing_buffer<ram_load_plan_t, forkunion_allocator_t> plans {target.shards_.allocator()};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {target.shards_.allocator()};
         if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards))) return status_t::bad_alloc_k;
         for (std::size_t into = 0; into != shards; ++into) {
             std::size_t rows = 0;
             for (std::size_t from = 0; from != sources; ++from)
-                if (landings[from].into == into) rows += source.shards_[from].index->size();
+                if (moves[from].into == into) rows += source.shards_[from].index->size();
             auto [plan, status] = target.shards_[into].index->plan_load(rows);
             if (failed(status)) return status;
             plans.push_back_reserved(std::move(plan));
@@ -659,21 +661,21 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
         for (bin_t const& bin : bins_) {
             if (members_[bin.first] < first || members_[bin.first] >= first + sources) continue;
-            std::size_t const into = landings[members_[bin.first] - first].into;
+            std::size_t const into = moves[members_[bin.first] - first].into;
             node_id_t const rows = static_cast<node_id_t>(bin_rows_(bin));
-            node_id_t landed = plans[into].base;
+            node_id_t first_node = plans[into].base;
             for (std::size_t earlier = 0; earlier != members_[bin.first] - first; ++earlier)
-                if (landings[earlier].into == into)
-                    landed += static_cast<node_id_t>(source.shards_[earlier].index->size());
-            iota_view<node_id_t> const landing {landed, static_cast<node_id_t>(landed + rows)};
+                if (moves[earlier].into == into)
+                    first_node += static_cast<node_id_t>(source.shards_[earlier].index->size());
+            iota_view<node_id_t> const target_nodes {first_node, static_cast<node_id_t>(first_node + rows)};
             byte_t* const vectors = columns_.data();
             byte_t* const neighbors = vectors + rows * vectors_row_bytes;
 
             node_id_t offset = 0;
             for (std::size_t member = bin.first; member != bin.first + bin.count; ++member) {
                 std::size_t const from = members_[member] - first;
-                vram_shard_t const& part = source.shards_[from];
-                node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
+                vram_shard_t const& donor_slot = source.shards_[from];
+                node_id_t const part_rows = static_cast<node_id_t>(donor_slot.index->size());
                 typename vram_index_t::columns_t const staged {
                     bytes_of(vectors + offset * vectors_row_bytes, part_rows * vectors_row_bytes),
                     bytes_of(neighbors + offset * neighbors_row_bytes, part_rows * neighbors_row_bytes),
@@ -681,7 +683,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 typename device_executor_t::stream_t& stream = device_executor.stream(
                     fanout_t::stream_of(source.shards_, device_executor, from));
                 if (status_t const entered = fanout_t::enter(source.shards_, from); failed(entered)) return entered;
-                auto [saving, save_status] = part.index->plan_save(staged, synchronization_t::immutable_k, stream);
+                auto [saving, save_status] = donor_slot.index->plan_save(staged, synchronization_t::immutable_k,
+                                                                         stream);
                 if (failed(save_status)) return save_status;
                 for (typename vram_index_t::save_plan_t::step_t const step : saving.steps())
                     if (status_t const saved = saving.save(step, {}); failed(saved)) return saved;
@@ -701,15 +704,15 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 bytes_of(static_cast<byte_t const*>(vectors), rows * vectors_row_bytes),
                 bytes_of(static_cast<byte_t const*>(neighbors), rows * neighbors_row_bytes),
                 {}};
-            auto land = [&](std::size_t shard, typename ram_load_plan_t::step_t const& chunk, std::size_t,
-                            nk::matrix_span<node_id_t>) noexcept -> status_t {
+            auto copy_step = [&](std::size_t shard, typename ram_load_plan_t::step_t const& chunk, std::size_t,
+                                 nk::matrix_span<node_id_t>) noexcept -> status_t {
                 if (shard != into) return status_t::success_k;
                 typename ram_load_plan_t::step_t step = chunk;
-                step.index_nodes = {max_of(chunk.index_nodes.first, landing.first),
-                                    min_of(chunk.index_nodes.bound, landing.bound)};
+                step.index_nodes = {max_of(chunk.index_nodes.first, target_nodes.first),
+                                    min_of(chunk.index_nodes.bound, target_nodes.bound)};
                 if (step.index_nodes.first >= step.index_nodes.bound) return status_t::success_k;
-                step.source_nodes = {static_cast<node_id_t>(step.index_nodes.first - landing.first),
-                                     static_cast<node_id_t>(step.index_nodes.bound - landing.first)};
+                step.source_nodes = {static_cast<node_id_t>(step.index_nodes.first - target_nodes.first),
+                                     static_cast<node_id_t>(step.index_nodes.bound - target_nodes.first)};
                 auto part_of = [&](std::size_t member) noexcept -> vram_shard_t const& {
                     return source.shards_[members_[member] - first];
                 };
@@ -724,18 +727,19 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 });
             };
             std::memset(cursors.data(), 0, shards * sizeof(std::size_t));
-            if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, 0, land);
+            if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, 0,
+                                                            copy_step);
                 failed(loaded))
                 return loaded;
         }
 
-        // Every bin landed, so no plan refuses; each plan files its keys ahead of the bracket,
+        // Every bin was copied, so no plan refuses; each plan files its keys ahead of the bracket,
         // which shows a search every shard's rows with their keys or none.
         for (ram_load_plan_t& plan : plans) plan.publish_keys();
         auto publish = [&]() noexcept {
             for (ram_load_plan_t& plan : plans)
                 if (status_t const finished = plan.finish(); failed(finished)) return finished;
-            target.shards_.record_parts(source.shards_, landings, plans, refining_.part_bases_.data(),
+            target.shards_.record_parts(source.shards_, moves, plans, refining_.part_bases_.data(),
                                         to_span(refining_.part_offsets_));
             return status_t::success_k;
         };
@@ -751,7 +755,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
 
     /** Reopens every source still pending, each closed at planning; the plan holds none after. */
     void release_sources_() noexcept {
-        for (std::size_t pending = landed_; pending < sources_.size(); ++pending) sources_[pending]->shards_.reopen();
+        for (std::size_t pending = copied_; pending < sources_.size(); ++pending) sources_[pending]->shards_.reopen();
         sources_ = {};
     }
 
@@ -769,7 +773,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
         return {result, failed(finish_status) ? finish_status : ran};
     }
 
-    /** The absorb plan over the target: its landings, part runs and per-shard heals. */
+    /** The absorb plan over the target: its moves, part runs and per-shard heals. */
     refine_plan_t refining_;
 
     /** One bin's packed vectors, then its neighbors, sized at planning for the widest, which every
@@ -800,14 +804,14 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
     /** The caller's source slots, borrowed until the plan dies. */
     std::span<vram_indexes_t* const> sources_;
 
-    /** Sources landed so far. */
-    std::size_t landed_ = 0;
+    /** Sources copied so far. */
+    std::size_t copied_ = 0;
 
     /** Source rows, every one of which changes shard. */
     std::size_t moved_entries_ = 0;
 
     /** The fold's re-selections and merges, as a refine counts them. */
-    refine_result_t folded_;
+    refine_report_t folded_;
 
     /** The fold's next phase. */
     phase_t phase_ = phase_t::cross_k;

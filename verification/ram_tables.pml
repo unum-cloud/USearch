@@ -10,7 +10,7 @@
  *  and publishes the tag with no claim. Readers walk the control bytes with acquire loads,
  *  wait-free. One published chunk of two seats, two slots and the constant terminator at position 2.
  *
- *  - Bound: no inserter probes past the terminator, and no insert lands past the published seats.
+ *  - Bound: no inserter probes past the terminator, and no insert goes past the published seats.
  *  - Visibility: the value a prober reads beside a matching key is that key's value.
  *  - Completeness, under `sc`: a key published before the prober started is found.
  *
@@ -22,7 +22,7 @@
  *      slot's initial value
  *  @verify fail rc11 probe_order=order_relaxed: without it, the prober reads the new key beside the
  *      slot's initial value
- *  @verify fail sc cover_refusal=false: without the refusal, the seat lands in a chunk never
+ *  @verify fail sc cover_refusal=false: without the refusal, the seat falls in a chunk never
  *      published
  */
 #define thread_count 4

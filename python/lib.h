@@ -201,6 +201,8 @@ extern PyTypeObject DenseIndexType;
 extern PyTypeObject DenseMetadataType;
 extern PyTypeObject DenseIndexDescriptionType;
 extern PyTypeObject DenseReachabilityType;
+extern PyTypeObject RefineReportType;
+extern PyTypeObject SampleType;
 extern PyTypeObject DenseTraversalStatsType;
 extern PyTypeObject DenseCursorType;
 extern PyTypeObject DenseBatchType;
@@ -215,6 +217,8 @@ extern PyStructSequence_Desc usearch_py_match_desc;
 extern PyStructSequence_Desc usearch_py_dense_metadata_desc;
 extern PyStructSequence_Desc usearch_py_dense_index_description_desc;
 extern PyStructSequence_Desc usearch_py_dense_reachability_desc;
+extern PyStructSequence_Desc usearch_py_refine_report_desc;
+extern PyStructSequence_Desc usearch_py_sample_desc;
 
 /** The base of the one exception class per failing status, subclassing @c RuntimeError. */
 extern PyObject* ErrorType;

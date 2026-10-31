@@ -1,3 +1,9 @@
+/**
+ *  @file javascript/usearch.test.js
+ *  @author Ash Vardanian
+ *  @date September 28, 2023
+ *  @brief The Node.js binding's tests over the CommonJS build, each test logged as it runs.
+ */
 const nodeTest = require("node:test");
 const realTest = nodeTest.test; // the original function
 
@@ -434,7 +440,7 @@ test("Deferred calls", async (t) => {
     assert(health.sweeps >= 1, "an audit sweeps at least once");
     const stored = (await calls.get).data;
     [0.9, 0.1, 0.1].forEach((expected, column) => assertAlmostEqual(stored[column], expected, 2 ** -7));
-    assert.equal(await calls.refine, 0);
+    assert.equal((await calls.refine).changed, 0);
     executor.free();
   });
 
@@ -558,8 +564,9 @@ test("Refinement leaves the graph searchable", () => {
   index.reserve(64);
   index.on(EXECUTOR).insert(keys, rows(4, ...values));
 
-  const changed = index.on(EXECUTOR).refine({ expansionFactor: 64 });
-  assert.equal(typeof changed, "number", "refinement reports the nodes it touched");
+  const report = index.on(EXECUTOR).refine({ expansionFactor: 64 });
+  assert(report.changed <= report.reselected, "refinement changes only the nodes it re-selected");
+  assert.equal(typeof report.reachability.reachable, "number", "and closes on an audit");
   assert.equal(index.describe().size, 64, "refinement adds and removes nothing");
   assert.equal(usearch.integerFromKey(index.search(new Float32Array([7, 8, 9, 10]), 1, new Arena()).get(0).keys), 7n);
 });
@@ -625,9 +632,48 @@ test("A deferred absorb holds its donors until it is final", () => {
     code: Status.Uninitialized,
     message: "A donor was freed or absorbed already",
   });
-  assert.equal(call.wait(), undefined);
+  const report = call.wait();
+  assert(report.changed <= report.reselected, "the closing refine changes only what it re-selected");
   assert.equal(index.count(2n), 1, "the donor's entries joined the index");
   executor.free();
+});
+
+test("A split empties the source into its receivers", () => {
+  const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(4);
+  index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
+  const receivers = [0, 1].map(() => {
+    const receiver = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+    receiver.reserve(4);
+    return receiver;
+  });
+  index.on(EXECUTOR).split(receivers, { seed: 7 });
+  assert.equal(index.describe().size, 0, "the source is left empty but live");
+  assert.equal(receivers[0].describe().size + receivers[1].describe().size, 4, "every entry moved into a receiver");
+});
+
+test("A sample draws held keys, each placed in three dimensions", () => {
+  const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(4);
+  index.insert([1n, 2n, 3n, 4n], rows(2, 1, 0, 0, 1, 1, 1, 2, 2));
+  const arena = new Arena();
+  const drawn = index.sample(2, arena, { seed: 42 });
+  assert(drawn.draws <= 2, "no more draws than wanted");
+  for (let draw = 0; draw < drawn.draws; draw++)
+    assert(
+      [1n, 2n, 3n, 4n].includes(usearch.integerFromKey(usearch.keyAt(drawn.keys, draw))),
+      "every draw is a held key",
+    );
+  if (drawn.draws) assert.equal(drawn.coordinates.columns, 3, "each draw is placed in three dimensions");
+  assert.throws(() => index.sample(2, arena, { shown: [1n] }), { code: Status.ShapeMismatch });
+
+  // A deferred sample reads the caller's arrays in place, so it holds them until final.
+  const shown = keysFromIntegers(1n);
+  const places = new Float32Array([0, 0, 0]);
+  const call = index.deferred(EXECUTOR).sample(3, arena, { shown, shownCoordinates: places, focus: [4n] });
+  const around = call.wait();
+  for (let draw = 0; draw < around.draws; draw++)
+    assert.notEqual(usearch.integerFromKey(usearch.keyAt(around.keys, draw)), 1n, "a shown key is never drawn again");
 });
 
 test("Late interaction over multi-vector keys", () => {

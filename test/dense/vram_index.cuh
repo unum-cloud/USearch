@@ -64,12 +64,12 @@ std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t
             failures += expect(!index.build_scratch_fits(index.build_scratch_bytes_per_warp(connectivity_16_k + 1)));
         failures += expect(index.insert(to_span(keys), vectors.view(), {}, context).status == status_t::success_k);
         failures += expect_eq(index.size(), dense_growth_nodes_k);
-        auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
+        auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, {}, {}, context);
         failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0 &&
                            refined.changed_nodes <= refined.reselected_nodes);
         // A dot graph's hubs can stall the heal short of every node.
         if constexpr (kernel_ != nk_kernel_dot_k) {
-            failures += expect_eq(refined.health.reachable_nodes, dense_growth_nodes_k);
+            failures += expect_eq(refined.reachability.reachable_nodes, dense_growth_nodes_k);
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         }
     }
@@ -120,11 +120,72 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
         typename index_type_::refine_config_t broad_refine;
         broad_refine.expansion_factor = 1024;
-        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context, broad_refine).status ==
+        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, {}, broad_refine, context).status ==
                            status_t::success_k);
         // The greedy over many tile blocks of a wide pool keeps every entry findable.
         if constexpr (kernel_ != nk_kernel_dot_k)
             failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+    }
+    return failures + expect_eq(ledger.live_bytes, 0);
+}
+
+/** Plants a one-way node in a built graph: the last node keeps the in-links the build gave it but
+ *  points only at itself, so the landmarks reach it while it reaches none back. The audit must not
+ *  count it, the refine must find it among its islands and heal it, and a second refine must find
+ *  nothing left to heal. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_vram_one_way_islands(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        constexpr std::size_t nodes_count = 512;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "one-way"));
+        std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(nodes_count);
+        std::unique_ptr<index_type_> const built_ptr = make_index(ledger, {dimensions, connectivity_16_k});
+        index_type_& built = *built_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        failures += expect(built.reserve({nodes_count}).status == status_t::success_k);
+        failures += expect(built.insert(to_span(keys), vectors.view(), {}, context).status == status_t::success_k);
+
+        std::size_t const connectivity = static_cast<std::size_t>(built.connectivity());
+        auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
+        auto saved_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity}).value;
+        auto scratch = nk::matrix<node_id_t>::zeros({nodes_count, connectivity}).value;
+        failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
+        if (saved_vectors.empty() || saved_neighbors.empty() || scratch.empty()) return failures;
+        failures += expect_eq(
+            dense_save(built, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
+                       synchronization_t::exclusive_k, scratch.span()),
+            status_t::success_k);
+        // No landmark: they sit at multiples of the rows over the connectivity.
+        node_id_t const sink = static_cast<node_id_t>(nodes_count - 1);
+        auto island_sink_neighbors = saved_neighbors.span().row(sink).as_vector();
+        island_sink_neighbors[0] = sink;
+        for (std::size_t slot = 1; slot != connectivity; ++slot) island_sink_neighbors[slot] = node_id_unknown_k;
+
+        std::unique_ptr<index_type_> const planted_ptr = make_index(ledger, {dimensions, connectivity_16_k});
+        index_type_& planted = *planted_ptr;
+        failures += expect(planted.reserve({nodes_count}).status == status_t::success_k);
+        failures += expect_eq(
+            dense_load(planted, make_index,
+                       {dense_matrix_bytes(saved_vectors.view()), dense_matrix_bytes(saved_neighbors.view())},
+                       to_span(keys), nodes_count, {0, static_cast<node_id_t>(nodes_count)}),
+            status_t::success_k);
+
+        auto const [before, before_status] = dense_audit_health(planted, context);
+        failures += expect(succeeded(before_status) && before.reachable_nodes < nodes_count && before.back_sweeps >= 1);
+        auto const [repair, repair_status] = planted.refine({}, {}, {}, context);
+        failures += expect(succeeded(repair_status) && repair.islands_found >= 1);
+        // A dot graph's hubs can stall the heal short of every node.
+        if constexpr (kernel_ != nk_kernel_dot_k) {
+            failures += expect_eq(repair.reachability.reachable_nodes, nodes_count);
+            auto const [settled, settled_status] = planted.refine({}, {}, {}, context);
+            failures += expect(succeeded(settled_status));
+            failures += expect_eq(settled.islands_found, 0u);
+        }
     }
     return failures + expect_eq(ledger.live_bytes, 0);
 }
@@ -136,8 +197,8 @@ std::size_t test_vram_arena_configuration(char const*, u64_t, executor_type_&) {
 }
 
 /** Composes the arena rung over the ledgered index of @p executor 's vendor, on its first stream:
- *  rows too wide for a builder's shared-memory cache, then an expansion past the register ladder,
- *  reported under @p name prefixed by the vendor's toolkit. */
+ *  rows too wide for a builder's shared-memory cache, an expansion past the register ladder, then
+ *  a planted one-way node, reported under @p name prefixed by the vendor's toolkit. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
     requires vram_compiled<executor_type_::vendor_k>
 std::size_t test_vram_arena_configuration(char const* name, u64_t seed, executor_type_& executor) {
@@ -148,6 +209,7 @@ std::size_t test_vram_arena_configuration(char const* name, u64_t seed, executor
     std::size_t failures_count = 0;
     failures_count += test_dense_vram_wide_build<index_t, kernel_>(cell, seed);
     failures_count += test_dense_vram_broad_build<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_vram_one_way_islands<index_t, kernel_>(cell, seed);
     return report(vendor_name.c_str(), failures_count);
 }
 

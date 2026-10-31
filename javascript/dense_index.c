@@ -29,30 +29,36 @@ typedef struct usearch_js_dense_call_t {
     /** The audit @c health reports. */
     usearch_reachability_t reachability;
 
+    /** What a refine, absorb or split did to the graph. */
+    usearch_refine_report_t report;
+
     /** The report @c describe fills. */
     usearch_dense_index_description_t description;
 
     /** Donors an absorb names, which its settlement walks, or the rows on a verb's batch axis. */
     size_t count;
 
-    /** Entries under a key or a cursor pull landed, nodes a refinement changed, or the rows or
-     *  pairs a call landed. */
+    /** Entries under a key or a cursor pull wrote, nodes a refinement changed, or the rows or
+     *  pairs a call wrote. */
     size_t written;
 
-    /** Pairs a product scored before its bound cut any, or keys a late interaction landed. */
+    /** Pairs a product scored before its bound cut any, or keys a late interaction wrote. */
     size_t required;
 
-    /** The ranked run a search or a stream pull landed in its arena. */
+    /** The ranked run a search or a stream pull wrote into its arena. */
     usearch_matches_view_t matches;
 
-    /** The pairs a product, or the keys a late-interaction scoring, landed in its arena. */
+    /** The pairs a product, or the keys a late-interaction scoring, wrote into its arena. */
     usearch_matches_tape_view_t products;
 
-    /** The rows a retrieval, a cursor pull or an attention landed in its arena. */
+    /** The rows a retrieval, a cursor pull or an attention wrote into its arena. */
     usearch_rows_view_t vectors;
 
-    /** The identities a cursor pull landed in its arena. */
+    /** The identities a cursor pull or a sample wrote into its arena. */
     usearch_keys_view_t keys;
+
+    /** Which of its key's entries each draw of a sample is, inside its arena. */
+    size_t const* entry_ordinals;
 
     /** The keys each of a cursor pull's entries links to, inside its arena. */
     usearch_keys_tape_view_t links;
@@ -60,7 +66,7 @@ typedef struct usearch_js_dense_call_t {
     /** A monolith inside its arena. */
     usearch_bytes_view_t monolith;
 
-    /** The kind the rows were asked in, which picks their element type even when none landed. */
+    /** The kind the rows were asked in, which picks their element type even with none written. */
     usearch_scalar_t scalar;
 } usearch_js_dense_call_t;
 
@@ -121,16 +127,9 @@ static napi_value usearch_js_finish_written(napi_env env, usearch_js_call_t* cal
     return usearch_js_number(env, ((usearch_js_dense_call_t*)call)->written);
 }
 
-static napi_value usearch_js_finish_refine(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
-    usearch_js_dense_call_t* const dense = (usearch_js_dense_call_t*)call;
-    if (!usearch_js_stats_report(env, slots[usearch_js_slot_stats_k], &dense->stats)) return NULL;
-    return usearch_js_number(env, dense->written);
-}
-
-static napi_value usearch_js_finish_health(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
-    usearch_reachability_t const* const reachability = &((usearch_js_dense_call_t*)call)->reachability;
+/** Wraps one reachability audit. */
+static napi_value usearch_js_reachability_object(napi_env env, usearch_reachability_t const* reachability) {
     napi_value object = NULL;
-    (void)slots;
     if (napi_create_object(env, &object) != napi_ok) {
         usearch_js_throw(env, usearch_status_internal_k, "Could not publish the reachability audit");
         return NULL;
@@ -140,6 +139,30 @@ static napi_value usearch_js_finish_health(napi_env env, usearch_js_call_t* call
     napi_set_named_property(env, object, "sweeps", usearch_js_number(env, reachability->sweeps));
     napi_set_named_property(env, object, "backSweeps", usearch_js_number(env, reachability->back_sweeps));
     return object;
+}
+
+/** Wraps what a refine, absorb or split did to the graph, after publishing its telemetry. */
+static napi_value usearch_js_finish_report(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    usearch_js_dense_call_t* const dense = (usearch_js_dense_call_t*)call;
+    usearch_refine_report_t const* const report = &dense->report;
+    if (!usearch_js_stats_report(env, slots[usearch_js_slot_stats_k], &dense->stats)) return NULL;
+    napi_value const reachability = usearch_js_reachability_object(env, &report->reachability);
+    napi_value object = NULL;
+    if (!reachability || napi_create_object(env, &object) != napi_ok) {
+        usearch_js_throw(env, usearch_status_internal_k, "Could not publish the refine report");
+        return NULL;
+    }
+    napi_set_named_property(env, object, "reselected", usearch_js_number(env, report->reselected));
+    napi_set_named_property(env, object, "changed", usearch_js_number(env, report->changed));
+    napi_set_named_property(env, object, "islandsFound", usearch_js_number(env, report->islands_found));
+    napi_set_named_property(env, object, "islandsReconnected", usearch_js_number(env, report->islands_reconnected));
+    napi_set_named_property(env, object, "reachability", reachability);
+    return object;
+}
+
+static napi_value usearch_js_finish_health(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    (void)slots;
+    return usearch_js_reachability_object(env, &((usearch_js_dense_call_t*)call)->reachability);
 }
 
 static napi_value usearch_js_finish_describe(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
@@ -642,7 +665,7 @@ static napi_value usearch_js_index_insert(napi_env env, napi_callback_info info)
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
-/** @c refine(executor, completion, expansion, stats) → the nodes whose edges changed. */
+/** <tt>refine(executor, completion, expansion, stats)</tt> → what the pass did to the graph. */
 static napi_value usearch_js_index_refine(napi_env env, napi_callback_info info) {
     napi_value arguments[4], self = NULL, deferred = NULL;
     usearch_js_index_t* const index = usearch_js_index_self(env, info, 4, arguments, &self);
@@ -657,9 +680,9 @@ static napi_value usearch_js_index_refine(napi_env env, napi_callback_info info)
         return NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], NULL, NULL, NULL, arguments[3]};
-    call->call.finish = usearch_js_finish_refine;
+    call->call.finish = usearch_js_finish_report;
     refine.outcome = &call->call.outcome;
-    refine.changed = &call->written;
+    refine.report = &call->report;
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     usearch_dense_refine(&refine);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
@@ -710,7 +733,7 @@ static napi_typedarray_type usearch_js_typedarray_of(usearch_scalar_t scalar, si
     }
 }
 
-/** Views @p count rows a call landed inside @p arena as @c {data, rows, columns, stride}, typed by
+/** Views @p count rows a call wrote inside @p arena as @c {data, rows, columns, stride}, typed by
  *  @p call's kind. */
 static napi_value usearch_js_rows_object(napi_env env, napi_value arena, usearch_js_dense_call_t const* call,
                                          size_t count) {
@@ -863,6 +886,87 @@ static napi_value usearch_js_index_get(napi_env env, napi_callback_info info) {
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
+/** Views the draws a sample wrote as @c {keys, entryOrdinals, parents, coordinates, draws}. */
+static napi_value usearch_js_finish_sample(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
+    usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
+    napi_value const arena = slots[usearch_js_slot_arena_k];
+    size_t const draws = dense->written;
+    napi_value const keys = usearch_js_arena_view(env, arena, napi_uint8_array, (void*)dense->keys.data,
+                                                  draws * sizeof(usearch_key_t), draws * sizeof(usearch_key_t));
+    napi_value const entry_ordinals = keys ? usearch_js_arena_view(env, arena, napi_biguint64_array,
+                                                                   (void*)dense->entry_ordinals, draws * sizeof(size_t),
+                                                                   draws)
+                                           : NULL;
+    napi_value const parents = entry_ordinals ? usearch_js_matches_object(env, arena, &dense->matches, draws) : NULL;
+    napi_value const coordinates = parents ? usearch_js_rows_object(env, arena, dense, draws) : NULL;
+    if (!coordinates) return NULL;
+    static char const* const names[] = {"keys", "entryOrdinals", "parents", "coordinates", "draws"};
+    napi_value const values[] = {keys, entry_ordinals, parents, coordinates, usearch_js_number(env, draws)};
+    return usearch_js_object(env, usearch_js_table_size_(names), names, values);
+}
+
+/** Views a run of keys in place, gathering only integer keys into block @p block of @p call; an
+ *  absent run reads as none. */
+static bool usearch_js_optional_keys(napi_env env, napi_value value, char const* field, usearch_js_call_t* call,
+                                     size_t block, usearch_keys_view_t* view, size_t* count) {
+    *count = 0;
+    view->data = NULL;
+    view->stride = sizeof(usearch_key_t);
+    if (usearch_js_value_absent(env, value)) return true;
+    return usearch_js_keys_from_value(env, value, field, &view->data, count, (usearch_key_t**)&call->owned[block]);
+}
+
+/**
+ *  @brief <tt>sample(executor, completion, arena, wanted, shown, data, rows, columns, stride,
+ *      scalar, focus, seed, expansion)</tt> → @c {keys, entryOrdinals, parents, coordinates, draws},
+ *      viewed inside @p arena.
+ *
+ *  The shown coordinates are absent with the shown keys, or one row of three @c f32 values per key.
+ *  Both key runs and the coordinates are read in place, so a deferred call holds the arrays.
+ */
+static napi_value usearch_js_index_sample(napi_env env, napi_callback_info info) {
+    napi_value arguments[13], self = NULL, deferred = NULL;
+    usearch_js_index_t* const index = usearch_js_index_self(env, info, 13, arguments, &self);
+    usearch_js_dense_call_t local;
+    usearch_dense_sample_t sample = {.index = index ? index->handle : NULL};
+    usearch_js_dense_call_t* const call =
+        index ? usearch_js_dense_open(env, arguments, &local, &sample.executor, &sample.completion) : NULL;
+    if (!call) return NULL;
+    size_t seed = 0, placed = 0;
+    sample.shown_coordinates = (usearch_rows_view_t) {NULL, 3 * sizeof(float), 3, usearch_scalar_f32_k};
+    if (!usearch_js_size_from_value(env, arguments[3], "wanted", &sample.wanted) ||
+        !usearch_js_optional_keys(env, arguments[4], "shown", &call->call, 0, &sample.shown, &sample.shown_count) ||
+        (!usearch_js_value_absent(env, arguments[5]) &&
+         !usearch_js_rows_from_value(env, arguments + 5, "shownCoordinates", &placed, &sample.shown_coordinates)) ||
+        !usearch_js_optional_keys(env, arguments[10], "focus", &call->call, 1, &sample.focus, &sample.focus_count) ||
+        !usearch_js_size_from_value(env, arguments[11], "seed", &seed) ||
+        !usearch_js_size_from_value(env, arguments[12], "expansionFactor", &sample.expansion_factor) ||
+        !usearch_js_arena_from_value(env, arguments[2], &call->call, &sample.arena)) {
+        usearch_js_call_abandon(&call->call, &local.call);
+        return NULL;
+    }
+    // The coordinates carry no count of their own, so only this side can see them disagree.
+    if (placed != sample.shown_count) {
+        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_throw(env, usearch_status_shape_mismatch_k, "The shown keys need one place apiece");
+        return NULL;
+    }
+    napi_value const slots[usearch_js_slots_k] = {
+        self, arguments[0], arguments[2], arguments[5], arguments[4], [usearch_js_slot_focus_k] = arguments[10]};
+    call->call.finish = usearch_js_finish_sample;
+    call->scalar = usearch_scalar_f32_k;
+    sample.outcome = &call->call.outcome;
+    sample.keys = &call->keys;
+    sample.entry_ordinals = &call->entry_ordinals;
+    sample.parents = &call->matches;
+    sample.coordinates = &call->vectors;
+    sample.written = &call->written;
+    sample.seed = seed;
+    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    usearch_dense_sample(&sample);
+    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+}
+
 /**
  *  @brief @c multiply(executor, completion, data, rows, columns, stride, scalar, arena, wanted,
  *      expansion, stats) → @c {offsets, keys, scores, required}, viewed inside @p arena.
@@ -908,7 +1012,8 @@ static void usearch_js_conclude_absorb(usearch_js_call_t* call) {
 }
 
 /**
- *  @brief @c absorb(executor, completion, donors) - absorbs every donor, each consumed as it nulls.
+ *  @brief <tt>absorb(executor, completion, donors)</tt> → what the closing refine did, absorbing every
+ *      donor, each consumed as it nulls.
  *
  *  Every donor's handle moves into the call at submission, so until it is final a donor refuses
  *  every verb and no second absorb can name it; @c usearch_js_conclude_absorb hands back the rest.
@@ -958,14 +1063,77 @@ static napi_value usearch_js_index_absorb(napi_env env, napi_callback_info info)
         donor->handle = NULL;
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], NULL, arguments[2]};
-    call->call.finish = usearch_js_finish_nothing;
+    call->call.finish = usearch_js_finish_report;
     call->call.conclude = usearch_js_conclude_absorb;
     call->count = length;
     absorb.outcome = &call->call.outcome;
     absorb.count = length;
     absorb.donors = handles;
+    absorb.report = &call->report;
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     usearch_dense_absorb(&absorb);
+    return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
+}
+
+/**
+ *  @brief <tt>split(executor, completion, receivers, seed, expansion)</tt> → what the receivers' closing
+ *      refines did, leaving this index empty but live.
+ *
+ *  The receivers stay their wrappers' own, held by the call until it is final.
+ */
+static napi_value usearch_js_index_split(napi_env env, napi_callback_info info) {
+    napi_value arguments[5], self = NULL, deferred = NULL;
+    usearch_js_index_t* const index = usearch_js_index_self(env, info, 5, arguments, &self);
+    usearch_js_dense_call_t local;
+    usearch_dense_split_t split = {.index = index ? index->handle : NULL};
+    usearch_js_dense_call_t* const call =
+        index ? usearch_js_dense_open(env, arguments, &local, &split.executor, &split.completion) : NULL;
+    if (!call) return NULL;
+    bool is_array = false;
+    uint32_t length = 0;
+    size_t seed = 0;
+    if (napi_is_array(env, arguments[2], &is_array) != napi_ok || !is_array ||
+        napi_get_array_length(env, arguments[2], &length) != napi_ok) {
+        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_throw_field(env, "receivers", "must be an array of indexes");
+        return NULL;
+    }
+    if (!usearch_js_size_from_value(env, arguments[3], "seed", &seed) ||
+        !usearch_js_size_from_value(env, arguments[4], "expansionFactor", &split.expansion_factor)) {
+        usearch_js_call_abandon(&call->call, &local.call);
+        return NULL;
+    }
+    usearch_dense_index_t* const handles = (usearch_dense_index_t*)calloc(length ? length : 1, sizeof(void*));
+    call->call.owned[0] = handles;
+    if (!handles) {
+        usearch_js_call_abandon(&call->call, &local.call);
+        usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not gather the receivers");
+        return NULL;
+    }
+    usearch_js_addon_t* addon = NULL;
+    napi_get_instance_data(env, (void**)&addon);
+    for (uint32_t position = 0; position != length; ++position) {
+        napi_value entry = NULL;
+        usearch_js_index_t* const receiver = addon && napi_get_element(env, arguments[2], position, &entry) == napi_ok
+                                                 ? (usearch_js_index_t*)usearch_js_unwrap_instance(
+                                                       env, entry, addon->index_class, "receivers", "must hold indexes")
+                                                 : NULL;
+        if (!receiver || !receiver->handle) {
+            usearch_js_call_abandon(&call->call, &local.call);
+            if (receiver) usearch_js_throw(env, usearch_status_uninitialized_k, "A receiver was freed or absorbed");
+            return NULL;
+        }
+        handles[position] = receiver->handle;
+    }
+    napi_value const slots[usearch_js_slots_k] = {self, arguments[0], NULL, arguments[2]};
+    call->call.finish = usearch_js_finish_report;
+    split.outcome = &call->call.outcome;
+    split.count = length;
+    split.receivers = handles;
+    split.seed = seed;
+    split.report = &call->report;
+    if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    usearch_dense_split(&split);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
@@ -1302,7 +1470,7 @@ static napi_value usearch_js_walk_object(napi_env env, void* handle, napi_value 
     return object;
 }
 
-/** Views the keys a cursor pull landed as @c {keys, entries}. */
+/** Views the keys a cursor pull wrote as @c {keys, entries}. */
 static napi_value usearch_js_finish_cursor_keys(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
     usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
     size_t const bytes = dense->written * sizeof(usearch_key_t);
@@ -1314,7 +1482,7 @@ static napi_value usearch_js_finish_cursor_keys(napi_env env, usearch_js_call_t*
     return usearch_js_object(env, usearch_js_table_size_(names), names, values);
 }
 
-/** Views the keys and links a cursor pull landed as @c {keys, entries, links: {offsets, keys}}. */
+/** Views the keys and links a cursor pull wrote as @c {keys, entries, links: {offsets, keys}}. */
 static napi_value usearch_js_finish_cursor_links(napi_env env, usearch_js_call_t* call, napi_value const* slots) {
     usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
     napi_value const arena = slots[usearch_js_slot_arena_k];
@@ -1483,6 +1651,8 @@ napi_value usearch_js_index_define(napi_env env) {
         {"get", NULL, usearch_js_index_get, NULL, NULL, NULL, napi_default_method, NULL},
         {"multiply", NULL, usearch_js_index_multiply, NULL, NULL, NULL, napi_default_method, NULL},
         {"absorb", NULL, usearch_js_index_absorb, NULL, NULL, NULL, napi_default_method, NULL},
+        {"split", NULL, usearch_js_index_split, NULL, NULL, NULL, napi_default_method, NULL},
+        {"sample", NULL, usearch_js_index_sample, NULL, NULL, NULL, napi_default_method, NULL},
         {"save", NULL, usearch_js_index_save, NULL, NULL, NULL, napi_default_method, NULL},
         {"saveBuffer", NULL, usearch_js_index_save_buffer, NULL, NULL, NULL, napi_default_method, NULL},
         {"attend", NULL, usearch_js_index_attend, NULL, NULL, NULL, napi_default_method, NULL},

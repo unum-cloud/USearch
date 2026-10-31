@@ -5,7 +5,7 @@
 # the few properties consumers depend on. The one runtime it does resolve is the platform's threads, since the stand-ins
 # keep the headers' concurrency promises with a `std::shared_mutex` rather than a comment.
 #
-# The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and land in a directory of
+# The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and sit in a directory of
 # their own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
 set(usearch_stub_sources_ types.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp)
 

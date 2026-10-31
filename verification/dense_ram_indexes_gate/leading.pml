@@ -4,8 +4,8 @@
  *  @date October 29, 2026
  *  @brief The MaxSim scan's `leads_` over a snapshot: each key nominated at exactly one row.
  *
- *  Two shards and two entries of key K. A batch spanning both lands key L on shard 0 and K on shard
- *  1 and commits them inside the sequence bracket; a single insert lands K on shard 0. Each files
+ *  Two shards and two entries of key K. A batch spanning both places key L on shard 0 and K on shard
+ *  1 and commits them inside the sequence bracket; a single insert places K on shard 0. Each files
  *  its keys into the shard's map while holding its turn. The scanner takes the snapshot under
  *  `read_committed` and asks `leads_` of every row below it: no earlier shard holds the key below
  *  its watermark, and no lower node of the row's shard does.

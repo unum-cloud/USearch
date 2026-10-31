@@ -1082,6 +1082,297 @@ struct packed_skylake_needleman_wunsch_kit_t {
 };
 #endif // STRINGZILLA_TARGET_SKYLAKE
 
+#if STRINGZILLA_TARGET_HASWELL
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx2"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2")
+#endif
+
+/**
+ *  @brief Intel Haswell AVX2: 16 candidates per YMM, one @c u16 cell each, a column at a time.
+ *
+ *  The Skylake sweep with byte codes: each column looks its codes up once per class the query holds
+ *  with two @c VPSHUFB over the low and high halves of that class's row, blended on the code's
+ *  fifth bit and widened to the lanes. AVX2 has no unsigned 16-bit compare, so a column is past the
+ *  radius when clamping its minimum to the radius changes it.
+ */
+struct packed_haswell_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = true;
+
+    /** Candidates one group sweeps, the @c u16 lanes of a YMM. */
+    static constexpr std::size_t lanes_k = sizeof(__m256i) / sizeof(u16_t);
+
+    /** Scratch bytes a round of a @p query_codes long query and candidates of up to
+     *  @p longest_codes takes: a YMM per query code and one more, a byte per lane per candidate
+     *  code, and the slack aligning them. */
+    static constexpr std::size_t scratch_bytes(std::size_t query_codes, std::size_t longest_codes) noexcept {
+        return (query_codes + 2) * sizeof(__m256i) + longest_codes * lanes_k;
+    }
+
+    /** Scores every candidate of @p candidates into its slot of @p distances, @p order taken in
+     *  groups of @ref lanes_k. */
+    static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
+                          std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
+                          std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
+        constexpr u32_t saturated_k = std::numeric_limits<u16_t>::max();
+        constexpr u32_t every_lane_k = ~u32_t {0};
+        std::size_t const rows = query.size();
+        u32_t const gap = costs.gap;
+        void* aligned = scratch.data();
+        std::size_t space = scratch.size();
+        __m256i* const column = static_cast<__m256i*>(std::align(sizeof(__m256i), sizeof(__m256i), aligned, space));
+        u8_t* const codes = reinterpret_cast<u8_t*>(column + rows + 1);
+
+        // A row of the table per class the query holds, as its low and high sixteen costs.
+        u32_t query_classes = 0;
+        for (u8_t const code : query) query_classes = max_of<u32_t>(query_classes, code + 1u);
+        __m128i low_rows_u8x16[needleman_wunsch_classes_k], high_rows_u8x16[needleman_wunsch_classes_k];
+        __m256i profile_u16x16[needleman_wunsch_classes_k];
+        for (u32_t code = 0; code != query_classes; ++code) {
+            low_rows_u8x16[code] = _mm_loadu_si128(reinterpret_cast<__m128i const*>(costs.substitutions[code]));
+            high_rows_u8x16[code] = _mm_loadu_si128(reinterpret_cast<__m128i const*>(costs.substitutions[code] + 16));
+        }
+        __m128i const last_low_code_u8x16 = _mm_set1_epi8(15);
+        __m256i const gap_u16x16 = _mm256_set1_epi16(static_cast<short>(gap));
+        __m256i const radius_u16x16 = _mm256_set1_epi16(static_cast<short>(min_of<sz_size_t>(radius, saturated_k)));
+
+        for (std::size_t first = 0; first < order.size(); first += lanes_k) {
+            std::size_t const lanes = min_of(lanes_k, order.size() - first);
+            u16_t lengths[lanes_k] = {};
+            u16_t finished[lanes_k] = {};
+            u32_t scalar = 0;
+            std::size_t longest = 0;
+            for (std::size_t lane = 0; lane != lanes_k; ++lane) {
+                if (lane >= lanes) {
+                    finished[lane] = static_cast<u16_t>(saturated_k);
+                    continue;
+                }
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                std::size_t const length = packed_codes_count(candidate.data(), candidate.size(), costs.code_bits);
+                if (length > saturated_k) scalar |= u32_t {1} << lane;
+                else lengths[lane] = static_cast<u16_t>(length), longest = max_of(longest, length);
+                // Padding lanes, empty ones and scalar ones count as finished from the start.
+                if (!lengths[lane]) finished[lane] = static_cast<u16_t>(saturated_k);
+            }
+            std::memset(codes, 0, longest * lanes_k);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                for (std::size_t index = 0; index != lengths[lane]; ++index)
+                    codes[index * lanes_k + lane] = static_cast<u8_t>(
+                        packed_code_at(candidate.data(), index, costs.code_bits));
+            }
+
+            for (std::size_t row = 0; row <= rows; ++row)
+                column[row] = _mm256_set1_epi16(static_cast<short>(min_of<std::size_t>(row * gap, saturated_k)));
+            __m256i const lengths_u16x16 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(lengths));
+            __m256i finished_u16x16 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(finished));
+            __m256i results_u16x16 = column[rows];
+            for (std::size_t index = 0;
+                 index != longest && static_cast<u32_t>(_mm256_movemask_epi8(finished_u16x16)) != every_lane_k;
+                 ++index) {
+                __m128i const codes_u8x16 = _mm_loadu_si128(reinterpret_cast<__m128i const*>(codes + index * lanes_k));
+                __m128i const high_codes_u8x16 = _mm_cmpgt_epi8(codes_u8x16, last_low_code_u8x16);
+                for (u32_t code = 0; code != query_classes; ++code)
+                    profile_u16x16[code] = _mm256_cvtepu8_epi16(
+                        _mm_blendv_epi8(_mm_shuffle_epi8(low_rows_u8x16[code], codes_u8x16),
+                                        _mm_shuffle_epi8(high_rows_u8x16[code], codes_u8x16), high_codes_u8x16));
+                __m256i diagonal_u16x16 = column[0];
+                __m256i above_u16x16 = _mm256_adds_epu16(diagonal_u16x16, gap_u16x16);
+                __m256i minimum_u16x16 = above_u16x16;
+                column[0] = above_u16x16;
+                for (std::size_t row = 1; row <= rows; ++row) {
+                    __m256i const left_u16x16 = column[row];
+                    __m256i const aligned_u16x16 = _mm256_adds_epu16(diagonal_u16x16, profile_u16x16[query[row - 1]]);
+                    __m256i const opened_u16x16 = _mm256_min_epu16(aligned_u16x16,
+                                                                   _mm256_adds_epu16(left_u16x16, gap_u16x16));
+                    above_u16x16 = _mm256_min_epu16(opened_u16x16, _mm256_adds_epu16(above_u16x16, gap_u16x16));
+                    diagonal_u16x16 = left_u16x16;
+                    column[row] = above_u16x16;
+                    minimum_u16x16 = _mm256_min_epu16(minimum_u16x16, above_u16x16);
+                }
+                __m256i const ended_u16x16 = _mm256_andnot_si256(
+                    finished_u16x16,
+                    _mm256_cmpeq_epi16(lengths_u16x16, _mm256_set1_epi16(static_cast<short>(index + 1))));
+                results_u16x16 = _mm256_blendv_epi8(results_u16x16, above_u16x16, ended_u16x16);
+                finished_u16x16 = _mm256_or_si256(finished_u16x16, ended_u16x16);
+                // Every alignment crosses each column, so none ends below the column's minimum.
+                __m256i const within_u16x16 = _mm256_cmpeq_epi16(_mm256_min_epu16(minimum_u16x16, radius_u16x16),
+                                                                 minimum_u16x16);
+                __m256i const past_u16x16 = _mm256_andnot_si256(_mm256_or_si256(finished_u16x16, within_u16x16),
+                                                                _mm256_set1_epi16(-1));
+                results_u16x16 = _mm256_blendv_epi8(results_u16x16, minimum_u16x16, past_u16x16);
+                finished_u16x16 = _mm256_or_si256(finished_u16x16, past_u16x16);
+            }
+
+            u16_t results[lanes_k];
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(results), results_u16x16);
+            u32_t* const scalar_column = static_cast<u32_t*>(aligned);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                u32_t const slot = order[first + lane];
+                bool const rescored = (scalar >> lane & 1u) || (results[lane] == saturated_k && radius >= saturated_k);
+                distances[slot] = rescored
+                                      ? needleman_wunsch_serial(costs, query, candidates[slot], radius, scalar_column)
+                                      : results[lane];
+            }
+        }
+    }
+};
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#else
+
+/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct packed_haswell_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_haswell_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // STRINGZILLA_TARGET_HASWELL
+
+#if STRINGZILLA_TARGET_NEON
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("+simd"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("+simd")
+#endif
+
+/**
+ *  @brief Arm NEON: 8 candidates per register, one @c u16 cell each, a column at a time.
+ *
+ *  The Skylake sweep with byte codes: each column looks its codes up once per class the query holds
+ *  with one @c TBL over that class's 32-byte row, widened to the lanes.
+ */
+struct packed_neon_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = true;
+
+    /** Candidates one group sweeps, the @c u16 lanes of a Q register. */
+    static constexpr std::size_t lanes_k = sizeof(uint16x8_t) / sizeof(u16_t);
+
+    /** Scratch bytes a round takes, @p query_codes the query's and @p longest_codes the candidates'
+     *  at most: a register per query code and one more, and a byte per lane per candidate code. */
+    static constexpr std::size_t scratch_bytes(std::size_t query_codes, std::size_t longest_codes) noexcept {
+        return (query_codes + 2) * sizeof(uint16x8_t) + longest_codes * lanes_k;
+    }
+
+    /** Scores every candidate of @p candidates into its slot of @p distances, @p order taken in
+     *  groups of @ref lanes_k. */
+    static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
+                          std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
+                          std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
+        constexpr u32_t saturated_k = std::numeric_limits<u16_t>::max();
+        std::size_t const rows = query.size();
+        u32_t const gap = costs.gap;
+        void* aligned = scratch.data();
+        std::size_t space = scratch.size();
+        uint16x8_t* const column = static_cast<uint16x8_t*>(
+            std::align(sizeof(uint16x8_t), sizeof(uint16x8_t), aligned, space));
+        u8_t* const codes = reinterpret_cast<u8_t*>(column + rows + 1);
+
+        // A row of the table per class the query holds, one lookup table of 32 costs each.
+        u32_t query_classes = 0;
+        for (u8_t const code : query) query_classes = max_of<u32_t>(query_classes, code + 1u);
+        uint8x16x2_t rows_u8x16x2[needleman_wunsch_classes_k];
+        uint16x8_t profile_u16x8[needleman_wunsch_classes_k];
+        for (u32_t code = 0; code != query_classes; ++code) rows_u8x16x2[code] = vld1q_u8_x2(costs.substitutions[code]);
+        uint16x8_t const gap_u16x8 = vdupq_n_u16(static_cast<u16_t>(gap));
+        uint16x8_t const radius_u16x8 = vdupq_n_u16(static_cast<u16_t>(min_of<sz_size_t>(radius, saturated_k)));
+
+        for (std::size_t first = 0; first < order.size(); first += lanes_k) {
+            std::size_t const lanes = min_of(lanes_k, order.size() - first);
+            u16_t lengths[lanes_k] = {};
+            u16_t finished[lanes_k] = {};
+            u32_t scalar = 0;
+            std::size_t longest = 0;
+            for (std::size_t lane = 0; lane != lanes_k; ++lane) {
+                if (lane >= lanes) {
+                    finished[lane] = static_cast<u16_t>(saturated_k);
+                    continue;
+                }
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                std::size_t const length = packed_codes_count(candidate.data(), candidate.size(), costs.code_bits);
+                if (length > saturated_k) scalar |= u32_t {1} << lane;
+                else lengths[lane] = static_cast<u16_t>(length), longest = max_of(longest, length);
+                // Padding lanes, empty ones and scalar ones count as finished from the start.
+                if (!lengths[lane]) finished[lane] = static_cast<u16_t>(saturated_k);
+            }
+            std::memset(codes, 0, longest * lanes_k);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                for (std::size_t index = 0; index != lengths[lane]; ++index)
+                    codes[index * lanes_k + lane] = static_cast<u8_t>(
+                        packed_code_at(candidate.data(), index, costs.code_bits));
+            }
+
+            for (std::size_t row = 0; row <= rows; ++row)
+                column[row] = vdupq_n_u16(static_cast<u16_t>(min_of<std::size_t>(row * gap, saturated_k)));
+            uint16x8_t const lengths_u16x8 = vld1q_u16(lengths);
+            uint16x8_t finished_u16x8 = vld1q_u16(finished);
+            uint16x8_t results_u16x8 = column[rows];
+            for (std::size_t index = 0; index != longest && vminvq_u16(finished_u16x8) != saturated_k; ++index) {
+                uint8x8_t const codes_u8x8 = vld1_u8(codes + index * lanes_k);
+                for (u32_t code = 0; code != query_classes; ++code)
+                    profile_u16x8[code] = vmovl_u8(vqtbl2_u8(rows_u8x16x2[code], codes_u8x8));
+                uint16x8_t diagonal_u16x8 = column[0];
+                uint16x8_t above_u16x8 = vqaddq_u16(diagonal_u16x8, gap_u16x8);
+                uint16x8_t minimum_u16x8 = above_u16x8;
+                column[0] = above_u16x8;
+                for (std::size_t row = 1; row <= rows; ++row) {
+                    uint16x8_t const left_u16x8 = column[row];
+                    uint16x8_t const aligned_u16x8 = vqaddq_u16(diagonal_u16x8, profile_u16x8[query[row - 1]]);
+                    uint16x8_t const opened_u16x8 = vminq_u16(aligned_u16x8, vqaddq_u16(left_u16x8, gap_u16x8));
+                    above_u16x8 = vminq_u16(opened_u16x8, vqaddq_u16(above_u16x8, gap_u16x8));
+                    diagonal_u16x8 = left_u16x8;
+                    column[row] = above_u16x8;
+                    minimum_u16x8 = vminq_u16(minimum_u16x8, above_u16x8);
+                }
+                uint16x8_t const ended_u16x8 = vbicq_u16(
+                    vceqq_u16(lengths_u16x8, vdupq_n_u16(static_cast<u16_t>(index + 1))), finished_u16x8);
+                results_u16x8 = vbslq_u16(ended_u16x8, above_u16x8, results_u16x8);
+                finished_u16x8 = vorrq_u16(finished_u16x8, ended_u16x8);
+                // Every alignment crosses each column, so none ends below the column's minimum.
+                uint16x8_t const past_u16x8 = vbicq_u16(vcgtq_u16(minimum_u16x8, radius_u16x8), finished_u16x8);
+                results_u16x8 = vbslq_u16(past_u16x8, minimum_u16x8, results_u16x8);
+                finished_u16x8 = vorrq_u16(finished_u16x8, past_u16x8);
+            }
+
+            u16_t results[lanes_k];
+            vst1q_u16(results, results_u16x8);
+            u32_t* const scalar_column = static_cast<u32_t*>(aligned);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                u32_t const slot = order[first + lane];
+                bool const rescored = (scalar >> lane & 1u) || (results[lane] == saturated_k && radius >= saturated_k);
+                distances[slot] = rescored
+                                      ? needleman_wunsch_serial(costs, query, candidates[slot], radius, scalar_column)
+                                      : results[lane];
+            }
+        }
+    }
+};
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#else
+
+/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct packed_neon_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_neon_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // STRINGZILLA_TARGET_NEON
+
 /** The widest Needleman-Wunsch kit this build compiled in among the backends @p caps_ admits,
  *  newest first. */
 template <sz_capability_t caps_>
@@ -1090,10 +1381,12 @@ struct needleman_wunsch_ladder;
 template <sz_capability_t caps_>
     requires((caps_ & sz_cap_cpus_k) != 0)
 struct needleman_wunsch_ladder<caps_> {
-    using kit_t = typename highest_kit<       //
-        caps_,                                //
-        packed_serial_needleman_wunsch_kit_t, //
-        packed_skylake_needleman_wunsch_kit_t //
+    using kit_t = typename highest_kit<        //
+        caps_,                                 //
+        packed_serial_needleman_wunsch_kit_t,  //
+        packed_skylake_needleman_wunsch_kit_t, //
+        packed_haswell_needleman_wunsch_kit_t, //
+        packed_neon_needleman_wunsch_kit_t     //
         >::type;
     static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };

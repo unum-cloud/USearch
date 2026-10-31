@@ -8,4 +8,4 @@
 
 #include "dense_specializations.cuh"
 
-template struct dense_class_tables<dense_home_t::vram_apple_k, gpu_class_t::apple_metal9_k>;
+template struct dense_class_tables<vendored_residency_t::vram_apple_k, gpu_class_t::apple_metal9_k>;

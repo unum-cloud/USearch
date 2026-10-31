@@ -13,8 +13,8 @@
  *
  *  - An ID a lane read from a published row names a node it sees published, with its payload whole.
  *  - A lock holder's edit is whole to a reader that acquired its unlock.
- *  - An assigned ID ends published, self-loop or not, whether or not its reverse edge landed.
- *  - An append lands in a slot that is empty.
+ *  - An assigned ID ends published, self-loop or not, whether or not its reverse edge was written.
+ *  - An append goes into a slot that is empty.
  *
  *  @verify pass sc,rc11
  *  @verify pass sc syncwarp_after_broadcast=false syncwarp_after_lock=false tail_order=order_relaxed tail_fence=false
@@ -46,7 +46,7 @@
 #define leader_of(w) ((w) * 2)
 #define follower_of(w) ((w) * 2 + 1)
 
-// The words: a row is its slot zero, the lock, and one tail slot; the newcomer also owns a payload word.
+// The words: a row is its slot zero, the lock, and one tail slot; the appended node also owns a payload word.
 #define row_lock(id) ((id) * 2)
 #define row_tail(id) ((id) * 2 + 1)
 #define payload(id) ((id) * 2 + 1)
@@ -75,13 +75,13 @@
 #endif
 
 bool launched;
-byte links;       // the walk's selection: 1 links the newcomer to node 0, 0 publishes it empty
+byte links;       // the walk's selection: 1 links the appended node to node 0, 0 publishes it empty
 byte arrivals[2]; // per warp, the lanes' barrier arrivals so far
 int broadcast_lock, broadcast_first; // the shuffled words: no view moves with them
 bool lock_ready, first_ready;
 bool slot1_empty; // the sweep's ballot
 byte lock_skips, locked_drops;
-byte published_at;                  // the history index of the newcomer's publication
+byte published_at;                  // the history index of the appended node's publication
 byte tail_at_unlock[history_depth]; // per slot-zero write, the slot-one write it published
 byte leader_read;                   // the slot-zero write the reader's leader acquired
 hidden int drawn;                   // scratch: the landmark draw's slot zero, checked in the same step
@@ -132,7 +132,7 @@ proctype inserter_leader_lane(byte t) {
     :: true -> links = 1
     fi;
     launched = true;
-    // the newcomer: the lanes' payload writes, the syncwarp, the one release that publishes
+    // the appended node: the lanes' payload writes, the syncwarp, the one release that publishes
     syncwarp(inserter_warp, phase);
     first_link = (links -> node(0) : node(1)); // a self-loop encodes published-empty
     atomic {
@@ -151,7 +151,7 @@ lock:
         atomic { broadcast_lock = displaced; lock_ready = true };
         if
         :: displaced == sentinel -> lock_skips++
-        :: displaced == node(0) -> unlock(t, node(1)) // published-empty: the newcomer heads it
+        :: displaced == node(0) -> unlock(t, node(1)) // published-empty: the appended node heads it
         :: else ->
             if
             :: syncwarp_after_lock -> syncwarp(inserter_warp, phase)
@@ -165,7 +165,7 @@ lock:
             if
             :: slot1_empty ->
                 atomic {
-                    assert(newest_value(row_tail(0)) == sentinel); // the append lands in an empty slot
+                    assert(newest_value(row_tail(0)) == sentinel); // the append goes into an empty slot
                     store(t, row_tail(0), order_relaxed, node(1))
                 };
                 syncwarp(inserter_warp, phase)
@@ -175,7 +175,7 @@ lock:
         fi
     :: else
     fi;
-    assert(newest_value(row_lock(1)) != sentinel) // the newcomer ends published
+    assert(newest_value(row_lock(1)) != sentinel) // the appended node ends published
 }
 
 proctype inserter_follower_lane(byte t) {
@@ -204,7 +204,7 @@ proctype inserter_follower_lane(byte t) {
             fi;
             if
             :: slot1_empty -> syncwarp(inserter_warp, phase)
-            :: else -> // full: the re-selection keeps the newcomer in this lane's slot
+            :: else -> // full: the re-selection keeps the appended node in this lane's slot
                 store(t, row_tail(0), order_relaxed, node(1));
                 syncwarp(inserter_warp, phase)
             fi
