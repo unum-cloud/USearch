@@ -1,13 +1,10 @@
 name: Pre-Release
 
 on:
-  push:
-    branches: ["main-dev"]
   pull_request:
-    branches: ["main-dev"]
+    branches: ["main", "main-dev"]
 
 env:
-  GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
   PYTHONFAULTHANDLER: 1
   PYTHON_VERSION: 3.11
@@ -23,49 +20,16 @@ permissions:
   contents: read
 
 jobs:
-  versioning:
-    name: Update Version
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3.0.0
-        with:
-          verbose: "true"
-          version-file: "VERSION"
-          update-version-in: |
-            package.json:"version": "(\d+\.\d+\.\d+)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+)
-            Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            wasmer.toml:^version = "(\d+\.\d+\.\d+)"
-            conanfile.py:version = "(\d+\.\d+\.\d+)"
-            java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
-            java/README.md:version: '(\d+\.\d+\.\d+)'
-            README.md:version = {(\d+\.\d+\.\d+)}
-            csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+)</Version>
-            CMakeLists.txt:VERSION (\d+\.\d+\.\d+)
-          update-major-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_MAJOR (\d+)
-          update-minor-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_MINOR (\d+)
-          update-patch-version-in: |
-            include/usearch/index.hpp:^#define USEARCH_VERSION_PATCH (\d+)
-          dry-run: "true"
-
   test_ubuntu_gcc:
     name: Ubuntu (GCC 13)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       CC: gcc
       CXX: g++
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
         # C/C++
@@ -81,7 +45,7 @@ jobs:
         run: build_artifacts/test_c
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -94,7 +58,7 @@ jobs:
         run: pytest
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -118,19 +82,19 @@ jobs:
         run: cargo test
         # Java
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
       - name: Check Java formatting
         run: gradle spotlessCheck
       - name: Test Java
         run: gradle clean build
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -152,14 +116,14 @@ jobs:
 
   test_ubuntu_clang:
     name: Ubuntu (Clang 20)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       CC: clang-20
       CXX: clang++-20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
         # C/C++
@@ -175,7 +139,7 @@ jobs:
         run: build_artifacts/test_c
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -186,7 +150,7 @@ jobs:
         run: npm test
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -209,7 +173,7 @@ jobs:
         run: cargo test
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -223,11 +187,11 @@ jobs:
 
   test_macos:
     name: macOS
-    runs-on: macos-15
+    runs-on: macos-26
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
         # C/C++
@@ -243,7 +207,7 @@ jobs:
         run: build_artifacts/test_c
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -254,7 +218,7 @@ jobs:
         run: npm test
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -285,7 +249,7 @@ jobs:
         run: cargo test
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -298,10 +262,10 @@ jobs:
 
   test_windows_x86:
     name: Windows (X86)
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
         # C/C++
@@ -316,7 +280,7 @@ jobs:
         run: .\build_artifacts\test_c.exe
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Build Python
@@ -328,7 +292,7 @@ jobs:
         run: pytest
         # JavaScript
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install dependencies
@@ -349,7 +313,7 @@ jobs:
         run: cargo test
         # C#
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
       - name: Test .NET
@@ -364,15 +328,15 @@ jobs:
 
   test_windows_arm:
     name: Windows (ARM)
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
       - name: Setup MSVC for ARM64
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
         # C/C++
       - name: Build C/C++ (ARM64)
         run: |
@@ -387,14 +351,14 @@ jobs:
 
   build_docker:
     name: Build Docker
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -402,20 +366,20 @@ jobs:
 
   build_wheels_linux:
     name: Build Python Wheels (Linux)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [test_ubuntu_gcc, test_ubuntu_clang]
     strategy:
       matrix:
         python-version: ["311", "312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Install cibuildwheel
         uses: nick-fields/retry@v4
         with:
@@ -436,16 +400,16 @@ jobs:
 
   build_wheels_macos:
     name: Build Python Wheels (macOS)
-    runs-on: macos-14
+    runs-on: macos-26
     needs: [test_macos]
     strategy:
       matrix:
         python-version: ["311", "312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install cibuildwheel
@@ -468,16 +432,16 @@ jobs:
 
   build_wheels_windows:
     name: Build Python Wheels (Windows)
-    runs-on: windows-2022
+    runs-on: windows-2025
     needs: [test_windows_x86]
     strategy:
       matrix:
         python-version: ["311", "312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install cibuildwheel
@@ -500,7 +464,7 @@ jobs:
 
   test_ubuntu_cross_compilation:
     name: Cross-Compile Linux
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     env:
       CC: clang
       CXX: clang++
@@ -519,7 +483,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
         # C/C++
@@ -552,7 +516,7 @@ jobs:
 
   test_android:
     name: Android
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -567,7 +531,7 @@ jobs:
             arch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Pull Git submodules
         run: git submodule update --init --recursive
 
@@ -614,7 +578,7 @@ jobs:
         run: cargo build --target ${{ matrix.target }}
         # Java
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: "adopt"
@@ -635,7 +599,7 @@ jobs:
           zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_artifacts/libusearch_c.so c/usearch.h
 
       - name: Upload Android libraries
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: android-${{ matrix.abi }}-libraries
           path: usearch_android_*.zip
