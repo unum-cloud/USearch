@@ -895,14 +895,6 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: write
-      packages: write
-    env:
-      MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-      MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGKEY }}
-      ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGPASSWORD }}
-
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -969,8 +961,6 @@ jobs:
           if [ "$lib_count" -lt 5 ]; then
             echo "WARNING: Found fewer native libraries than expected ($lib_count)"
           fi
-      - name: Sign and publish fat JAR
-        run: gradle signLibraryPublication publish
       - name: Log JAR contents
         run: |
           echo "=== JAR files created ==="
@@ -998,49 +988,6 @@ jobs:
         run: swift build
       - name: Run tests
         run: swift test
-
-  # Publishes to both Docker Hub and GitHub Container Registry
-  # https://docs.github.com/en/actions/publishing-packages/publishing-docker-images#publishing-images-to-docker-hub-and-github-packages
-  publish_docker:
-    name: Publish Docker Image
-    needs: hooks
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Check out refreshed version
-        uses: actions/checkout@v7
-      - name: Pull Git submodules
-        run: git submodule update --init --recursive
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Log in to GitHub Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Extract tags & labels for Docker
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            unum/usearch
-            ghcr.io/${{ github.repository }}
-          flavor: latest=${{ !github.event.release.prerelease }}
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
 
   build_csharp:
     name: Build C Dependencies for C#
@@ -1174,7 +1121,7 @@ jobs:
     name: Build Docs
     runs-on: ubuntu-26.04
     if: ${{ always() && needs.hooks.result == 'success' && !github.event.release.prerelease }}
-    needs: [hooks, publish_python, publish_javascript, publish_rust, publish_java, publish_swift, publish_docker, publish_csharp]
+    needs: [hooks, publish_python, publish_javascript, publish_rust, publish_java, publish_swift, publish_csharp]
     permissions:
       contents: write
     steps:
@@ -1233,16 +1180,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
-
-  deploy_docs_vercel:
-    name: Deploy Vercel
-    runs-on: ubuntu-26.04
-    if: ${{ always() && needs.hooks.result == 'success' && !github.event.release.prerelease }}
-    needs: [hooks, build_docs]
-    steps:
-      - name: Notify Vercel
-        uses: fjogeleit/http-request-action@v2
-        with:
-          url: ${{ secrets.DOCS_VERCEL }}
-          method: "POST"
-          timeout: "30000"
