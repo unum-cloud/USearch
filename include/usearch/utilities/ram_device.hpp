@@ -17,8 +17,9 @@
 #include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
-#include <forkunion/forkunion.h> // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
-#include <forkunion/types.hpp>   // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
+#include <forkunion/forkunion.h>    // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
+#include <forkunion/allocators.hpp> // `fu::linux_numa_allocator_t`, `fu::page_size_1g_k` - the payload pages
+#include <forkunion/types.hpp>      // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`
@@ -47,7 +48,9 @@ struct cache_line_tags<cache_hints_type_> {
 inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
 
 /** Allocates on one ForkUnion memory domain, so storage is placed beside the threads that walk
- *  it; @c no_memory_domain_k means the plain heap. */
+ *  it; @c no_memory_domain_k means the plain heap, which also serves every block under a page, as
+ *  per-entry packs and neighbor lists are. On Linux a block of 1 GiB or more claims 1 GiB pages
+ *  while the host's pool covers it, and every other block the largest page that fits it. */
 template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
@@ -71,15 +74,24 @@ struct forkunion_allocator {
      *  themselves assuming an aligned base, so the heap fallback aligns like the domains do. */
     value_type_* allocate(std::size_t count) noexcept {
         std::size_t const bytes = aligned_bytes_(count);
-        if (memory_domain == no_memory_domain_k)
-            return static_cast<value_type_*>(std::aligned_alloc(default_alignment_k, bytes));
+        if (heap_serves_(bytes)) return static_cast<value_type_*>(std::aligned_alloc(default_alignment_k, bytes));
+        if constexpr (places_by_mmap_k) {
+            fu::linux_numa_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
+            char* memory = nullptr;
+            if (bytes >= fu::page_size_1g_k) memory = pages.allocate_at_least(bytes, fu::page_size_1g_k).ptr;
+            if (!memory) memory = pages.allocate(mapped_bytes_(bytes));
+            return reinterpret_cast<value_type_*>(memory);
+        }
         void* memory = nullptr;
         if (fu_allocate_on_domain_id(memory_domain, bytes, &memory) != fu_success_k) return nullptr;
         return static_cast<value_type_*>(memory);
     }
 
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
-        if (memory_domain == no_memory_domain_k) return std::free(pointer);
+        if (heap_serves_(aligned_bytes_(count))) return std::free(pointer);
+        if constexpr (places_by_mmap_k)
+            return fu::linux_numa_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
+                reinterpret_cast<char*>(pointer), mapped_bytes_(aligned_bytes_(count)));
         fu_free_on_domain_id(memory_domain, pointer, aligned_bytes_(count));
     }
 
@@ -87,9 +99,24 @@ struct forkunion_allocator {
 
   private:
 
+    /** Whether ForkUnion places domains with Linux @c mmap, where the page size is ours to pick. */
+    inline static constexpr bool places_by_mmap_k = std::is_same_v<fu::domain_allocator_t, fu::linux_numa_allocator_t>;
+
+    /** Whether the heap places a block of @p bytes: a domain maps a page and a syscall apiece, so
+     *  a small block taking it costs a whole page and a page-splitting @c munmap to free. */
+    bool heap_serves_(std::size_t bytes) const noexcept {
+        return memory_domain == no_memory_domain_k || bytes < fu::ram_page_size();
+    }
+
     /** The byte count a run of @p count elements is claimed and released with. */
     static std::size_t aligned_bytes_(std::size_t count) noexcept {
         return divide_round_up<std::size_t>(count * sizeof(value_type_), default_alignment_k) * default_alignment_k;
+    }
+
+    /** The length a block of @p bytes maps on Linux. The base-page fallback maps the same rounded
+     *  length, as @c munmap refuses part of a 1 GiB page and release cannot tell which it got. */
+    static std::size_t mapped_bytes_(std::size_t bytes) noexcept {
+        return bytes < fu::page_size_1g_k ? bytes : round_up_to_multiple<std::size_t>(bytes, fu::page_size_1g_k);
     }
 };
 

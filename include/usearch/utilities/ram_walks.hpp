@@ -2,13 +2,14 @@
  *  @file include/usearch/utilities/ram_walks.hpp
  *  @author Ash Vardanian
  *  @date October 30, 2026
- *  @brief The breadth-first walk every sharded RAM index's cursor shares: the nodes it visited,
- *      one bit each, and the frontier it still has to expand.
+ *  @brief The walks every sharded index's cursor shares: the breadth-first one, with the nodes it
+ *      visited, one bit each, and the frontier it still has to expand, and the stored order.
  *
  *  A cursor owns one walk by value and drives it: @ref breadth_first_walk::open sizes the bits to
  *  the shards' watermarks as the cursor snapshotted them, @ref breadth_first_walk::visit admits a
- *  node once, and @ref breadth_first_walk::expand hands the frontier back in meeting order. The
- *  walk names no shard type: the cursor seeks its shard cursors and resolves keys itself.
+ *  node once, and @ref breadth_first_walk::expand hands the frontier back in meeting order.
+ *  @ref cursor_walk picks between that walk and the stored order. Neither names a shard type: the
+ *  cursor seeks its shard cursors and resolves keys itself.
  */
 #pragma once
 
@@ -68,12 +69,19 @@ struct breadth_first_walk {
      *  - @c bad_alloc_k The bits or their bases found no memory.
      */
     status_t open(std::span<std::size_t const> visible_per_shard) noexcept {
+        return open(visible_per_shard.size(), [&](std::size_t shard) noexcept { return visible_per_shard[shard]; });
+    }
+
+    /** Opens the walk over @p shards_count shards, shard @c s visiting the @p visible_of(s) nodes
+     *  below its watermark, as @ref open over their counts does. */
+    template <typename visible_of_type_>
+    status_t open(std::size_t shards_count, visible_of_type_&& visible_of) noexcept {
         frontier_.clear();
         expanded_ = 0;
-        if (failed(visited_bases_.resize(visible_per_shard.size() + 1))) return status_t::bad_alloc_k;
-        for (std::size_t shard = 0; shard != visible_per_shard.size(); ++shard)
+        if (failed(visited_bases_.resize(shards_count + 1))) return status_t::bad_alloc_k;
+        for (std::size_t shard = 0; shard != shards_count; ++shard)
             visited_bases_[shard + 1] = visited_bases_[shard] +
-                                        divide_round_up<std::size_t>(visible_per_shard[shard], lanes_k);
+                                        divide_round_up<std::size_t>(visible_of(shard), lanes_k);
         return visited_.resize(visited_bases_.back());
     }
 
@@ -99,6 +107,69 @@ struct breadth_first_walk {
         next = frontier_[expanded_++];
         return true;
     }
+};
+
+/**
+ *  @brief Where a cursor stands in its walk over the shards of one sharded index: the
+ *      breadth-first walk, whose opening picks that order, or the next stored entry.
+ *
+ *  The cursor names the shards and how to enter one; a stored walk enters each shard once, as it
+ *  reaches the shard's first node, so a cursor over live shards refreshes a shard's watermark
+ *  then, and the walk yields the nodes below the count entering answered.
+ */
+template <typename node_id_type_>
+struct cursor_walk {
+    using node_id_t = node_id_type_;
+    using shard_node_t = shard_node<node_id_type_>;
+
+    explicit cursor_walk(forkunion_allocator_t allocator) noexcept : breadth_first_(allocator) {}
+
+    /**
+     *  @brief Turns the walk breadth-first over @p shards_count shards, shard @c s visiting the
+     *      @p visible_of(s) nodes below its watermark; the starts follow through @ref visit.
+     *
+     *  @par Statuses:
+     *  - @c bad_alloc_k The visited bits or their bases found no memory.
+     */
+    template <typename visible_of_type_>
+    status_t open_breadth_first(std::size_t shards_count, visible_of_type_&& visible_of) noexcept {
+        return breadth_first_.open(shards_count, visible_of);
+    }
+
+    /** Whether the walk runs breadth-first, so every link it meets is a node to visit: opening
+     *  sized the visited bits' bases, which a stored walk never does. */
+    bool breadth_first() const noexcept { return !breadth_first_.visited_bases_.empty(); }
+
+    /** Visits @p node of @p shard in a breadth-first walk; see @ref breadth_first_walk::visit. */
+    status_t visit(u32_t shard, node_id_t node) noexcept { return breadth_first_.visit(shard, node); }
+
+    /**
+     *  @brief Takes the next entry into @p entry, answering false once the walk ran out.
+     *
+     *  A stored walk runs over @p shards_count shards, entering each through @p enter, as
+     *  <tt>enter(shard) noexcept → nodes</tt>, once, as it reaches it.
+     */
+    template <typename enter_type_>
+    bool next(shard_node_t& entry, std::size_t shards_count, enter_type_&& enter) noexcept {
+        if (breadth_first()) return breadth_first_.expand(entry);
+        for (; next_stored_.shard != shards_count; next_stored_ = {next_stored_.shard + 1, 0}) {
+            // The walk only moves forward, so it stands on a shard's first node once, on arriving.
+            if (!next_stored_.node) stored_nodes_ = enter(next_stored_.shard);
+            if (next_stored_.node == stored_nodes_) continue;
+            entry = next_stored_;
+            ++next_stored_.node;
+            return true;
+        }
+        return false;
+    }
+
+  private:
+    /** The nodes visited and the frontier of a breadth-first walk; untouched by a stored one. */
+    breadth_first_walk<node_id_t> breadth_first_;
+
+    /** As stored: the entry the next step takes, and the nodes its shard held when entered. */
+    shard_node_t next_stored_ {};
+    std::size_t stored_nodes_ = 0;
 };
 
 } // namespace unum::usearch::utilities

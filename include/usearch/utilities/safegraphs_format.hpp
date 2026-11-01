@@ -920,10 +920,13 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
         });
 }
 
-/** Lays @p parts monoliths, @p part_at answering each one's bytes and nodes, behind the manifest
- *  that leads one buffer: fills each part's offset into @p offsets, every one on an @p alignment
- *  boundary past the manifest and the zero byte that ends it, and answers the buffer's whole
- *  size.
+/**
+ *  @brief Lays @p parts monoliths, @p part_at answering each one's bytes and nodes, behind the
+ *      manifest that leads one buffer, or a lone one at its head with no manifest.
+ *
+ *  Fills each part's offset into @p offsets, a lone monolith's at zero, and every other one on an
+ *  @p alignment boundary past the manifest and the zero byte that ends it, then answers the size
+ *  of the whole buffer.
  *
  *  @par Statuses:
  *  - @c config_mismatch_k @p parts is zero, @p offsets holds fewer slots, or @p alignment is not
@@ -934,6 +937,8 @@ expected<std::size_t> safegraphs_buffer_layout(std::size_t parts, callback_type_
                                                std::span<std::size_t> offsets,
                                                allocator_type_ allocator = {}) noexcept {
     if (!parts || offsets.size() < parts || !std::has_single_bit(alignment)) return {0, status_t::config_mismatch_k};
+    offsets[0] = 0;
+    if (parts == 1) return {part_at(0).bytes, status_t::success_k};
     // Wider offsets print longer, so the manifest is measured again until the parts clear it.
     for (std::size_t lead = 0;;) {
         std::size_t end = 0;
@@ -979,6 +984,21 @@ status_t safegraphs_write_manifest(bytes_span_t buffer, std::size_t parts, callb
                                  std::memset(buffer.data() + json.size(), 0, first - json.size());
                                  return status_t::success_k;
                              });
+}
+
+/** Commits the checkpoint @ref safegraphs_buffer_layout laid into @p buffer at @p offsets: writes
+ *  the manifest leading it over @p parts entries drawn from @p part_at, each naming its offset, as
+ *  the buffer overload of @ref safegraphs_write_manifest does; a lone monolith needs none. */
+template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
+status_t safegraphs_commit_buffer(bytes_span_t buffer, std::size_t parts, callback_type_&& part_at,
+                                  std::span<std::size_t const> offsets, allocator_type_ allocator = {}) noexcept {
+    if (parts == 1) return status_t::success_k;
+    auto entry_at = [&](std::size_t part) noexcept {
+        safegraphs_part_t entry = part_at(part);
+        entry.offset = offsets[part];
+        return entry;
+    };
+    return safegraphs_write_manifest(buffer, parts, entry_at, allocator);
 }
 
 /**
@@ -1728,20 +1748,38 @@ struct safegraphs_index_metadata_t {
 };
 
 /**
- *  @brief Reads a columned index's header from @p monolith into its metadata.
+ *  @brief Reads a columned index's header from @p monolith into its metadata, or a manifest-led
+ *      buffer's with the counts summed over its parts and the custom fields read off the first
+ *      one, which every part repeats.
  *  @param[in] monolith The checkpoint's bytes - a buffer, or a file's mapping.
  *  @param[in] allocator The allocator for the metadata's own storage.
  *  @param[in] per_custom_field Fires once per string-valued @c __metadata__ entry, the metric
  *      included, for the parameters a modality records beside it; its views die with this call.
  *
  *  @par Statuses:
- *  - @c malformed_k The header does not parse.
+ *  - @c malformed_k The header does not parse, or a manifest lists no part or does not parse.
  */
 template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_t monolith,
                                                                      allocator_type_ allocator = {},
                                                                      callback_type_&& per_custom_field = {}) noexcept {
     safegraphs_index_metadata_t metadata;
+    if (!safegraphs_is_monolith(monolith.first(min_of(monolith.size(), sizeof(safegraphs_prefix_t))))) {
+        growing_buffer<safegraphs_catalog_part_t, allocator_type_> parts {allocator};
+        growing_buffer<safegraphs_named_column_t, allocator_type_> extra_columns {allocator};
+        if (status_t const listed = checkpoint_source_t {monolith}.read_header(parts, extra_columns,
+                                                                               no_device_copy_t {}, allocator);
+            failed(listed))
+            return {metadata, listed};
+        auto [first, status] = safegraphs_read_index_metadata(parts[0].monolith, allocator,
+                                                              std::forward<callback_type_>(per_custom_field));
+        for (std::size_t part = 1; part != parts.size() && succeeded(status); ++part) {
+            auto const [more, more_status] = safegraphs_read_index_metadata(parts[part].monolith, allocator);
+            first.nodes += more.nodes, first.neighbors += more.neighbors, first.value_bytes += more.value_bytes;
+            status = more_status;
+        }
+        return {first, status};
+    }
     auto per_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metadata.metric = safegraphs_name_t {field.value};
         per_custom_field(field);

@@ -267,6 +267,10 @@ struct ignore_nodes_t {
  *  - <tt>walk(from, toward, chain)</tt> walks greedily from @p from toward @p toward, writing each
  *    entry it steps on into @p chain, and answers the steps.
  *
+ *  An optional <tt>ordinals_of(keys, nodes, ordinals) noexcept → status_t</tt> writes each node's
+ *  ordinal among its key's entries in one batch, for a source whose @c nodes_of costs a scan; the
+ *  plan then calls @c nodes_of only for the shown and focus keys.
+ *
  *  Two optional members choose the coordinates without shown points:
  *  <tt>coordinates_of(node, coordinates)</tt> writes fixed coordinates, and <tt>values_of(node)</tt>
  *  answers a dense entry's values as f32 for the projection to read.
@@ -324,7 +328,7 @@ std::size_t sample_greedy_walk(source_type_ const& source, shard_node<typename s
 
 /**
  *  @brief One SAMPLE call over a @ref sample_source, its steps run in order: @ref draw, then
- *      @ref assign_coordinates.
+ *      @ref assign_ordinals, then @ref assign_coordinates.
  *
  *  A one-call plan: unlike the resumable refine, load and health plans, it lives inside a single
  *  SAMPLE call and has no @c plan_sample opening it. Every buffer is carved once from the
@@ -439,6 +443,27 @@ struct sample_plan {
             quota = next;
         }
         return status_t::success_k;
+    }
+
+    /** Writes which of its key's entries each draw is, as @c get orders them: in one batch where
+     *  the source counts them through @c ordinals_of, else through @c nodes_of draw by draw. */
+    status_t assign_ordinals() noexcept {
+        std::span<key_t const> const keys = outputs_.keys.first(written_);
+        std::span<shard_node_t const> const drawn = drawn_.first(written_);
+        std::span<std::size_t> const ordinals = outputs_.entry_ordinals.first(written_);
+        if constexpr (requires { source_->ordinals_of(keys, drawn, ordinals); })
+            return source_->ordinals_of(keys, drawn, ordinals);
+        else {
+            for (std::size_t draw = 0; draw != written_; ++draw) {
+                std::size_t ordinal = 0, entries = 0;
+                source_->nodes_of(keys[draw], [&](shard_node_t entry) noexcept {
+                    if (entry == drawn[draw]) ordinal = entries;
+                    ++entries;
+                });
+                ordinals[draw] = ordinal;
+            }
+            return status_t::success_k;
+        }
     }
 
     /** Writes every draw's coordinates: its fixed ones, or those solved among its nearest shown
@@ -580,12 +605,6 @@ struct sample_plan {
         std::size_t const draw = written_++;
         drawn_[draw] = node;
         outputs_.keys[draw] = key;
-        std::size_t ordinal = 0, entries = 0;
-        source_->nodes_of(key, [&](shard_node_t entry) noexcept {
-            if (entry == node) ordinal = entries;
-            ++entries;
-        });
-        outputs_.entry_ordinals[draw] = ordinal;
         if (!nearest_shown_count_) return static_cast<u32_t>(draw);
 
         distance_(node, shown_nodes_.first(resolved_shown_count_), distances_.first(resolved_shown_count_));

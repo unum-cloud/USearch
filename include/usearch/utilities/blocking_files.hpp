@@ -67,13 +67,15 @@ enum class file_mode_t { read_k, write_k };
  *  @verbatim
  *  /data/sift.safegraphs                              a file at byte zero
  *  /dev/nvme1n1@64GiB                                 a device node from byte 64 GiB
+ *  /dev/nvme1n1@64GiB+16GiB                           the 16 GiB of it from byte 64 GiB on
  *  spdk://0000:5e:00.0@64GiB                          namespace 1 of a local PCIe controller
  *  spdk://0000:5e:00.0/2@64GiB                        namespace 2 of it
  *  trtype:PCIe traddr:0000:5e:00.0 ns:2 base:4096     an SPDK transport ID with its keys
  *  @endverbatim
  *
- *  A base is a whole number of B, KiB, MiB, GiB or TiB, all binary, bytes when bare; a file whose
- *  name ends in such a suffix takes an explicit @c @0 after it.
+ *  A base and a length are whole numbers of B, KiB, MiB, GiB or TiB, all binary, bytes when bare;
+ *  a file whose name ends in such a suffix takes an explicit @c @0 after it. A length bounds what a
+ *  writer may size the part to.
  */
 struct file_address_t {
 
@@ -86,6 +88,9 @@ struct file_address_t {
 
     /** Where the part's byte zero sits on the medium, a multiple of its block. */
     u64_t byte_base = 0;
+
+    /** Bytes past the base a writer may size the part to, zero meaning to the medium's end. */
+    u64_t byte_limit = 0;
 };
 
 /** Reads @p token as @p key and a whole decimal number into @p value, left as it was otherwise. */
@@ -120,11 +125,11 @@ inline bool parse_byte_count_(std::string_view text, u64_t& bytes) noexcept {
 }
 
 /**
- *  Splits @p path into the parts of a @ref unum::usearch::utilities::file_address_t, in any form it
- *  lists.
+ *  @brief Splits @p path into the parts of a @ref unum::usearch::utilities::file_address_t, in any
+ *      form it lists.
  *
  *  @par Statuses:
- *  - @c invalid_argument_k The base is in an unknown unit or overflows.
+ *  - @c invalid_argument_k The base or the length is in an unknown unit or overflows.
  *  - @c invalid_argument_k The namespace after an @c spdk:// controller is unreadable.
  *  - @c invalid_argument_k The path names no location.
  */
@@ -142,7 +147,10 @@ inline expected<file_address_t> parse_file_address(std::string_view path) noexce
     std::size_t const at = location.rfind('@');
     if (at != std::string_view::npos && at + 1 < location.size() && location[at + 1] >= '0' &&
         location[at + 1] <= '9') {
-        if (!parse_byte_count_(location.substr(at + 1), parsed.byte_base))
+        std::string_view const extent = location.substr(at + 1);
+        std::size_t const plus = extent.find('+');
+        if ((plus != std::string_view::npos && !parse_byte_count_(extent.substr(plus + 1), parsed.byte_limit)) ||
+            !parse_byte_count_(extent.substr(0, plus), parsed.byte_base))
             return {parsed, status_t::invalid_argument_k};
         location = location.substr(0, at);
     }
@@ -182,10 +190,12 @@ struct seekable_file_t {
 
     seekable_file_t() = default;
     seekable_file_t(seekable_file_t&& other) noexcept
-        : descriptor_(std::exchange(other.descriptor_, closed_k)), byte_base_(std::exchange(other.byte_base_, 0u)) {}
+        : descriptor_(std::exchange(other.descriptor_, closed_k)), byte_base_(std::exchange(other.byte_base_, 0u)),
+          byte_limit_(std::exchange(other.byte_limit_, 0u)) {}
     seekable_file_t& operator=(seekable_file_t&& other) noexcept {
         std::swap(descriptor_, other.descriptor_);
         std::swap(byte_base_, other.byte_base_);
+        std::swap(byte_limit_, other.byte_limit_);
         return *this;
     }
     seekable_file_t(seekable_file_t const&) = delete;
@@ -196,9 +206,12 @@ struct seekable_file_t {
     explicit operator bool() const noexcept { return descriptor_ != closed_k; }
 
     /**
-     *  Opens @p path, a file or a device in any form @ref file_address_t lists, every offset
-     *  counting from its base; the NUL terminator the OS demands is one transient allocation
-     *  through @p allocator. A write past byte zero opens an existing medium.
+     *  @brief Opens @p path, a file or a device in any form @ref file_address_t lists, every
+     *      offset counting from its base.
+     *
+     *  The NUL terminator the OS demands is one transient allocation through @p allocator. A write
+     *  past byte zero opens an existing medium, and a write to a disk opens it exclusively, so a
+     *  mounted filesystem or another writer refuses it.
      *
      *  @par Statuses:
      *  - @c invalid_argument_k The path does not parse.
@@ -218,17 +231,19 @@ struct seekable_file_t {
         seekable_file_t file;
         file.descriptor_ = open_(terminated, mode, parsed.byte_base);
         file.byte_base_ = parsed.byte_base;
+        file.byte_limit_ = parsed.byte_limit;
         chars.deallocate(terminated, length + 1);
         status_t const opened = file ? status_t::success_k : status_t::io_k;
         return {std::move(file), opened};
     }
 
     /**
-     *  Sets the file's length to @p bytes past its base, so positional writes land in a pre-sized
-     *  file; a device keeps its size and answers @c overflow_k when the bytes do not fit.
+     *  @brief Sets the file's length to @p bytes past its base, so positional writes land in a
+     *      pre-sized file; a device keeps its size and answers @c overflow_k when they do not fit.
      *
      *  @par Statuses:
      *  - @c overflow_k A device ends before its base plus @p bytes.
+     *  - @c overflow_k @p bytes passes the length the address bounded the part to.
      */
     status_t truncate(std::size_t bytes) noexcept;
 
@@ -269,6 +284,9 @@ struct seekable_file_t {
 
     /** Where offset zero sits in the file. */
     u64_t byte_base_ = 0;
+
+    /** Bytes past the base @ref truncate may size the file to, zero meaning to the medium's end. */
+    u64_t byte_limit_ = 0;
 };
 
 #if USEARCH_OS_LINUX_
@@ -279,9 +297,24 @@ inline u64_t block_device_bytes_(int descriptor) noexcept {
     return ::ioctl(descriptor, BLKGETSIZE64, &bytes) == 0 ? bytes : 0;
 }
 
+/** The logical block of the block device @p descriptor, once its writes go out @c O_DIRECT; zero
+ *  for anything else, which keeps writing through the page cache. */
+inline std::size_t direct_write_block_bytes_(int descriptor) noexcept {
+    struct stat description;
+    int sector_bytes = 0;
+    if (::fstat(descriptor, &description) != 0 || !S_ISBLK(description.st_mode) ||
+        ::ioctl(descriptor, BLKSSZGET, &sector_bytes) != 0 || sector_bytes <= 0)
+        return 0;
+    int const flags = ::fcntl(descriptor, F_GETFL);
+    if (flags < 0 || ::fcntl(descriptor, F_SETFL, flags | O_DIRECT) != 0) return 0;
+    return static_cast<std::size_t>(sector_bytes);
+}
+
 #elif !USEARCH_OS_WINDOWS_
 
 inline u64_t block_device_bytes_(int) noexcept { return 0; }
+
+inline std::size_t direct_write_block_bytes_(int) noexcept { return 0; }
 
 #endif
 
@@ -297,6 +330,7 @@ inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, fi
 }
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
+    if (byte_limit_ && bytes > byte_limit_) return status_t::overflow_k;
     LARGE_INTEGER distance;
     distance.QuadPart = static_cast<LONGLONG>(byte_base_ + bytes);
     if (!::SetFilePointerEx(descriptor_, distance, nullptr, FILE_BEGIN)) return status_t::io_k;
@@ -354,12 +388,17 @@ inline status_t seekable_file_t::close() noexcept {
 inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode,
                                                             u64_t byte_base) noexcept {
     // A part past byte zero is written into a medium that exists, and the bytes before it stay.
-    int const created = byte_base ? 0 : O_CREAT | O_TRUNC;
+    struct stat description;
+    // An exclusive open of a disk fails while a filesystem or another writer holds it.
+    int const exclusive =
+        mode == file_mode_t::write_k && ::stat(path, &description) == 0 && S_ISBLK(description.st_mode) ? O_EXCL : 0;
+    int const created = byte_base || exclusive ? exclusive : O_CREAT | O_TRUNC;
     int const flags = mode == file_mode_t::read_k ? O_RDONLY : (O_RDWR | created);
     return ::open(path, flags | O_CLOEXEC, 0644);
 }
 
 inline status_t seekable_file_t::truncate(std::size_t bytes) noexcept {
+    if (byte_limit_ && bytes > byte_limit_) return status_t::overflow_k;
     struct stat description;
     if (::fstat(descriptor_, &description) != 0) return status_t::io_k;
     if (S_ISBLK(description.st_mode))
@@ -553,6 +592,8 @@ class mapped_file_t {
         std::swap(file_, other.file_);
 #else
         std::swap(descriptor_, other.descriptor_);
+        std::swap(byte_base_, other.byte_base_);
+        std::swap(staged_bytes_, other.staged_bytes_);
 #endif
     }
 
@@ -580,7 +621,9 @@ class mapped_file_t {
     static expected<mapped_file_t> read(std::string_view path) noexcept;
 
     /**
-     *  Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed.
+     *  @brief Creates @p path at @p bytes and maps it writable; the bytes arrive zeroed.
+     *
+     *  On a disk the bytes stage in anonymous memory, and @ref sync writes them out direct.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p bytes is zero.
@@ -604,7 +647,17 @@ class mapped_file_t {
 #elif USEARCH_OS_WASI_
     seekable_file_t file_;
 #else
+
+    /** Writes the staged blocks out direct from the part's base, then flushes the disk. */
+    status_t write_staged_() noexcept;
+
     int descriptor_ = -1;
+
+    /** Where the part's byte zero sits on the disk the staged bytes go out to. */
+    u64_t byte_base_ = 0;
+
+    /** Bytes staged in anonymous memory, whole logical blocks; zero for a shared file mapping. */
+    std::size_t staged_bytes_ = 0;
 #endif
 };
 
@@ -737,9 +790,16 @@ inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::
     auto [file, status] = seekable_file_t::open(path, file_mode_t::write_k);
     if (failed(status)) return {std::move(mapping), status};
     if (status_t const sized = file.truncate(bytes); failed(sized)) return {std::move(mapping), sized};
-    off_t const byte_base = static_cast<off_t>(file.byte_base());
+    mapping.byte_base_ = file.byte_base();
     mapping.descriptor_ = file.release();
-    void* base = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_, byte_base);
+    // A disk has no holes, so a shared mapping would read every page before its first write.
+    std::size_t const block_bytes = direct_write_block_bytes_(mapping.descriptor_);
+    if (block_bytes && mapping.byte_base_ % block_bytes == 0)
+        mapping.staged_bytes_ = round_up_to_multiple<std::size_t>(bytes, block_bytes);
+    void* base = mapping.staged_bytes_ ? ::mmap(nullptr, mapping.staged_bytes_, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+                                       : ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.descriptor_,
+                                                static_cast<off_t>(mapping.byte_base_));
     if (base == MAP_FAILED) return {std::move(mapping), status_t::io_k};
     mapping.data_ = static_cast<byte_t*>(base);
     mapping.bytes_ = bytes;
@@ -747,17 +807,31 @@ inline expected<mapped_file_t> mapped_file_t::write(std::string_view path, std::
     return {std::move(mapping), status_t::success_k};
 }
 
+inline status_t mapped_file_t::write_staged_() noexcept {
+    // The tail past the part's last byte up to its block boundary goes out as zeros.
+    for (std::size_t written = 0; written != staged_bytes_;) {
+        ssize_t const moved = ::pwrite(descriptor_, data_ + written, staged_bytes_ - written,
+                                       static_cast<off_t>(byte_base_ + written));
+        if (moved < 0 && errno == EINTR) continue;
+        if (moved <= 0) return status_t::io_k;
+        written += static_cast<std::size_t>(moved);
+    }
+    return ::fsync(descriptor_) == 0 ? status_t::success_k : status_t::io_k;
+}
+
 inline status_t mapped_file_t::sync() noexcept {
     if (!data_) return status_t::success_k;
-    bool const flushed = mode_ == file_mode_t::read_k || ::msync(data_, bytes_, MS_SYNC) == 0;
+    status_t flushed = status_t::success_k;
+    if (mode_ == file_mode_t::write_k && staged_bytes_) flushed = write_staged_();
+    else if (mode_ == file_mode_t::write_k && ::msync(data_, bytes_, MS_SYNC) != 0) flushed = status_t::io_k;
     unmap_();
-    return flushed ? status_t::success_k : status_t::io_k;
+    return flushed;
 }
 
 inline void mapped_file_t::unmap_() noexcept {
-    if (data_) ::munmap(data_, bytes_);
+    if (data_) ::munmap(data_, staged_bytes_ ? staged_bytes_ : bytes_);
     if (descriptor_ >= 0) ::close(descriptor_);
-    data_ = nullptr, bytes_ = 0, mode_ = file_mode_t::read_k, descriptor_ = -1;
+    data_ = nullptr, bytes_ = 0, mode_ = file_mode_t::read_k, descriptor_ = -1, byte_base_ = 0, staged_bytes_ = 0;
 }
 
 #endif

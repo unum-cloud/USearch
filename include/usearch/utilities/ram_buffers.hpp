@@ -1084,7 +1084,7 @@ struct chunk_schedule {
 };
 
 /** The schedule spanning @p max_nodes_ nodes in about 2^12 chunks: 2^10-node chunks doubling up to
- *  slabs as wide as that takes - at 2^32 nodes, the dense index's @c chunk_schedule<10, 20>. */
+ *  slabs as wide as that takes - at 2^32 nodes, @c chunk_schedule<10, 20>. */
 template <std::size_t max_nodes_>
 using chunk_schedule_spanning = chunk_schedule<10, max_of<std::size_t>(std::bit_width(max_nodes_), 10 + 12) - 12>;
 

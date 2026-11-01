@@ -13,6 +13,7 @@
 #include <array>       // `std::array` - a quad's keys and admissions
 #include <atomic>      // `std::atomic_ref` - under `standard_atomic_ref`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words, `std::bit_width` - the bijection's span
+#include <compare>     // `std::strong_ordering` - a `shard_node`'s order, shard first
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
 #include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
 #include <limits>      // `std::numeric_limits` - the claim word's closed sentinel
@@ -1966,7 +1967,7 @@ struct alignas(sizeof(u64_t)) shard_node {
     u32_t shard = 0;
     node_id_type_ node = 0;
 
-    friend constexpr bool operator==(shard_node const&, shard_node const&) noexcept = default;
+    friend constexpr std::strong_ordering operator<=>(shard_node const&, shard_node const&) noexcept = default;
 };
 
 /** Warps per thread block across every kernel of the VRAM design - four schedulers per
