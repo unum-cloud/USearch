@@ -1,21 +1,4 @@
-# Ignore all files without an extension
-
-# Temporary files
-.DS_Store
-*.fbin
-*.ibin
-datasets
-bin
-*.usearch
-.cache
-
-# C++ builds
-/build
-/build_release
-/build_debug
-/build_relwithdebinfo
-/build_profile
-/build_artifacts
+# Build trees and CMake
 /build*/
 _deps
 CMakeCache.txt
@@ -23,104 +6,96 @@ CMakeUserPresets.json
 CMakeFiles
 cmake_install.cmake
 
-# Profiling with GProf and `perf` on Linux
+# C and C++
+*.d
+*.slo
+*.lo
+*.o
+*.obj
+*.gch
+*.pch
+*.so
+*.dylib
+*.dll
+*.lai
+*.la
+*.a
+*.lib
+*.exe
+*.out
+*.app
+
+# Profilers
 gmon.out
 perf.data
 
-# Python SDK
+# Python
 __pycache__
 *.egg-info
 dist/
 wheelhouse/
 venv/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 uv.lock
 
-# JS SDK
+# Rust
+Cargo.lock
+target/
+/.cargo/config.toml
+
+# JavaScript
 node_modules/
 javascript/dist/
 prebuilds/
 package-lock.json
 
-# Wasm
+# WebAssembly
 wasi-sdk-*
 
-# Rust SDK
-Cargo.lock
-target/
-
-# Zig SDK
-zig-out/
-.zig-cache/
-
-# Mojo SDK
-.pixi/
-pixi.lock
-
-# Java SDK
-.gradle
-*.class
-
-# ObjC and Swift SDKs
+# Swift
 .build
 .swiftpm
 Package.resolved
 
-# Golang SDK
+# Go
 golang/usearch/
 
-# C# SDK
+# Java
+.gradle
+*.class
+
+# C#
 csharp/**/[Bb]in/
 csharp/**/[Oo]bj/
 csharp/lib
 csharp/packages
 
-# Prerequisites
-*.d
+# Zig
+zig-out/
+.zig-cache/
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled headers
-*.gch
-*.pch
-
-# Compiled dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Allow golang go.mod
-!go.mod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-
-# Claude Code local state
-.claude/
-data/*
-!data/.gitkeep
-
-# Datasets live under data/, which only tracks its .gitkeep
-/data/*
-!/data/.gitkeep
+# Mojo
+.pixi/
+pixi.lock
 
 # Editors, assistants, language servers and tool caches
 /compile_commands.json
-.venv/
-.mypy_cache/
+.cache
+.claude/
+
+# macOS
+.DS_Store
+
+# Local scratch
+bin
+
+# Datasets and indexes live under data/, which only tracks its .gitkeep
+/data/*
+!/data/.gitkeep
+datasets
+*.fbin
+*.ibin
+*.usearch

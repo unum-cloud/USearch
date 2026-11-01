@@ -192,6 +192,7 @@ vectors = NumericArray[{{1., 2., 3.}, {3., 2., 1.}}, "Real32"];
 DenseInsert[index, {41, 42}, vectors];
 DenseSearch[index, vectors, 2, arena]
 ```
+
 A matrix is a batch of rows, so a whole batch crosses in one call rather than one crossing per vector, and `DenseInsert` and `DenseMultiply` also take a single vector as a batch of one.
 The input's own width crosses with the rows, and the engine refuses one that differs from the frozen geometry as `shape-mismatch`.
 Metrics are `inner`, `angular`, `euclidean`, `hamming`, and `jaccard`; quantizations are `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4x2`, `u8`, `u4x2`, and `u1x8`.

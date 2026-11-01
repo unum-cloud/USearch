@@ -1,0 +1,131 @@
+name: Release C#
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: 10.0.x
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  build_csharp:
+    name: Build C Dependencies for C# on ${{ matrix.os }}
+    needs: hooks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-26, windows-2025-vs2026]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Build C Library for Linux
+        if: matrix.os == 'ubuntu-26.04'
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libjemalloc-dev libomp-dev
+          cmake --preset library -B build_artifacts -D USEARCH_WITH_JEMALLOC=1
+          cmake --build build_artifacts
+          mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+
+      - name: Build C Library for macOS
+        if: matrix.os == 'macos-26'
+        run: |
+          cmake --preset library -B build_artifacts
+          cmake --build build_artifacts
+          mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+          cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+
+      - name: Build C Library for Windows
+        if: matrix.os == 'windows-2025-vs2026'
+        run: |
+          cmake --preset msvc2026_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0
+          cmake --build build_artifacts --config Release
+          mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: usearch-csharp-dependencies-${{ matrix.os }}
+          path: ${{ github.workspace }}/csharp/lib/**/*
+
+  publish_csharp:
+    name: Publish C# to NuGet
+    needs: build_csharp
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/Cloud.Unum.USearch
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      SOLUTION: ${{ github.workspace }}/csharp
+      USEARCH_LIBS: ${{ github.workspace }}/csharp/lib
+      NUGET_PACKAGES: ${{ github.workspace }}/csharp/packages
+      NUGET_SOURCE: https://api.nuget.org/v3/index.json
+      GITHUB_PACKAGES_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Download USearch Libraries Artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: usearch-csharp-dependencies-*
+          merge-multiple: true
+          path: ${{ env.USEARCH_LIBS }}
+
+      - name: Set Up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Pack Project
+        run: |
+          dotnet pack "${{ env.SOLUTION }}" -c Release --output ${{ env.NUGET_PACKAGES }}
+        working-directory: ${{ github.workspace }}
+
+      - name: Authenticate to NuGet
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ashvardanian
+
+      - name: Publish to NuGet
+        env:
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg" --api-key "$NUGET_API_KEY" --source "${{ env.NUGET_SOURCE }}" --skip-duplicate
+
+      - name: Prepare Publish to GitHub Registry
+        run: dotnet nuget add source --username ${{ github.repository_owner }} --password ${{ github.token }} --store-password-in-clear-text --name github "${{ env.GITHUB_PACKAGES_SOURCE }}"
+
+      - name: Publish to GitHub Registry
+        run: dotnet nuget push "${{ env.NUGET_PACKAGES }}/*.nupkg"  --api-key "${{ github.token }}" --source "github" --skip-duplicate

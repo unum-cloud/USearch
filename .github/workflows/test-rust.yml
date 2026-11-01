@@ -1,0 +1,148 @@
+name: Test Rust
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 30.0.16248370
+  ANDROID_SDK_VERSION: 21
+
+jobs:
+  test_rust_ubuntu_gcc:
+    name: Test Rust on Ubuntu with GCC 14
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+      - name: Set Up Rust
+        run: |
+          rustup update nightly
+          rustup default nightly
+          rustup component add clippy
+      - name: Lint Rust
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build Rust
+        run: cargo build
+      - name: Test Rust
+        run: cargo test
+
+  test_rust_ubuntu_clang:
+    name: Test Rust on Ubuntu with Clang 20
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: clang-20
+      CXX: clang++-20
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
+      - name: Set Up Rust
+        run: |
+          rustup update nightly
+          rustup default nightly
+      - name: Build Rust
+        run: cargo build
+      - name: Test Rust
+        run: cargo test
+
+  test_rust_macos:
+    name: Test Rust on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Rust
+        run: |
+          rustup update nightly
+          rustup default nightly
+      - name: Build Rust
+        run: cargo build
+      - name: Test Rust
+        run: cargo test
+
+  test_rust_windows_x86:
+    name: Test Rust on Windows x86 with Visual Studio 2026
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Rust
+        run: |
+          rustup update nightly
+          rustup default nightly
+      - name: Build Rust
+        run: cargo build
+      - name: Test Rust
+        run: cargo test
+
+  build_rust_android:
+    name: Build Rust for Android ${{ matrix.abi }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - processor: armv7a
+            abi: armeabi-v7a
+            preset: android_armv7
+            target: armv7-linux-androideabi
+            arch: arm32
+          - processor: aarch64
+            abi: arm64-v8a
+            preset: android_arm64
+            target: aarch64-linux-android
+            arch: arm64
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Install NDK
+        run: |
+          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Set Up Rust
+        run: |
+          rustup update nightly
+          rustup default nightly
+          rustup target add ${{ matrix.target }}
+
+      - name: Set Up Rust Env
+        run: |
+          TOOLCHAIN=${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/
+          NDK_CLANG=$(find ${TOOLCHAIN} -name "${{ matrix.processor }}*${{ env.ANDROID_SDK_VERSION }}-clang")
+          echo "CC_${{ matrix.target }}=${NDK_CLANG}" >> ${GITHUB_ENV}
+          echo "CXX_${{ matrix.target }}=${NDK_CLANG}++" >> ${GITHUB_ENV}
+          echo "AR_${{ matrix.target }}=${TOOLCHAIN}/llvm-ar" >> ${GITHUB_ENV}
+          echo "CARGO_${{ matrix.target }}=${NDK_CLANG}" >> ${GITHUB_ENV}
+          echo "CARGO_${{ matrix.target }}=${TOOLCHAIN}/llvm-ar" >> ${GITHUB_ENV}
+
+      - name: Build Rust
+        run: cargo build --target ${{ matrix.target }}

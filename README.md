@@ -118,12 +118,12 @@ See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C gui
 
 ### Modalities
 
-| Modality            | Inputs                                              | Similarities & Distances                                                  | Status                                   |
-| :------------------ | :-------------------------------------------------- | :------------------------------------------------------------------------ | :--------------------------------------- |
-| __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard                     | RAM, VRAM, & NVMe engines                |
-| __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein, overlap, & Needleman-Wunsch global alignment                 | Experimental C++ engine & C interface    |
-| __Shapes__          | 3D point clouds of any size                         | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein          | Experimental C++ engine & C interface    |
-| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route               | Experimental C++ engine & C interface    |
+| Modality            | Inputs                                      | Similarities & Distances                                         | Status                                |
+| :------------------ | :------------------------------------------ | :--------------------------------------------------------------- | :------------------------------------ |
+| __Dense Vectors__   | Equal-width numeric rows or packed bit sets | Inner-Product, Angular, Euclidean, Hamming, & Jaccard            | RAM, VRAM, & NVMe engines             |
+| __Sequences__       | Variable-length byte strings & UTF-8 text   | Levenshtein, overlap, & Needleman-Wunsch global alignment        | Experimental C++ engine & C interface |
+| __Shapes__          | 3D point clouds of any size                 | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein | Experimental C++ engine & C interface |
+| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths  | Point proximity; declared Overlap, Shape, Coverage, & Route      | Experimental C++ engine & C interface |
 
 The experimental geospatial C interface currently uses a brute-force stand-in while its native engine & bindings develop.
 
@@ -240,21 +240,21 @@ The broader Overlap, Shape, Coverage, & Route calls are declared through the exp
 Every binding is a thin layer over the same C ABI, so this matrix follows the C symbols each one calls.
 The C++ core also exposes lower-level kits & custom folds.
 
-| Operation                         |   C   | Python | Rust  |  JS   |  Go   | Swift | Java  |  C#   |  Zig  | Mojo  | Wolfram |
-| :-------------------------------- | :---: | :----: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :-----: |
-| Dense Init, Load, Insert & Search |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Save, Metadata & Describe         |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Refine & Health                   |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Count & Get by Key                |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Exact Scans                       |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| VRAM & NVMe Residencies           |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Multiply & MaxSim                 |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Folded Flash Attention            |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    ✓    |
-| Batched Iteration with Cursors    |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    -    |
-| Filtered Search with Predicates   |   ✓   |   ✓    |   ✓   |   -   |   ✓   |   ✓   |   -   |   ✓   |   ✓   |   ✓   |    -    |
-| Deferred Calls                    |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    -    |
-| Merge & Streams ¹                 |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    -    |
-| Sequence, Shapes & Geospatial ²   |   ✓   |   -    |   -   |   -   |   -   |   -   |   -   |   -   |   -   |   -   |    -    |
+| Operation                         |  C  | Python | Rust | JS  | Go  | Swift | Java | C#  | Zig | Mojo | Wolfram |
+| :-------------------------------- | :-: | :----: | :--: | :-: | :-: | :---: | :--: | :-: | :-: | :--: | :-----: |
+| Dense Init, Load, Insert & Search |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Save, Metadata & Describe         |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Refine & Health                   |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Count & Get by Key                |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Exact Scans                       |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| VRAM & NVMe Residencies           |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Multiply & MaxSim                 |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Folded Flash Attention            |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    ✓    |
+| Batched Iteration with Cursors    |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
+| Filtered Search with Predicates   |  ✓  |   ✓    |  ✓   |  -  |  ✓  |   ✓   |  -   |  ✓  |  ✓  |  ✓   |    -    |
+| Deferred Calls                    |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
+| Merge & Streams ¹                 |  ✓  |   ✓    |  ✓   |  ✓  |  ✓  |   ✓   |  ✓   |  ✓  |  ✓  |  ✓   |    -    |
+| Sequence, Shapes & Geospatial ²   |  ✓  |   -    |  -   |  -  |  -  |   -   |  -   |  -  |  -  |  -   |    -    |
 
 ✓ indicates a binding surface; engine availability still depends on residency, as detailed in the [C guide](c/README.md).
 ¹ Absorption runs in the C engine; streams expose the declared API, but their C engine verbs currently report unsupported.

@@ -1,0 +1,328 @@
+name: Release C
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "^1.22.0"
+  ANDROID_NDK_VERSION: 30.0.16248370
+  ANDROID_SDK_VERSION: 21
+  EMSCRIPTEN_VERSION: 6.0.9
+  MINGW_VERSION: 12.2.0
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  create_linux_deb_package:
+    name: Create Debian Package for ${{ matrix.arch }} ${{ matrix.target }}
+    needs: hooks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux-gnu
+          - arch: arm64
+            target: aarch64-linux-gnu
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Get Version
+        id: set_version
+        run: |
+          version=$(cat VERSION)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld make crossbuild-essential-arm64 crossbuild-essential-armhf libjemalloc-dev
+
+      - name: Build C/C++
+        run: |
+          # Configure and build the project
+          cmake --preset library -B build_release \
+            -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_SYSTEM_NAME=Linux \
+            -D CMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }}
+
+          cmake --build build_release
+
+          cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
+
+          mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN"
+          touch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
+          mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib"
+          mkdir "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include"
+          for root in c include cpp; do
+            cp -r $root/usearch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
+          done
+          cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib/"
+          echo -e "Package: usearch\nVersion: ${{ steps.set_version.outputs.version }}\nMaintainer: Ash Vardanian\nArchitecture: ${{ matrix.arch }}\nDescription: Faster & Smaller Single-File Search Engine for Vectors & Texts" > "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
+          dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
+
+      - name: Upload Library
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" *.so *.deb --clobber
+
+  create_windows_dll_library:
+    name: Create Library for Windows ${{ matrix.arch }}
+    needs: hooks
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86, arm64]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+
+      - name: Set Up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Set Up MinGW
+        if: matrix.arch != 'arm64'
+        uses: egor-tensin/setup-mingw@v3
+        with:
+          platform: ${{ matrix.arch }}
+          version: ${{ env.MINGW_VERSION }}
+
+      - name: Set Up MSVC for ARM64
+        if: matrix.arch == 'arm64'
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Get Version
+        id: set_version
+        shell: bash
+        run: |
+          version=$(cat VERSION)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Build Library with MinGW
+        if: matrix.arch != 'arm64'
+        run: |
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_SHARED=1 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
+          cmake --build ./build_release --config Release
+          mkdir pkg
+          copy .\build_release\libusearch_shared.dll pkg\
+          xcopy /E /I .\c\usearch pkg\usearch
+          xcopy /E /I .\include\usearch pkg\usearch
+          xcopy /E /I .\cpp\usearch pkg\usearch
+          tar -cf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
+
+      - name: Build Library with MSVC for Arm64
+        if: matrix.arch == 'arm64'
+        run: |
+          cmake --preset msvc2022_arm64 -B ./build_release
+          cmake --build ./build_release --config Release
+          mkdir pkg
+          copy .\build_release\libusearch_shared.dll pkg\
+          xcopy /E /I .\c\usearch pkg\usearch
+          xcopy /E /I .\include\usearch pkg\usearch
+          xcopy /E /I .\cpp\usearch pkg\usearch
+          tar -cf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
+
+      - name: Upload Archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar --clobber
+
+  create_macos_dylib_library:
+    name: Create Library for macOS ${{ matrix.arch }}
+    needs: hooks
+    runs-on: macos-26
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Get Version
+        id: set_version
+        run: |
+          version=$(cat VERSION)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Build Library
+        run: |
+          cmake --preset library -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --build ./build_release
+          mkdir pkg
+          cp build_release/libusearch_shared.dylib pkg/
+          for root in c include cpp; do cp -r $root/usearch pkg/; done
+          (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.dylib usearch)
+
+      - name: Upload Library
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" *.dylib --clobber
+
+      - name: Upload Archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" *.zip --clobber
+
+  create_android_library:
+    name: Create Library for Android ${{ matrix.abi }}
+    needs: hooks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - processor: armv7a
+            abi: armeabi-v7a
+            target: armv7-linux-androideabi
+            arch: arm32
+            preset: android_armv7
+          - processor: aarch64
+            abi: arm64-v8a
+            target: aarch64-linux-android
+            arch: arm64
+            preset: android_arm64
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Get Version
+        id: set_version
+        run: |
+          version=$(cat VERSION)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Install NDK
+        run: |
+          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Build C/C++
+        run: |
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          cmake --preset ${{ matrix.preset }} -B build_artifacts -D ANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }}
+          cmake --build build_artifacts
+
+      - name: Package Library
+        run: |
+          mkdir pkg
+          cp build_artifacts/libusearch_shared.so pkg/
+          for root in c include cpp; do cp -r $root/usearch pkg/; done
+          (cd pkg && zip -r ../usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.so usearch)
+
+      - name: Upload Archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" *.zip --clobber
+
+  # One archive per checked-in Emscripten toolchain: a WebAssembly module carries one SIMD tier, width and threads
+  # choice, so each row is a whole build, and its C test runs under Node before anything is packed.
+  create_wasm_library:
+    name: Create WASM Library for ${{ matrix.archive }}
+    needs: hooks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { archive: wasm32_emscripten, node: 22 }
+          - { archive: wasm64_emscripten, node: 24 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Get Version
+        id: set_version
+        run: |
+          version=$(cat VERSION)
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Set Up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Build and Test WASM with CMake
+        run: |
+          cmake --workflow --preset ${{ matrix.archive }}
+
+          cd build_${{ matrix.archive }}
+          for root in c include cpp; do cp -r ../$root/usearch .; done
+          tar -czf ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.tar.gz libusearch_static.a usearch
+          zip -r ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.zip libusearch_static.a usearch
+
+      - name: Upload Archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" usearch_${{ matrix.archive }}_*.tar.gz usearch_${{ matrix.archive }}_*.zip --clobber

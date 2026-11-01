@@ -1,0 +1,380 @@
+name: Test C
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
+  ANDROID_NDK_VERSION: 30.0.16248370
+  ANDROID_SDK_VERSION: 21
+  EMSCRIPTEN_VERSION: 6.0.9
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v50.0.1
+
+jobs:
+  test_ubuntu_gcc:
+    name: Test on Ubuntu with GCC 14
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build C/C++
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --build --preset relwithdebinfo
+      - name: Test C and C++
+        run: ctest --preset relwithdebinfo
+
+  test_ubuntu_debug:
+    name: Test Debug Build on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build C/C++ with Asserts
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential lld libjemalloc-dev libomp-dev
+          cmake --preset debug -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
+          cmake --build --preset debug
+      - name: Test C/C++
+        run: ctest --preset debug
+
+  verify_models:
+    name: Check Promela Models and GenMC Clients
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Spin, Clang and the GenMC Build Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y spin cmake clang-20 llvm-20-dev libffi-dev zlib1g-dev libedit-dev
+      - name: Checkout GenMC
+        uses: actions/checkout@v7
+        with:
+          repository: MPI-SWS/genmc
+          ref: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
+          path: genmc
+      - name: Restore the GenMC Build
+        id: genmc
+        uses: actions/cache@v6
+        with:
+          path: genmc/build
+          key: genmc-9f6c4c0-clang-20
+      - name: Build GenMC
+        if: steps.genmc.outputs.cache-hit != 'true'
+        run: |
+          cmake -S genmc -B genmc/build -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D LLVM_DIR=/usr/lib/llvm-20/lib/cmake/llvm
+          cmake --build genmc/build --parallel
+      - name: Check the Models and the Clients
+        run: verification/check.sh
+        env:
+          GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
+          GENMC_CLANG: clang++-20
+
+  test_ubuntu_clang:
+    name: Test on Ubuntu with Clang 20
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: clang-20
+      CXX: clang++-20
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build C/C++
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --build --preset relwithdebinfo
+      - name: Test C and C++
+        run: ctest --preset relwithdebinfo
+
+  test_macos:
+    name: Test on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build C/C++
+        run: |
+          # Apple's linker is fast already; the preset's `lld` stands in for GNU `ld` on Linux
+          cmake --preset relwithdebinfo -D USEARCH_BUILD_SHARED=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
+          cmake --build --preset relwithdebinfo
+      - name: Test C and C++
+        run: ctest --preset relwithdebinfo
+
+  test_windows_x86:
+    name: Test on Windows x86 with Visual Studio 2026
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build C/C++
+        run: |
+          cmake --preset msvc2026_x64
+          cmake --build --preset msvc2026_x64
+      - name: Test C and C++
+        run: ctest --preset msvc2026_x64
+
+  build_windows_arm:
+    name: Build for Windows Arm64
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up MSVC for ARM64
+        uses: microsoft/setup-msbuild@v3
+
+        # C/C++
+      - name: Build C/C++ for Arm64
+        run: |
+          cmake --preset msvc2022_arm64
+          cmake --build --preset msvc2022_arm64
+
+      - name: Verify ARM64 Build Artifacts
+        run: Get-Item build_msvc2022_arm64\libusearch_shared.dll
+
+  build_cross_linux:
+    name: Build for Linux ${{ matrix.arch }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux-gnu
+          - arch: arm64
+            target: aarch64-linux-gnu
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+        # C/C++
+        # We need to install the cross-compilation toolchain for ARM64 and ARMHF
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld make crossbuild-essential-arm64 crossbuild-essential-armhf libjemalloc-dev
+
+      - name: Build C/C++
+        run: |
+          cmake --preset library \
+            -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_SYSTEM_NAME=Linux \
+            -D CMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }}
+
+          cmake --build --preset library
+
+        # We can't run the produced builds, but we can make sure they exist
+      - name: Test Artifacts Presence
+        run: |
+          test -e build_library/libusearch_shared.so
+
+  # Each machine profile compiles the shared library for one CPU class and one GPU code, compile only; the Arm ones build
+  # natively on Arm runners, where the CUDA image also exists. Clang 22 compiles the host units, as Ubuntu 24.04's GCC
+  # predates Olympus, and the family codes like `100f` need CMake 3.31, where Ubuntu 24.04 ships 3.28.
+  # Venice builds in AMD's image instead, as its preset compiles `gfx1250`.
+  build_machine_profile:
+    name: Build Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 90
+    container: ${{ matrix.preset == 'venice_mi450' && 'rocm/dev-ubuntu-26.04:10.0.0-full' || 'nvidia/cuda:13.4.3-devel-ubuntu26.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [xeon4_hopper, xeon6_blackwell, venice_mi450, grace_hopper, vera_rubin]
+    steps:
+      - name: Install Toolchain
+        run: |
+          apt-get update && apt-get install -y ninja-build g++ git python3-pip curl gnupg
+          pip install --break-system-packages "cmake>=3.31"
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 lld-22
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Compile Shared Library
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }} --parallel 2
+
+  # Compile-only: one library carries both GPU vendors' kernels and links neither runtime, since each driver opens at
+  # first use, so a machine without a GPU still loads it.
+  build_cuda_rocm:
+    name: Build CUDA and ROCm Library without GPU Runtimes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
+    steps:
+      # ROCm 10's Clang is LLVM 23, under which NVCC 13.4's front end rejects libstdc++'s `<atomic>`, so NVCC hosts
+      # on Clang 22.
+      - name: Install Toolchain
+        run: |
+          apt-get update && apt-get install -y ninja-build git curl gnupg python3-pip binutils
+          pip install --break-system-packages "cmake>=3.31"
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 cuda-minimal-build-13-4 cuda-driver-dev-13-4
+          echo "/usr/local/cuda-13.4/bin" >> "$GITHUB_PATH"
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Compile Shared Library
+        run: |
+          cmake --preset linux_cuda_rocm -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset linux_cuda_rocm --target usearch_shared --parallel 2
+      - name: Check No GPU Runtime Is Linked
+        run: |
+          readelf -d build_linux_cuda_rocm/libusearch_shared.so
+          ! readelf -d build_linux_cuda_rocm/libusearch_shared.so | grep -E 'NEEDED.*(libcudart|libcuda\.|libamdhip64)'
+
+  # One row per checked-in WebAssembly toolchain. A module carries one SIMD tier, width and threads choice, so each
+  # row is a whole build; its C test runs under the matrix's Node for Emscripten and under Wasmtime for WASI.
+  test_wasm:
+    name: Test on WebAssembly ${{ matrix.preset }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { preset: wasm32_emscripten, sdk: emscripten, node: 22 }
+          - { preset: wasm64_emscripten, sdk: emscripten, node: 24 }
+          - { preset: wasm32_wasi, sdk: wasi }
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up Emscripten
+        if: matrix.sdk == 'emscripten'
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        if: matrix.sdk == 'emscripten'
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Set Up WASI SDK and Wasmtime
+        if: matrix.sdk == 'wasi'
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Build and Test C
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  build_android:
+    name: Build for Android ${{ matrix.abi }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - processor: armv7a
+            abi: armeabi-v7a
+            preset: android_armv7
+            target: armv7-linux-androideabi
+            arch: arm32
+          - processor: aarch64
+            abi: arm64-v8a
+            preset: android_arm64
+            target: aarch64-linux-android
+            arch: arm64
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Install NDK
+        run: |
+          ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Build C/C++
+        run: |
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          cmake --preset ${{ matrix.preset }} -D ANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }}
+          cmake --build --preset ${{ matrix.preset }}
+
+        # We can't run the produced builds, but we can make sure they exist
+      - name: Test Artifacts Presence
+        run: test -e build_${{ matrix.preset }}/libusearch_shared.so
+
+      - name: Package Android Libraries for Release
+        run: |
+          version=$(cat VERSION)
+          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_${{ matrix.preset }}/libusearch_shared.so c/usearch \
+            include/usearch cpp/usearch
+
+      - name: Upload Android Libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-${{ matrix.abi }}-libraries
+          path: usearch_android_*.zip

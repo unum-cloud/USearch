@@ -1,0 +1,68 @@
+name: Release Swift
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# The release commit names the Swift artifacts the release carries by checksum, and `mint-release.sh` attaches them
+# as it publishes. This resolves the package as a consumer does, downloading and checking them, while NumKong links
+# the artifact its own preset builds from the submodule.
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  validate_swift_macos:
+    name: Validate Swift Package on macOS
+    needs: hooks
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.xcframework
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build NumKong XCFramework
+        working-directory: numkong
+        run: |
+          cmake --preset swift
+          cmake --build --preset swift
+      - name: Test
+        run: swift test
+
+  validate_swift_linux:
+    name: Validate Swift Package on Linux ${{ matrix.arch }}
+    needs: hooks
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    container: swift:6.4
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+    env:
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Install CMake
+        run: apt-get update && apt-get install -y cmake ninja-build
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
+          cmake --build --preset swift
+      - name: Test
+        run: swift test

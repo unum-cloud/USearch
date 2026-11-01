@@ -1,0 +1,43 @@
+name: Release Docs
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  # Candidates leave the published docs on the last stable release.
+  build_docs:
+    name: Build Docs
+    needs: hooks
+    if: ${{ !github.event.release.prerelease }}
+    uses: ./.github/workflows/test-docs.yml
+
+  deploy_docs:
+    name: Deploy Docs to GitHub Pages
+    needs: build_docs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

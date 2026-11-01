@@ -1,0 +1,81 @@
+name: Build Python Wheels
+
+on:
+  workflow_call:
+    inputs:
+      smoke:
+        description: "Build one GIL and one free-threaded interpreter per platform"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
+
+jobs:
+  build_wheels:
+    name: Build Python Wheels for ${{ matrix.os }} cp${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 270
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-26, windows-2025]
+        python-version: ${{ fromJSON(inputs.smoke && '["312", "315t"]' || '["312", "313", "314", "314t", "315", "315t"]') }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install 'cibuildwheel==4.3.5'
+      - name: Build Wheels
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 180
+          command: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ARCHS_LINUX: native
+      - name: Upload Wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: cibw-wheels-${{ matrix.os }}-cp${{ matrix.python-version }}
+          path: wheelhouse/*.whl
+          overwrite: true
+
+  build_sdist:
+    name: Build Python Source Distribution
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build Source Distribution
+        run: pip install build && python -m build --sdist
+      - name: Upload Source Distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          retention-days: 1

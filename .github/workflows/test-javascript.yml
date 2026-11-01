@@ -1,0 +1,105 @@
+name: Test JavaScript
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  test_javascript_ubuntu_gcc:
+    name: Test JavaScript on Ubuntu with GCC 14
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --skip-scripts
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Test JavaScript
+        run: npm test
+
+  test_javascript_ubuntu_clang:
+    name: Test JavaScript on Ubuntu with Clang 20
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: clang-20
+      CXX: clang++-20
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --skip-scripts
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Test JavaScript
+        run: npm test
+
+  test_javascript_macos:
+    name: Test JavaScript on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --skip-scripts
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Test JavaScript
+        run: npm test
+
+  test_javascript_windows_x86:
+    name: Test JavaScript on Windows x86 with Visual Studio 2026
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --skip-scripts
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Test JavaScript
+        run: npm test

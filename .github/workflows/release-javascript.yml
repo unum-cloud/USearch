@@ -1,0 +1,148 @@
+name: Release JavaScript
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  build_javascript:
+    name: Build JavaScript Native Modules for ${{ matrix.os }} ${{ matrix.arch }}
+    needs: hooks
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86]
+        # Windows pre-build is not working
+        # - windows-latest
+        os: [macos-26, ubuntu-26.04]
+        exclude:
+          - arch: x86
+            os: macos-26
+          - arch: x86
+            os: ubuntu-26.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          architecture: ${{ matrix.arch }}
+
+      - name: Update Compilers
+        if: matrix.os == 'ubuntu-26.04'
+        run: |
+          sudo apt update
+          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
+          sudo apt install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu g++-aarch64-linux-gnu
+        # NPM installation fails spuriously all the time
+      - name: Install Dependencies
+        run: |
+          npm install --ignore-scripts
+      - name: Prebuild for One Target
+        run: npm run prebuild
+        if: matrix.os != 'macos-26'
+      - name: Prebuild for Both macOS Architectures
+        run: npm run prebuild && npm run prebuild-arm64
+        env:
+          CC: clang
+          CXX: clang++
+        if: matrix.os == 'macos-26'
+      - name: Inspect the Prebuilt Binaries
+        run: file prebuilds/*/*
+        if: matrix.os == 'macos-26'
+      - name: Extra for Cross Build
+        if: matrix.os == 'ubuntu-26.04'
+        env:
+          CC: aarch64-linux-gnu-gcc
+          CXX: aarch64-linux-gnu-g++
+          AR: aarch64-linux-gnu-ar
+          AS: aarch64-linux-gnu-as
+          LD: aarch64-linux-gnu-ld
+          STRIP: aarch64-linux-gnu-strip
+        run: |
+          npm run prebuild-arm64
+          aarch64-linux-gnu-strip prebuilds/linux-arm64/*node
+      - name: Upload Prebuilds
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-${{ matrix.os }}-${{ matrix.arch }}
+          path: prebuilds
+          retention-days: 1
+
+  publish_javascript:
+    name: Publish JavaScript to npm
+    needs: build_javascript
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/usearch
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download Prebuilds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds
+
+      - name: Look for Links
+        run: find . -type f -links +1
+
+        # NPM installation fails spuriously all the time
+      - name: Install Dependencies
+        run: |
+          npm install --ignore-scripts
+
+      - name: Build the JS from TS
+        run: npm run build-js
+
+      - name: Last Minute Test with Prebuild Artifact
+        run: npm run test
+
+      - name: Publish Dry Run
+        run: npm publish --dry-run --tag ${{ github.event.release.prerelease && 'next' || 'latest' }}
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public --tag ${{ github.event.release.prerelease && 'next' || 'latest' }}

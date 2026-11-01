@@ -200,6 +200,44 @@ I'd recommend putting the following breakpoints when debugging the code in GDB:
 - `__GI_exit` - to stop at exit points - the end of running any executable.
 - `__builtin_unreachable` - to catch all the places where the code is expected to be unreachable.
 
+### SPDK Builds
+
+The SPDK engine reads NVMe namespaces from user space, so it needs SPDK's static libraries, hugepages to DMA into, and a controller taken from the kernel's `nvme` driver.
+Build SPDK once outside the checkout, and point `pkg-config` at its libraries and at the DPDK it bundles:
+
+```sh
+git clone --branch v26.09 --recursive https://github.com/spdk/spdk ~/Dependencies/spdk
+cd ~/Dependencies/spdk && sudo scripts/pkgdep.sh && ./configure && make -j "$(nproc)" && cd -
+export PKG_CONFIG_PATH=~/Dependencies/spdk/build/lib/pkgconfig:~/Dependencies/spdk/dpdk/build/lib/pkgconfig
+cmake -D USEARCH_WITH_SPDK=ON -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
+cmake --build build_relwithdebinfo --target usearch_test usearch_tools
+```
+
+DPDK takes its memory from any mounted `hugetlbfs` whose page size matches pages the kernel reserved, so 1 GiB pages need nothing more than a reservation and a mount.
+SPDK's setup script reserves 2 MiB pages unless told otherwise, so `SKIP_HUGE` leaves that to you, and `PCI_ALLOWED` limits it to the one controller under test, leaving every other drive with the kernel.
+The SPDK suite runs in two passes around that binding: the first saves its part under `TMPDIR`, a copy places it on the namespace while the kernel still holds it, and the second views it through SPDK.
+
+```sh
+drive=nvme1n1
+controller=$(basename "$(readlink -f /sys/block/$drive/device/device)")
+USEARCH_FILTER=nvme_indexes build_relwithdebinfo/usearch_test
+sudo build_relwithdebinfo/usearch copy "${TMPDIR:-/tmp}/usearch-nvme-spdk.safegraphs" /dev/$drive@64GiB
+
+echo 4 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+sudo mkdir -p /dev/hugepages1G && sudo mount -t hugetlbfs -o pagesize=1G none /dev/hugepages1G
+sudo env SKIP_HUGE=yes PCI_ALLOWED=$controller ~/Dependencies/spdk/scripts/setup.sh config
+sudo prlimit --memlock=unlimited:unlimited env USEARCH_FILTER=nvme_indexes \
+    USEARCH_NVME_PATHS=spdk://$controller@64GiB build_relwithdebinfo/usearch_test
+```
+
+Release the controller and the pages as soon as the run ends, since a bound drive vanishes from `/dev` and reserved pages are memory no other process gets:
+
+```sh
+sudo env SKIP_HUGE=yes PCI_ALLOWED=$controller ~/Dependencies/spdk/scripts/setup.sh reset
+sudo umount /dev/hugepages1G && sudo rmdir /dev/hugepages1G
+echo 0 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+```
+
 ### Capacities & Bounds
 
 No cache, pool, selection, batch or buffer takes its size from a constant picked to fit, like `64` or `2 * connectivity`.
@@ -288,35 +326,35 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 
 ### Vocabulary
 
-| Concept | Word | Refused |
-| :- | :- | :- |
-| `*_index` in prose | mono-index | singular, mono, standalone, single |
-| `*_indexes` in prose | sharded index | plural, group, collection, multi |
-| a mono-index inside a sharded index | shard | … |
-| one shard's graph in one file; several | monolith; parts under a manifest | … |
-| RAM, VRAM or NVMe | residency | home, memory side |
-| which device or NUMA domain a shard sits on | placement | … |
-| a residency split by the vendor its VRAM needs, one compiled variant each | vendored residency | home, tower |
-| a stored item; its ID inside a shard; its ordinal in a batch | entry; node; offset | row, value, member, item |
-| a horizontal slice of a physical matrix | row | … |
-| one query and its results | query | row |
-| a dedicated per-residency or per-vendor implementation; its C-facing side | tower; face | backend, engine class |
-| a compiled alternative per class, dtype or residency | variant | arm, cell |
-| a per-capability kernel bundle | kit | trait |
-| an exported operation and its table entry | verb; trampoline | … |
-| a fixed-shape collection a verb fills | outputs | landing, lander |
-| a callback consuming intermediate results | sink | landing |
-| the device fan-out's wait | await | join |
-| the nodes a refinement round re-selects | picked | dirty, seam, marked |
-| the nodes a walk has met and the ones it still has to expand | visited, frontier | met, seen, queue |
-| the reachability sweep: its verb and plan; what it returns; the step inside a refine | health; reachability; audit | check, scan, sweep |
-| one step of a plan | the same word in every plan: partition, picking, scatter, copy, reselect, merge, audit, heal, done | sweeping, copying, reconnect, land |
-| what a sample returns; the points it starts from; the ones it keeps near; a region's start | draws; shown; focus; root | pick, anchor, landmark, context, seed |
-| device row storage | flat matrix, flat column | plane |
-| node ID width under `utilities/` and `basic/` | `node_id_type_` | `node_id_t`, `u32_t node` |
-| the candidates a walk keeps | candidates | pool |
-| how a batch's entries are shared among shards | split_batch_into_shards, offsets | seat, deal, landed |
-| a member of a plan, cursor or walk | what it holds and when it holds it | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
+| Concept                                                                                    | Word                                                                                               | Refused                                                         |
+| :----------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------- |
+| `*_index` in prose                                                                         | mono-index                                                                                         | singular, mono, standalone, single                              |
+| `*_indexes` in prose                                                                       | sharded index                                                                                      | plural, group, collection, multi                                |
+| a mono-index inside a sharded index                                                        | shard                                                                                              | …                                                               |
+| one shard's graph in one file; several                                                     | monolith; parts under a manifest                                                                   | …                                                               |
+| RAM, VRAM or NVMe                                                                          | residency                                                                                          | home, memory side                                               |
+| which device or NUMA domain a shard sits on                                                | placement                                                                                          | …                                                               |
+| a residency split by the vendor its VRAM needs, one compiled variant each                  | vendored residency                                                                                 | home, tower                                                     |
+| a stored item; its ID inside a shard; its ordinal in a batch                               | entry; node; offset                                                                                | row, value, member, item                                        |
+| a horizontal slice of a physical matrix                                                    | row                                                                                                | …                                                               |
+| one query and its results                                                                  | query                                                                                              | row                                                             |
+| a dedicated per-residency or per-vendor implementation; its C-facing side                  | tower; face                                                                                        | backend, engine class                                           |
+| a compiled alternative per class, dtype or residency                                       | variant                                                                                            | arm, cell                                                       |
+| a per-capability kernel bundle                                                             | kit                                                                                                | trait                                                           |
+| an exported operation and its table entry                                                  | verb; trampoline                                                                                   | …                                                               |
+| a fixed-shape collection a verb fills                                                      | outputs                                                                                            | landing, lander                                                 |
+| a callback consuming intermediate results                                                  | sink                                                                                               | landing                                                         |
+| the device fan-out's wait                                                                  | await                                                                                              | join                                                            |
+| the nodes a refinement round re-selects                                                    | picked                                                                                             | dirty, seam, marked                                             |
+| the nodes a walk has met and the ones it still has to expand                               | visited, frontier                                                                                  | met, seen, queue                                                |
+| the reachability sweep: its verb and plan; what it returns; the step inside a refine       | health; reachability; audit                                                                        | check, scan, sweep                                              |
+| one step of a plan                                                                         | the same word in every plan: partition, picking, scatter, copy, reselect, merge, audit, heal, done | sweeping, copying, reconnect, land                              |
+| what a sample returns; the points it starts from; the ones it keeps near; a region's start | draws; shown; focus; root                                                                          | pick, anchor, landmark, context, seed                           |
+| device row storage                                                                         | flat matrix, flat column                                                                           | plane                                                           |
+| node ID width under `utilities/` and `basic/`                                              | `node_id_type_`                                                                                    | `node_id_t`, `u32_t node`                                       |
+| the candidates a walk keeps                                                                | candidates                                                                                         | pool                                                            |
+| how a batch's entries are shared among shards                                              | split_batch_into_shards, offsets                                                                   | seat, deal, landed                                              |
+| a member of a plan, cursor or walk                                                         | what it holds and when it holds it                                                                 | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
 
 ### Cross Compilation
 
@@ -477,15 +515,6 @@ npm test                    # Run the test suite
 ```
 
 To compile for AWS Lambda you'd need to recompile the binding.
-You can test the setup locally in a Docker image:
-
-```Dockerfile
-FROM public.ecr.aws/lambda/nodejs:22-x86_64
-RUN npm init -y
-# Amazon Linux 2023 packages CMake 3.22, older than the 3.28 floor, so pip brings a newer one.
-RUN microdnf install -y tar git gcc-c++ make python3-pip && pip3 install "cmake>=3.28"
-RUN npm install --build-from-source usearch
-```
 
 To compile to WebAssembly make sure you have `emscripten` installed and pick one of the checked-in toolchains.
 There is no WebAssembly target of its own — the C library is what crosses, and a module carries one SIMD tier, width and threads choice, so each toolchain file fixes all three:
@@ -735,27 +764,6 @@ wolframscript -file wolfram/Test.wls
 
 It links the C interface as an archive, so what Wolfram loads is one file, and it is the only target here without a `lib` prefix — Wolfram finds a library in `LibraryResources/$SystemID` by its bare name.
 
-## Docker
-
-```sh
-docker build -t unum/usearch . && docker run unum/usearch
-```
-
-For multi-architecture builds and publications:
-
-```sh
-version=$(cat VERSION)
-docker buildx create --use &&
-    docker login &&
-    docker buildx build \
-        --platform "linux/amd64,linux/arm64" \
-        --build-arg version=$version \
-        --file Dockerfile \
-        --tag unum/usearch:$version \
-        --tag unum/usearch:latest \
-        --push .
-```
-
 ## WebAssembly
 
 The WASI build uses the same module shape as the Emscripten `wasm32_v128_k` build, but for standalone runtimes and for the Rust crate's `wasm32-wasip1` target.
@@ -783,6 +791,28 @@ pip install -e .                        # the package the Python reference docum
 cd docs && doxygen conf.dox             # writes the XML into `build/xml`
 sphinx-build -M html . ../build/docs -W # writes the site into `build/docs/html`
 ```
+
+## Commits
+
+`.githooks/commit-msg` checks every message:
+
+- The title reads `<Verb>: <Summary>`, where the verb is one of `Add`, `Break`, `Chore`, `Docs`, `Fix`, `Improve` or `Make`.
+- The summary opens with a capital letter, unless it opens with a code identifier, which keeps its own case.
+- The title runs to at most 80 characters, and a body line to at most 100 columns, unless it holds a URL or is indented code.
+- The message carries no AI-assistant attribution, since authorship is the human who committed.
+
+Git's merge, `fixup!` and `squash!` titles are exempt from the title rules.
+A `Release: vX.Y.Z` title is exempt too, but its commit must stamp every version site, and no other commit may change `VERSION`.
+`.githooks/pre-commit` formats and judges the staged lines, and `.githooks/selftest` runs both hooks against their fixtures.
+On a pull request, `.github/scripts/check-commits.sh` replays `commit-msg` over every commit and runs `pre-commit` over the whole range.
+
+## Releases
+
+`.github/scripts/mint-release.sh X.Y.Z` cuts a release from a clean checkout of the branch it ships.
+It builds the Swift binaries for that version, stamps every version site and the binaries' checksums, and commits `Release: vX.Y.Z`.
+`.github/scripts/check-release.sh` then checks that commit, even in a clone where `core.hooksPath` is unset, before the script tags it and pushes both.
+Then it publishes the GitHub release with the binaries attached, marking `X.Y.Z-rc.N` candidates as prereleases.
+Publishing starts every `release-<binding>.yml` at once, and each runs `check-release.sh` before it builds anything, so each registry trusts only its own binding's file.
 
 ## Working on Sub-Modules
 

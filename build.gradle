@@ -1,7 +1,5 @@
 plugins {
     id 'java-library'
-    id 'maven-publish'
-    id 'signing'
     id 'com.diffplug.spotless' version '7.2.1'
     // The published artifact is Java only; these compile the interop suites, which check that the
     // Java surface reads correctly from the other two languages that consume it.
@@ -297,85 +295,6 @@ task fatJar(type: Jar) {
             }
         } else {
             throw new GradleException("Native libraries directory not found at build/libs/usearch/shared - ensure native libraries are downloaded first")
-        }
-    }
-}
-
-signing {
-    def signingKey = findProperty("signingKey")
-    def signingPassword = findProperty("signingPassword")
-    useInMemoryPgpKeys(signingKey, signingPassword)
-    sign publishing.publications
-}
-
-publishing {
-    publications {
-        library(MavenPublication) {
-            from components.java
-
-            artifact sourcesJar
-            artifact javadocJar
-
-            signing {
-                sign publishing.publications.library
-            }
-
-            pom {
-                name = "USearch"
-                description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
-                url = "https://github.com/unum-cloud/USearch"
-
-                licenses {
-                    license {
-                        name = 'The Apache License, Version 2.0'
-                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
-                    }
-                }
-
-                scm {
-                    connection = 'scm:git:git://github.com/unum-cloud/USearch.git'
-                    developerConnection = 'scm:git:ssh://github.com/unum-cloud/USearch.git'
-                    url = 'https://github.com/unum-cloud/USearch'
-                }
-
-                developers {
-                    developer {
-                        id = 'ashvardanian'
-                        name = 'Ash Vardanian'
-                        email = 'info@unum.cloud'
-                    }
-                }
-            }
-        }
-    }
-
-
-    // Maven Central via central.sonatype.com would be great, but it doesn't support Gradle yet :(
-    // Info: https://central.sonatype.org/publish/publish-portal-gradle/
-    /*
-    repositories {
-        maven {
-            name = "MavenCentral"
-            url = "https://central.sonatype.com/api/v1/publisher/upload"
-            credentials {
-                username = System.getenv("MAVEN_CENTRAL_USERNAME")
-                password = System.getenv("MAVEN_CENTRAL_TOKEN")
-            }
-            authentication {
-                basic(BasicAuthentication)
-            }
-        }
-    }
-    */
-
-    repositories {
-        maven {
-            name = "GitHubPackages"
-            url = "https://maven.pkg.github.com/unum-cloud/USearch"
-            credentials {
-                username = System.getenv("GITHUB_ACTOR")
-                password = System.getenv("GITHUB_TOKEN")
-            }
         }
     }
 }

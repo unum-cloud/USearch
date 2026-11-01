@@ -1,0 +1,312 @@
+name: Build Swift Artifacts
+
+# The XCFramework and the artifact bundle `Package.swift` links, zipped as the release ships them. `mint-release.sh`
+# dispatches this with the version the release commit will carry, so the headers and the bundle carry it too.
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version the release commit will carry"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 30.0.16248370
+  WASI_SDK_VERSION: "34"
+
+jobs:
+  # The files the release commit stamps that land in the Swift artifacts: the headers' version macros and the bundle's.
+  bump_version:
+    name: Bump Swift Artifacts Version
+    if: inputs.version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Bump Version
+        env:
+          version: ${{ inputs.version }}
+        run: |
+          export core=${version%%-*}
+          IFS=. read -r major minor patch <<< "$core"
+          export major minor patch
+          echo "$version" > VERSION
+          perl -pi -e 's/^(    VERSION )[0-9.]+$/$1$ENV{core}/' CMakeLists.txt
+          perl -pi -e 's/^(#define USEARCH_VERSION_MAJOR )[0-9]+$/$1$ENV{major}/; s/^(#define USEARCH_VERSION_MINOR )[0-9]+$/$1$ENV{minor}/; s/^(#define USEARCH_VERSION_PATCH )[0-9]+$/$1$ENV{patch}/' c/usearch/types.h
+      - name: Upload Bumped Files
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-version
+          path: |
+            VERSION
+            CMakeLists.txt
+            c/usearch/types.h
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each build adds its slice, and `lipo` joins the architectures of one SDK. The simulators' runtimes and the 32-bit
+  # watchOS one lack the `__sme_memset` routine streaming SME code calls, so those go without NumKong's SME kernels.
+  build_swift_xcframework:
+    name: Build Swift XCFramework
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Every Apple Slice
+        run: |
+          set -euo pipefail
+          no_sme="-D NUMKONG_TARGET_SME=0 -D NUMKONG_TARGET_SMEF64=0 -D NUMKONG_TARGET_SMEBI32=0"
+          slice() {
+            local name=$1
+            shift
+            cmake -S . -B "build_$name" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" "$@"
+            cmake --build "build_$name"
+          }
+          for arch in arm64 x86_64; do
+            slice "macos_$arch" -D CMAKE_OSX_ARCHITECTURES=$arch
+            slice "catalyst_$arch" -D USEARCH_SWIFT_SDK=maccatalyst -D CMAKE_OSX_ARCHITECTURES=$arch \
+              -D "CMAKE_C_FLAGS=-target $arch-apple-ios18.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios18.0-macabi"
+            slice "iossim_$arch" -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphonesimulator \
+              -D USEARCH_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "tvossim_$arch" -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvsimulator \
+              -D USEARCH_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "watchsim_$arch" -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchsimulator \
+              -D USEARCH_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+            slice "xrsim_$arch" -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xrsimulator \
+              -D USEARCH_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0 $no_sme
+          done
+          slice watchos_arm64_32 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+          slice watchos_arm64 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D USEARCH_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          slice ios -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphoneos -D USEARCH_SWIFT_SDK=iphoneos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice tvos -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvos -D USEARCH_SWIFT_SDK=appletvos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice xros -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xros -D USEARCH_SWIFT_SDK=xros \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0
+          (cd build_swift && zip -qry ../USearchC.xcframework.zip USearchC.xcframework)
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-xcframework
+          path: USearchC.xcframework.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build_swift_linux:
+    name: Build Swift Artifact Bundle for Linux ${{ matrix.arch }}
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    container: swift:6.4
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Install CMake
+        run: apt-get update && apt-get install -y cmake ninja-build
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
+          cmake --build --preset swift
+      # SE-0482 admits libraries that need nothing beyond the C library and runtime.
+      - name: Audit Artifact Bundle
+        run: swift package experimental-audit-binary-artifact build_swift/USearchC.artifactbundle
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-linux-${{ matrix.arch }}
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Swift on Windows links the MSVC ABI, so the archive comes from `cl`, which only a developer prompt puts on the
+  # `PATH` for the Ninja generator the preset picks.
+  build_swift_windows:
+    name: Build Swift Artifact Bundle for Windows ${{ matrix.arch }}
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'windows-11-arm' || 'windows-2025' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Set Up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'aarch64' && 'arm64' || 'x64' }}
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=cl -D CMAKE_CXX_COMPILER=cl -D USEARCH_SWIFT_TRIPLES=${{ matrix.arch }}-unknown-windows-msvc
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-windows-${{ matrix.arch }}
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names.
+  build_swift_android:
+    name: Build Swift Artifact Bundle for Android
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Install NDK
+        run: |
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Build Artifact Bundle
+        run: |
+          set -euo pipefail
+          abi() {
+            local abi=$1 arch=$2
+            cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake" \
+              -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D USEARCH_SWIFT_TRIPLES="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+            cmake --build "build_$abi"
+          }
+          abi arm64-v8a aarch64
+          abi armeabi-v7a armv7
+          abi x86_64 x86_64
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-android
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Strict SIMD128, which every SIMD engine validates, as one archive serves every Swift WASI module.
+  build_swift_wasi:
+    name: Build Swift Artifact Bundle for WebAssembly WASI
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Install WASI SDK
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake \
+            -D USEARCH_SWIFT_TRIPLES=wasm32-unknown-wasip1
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-wasi
+          path: build_swift/USearchC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each part's variants go through the same CMake script that wrote them, into one bundle.
+  merge_swift_artifact_bundle:
+    name: Merge Swift Artifact Bundle
+    needs: [build_swift_linux, build_swift_windows, build_swift_android, build_swift_wasi]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle Parts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-part-*
+          path: parts
+      - name: Merge Artifact Bundle Parts
+        run: |
+          set -euo pipefail
+          for part in parts/*; do
+            version=$(jq -r '.artifacts.USearchC.version' "$part/info.json")
+            jq -r '.artifacts.USearchC.variants[] | [.path, (.supportedTriples | join(","))] | @tsv' "$part/info.json" |
+              while IFS=$'\t' read -r path triples; do
+                cmake -D NUMKONG_SWIFT_MODULE=USearchC -D NUMKONG_SWIFT_ARCHIVE="$part/$path" \
+                  -D NUMKONG_SWIFT_HEADERS="$part/include" -D NUMKONG_SWIFT_DIRECTORY="$PWD/merged" \
+                  -D NUMKONG_SWIFT_TRIPLES="$triples" -D NUMKONG_SWIFT_VERSION="$version" \
+                  -P numkong/cmake/numkong_swift_artifact.cmake
+              done
+          done
+          (cd merged && zip -qry ../USearchC.artifactbundle.zip USearchC.artifactbundle)
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-artifactbundle
+          path: USearchC.artifactbundle.zip
+          if-no-files-found: error
+          retention-days: 7

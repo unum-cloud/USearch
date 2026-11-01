@@ -1,27 +1,70 @@
 #!/usr/bin/env bash
 #
-# commit-msg: enforce the commit-message contract, identical in every repository that carries it.
+# commit-msg: enforce the commit-message contract, shared by every repository that carries it but for the
+# version sites a release stamps.
 #
 # The subject is `<Verb>: <Summary>`, so the history reads as a changelog. A refactor is an Improve, Chore
 # rearranges without changing behaviour, Make touches only the build or the environment, Docs fixes
 # documentation that drifted on its own, and Break marks an incompatible interface change. Git writes merge,
-# `fixup!` and `squash!` subjects and TinySemVer writes `Release:` ones, so those are exempt. Authorship is
-# the human who committed, so the message carries no assistant attribution.
+# `fixup!` and `squash!` subjects, so those are exempt. `mint-release.sh` writes `Release:` commits, which
+# this hook checks site by site, and no other commit touches `VERSION`. Authorship is the human who
+# committed, so the message carries no assistant attribution.
 #
 # Bypass knowingly, which you almost never should, with: git commit --no-verify
 
 set -u
 export LC_ALL=C
 
-approved_verbs='Add|Break|Build|Chore|Docs|Fix|Improve|Make'
+approved_verbs='Add|Break|Chore|Docs|Fix|Improve|Make'
 
 payload=$(grep -v '^#' "$1")
 subject=$(grep -m 1 -v '^[[:space:]]*$' <<< "$payload")
 failed=0
 
 case "$subject" in
-Merge* | Release:* | "fixup!"* | "squash!"*) ;;
+Merge* | "fixup!"* | "squash!"*) ;;
+# Releases are minted by hand, so this check is all that stands between a typo and a published package.
+Release:*)
+    version=$(sed -nE 's/^Release: v([0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?)$/\1/p' <<< "$subject")
+    if [ -z "$version" ]; then
+        echo "commit-msg: a release subject is exactly 'Release: vX.Y.Z' or 'Release: vX.Y.Z-rc.N'."
+        echo "            Got: $subject"
+        failed=1
+    else
+        core=${version%%-*} stale=""
+        IFS=. read -r major minor patch <<< "$core"
+        [ "$(git show :VERSION 2>/dev/null)" = "$version" ] || stale="$stale VERSION"
+        git show :package.json 2>/dev/null | grep -qxF "  \"version\": \"$version\"," || stale="$stale package.json"
+        git show :CITATION.cff 2>/dev/null | grep -qxF "version: $version" || stale="$stale CITATION.cff"
+        git show :Cargo.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale Cargo.toml"
+        # Both the workspace and the package name the version.
+        [ "$(git show :pixi.toml 2>/dev/null | grep -cxF "version = \"$version\"")" = 2 ] || stale="$stale pixi.toml"
+        git show :mojo/pixi.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale mojo/pixi.toml"
+        git show :build.zig.zon 2>/dev/null | grep -qxF "    .version = \"$version\"," || stale="$stale build.zig.zon"
+        git show :java/README.md 2>/dev/null | grep -qF "def usearchVersion = '$version'" || stale="$stale java/README.md"
+        git show :java/README.md 2>/dev/null | grep -qF "implementation name: 'usearch', version: '$version'," || stale="$stale java/README.md"
+        git show :csharp/nuget/nuget-package.props 2>/dev/null | grep -qF "'\$(Version)' == ''\">$version</Version>" ||
+            stale="$stale csharp/nuget/nuget-package.props"
+        git show :Package.swift 2>/dev/null | grep -qF "/releases/download/v$version\"" || stale="$stale Package.swift"
+        # CMake's `project(VERSION)`, the C macros and the stub take numbers only, so a candidate keeps its core there.
+        git show :CMakeLists.txt 2>/dev/null | grep -qE "^[[:space:]]+VERSION ${core//./\\.}$" || stale="$stale CMakeLists.txt"
+        for field in "MAJOR $major" "MINOR $minor" "PATCH $patch"; do
+            git show :c/usearch/types.h 2>/dev/null | grep -qxF "#define USEARCH_VERSION_$field" ||
+                stale="$stale c/usearch/types.h:${field% *}"
+        done
+        git show :src_stub/types.cpp 2>/dev/null | grep -qF "usearch_version_name(void) { return \"$core\"; }" ||
+            stale="$stale src_stub/types.cpp"
+        if [ -n "$stale" ]; then
+            echo "commit-msg: these staged files don't carry $version:$stale"
+            failed=1
+        fi
+    fi
+    ;;
 *)
+    if git diff --cached --name-only | grep -qx VERSION; then
+        echo "commit-msg: VERSION only changes in a 'Release: vX.Y.Z' commit."
+        failed=1
+    fi
     # A summary may open with a code identifier, as in `update()` or `snake_case`, which keeps its own case.
     if ! [[ $subject =~ ^($approved_verbs):\ \`?([A-Z]|[a-z_][a-z0-9_]*(\(\)|_[a-z0-9_]+)) ]]; then
         echo "commit-msg: the subject must be '<Verb>: <Capitalized summary>' with an approved verb:"

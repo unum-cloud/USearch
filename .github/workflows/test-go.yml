@@ -1,0 +1,37 @@
+name: Test Go
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test_go_ubuntu_gcc:
+    name: Test Go on Ubuntu with GCC 14
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Toolchain
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
+      - name: Build the Shared C Library
+        run: |
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          cmake --build --preset relwithdebinfo --target usearch_shared
+      - name: Test GoLang
+        run: |
+          sudo cp ${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
+          for root in c include cpp; do sudo cp -r ${{ github.workspace }}/$root/usearch /usr/include/; done
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -v ./...
+        working-directory: ${{ github.workspace }}/golang/

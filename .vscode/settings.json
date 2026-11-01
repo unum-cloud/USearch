@@ -270,20 +270,50 @@
     "xutility": "cpp"
   },
   "files.watcherExclude": {
-    "**/build_*/**": true,
-    "**/datasets/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/build*/**": true,
+    "**/dist*/**": true,
     "**/node_modules/**": true,
-    "**/numkong/**": true,
-    "**/stringzilla/**": true,
-    "**/target/**": true
+    "**/target/**": true,
+    "data/**": true,
+    "datasets/**": true,
+    "forkunion/**": true,
+    "numkong/**": true,
+    "smashtable/**": true,
+    "stringzilla/**": true
   },
-  "python.testing.pytestArgs": ["python"],
+  "python.analysis.exclude": [
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/build*/**",
+    "**/dist*/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "data/**",
+    "datasets/**",
+    "forkunion/**",
+    "numkong/**",
+    "smashtable/**",
+    "stringzilla/**"
+  ],
+  "python.testing.pytestArgs": [
+    "python"
+  ],
   "python.testing.pytestEnabled": true,
   "python.testing.unittestEnabled": false,
   "search.exclude": {
-    "**/build_*/**": true,
-    "**/datasets/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/build*/**": true,
+    "**/dist*/**": true,
     "**/node_modules/**": true,
-    "**/target/**": true
+    "**/target/**": true,
+    "data/**": true,
+    "datasets/**": true,
+    "forkunion/**": true,
+    "numkong/**": true,
+    "smashtable/**": true,
+    "stringzilla/**": true
   }
 }

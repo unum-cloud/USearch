@@ -1,0 +1,35 @@
+name: Test Java
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test_java:
+    name: Test Java on Linux
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build Shared Library
+        run: |
+          cmake --preset library
+          cmake --build --preset library --target usearch_shared
+      # JDK 25: the language level `build.gradle` compiles for, with the final Foreign Function & Memory API.
+      - name: Set Up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Check Formatting
+        run: gradle spotlessCheck
+      # `build` stages the library CMake built above and runs the Java, Kotlin and Scala suites against it.
+      - name: Test Java
+        run: gradle build -PusearchPrebuilt=build_library

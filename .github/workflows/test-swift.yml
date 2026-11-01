@@ -1,0 +1,222 @@
+name: Test Swift
+
+on:
+  workflow_call:
+
+# `actions: read` lets the Android job, which runs in another repository's workflow, download this run's artifacts.
+permissions:
+  actions: read
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 30.0.16248370
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v50.0.1
+  SWIFT_VERSION: 6.4.0
+
+jobs:
+  build_swift_artifacts:
+    name: Build Swift Artifacts
+    uses: ./.github/workflows/build-swift.yml
+
+  # USearch links the zipped XCFramework or artifact bundle a release would ship, and NumKong the one its `swift` preset
+  # builds from the submodule.
+  test_swift_macos:
+    name: Test Swift on macOS
+    needs: build_swift_artifacts
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      USEARCH_SWIFT_ARTIFACT: USearchC.xcframework.zip
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.xcframework
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Download XCFramework
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-xcframework
+      - name: Build NumKong XCFramework
+        working-directory: numkong
+        run: |
+          cmake --preset swift
+          cmake --build --preset swift
+      - name: Test Swift
+        run: swift test
+
+  test_swift_linux:
+    name: Test Swift on Linux ${{ matrix.arch }}
+    needs: build_swift_artifacts
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 30
+    container: swift:6.4
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      USEARCH_SWIFT_ARTIFACT: USearchC.artifactbundle.zip
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Install CMake
+        run: apt-get update && apt-get install -y cmake ninja-build
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-artifactbundle
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
+          cmake --build --preset swift
+      - name: Test Swift
+        run: swift test
+
+  # Swift on Windows links the MSVC ABI, so NumKong's archive comes from `cl`, which only a developer prompt puts on
+  # the `PATH` for the Ninja generator the presets pick.
+  test_swift_windows:
+    name: Test Swift on Windows ${{ matrix.arch }}
+    needs: build_swift_artifacts
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      USEARCH_SWIFT_ARTIFACT: USearchC.artifactbundle.zip
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-artifactbundle
+      - name: Set Up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_C_COMPILER=cl -D CMAKE_CXX_COMPILER=cl
+          cmake --build --preset swift
+      - name: Set Up Swift
+        uses: compnerd/gha-setup-swift@v0.5.0
+        with:
+          swift-version: swift-${{ env.SWIFT_VERSION }}-release
+          swift-build: ${{ env.SWIFT_VERSION }}-RELEASE
+          build_arch: ${{ matrix.arch }}
+      - name: Test Swift
+        run: swift test
+
+  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names, built here because the
+  # reusable workflow below runs in a container without the NDK.
+  build_swift_android:
+    name: Build Swift Artifact Bundles for Android
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install NDK
+        run: |
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Build Artifact Bundles
+        run: |
+          set -euo pipefail
+          toolchain="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake"
+          abi() {
+            local abi=$1 arch=$2
+            local triples
+            triples="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+            (cd numkong && cmake -S . -B "build_$abi" --preset swift -D NUMKONG_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D NUMKONG_SWIFT_TRIPLES="$triples" && cmake --build "build_$abi")
+            cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D USEARCH_SWIFT_TRIPLES="$triples"
+            cmake --build "build_$abi"
+          }
+          abi arm64-v8a aarch64
+          abi armeabi-v7a armv7
+          abi x86_64 x86_64
+      - name: Upload Artifact Bundles
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-android
+          path: |
+            build_swift/USearchC.artifactbundle
+            numkong/build_swift/NumKongC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # The reusable workflow runs in another repository, so it fetches the artifact bundles through `gh`, with the token
+  # and the `actions: read` permission this workflow grants.
+  test_swift_android:
+    name: Test Swift on Android
+    needs: build_swift_android
+    uses: swiftlang/github-workflows/.github/workflows/swift_package_test.yml@fa1e46cf0f07ffde2de131e9ed5bd66a488c289c # main
+    with:
+      enable_linux_checks: false
+      enable_windows_checks: false
+      enable_android_sdk_build: true
+      enable_android_sdk_checks: true
+      needs_token: true
+      linux_env_vars: |
+        USEARCH_SWIFT_ARTIFACT=build_swift/USearchC.artifactbundle
+        NUMKONG_SWIFT_ARTIFACT=build_swift/NumKongC.artifactbundle
+      android_sdk_pre_build_command: git submodule update --init --recursive && gh run download ${{ github.run_id }} --repo ${{ github.repository }} --name swift-android
+      android_sdk_versions: '["6.4"]'
+
+  # Strict SIMD128, which every SIMD engine validates, as one archive serves every Swift WASI module.
+  test_swift_wasi:
+    name: Test Swift on WebAssembly WASI
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container: swift:6.4
+    env:
+      USEARCH_SWIFT_ARTIFACT: build_swift/USearchC.artifactbundle
+      NUMKONG_SWIFT_ARTIFACT: build_swift/NumKongC.artifactbundle
+    steps:
+      - name: Install CMake and Wasmtime
+        run: |
+          apt-get update && apt-get install -y cmake ninja-build curl xz-utils
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install WASI SDK and Swift SDK for WebAssembly
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          swift sdk install "https://download.swift.org/swift-${SWIFT_VERSION}-release/wasm-sdk/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE_wasm.artifactbundle.tar.gz" --checksum f07b7be3c586d92d7a07051fc6d303b87ebea67eadc40640ba59d5a8b79aa86d
+      - name: Build NumKong Artifact Bundle
+        working-directory: numkong
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -D NUMKONG_MARCH=v128
+          cmake --build --preset swift
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift -D CMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake \
+            -D USEARCH_SWIFT_TRIPLES=wasm32-unknown-wasip1
+          cmake --build --preset swift
+      - name: Build Library and Tests
+        run: swift build --build-tests --swift-sdk "swift-${SWIFT_VERSION}-RELEASE_wasm"
+      - name: Test under Wasmtime
+        run: ~/.wasmtime/bin/wasmtime run -S inherit-env=y --dir / .build/debug/USearchTestsSwift-test-runner.wasm --testing-library swift-testing

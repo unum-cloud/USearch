@@ -1,0 +1,174 @@
+name: Release Java
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# Each library job stages its build as `<os>-<arch>/<library>`, the directory `Library` extracts from inside the JAR.
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  create_linux_library:
+    name: Create Library for Linux ${{ matrix.arch }}
+    needs: hooks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      NM: llvm-nm
+      RANLIB: llvm-ranlib
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, target: x86_64-linux-gnu, machine: x86-64, platform: linux-amd64 }
+          - { arch: arm64, target: aarch64-linux-gnu, machine: aarch64, platform: linux-arm64 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld crossbuild-essential-arm64
+      - name: Build Library
+        run: |
+          cmake --preset library -B build_release \
+            -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_SYSTEM_NAME=Linux \
+            -D CMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }}
+          cmake --build build_release --target usearch_shared
+      # A missing Clang falls back to the host GCC, which drops the cross target without an error.
+      - name: Stage Library
+        run: |
+          mkdir -p native/${{ matrix.platform }}
+          cp build_release/libusearch_shared.so native/${{ matrix.platform }}/
+          file native/${{ matrix.platform }}/libusearch_shared.so | grep -q '${{ matrix.machine }}'
+      - name: Upload Library
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-library-${{ matrix.platform }}
+          path: native/
+          retention-days: 1
+
+  create_macos_library:
+    name: Create Library for macOS ${{ matrix.arch }}
+    needs: hooks
+    runs-on: macos-26
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, platform: darwin-arm64 }
+          - { arch: x86_64, platform: darwin-amd64 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build Library
+        run: |
+          cmake --preset library -B build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --build build_release --target usearch_shared
+      - name: Stage Library
+        run: |
+          mkdir -p native/${{ matrix.platform }}
+          cp build_release/libusearch_shared.dylib native/${{ matrix.platform }}/
+          file native/${{ matrix.platform }}/libusearch_shared.dylib | grep -q '${{ matrix.arch }}'
+      - name: Upload Library
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-library-${{ matrix.platform }}
+          path: native/
+          retention-days: 1
+
+  create_windows_library:
+    name: Create Library for Windows ${{ matrix.arch }}
+    needs: hooks
+    runs-on: windows-2025
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            platform: windows-amd64
+            configure: -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
+          - arch: arm64
+            platform: windows-arm64
+            configure: --preset msvc2022_arm64
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Build Library
+        run: |
+          cmake ${{ matrix.configure }} -B build_release
+          cmake --build build_release --config Release --target usearch_shared
+      - name: Stage Library
+        shell: bash
+        run: |
+          mkdir -p native/${{ matrix.platform }}
+          cp build_release/libusearch_shared.dll native/${{ matrix.platform }}/
+      - name: Upload Library
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-library-${{ matrix.platform }}
+          path: native/
+          retention-days: 1
+
+  attach_java:
+    name: Attach Java JAR to the Release
+    needs: [create_linux_library, create_macos_library, create_windows_library]
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Download Libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: java-library-*
+          merge-multiple: true
+          path: build/libs/usearch/shared
+      - name: Set Up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+      - name: Set Up Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Build JAR
+        run: gradle fatJar
+      - name: Check JAR Contents
+        run: |
+          jar tf build/libs/usearch-*.jar > contents.txt
+          for library in linux-amd64/libusearch_shared.so linux-arm64/libusearch_shared.so \
+            darwin-arm64/libusearch_shared.dylib darwin-amd64/libusearch_shared.dylib \
+            windows-amd64/libusearch_shared.dll windows-arm64/libusearch_shared.dll; do
+            grep -qx "usearch-native/$library" contents.txt || { echo "::error::The JAR lacks $library"; exit 1; }
+          done
+      - name: Upload JAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" build/libs/usearch-*.jar --clobber

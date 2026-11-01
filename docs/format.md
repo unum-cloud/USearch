@@ -29,10 +29,10 @@ A dense index writes `norms` where it keeps norms, and a dense load that finds n
 
 The number of live shards picks the layout, whatever the path's extension says.
 
-| Live shards | Saved to a path         | Saved to a buffer       |
-| ----------- | ----------------------- | ----------------------- |
-| one         | a monolith              | a monolith              |
-| several     | parts, then a manifest  | a manifest, then parts  |
+| Live shards | Saved to a path        | Saved to a buffer      |
+| ----------- | ---------------------- | ---------------------- |
+| one         | a monolith             | a monolith             |
+| several     | parts, then a manifest | a manifest, then parts |
 
 Each part is a monolith of one shard's graph with that shard's own node IDs, so no edge crosses parts.
 A path's parts are named `<stem>-0000k-of-0000N.safegraphs`, and its manifest lists them by `path`, `bytes` and `nodes`, written last as the commit record.
@@ -52,12 +52,12 @@ Placed shards the parts leave empty stay empty, and shards past the placed ones 
 
 ## Residencies
 
-| Index               | Saves to      | Loads from    | Views on NVMe |
-| ------------------- | ------------- | ------------- | ------------- |
-| Dense on RAM        | path, buffer  | path, buffer  | path          |
-| Dense on GPUs       | path, buffer  | path, buffer  | path          |
-| Basic on RAM        | path          | path          | path          |
-| Basic on NVIDIA     | path          | path          | path          |
+| Index           | Saves to     | Loads from   | Views on NVMe |
+| --------------- | ------------ | ------------ | ------------- |
+| Dense on RAM    | path, buffer | path, buffer | path          |
+| Dense on GPUs   | path, buffer | path, buffer | path          |
+| Basic on RAM    | path         | path         | path          |
+| Basic on NVIDIA | path         | path         | path          |
 
 Dense GPUs are NVIDIA, AMD and Apple devices; the basic modalities are sequence, shapes and geospatial.
 Any residency loads what any other saved.
@@ -80,12 +80,12 @@ The C interface keys every index by `uuid`, so it loads all three.
 
 The format describes `u32` and `u64` node IDs alike, and a reader takes only its own width.
 
-| Reader                  | `u32` IDs | `u64` IDs |
-| ----------------------- | --------- | --------- |
-| Compiled library        | loads     | refused   |
-| Dense templates         | loads     | refused   |
-| Basic with `u32` nodes  | loads     | refused   |
-| Basic with `u64` nodes  | refused   | loads     |
+| Reader                 | `u32` IDs | `u64` IDs |
+| ---------------------- | --------- | --------- |
+| Compiled library       | loads     | refused   |
+| Dense templates        | loads     | refused   |
+| Basic with `u32` nodes | loads     | refused   |
+| Basic with `u64` nodes | refused   | loads     |
 
 The compiled library's refusal names the 64-bit IDs, since its shards hold 32-bit ones.
 

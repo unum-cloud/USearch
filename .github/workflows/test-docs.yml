@@ -1,0 +1,40 @@
+name: Test Docs
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
+
+jobs:
+  build_docs:
+    name: Build Docs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
+        run: |
+          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
+      - name: Install Sphinx
+        run: pip install -r docs/requirements.txt
+      - name: Install USearch from the Checkout
+        run: pip install .
+      - name: Build Docs
+        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./build/docs/html

@@ -3,7 +3,7 @@ description: Something doesn't work as expected?
 title: "Bug: "
 labels: ["bug"]
 assignees:
-  - octocat
+  - ashvardanian
 body:
   - type: markdown
     attributes:
@@ -35,7 +35,7 @@ body:
     id: version
     attributes:
       label: USearch version
-      placeholder: v0.4.X
+      placeholder: vX.Y.Z
     validations:
       required: true
   - type: input
@@ -60,7 +60,9 @@ body:
       label: Which interface are you using?
       options:
         - C++ implementation
+        - C bindings
         - Python bindings
+        - Rust bindings
         - Other bindings
     validations:
       required: true
@@ -76,7 +78,7 @@ body:
     id: mentions
     attributes:
       label: Are you open to being tagged as a contributor?
-      description: Sometimes a good bug report is just as valuable as a patch 🤗
+      description: Sometimes, a bug report is just as valuable as a patch 🤗
       options:
         - label: I am open to being mentioned in the project `.git` history as a contributor
           required: false

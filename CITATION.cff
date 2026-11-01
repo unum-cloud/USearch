@@ -4,9 +4,9 @@ message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
 version: 3.0.0-rc.1
-doi: 10.5281/zenodo.7949415
 repository-code: https://github.com/unum-cloud/USearch
 url: https://github.com/unum-cloud/USearch
+doi: 10.5281/zenodo.7949415
 abstract: >-
   USearch is a similarity-search engine generalizable to sparse linear algebra and machine-learning
   workloads, designed to put each part of the machine on the work it is best at: GPUs for the
