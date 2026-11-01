@@ -402,15 +402,17 @@ USEARCH_EXPORT size_t usearch_search(                                         //
  *  @param[in] count Upper bound on the number of neighbors to search, the "k" in "kANN".
  *  @param[in] filter The custom filter function that returns `true` for vectors to be included.
  *  @param[in] filter_state The @b optional state pointer to be passed to the custom filter function.
+ *  @param[in] exact Skips the graph: applies the filter to every indexed vector and measures the distance only to
+ *             the included ones. The results are exact, and the search is faster when few vectors are included.
  *  @param[out] keys Output buffer for up to `count` nearest neighbors keys.
  *  @param[out] distances Output buffer for up to `count` distances to nearest neighbors.
  *  @param[out] error Pointer to a string where the error message will be stored, if an error occurs.
  *  @return Number of found matches.
  */
-USEARCH_EXPORT size_t usearch_filtered_search(                                //
-    usearch_index_t index,                                                    //
-    void const* query_vector, usearch_scalar_kind_t query_kind, size_t count, //
-    usearch_filtered_search_callback_t filter, void* filter_state,            //
+USEARCH_EXPORT size_t usearch_filtered_search(                                 //
+    usearch_index_t index,                                                     //
+    void const* query_vector, usearch_scalar_kind_t query_kind, size_t count,  //
+    usearch_filtered_search_callback_t filter, void* filter_state, bool exact, //
     usearch_key_t* keys, usearch_distance_t* distances, usearch_error_t* error);
 
 /**

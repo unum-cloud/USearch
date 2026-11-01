@@ -64,6 +64,7 @@ func filteredSearchGeneric<T>(
             Int(count),
             filterBlock,
             filterState,
+            false,
             keys,
             distances,
             $0

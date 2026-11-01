@@ -260,6 +260,73 @@ void test_find_vector(size_t const collection_size, size_t const dimensions) {
     printf("Test: Find Vector - PASSED\n");
 }
 
+static int filter_every_third(usearch_key_t key, void* state) {
+    (void)state;
+    return key % 3 == 0;
+}
+
+/**
+ *  Checks `usearch_filtered_search` with `exact` against a brute-force scan of the accepted vectors: it returns
+ *  the same distances, in ascending order, and only keys the filter accepts.
+ */
+void test_filtered_search_exact(size_t const collection_size, size_t const dimensions) {
+    printf("Test: Filtered Search Exact... %zu vectors, %zu dimensions \n", collection_size, dimensions);
+
+    usearch_error_t error = NULL;
+    usearch_init_options_t opts = create_options(dimensions);
+    usearch_index_t index = usearch_init(&opts, &error);
+    expect(!error, error);
+    usearch_reserve(index, collection_size, &error);
+    expect(!error, error);
+
+    float* data = create_vectors(collection_size, dimensions);
+    for (size_t i = 0; i < collection_size; ++i) {
+        usearch_add(index, (usearch_key_t)i, data + i * dimensions, usearch_scalar_f32_k, &error);
+        expect(!error, error);
+    }
+
+    size_t const wanted = 5;
+    size_t const accepted = (collection_size + 2) / 3;
+    size_t const expected = accepted < wanted ? accepted : wanted;
+    usearch_key_t keys[5];
+    usearch_distance_t distances[5];
+    usearch_distance_t* scan = (usearch_distance_t*)malloc(accepted * sizeof(usearch_distance_t));
+    expect(scan, "Failed to allocate memory");
+
+    for (size_t i = 0; i < collection_size; ++i) {
+        float const* query = data + i * dimensions;
+        size_t count = usearch_filtered_search(index, query, usearch_scalar_f32_k, wanted, filter_every_third, NULL,
+                                               true, keys, distances, &error);
+        expect(!error, error);
+        expect(count == expected, "Exact filtered search must return every accepted vector up to the limit");
+
+        // Brute force: the `expected` smallest distances among the accepted vectors, in ascending order.
+        size_t scanned = 0;
+        for (size_t j = 0; j < collection_size; j += 3)
+            scan[scanned++] = usearch_distance(query, data + j * dimensions, usearch_scalar_f32_k, dimensions,
+                                               opts.metric_kind, &error);
+        for (size_t a = 0; a < expected; ++a)
+            for (size_t b = a + 1; b < scanned; ++b)
+                if (scan[b] < scan[a]) {
+                    usearch_distance_t swap = scan[a];
+                    scan[a] = scan[b];
+                    scan[b] = swap;
+                }
+
+        for (size_t j = 0; j < count; ++j) {
+            expect(keys[j] % 3 == 0, "Exact filtered search returned a key the filter rejects");
+            float const tolerance = 1e-4f * (1.0f + (scan[j] < 0 ? -scan[j] : scan[j]));
+            float const delta = distances[j] - scan[j];
+            expect(delta <= tolerance && delta >= -tolerance, "Exact filtered search must match brute force");
+        }
+    }
+
+    free(scan);
+    free(data);
+    usearch_free(index, &error);
+    printf("Test: Filtered Search Exact - PASSED\n");
+}
+
 /**
  *  This test checks the ability of the index to handle multiple vectors associated with the same key. It initializes
  *  the index with the multi-option enabled, reserves space, and adds multiple vectors with the same key. The test then
@@ -517,6 +584,7 @@ int main(int argc, char const* argv[]) {
             test_init(collection_sizes[index], dimensions[jdx]);
             test_add_vector(collection_sizes[index], dimensions[jdx]);
             test_find_vector(collection_sizes[index], dimensions[jdx]);
+            test_filtered_search_exact(collection_sizes[index], dimensions[jdx]);
             test_get_vector(collection_sizes[index], dimensions[jdx]);
             test_remove_vector(collection_sizes[index], dimensions[jdx]);
             test_save_load(collection_sizes[index], dimensions[jdx]);

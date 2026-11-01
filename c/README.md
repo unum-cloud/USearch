@@ -137,8 +137,11 @@ usearch_distance_t found_distances[10];
 usearch_filtered_search(
     index, &query[0], usearch_scalar_f32_k, 10, 
     &is_odd, NULL, // no state needed for this callback
+    false,         // traverse the graph
     &found_keys[0], &found_distances[0], &error);
 ```
+
+When the predicate accepts only a small fraction of the index, pass `exact = true`: the search skips the graph, applies the predicate to every indexed vector, and measures distances only to the accepted ones, which is both faster and exact.
 
 ## Extracting, Updating, and Removing Values
 

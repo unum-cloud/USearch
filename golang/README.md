@@ -165,7 +165,13 @@ handler := &usearch.FilteredSearchHandler{
 }
 
 // Perform filtered search
-keys, distances, err := index.FilteredSearch(queryVector, 10, handler)
+keys, distances, err := index.FilteredSearch(queryVector, 10, handler, false)
+```
+
+When the handler accepts only a small fraction of the index, pass `exact = true`: the search skips the graph, applies the handler to every indexed vector, and measures distances only to the accepted ones, which is both faster and exact.
+
+```go
+keys, distances, err := index.FilteredSearch(queryVector, 10, handler, true)
 ```
 
 ## Exact Search
