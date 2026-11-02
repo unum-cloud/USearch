@@ -36,7 +36,7 @@
 #include <array>       // `std::array` - the flags, the byte-to-class fold
 #include <charconv>    // `std::from_chars` - the queries' intended rows
 #include <filesystem>  // `std::filesystem::temp_directory_path` - where a reloaded run saves
-#include <string>      // `std::string` - the lines end to end
+#include <string>      // `std::string` - the matches output, the reloaded checkpoint
 #include <string_view> // `std::string_view`
 #include <vector>      // `std::vector` - the offsets, the similarities
 
@@ -141,56 +141,25 @@ inline alphabet_t alphabet_of(std::string_view name, bool uniform) {
     return alphabet;
 }
 
-/** Entries end to end and their offsets, as the C interface takes a tape of sequences. */
-struct sequence_tape_t {
-    void const* elements = nullptr;
-    std::vector<std::size_t> offsets {0};
-
-    std::size_t size() const noexcept { return offsets.size() - 1; }
-    usearch_tape_view_t view() const noexcept { return {elements, offsets.data(), usearch_scalar_u8_k}; }
-};
-
-/** Packs every entry of @p tape over @p characters as its codes under @p alphabet into
- *  @p packed, one packed row per entry. */
-inline sequence_tape_t packed_codes_of(sequence_tape_t const& tape, std::string_view characters,
-                                       alphabet_t const& alphabet, std::string& packed) {
+/** Packs every entry of @p tape as its codes under @p alphabet, one packed row per entry. */
+inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& alphabet) {
     u32_t const code_bits = sequence::packed_code_bits(alphabet.classes);
-    sequence_tape_t packed_tape;
+    byte_tape_t packed;
     std::size_t total = 0;
     for (std::size_t row = 0; row != tape.size(); ++row)
         total += sequence::packed_codes_bytes(tape.offsets[row + 1] - tape.offsets[row], code_bits);
-    packed.resize(total);
+    packed.bytes.resize(total);
     std::vector<std::uint8_t> codes;
     for (std::size_t row = 0; row != tape.size(); ++row) {
-        std::string_view const entry = characters.substr(tape.offsets[row], tape.offsets[row + 1] - tape.offsets[row]);
+        std::string_view const entry = std::string_view {tape.bytes}.substr(tape.offsets[row],
+                                                                            tape.offsets[row + 1] - tape.offsets[row]);
         codes.clear();
         for (char const character : entry) codes.push_back(alphabet.codes[static_cast<std::uint8_t>(character)]);
-        std::size_t const first = packed_tape.offsets.back(),
-                          bytes = sequence::packed_codes_bytes(codes.size(), code_bits);
-        sequence::pack_codes(codes, code_bits, bytes_of(packed.data() + first, bytes));
-        packed_tape.offsets.push_back(first + bytes);
+        std::size_t const first = packed.offsets.back(), bytes = sequence::packed_codes_bytes(codes.size(), code_bits);
+        sequence::pack_codes(codes, code_bits, bytes_of(packed.bytes.data() + first, bytes));
+        packed.offsets.push_back(first + bytes);
     }
-    packed_tape.elements = packed.data();
-    return packed_tape;
-}
-
-/** The lines of @p text as entries end to end in @p characters, each newline dropped with a
- *  carriage return before it. */
-inline sequence_tape_t lines_of(bytes_view_t text, std::string& characters) {
-    sequence_tape_t tape;
-    characters.reserve(text.size());
-    for (byte_t const byte : text) {
-        char const character = static_cast<char>(byte);
-        if (character != '\n') {
-            characters.push_back(character);
-            continue;
-        }
-        if (characters.size() != tape.offsets.back() && characters.back() == '\r') characters.pop_back();
-        tape.offsets.push_back(characters.size());
-    }
-    if (characters.size() != tape.offsets.back()) tape.offsets.push_back(characters.size());
-    tape.elements = characters.data();
-    return tape;
+    return packed;
 }
 
 /** Runs the sequence search benchmark over the flags in @p argv. */
@@ -220,13 +189,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     print(settings);
 
     std::string_view const metric_name = search.metric_name.empty() ? "levenshtein" : search.metric_name;
-    usearch_sequence_metric_t const metric = metric_name == "levenshtein" ? usearch_sequence_metric_levenshtein_bytes_k
-                                             : metric_name == "levenshtein-utf8"
-                                                 ? usearch_sequence_metric_levenshtein_utf8_k
-                                             : metric_name == "overlap" ? usearch_sequence_metric_overlap_k
-                                             : metric_name == "needleman-wunsch"
-                                                 ? usearch_sequence_metric_needleman_wunsch_k
-                                                 : usearch_sequence_metric_unknown_k;
+    usearch_sequence_metric_t const metric = usearch_sequence_metric_from_name(bytes_view(metric_name));
     if (metric == usearch_sequence_metric_unknown_k)
         return fmt::println(
                    stderr,
@@ -271,10 +234,9 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
     usearch_sequence_weights_t const weights = alphabet.weights(), searched_weights = searched_alphabet.weights();
     auto [file, read_status] = mapped_file_t::read(base_texts_path);
     if (failed(read_status)) return fmt::println(stderr, "--base-texts=\"{}\" could not be read", base_texts_path), 1;
-    std::string characters, packed;
-    sequence_tape_t tape = lines_of(file.view(), characters);
+    byte_tape_t tape = lines_of(file.view());
     // The index reads the packed codes alone.
-    if (aligned) tape = packed_codes_of(tape, characters, alphabet, packed), std::string {}.swap(characters);
+    if (aligned) tape = packed_codes_of(tape, alphabet);
     if (tape.size() <= search.queries.value)
         return fmt::println(stderr, "The file holds {} entries, too few to hold out {} queries", tape.size(),
                             search.queries.value),
@@ -284,7 +246,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                                                                  : query_first;
     if (aligned)
         fmt::println("- Alphabet: {} · {} classes · {} bytes packed · searched under {} costs", alphabet_name,
-                     alphabet.classes, packed.size(), search_costs);
+                     alphabet.classes, tape.bytes.size(), search_costs);
 
     // The base row each held-out query intends, judged by key at rank 1 and among the top-k.
     std::vector<u64_t> query_targets;
@@ -292,12 +254,11 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
         auto [targets_file, targets_status] = mapped_file_t::read(query_targets_path);
         if (failed(targets_status))
             return fmt::println(stderr, "--query-targets=\"{}\" could not be read", query_targets_path), 1;
-        std::string targets_text;
-        sequence_tape_t const targets = lines_of(targets_file.view(), targets_text);
+        byte_tape_t const targets = lines_of(targets_file.view());
         for (std::size_t row = 0; row != targets.size(); ++row) {
             u64_t target = 0;
-            std::from_chars(targets_text.data() + targets.offsets[row], targets_text.data() + targets.offsets[row + 1],
-                            target);
+            std::from_chars(targets.bytes.data() + targets.offsets[row],
+                            targets.bytes.data() + targets.offsets[row + 1], target);
             query_targets.push_back(target);
         }
         if (query_targets.size() != search.queries.value)

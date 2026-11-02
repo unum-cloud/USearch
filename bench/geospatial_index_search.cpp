@@ -29,7 +29,7 @@
 #include <cstdlib> // `std::strtod` - signed terrain degrees
 
 #include <algorithm>   // `std::min`, `std::max`
-#include <array>       // `std::array` - the relations, a town's centre
+#include <array>       // `std::array` - a town's centre
 #include <limits>      // `std::numeric_limits` - the unbounded time slack
 #include <span>        // `std::span` - the observations, from a file or generated
 #include <string_view> // `std::string_view`
@@ -83,19 +83,6 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
     return places;
 }
 
-/** One relation a run may judge, by the name its flag takes. */
-struct relation_name_t {
-    std::string_view name;
-    usearch_geospatial_relation_t relation;
-};
-
-inline constexpr std::array<relation_name_t, 4> relation_names_k {{
-    {"near", usearch_geospatial_relation_near_k},
-    {"visible", usearch_geospatial_relation_visible_k},
-    {"sees", usearch_geospatial_relation_sees_k},
-    {"seen", usearch_geospatial_relation_seen_k},
-}};
-
 /** The signed degrees @p text spells, or NaN when it spells none. */
 inline f64_t degrees_of(std::string_view text) noexcept {
     // Text values view the tail of their `argv` entry, so `strtod` stops at its terminator.
@@ -129,10 +116,8 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
     flags.insert(flags.end(), own.begin(), own.end());
     settings_t const settings = read_settings(argc, argv, "usearch_bench_geospatial_index_search [flags]", flags);
     print(settings);
-    relation_name_t const* relation = nullptr;
-    for (relation_name_t const& candidate : relation_names_k)
-        if (candidate.name == relation_text) relation = &candidate;
-    if (!relation)
+    usearch_geospatial_relation_t const relation = geospatial_relation_of(relation_text);
+    if (relation == usearch_geospatial_relation_unknown_k)
         return fmt::println(stderr, "--relation=\"{}\" does not parse, expected near, visible, sees or seen",
                             relation_text),
                1;
@@ -190,12 +175,12 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
     std::size_t const base_count = search.max_base_entries.value ? std::min(search.max_base_entries.value, query_first)
                                                                  : query_first;
     fmt::println("- Observations: {} · relation: {} · radius: {} m · terrain: {} × {} heights",
-                 observations_path.empty() ? std::string_view {"GeoNames-like"} : observations_path, relation->name,
+                 observations_path.empty() ? std::string_view {"GeoNames-like"} : observations_path, relation_text,
                  radius_metres, terrain.rows, terrain.columns);
 
     geospatial_geometry_t const geometry {{search.connectivity.value}, terrain};
     geospatial_queries_t const queries {observations.data() + query_first,
-                                        relation->relation,
+                                        relation,
                                         {radius_metres, std::numeric_limits<f64_t>::infinity()}};
     return run_search_bench<geospatial_verbs_t>(settings, search, geometry, geometry, observations.data(), base_count,
                                                 queries, search.queries.value, settings.checkpoint);

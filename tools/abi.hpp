@@ -19,7 +19,7 @@
  *  USEARCH_SEED        42               Seed every scenario's data derives from, an unsigned integer or random
  *  USEARCH_FILTER      none             Checks to run, by name, as an ECMAScript regex or else as a substring
  *  USEARCH_DEVICES     first of each    Comma-separated USearch device ordinals the GPU work runs on
- *  USEARCH_NVME_PATHS  none             Comma-separated files, block devices or transport IDs NVMe serves from
+ *  USEARCH_NVME_PATHS  none             Comma-separated paths or transport IDs an NVMe view serves parts from
  *  --filter            none             Checks to run, overriding USEARCH_FILTER
  *  --residency         ram              Where an index lives: ram, vram or nvme
  *  --cpu-class         derived          The CPU class to dispatch as, like intel-icelake or serial
@@ -28,7 +28,8 @@
  *  --threads           derived          Worker threads of a RAM or NVMe executor
  *  --shards            one per domain   Shards each index opens on, over the memory domains or the devices
  *  --shard-capacity    unbounded        Entries one shard holds before another shard generation opens
- *  --checkpoint        none             Path to save a built index under and reopen it from
+ *  --checkpoint        none             File or device address to save a built index to and reopen it from
+ *  --huge-pages        0                Free 1 GiB huge pages the host must hold at launch, enforced
  *  @endverbatim
  *
  *  Every flag also reads its default from a @c RETRIEVAL_ variable named after it, the one
@@ -40,7 +41,7 @@
 #include <cmath>   // `std::fabs`, `std::log2` - the score tolerance, the ranking discounts
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`, `std::uint64_t`
-#include <cstdio>  // `std::remove`, `stdout` - the round-tripped checkpoints, the terminal probe
+#include <cstdio>  // `std::remove`, `stdout`, `std::fopen` - the round-tripped checkpoints, the terminal probe, io.stat
 #include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
 #include <cstring> // `std::memcpy`, `std::memcmp` - the counters, the keys
 
@@ -74,6 +75,7 @@
 
 #include "usearch/usearch.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t` - the dataset parts, the compared checkpoints
+#include "usearch/utilities/nvme_device.hpp"    // `file_medium_t`, `block_bytes_of`, `reads_directly` - views' reads
 #include "usearch/utilities/types.hpp"          // `uuid_t`, `u64_t`
 #include "usearch/utilities/vram_device.hpp"    // `cuda_device_of`, `hip_device_of` - device outputs read back
 
@@ -635,12 +637,22 @@ struct settings_t {
     /** Path to save a built index under and reopen it from in its residency; empty keeps it. */
     std::string_view checkpoint;
 
+    /** Free 1 GiB huge pages the host must hold at launch; zero expects none, any other value is
+     *  enforced, so a base-page fallback cannot pass as a huge-page result. */
+    count_t huge_pages {.minimum = 0};
+
     /** Whether stdout is a terminal, so progress redraws one line instead of printing deciles. */
     bool terminal = false;
 };
 
+/** The flag every binary checking @ref huge_pages_provisioned takes. */
+inline flag_t huge_pages_flag(count_t& huge_pages) noexcept {
+    return {"--huge-pages", "count",
+            "free 1 GiB huge pages required at launch; enforced, so base-page fallbacks fail fast", &huge_pages};
+}
+
 /** The flags every binary reading a @ref settings_t takes. */
-inline std::array<flag_t, 9> settings_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 10> settings_flags(settings_t& settings) noexcept {
     return {{
         {"--filter", "pattern", "checks to run, as a regex or a substring; every one by default", &settings.filter},
         {"--residency", "name", "where an index lives: ram, vram or nvme; ram by default", &settings.residency},
@@ -656,8 +668,35 @@ inline std::array<flag_t, 9> settings_flags(settings_t& settings) noexcept {
         {"--shard-capacity", "entries",
          "entries one shard holds before another shard generation opens; unbounded by default",
          &settings.shard_capacity},
-        {"--checkpoint", "path", "path to save the built index under and reopen it from", &settings.checkpoint},
+        {"--checkpoint", "address",
+         "file or device address, like /dev/nvme1n1@64GiB, to save the built index to and reopen",
+         &settings.checkpoint},
+        huge_pages_flag(settings.huge_pages),
     }};
+}
+
+/** The whole text of the file at @p path, none where it cannot be opened. */
+inline std::optional<std::string> read_text(char const* path) {
+    std::FILE* const file = std::fopen(path, "r");
+    if (!file) return std::nullopt;
+    std::string text;
+    std::array<char, 4096> chunk;
+    for (std::size_t read = 0; (read = std::fread(chunk.data(), 1, chunk.size(), file)) != 0;)
+        text.append(chunk.data(), read);
+    std::fclose(file);
+    return text;
+}
+
+/** Whether the host's 1 GiB pool holds the @p expected free pages a run declares, which the
+ *  launcher provisions outside the process; prints why not. */
+inline bool huge_pages_provisioned(std::size_t expected) {
+    if (!expected) return true;
+    std::optional<std::string> const text = read_text("/sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages");
+    std::size_t free_pages = 0;
+    if (text) std::from_chars(text->data(), text->data() + text->size(), free_pages);
+    if (free_pages < expected)
+        fmt::println("--huge-pages expects {} free 1 GiB pages, but the host offers {}", expected, free_pages);
+    return free_pages >= expected;
 }
 
 /** Reads the settings the environment holds, exiting with status 1 on the first that does not
@@ -684,34 +723,51 @@ inline settings_t read_environment() {
 }
 
 /** Reads the environment, then parses @p argv against the shared flags and @p binary_flags. On
- *  `--help` prints the usage and exits with status 0; on a setting that does not parse prints one
- *  line and exits with status 1. */
+ *  <tt>--help</tt> prints the usage and exits with status 0; on a setting that does not parse, or huge
+ *  pages the host does not hold, prints one line and exits with status 1. */
 inline settings_t read_settings(int argc, char const* const* argv, std::string_view synopsis,
                                 std::span<flag_t const> binary_flags = {}) {
     settings_t settings = read_environment();
     std::vector<flag_t> flags(binary_flags.begin(), binary_flags.end());
-    std::array<flag_t, 9> const shared = settings_flags(settings);
+    std::array<flag_t, 10> const shared = settings_flags(settings);
     flags.insert(flags.end(), shared.begin(), shared.end());
     parse_or_exit(argc, argv, synopsis, flags);
+    if (!huge_pages_provisioned(settings.huge_pages.value)) std::exit(1);
     return settings;
 }
 
+/** How a view reads @p path: "direct" past the page cache, "buffered" through it, or "unopened"
+ *  before it opens; a transport ID reads directly and stays closed, as SPDK starts once. */
+inline std::string_view nvme_reads_name(std::string_view path) noexcept {
+    if (names_transport_id(path)) return "direct";
+    auto const [medium, open_status] = file_medium_t::open(path);
+    if (failed(open_status)) return "unopened";
+    return reads_directly(medium) ? "direct" : "buffered";
+}
+
 /** Prints each setting @ref read_environment reads as "- Name: value", in the grammar it parses
- *  from; calls nothing of the library, so header-only suites print it too. */
+ *  from, and how views read each NVMe path; calls nothing of the library, so header-only suites
+ *  print it too. */
 inline void print_environment(settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
     fmt::println("- Filter: {}", settings.filter.pattern.empty() ? "none" : settings.filter.pattern);
     if (settings.devices.empty()) fmt::println("- Devices: derived");
     else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
-    if (settings.nvme_paths.empty()) fmt::println("- NVMe paths: none");
-    else fmt::println("- NVMe paths: {}", fmt::join(settings.nvme_paths, ","));
+    if (settings.nvme_paths.empty()) return fmt::println("- NVMe paths: none");
+    fmt::println("- NVMe paths: {}", fmt::join(settings.nvme_paths, ","));
+    std::vector<std::string_view> reads;
+    for (std::string_view const path : settings.nvme_paths) reads.push_back(nvme_reads_name(path));
+    fmt::println("- NVMe reads: {}", fmt::join(reads, ","));
 }
 
 /** Prints each setting as "- Name: value", in the grammar it parses from. */
 inline void print(settings_t const& settings) {
     print_environment(settings);
     fmt::println("- Residency: {}", usearch_residency_name(settings.residency));
-    fmt::println("- CPU class: {}", usearch_cpu_class_name(settings.cpu_class));
+    // Unpinned runs dispatch on the index, whose "- Index:" line names the class it picked.
+    fmt::println("- CPU class: {}", settings.cpu_class == usearch_cpu_class_unknown_k
+                                        ? "derived"
+                                        : usearch_cpu_class_name(settings.cpu_class));
     fmt::println("- GPU class: {}", usearch_gpu_class_name(settings.gpu_class));
     fmt::println("- NVMe class: {}", usearch_nvme_class_name(settings.nvme_class));
 }
@@ -768,7 +824,14 @@ struct session_t {
     /** The USearch device ordinals a VRAM index places shards on, in turn. */
     std::vector<std::int32_t> devices;
 
-    /** The NVMe namespaces views serve from, borrowed from the settings. */
+    /** The NVMe namespaces a save places its parts on, one per part, borrowed from the settings. */
+    std::vector<std::string_view> places;
+
+    /** What views read those parts through: the places themselves, or under passthrough each block
+     *  node's generic character node. */
+    std::vector<std::string> served;
+
+    /** The served namespaces as the C interface borrows them. */
     std::vector<usearch_bytes_view_t> paths;
 
     /** The memory domains RAM shards repeat over, in turn. */
@@ -800,7 +863,8 @@ struct session_t {
     void swap(session_t& other) noexcept {
         std::swap(residency, other.residency), std::swap(seed, other.seed), std::swap(cpu_class, other.cpu_class);
         std::swap(gpu_class, other.gpu_class), std::swap(devices, other.devices);
-        std::swap(paths, other.paths), std::swap(memory_domains, other.memory_domains);
+        std::swap(places, other.places), std::swap(served, other.served), std::swap(paths, other.paths);
+        std::swap(memory_domains, other.memory_domains);
         std::swap(shard_capacity, other.shard_capacity), std::swap(executor, other.executor);
         std::swap(storage, other.storage), std::swap(arena, other.arena);
     }
@@ -841,6 +905,15 @@ struct session_t {
     }
 };
 
+/** The generic character node serving the namespace at @p address, a block node of the kernel's
+ *  NVMe driver, at the same base and length; empty for any other address. */
+inline std::string character_sibling(std::string_view address) {
+    // The kernel names a namespace's character node after its block node: nvmeXnY and ngXnY.
+    std::string_view const block_prefix = "/dev/nvme";
+    if (!address.starts_with(block_prefix)) return {};
+    return fmt::format("/dev/ng{}", address.substr(block_prefix.size()));
+}
+
 /** Opens the executors and the arena of @p settings ' residency, every index of the session
  *  dispatching as @p pinned on the CPU; prints what failed and answers a session that tests
  *  false. */
@@ -861,7 +934,14 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
         }
     if (topology) fu_topology_delete(topology);
     if (session.memory_domains.empty()) session.memory_domains.push_back(0);
-    for (std::string_view const path : settings.nvme_paths) session.paths.push_back(bytes_view(path));
+    // Parts are written through block nodes, and passthrough reads them through character nodes.
+    bool const passthrough = settings.nvme_class == usearch_nvme_class_linux_uring_passthrough_k;
+    for (std::string_view const place : settings.nvme_paths) {
+        std::string const sibling = character_sibling(place);
+        session.places.push_back(place);
+        session.served.push_back(passthrough && !sibling.empty() ? sibling : std::string {place});
+    }
+    for (std::string const& path : session.served) session.paths.push_back(bytes_view(path));
     usearch_outcome_t outcome {};
     if (session.residency == usearch_residency_vram_k) {
         std::vector<usearch_gpu_device_t> const listed = listed_devices();
@@ -945,6 +1025,8 @@ struct dense_verbs_t {
     using index_t = usearch_dense_index_t;
     using description_t = usearch_dense_index_description_t;
     using geometry_t = usearch_dense_metadata_t;
+    using metadata_t = usearch_dense_metadata_t;
+    using metric_t = usearch_dense_metric_t;
     using values_t = usearch_rows_view_t;
     using queries_t = usearch_rows_view_t;
     static constexpr std::string_view name_k = "dense";
@@ -993,11 +1075,36 @@ struct dense_verbs_t {
         usearch_dense_save(&arguments);
     }
     static void load_ram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                         usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                         usearch_ram_options_t ram, geometry_t const& geometry, usearch_outcome_t* outcome) noexcept {
         usearch_dense_load_ram_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.ram = ram;
+        arguments.ram = ram, arguments.connectivity = geometry.connectivity;
         usearch_dense_load_ram(&arguments);
+    }
+    static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                            usearch_bytes_view_t* monolith, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_save_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.monolith = monolith, arguments.arena = arena;
+        usearch_dense_save_buffer(&arguments);
+    }
+    static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
+                                usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_load_ram_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.ram = ram;
+        usearch_dense_load_ram_buffer(&arguments);
+    }
+    static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
+                                     usearch_outcome_t* outcome) noexcept {
+        usearch_dense_metadata_read_buffer_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.metadata = metadata;
+        usearch_dense_metadata_read_buffer(&arguments);
+    }
+    static char const* metric_name(metric_t metric) noexcept { return usearch_dense_metric_name(metric); }
+    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
+        return usearch_dense_metric_from_name(name);
     }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
@@ -1031,16 +1138,19 @@ struct dense_verbs_t {
         usearch_dense_clear(&arguments);
     }
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, std::size_t expansion = 0) noexcept {
         usearch_dense_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_dense_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr,
+                       std::size_t expansion = 0) noexcept {
         usearch_dense_absorb_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.donors = donors;
+        arguments.report = report, arguments.expansion_factor = expansion;
         usearch_dense_absorb(&arguments);
     }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
@@ -1051,11 +1161,37 @@ struct dense_verbs_t {
         usearch_dense_health(&arguments);
     }
     static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                      std::size_t expansion = 0) noexcept {
         usearch_dense_split_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_dense_split(&arguments);
+    }
+    using refinement_t = usearch_dense_refinement_t;
+    static void refinement_init(index_t index, usearch_executor_t executor, refinement_t* refinement,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_dense_refinement_init_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement;
+        usearch_dense_refinement_init(&arguments);
+    }
+    static void refinement_next(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                usearch_progress_t progress, std::size_t* reselected, std::size_t* changed,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_dense_refinement_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.progress = progress;
+        arguments.reselected = reselected, arguments.changed = changed;
+        usearch_dense_refinement_next(&arguments);
+    }
+    static void refinement_finish(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_dense_refinement_finish_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.report = report;
+        usearch_dense_refinement_finish(&arguments);
     }
     using cursor_t = usearch_dense_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1106,6 +1242,8 @@ struct sequence_verbs_t {
     using index_t = usearch_sequence_index_t;
     using description_t = usearch_sequence_index_description_t;
     using geometry_t = sequence_geometry_t;
+    using metadata_t = usearch_sequence_metadata_t;
+    using metric_t = usearch_sequence_metric_t;
     using values_t = usearch_tape_view_t;
     using queries_t = usearch_tape_view_t;
     static constexpr std::string_view name_k = "sequence";
@@ -1173,6 +1311,32 @@ struct sequence_verbs_t {
         arguments.ram = ram, arguments.weights = geometry.weights;
         usearch_sequence_load_ram(&arguments);
     }
+    static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                            usearch_bytes_view_t* monolith, usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_save_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.monolith = monolith, arguments.arena = arena;
+        usearch_sequence_save_buffer(&arguments);
+    }
+    static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
+                                usearch_ram_options_t ram, geometry_t const& geometry,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_load_ram_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.ram = ram, arguments.weights = geometry.weights;
+        usearch_sequence_load_ram_buffer(&arguments);
+    }
+    static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
+                                     usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_metadata_read_buffer_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.metadata = metadata;
+        usearch_sequence_metadata_read_buffer(&arguments);
+    }
+    static char const* metric_name(metric_t metric) noexcept { return usearch_sequence_metric_name(metric); }
+    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
+        return usearch_sequence_metric_from_name(name);
+    }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const& geometry,
                           usearch_outcome_t* outcome) noexcept {
@@ -1209,16 +1373,19 @@ struct sequence_verbs_t {
         usearch_sequence_clear(&arguments);
     }
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, std::size_t expansion = 0) noexcept {
         usearch_sequence_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_sequence_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr,
+                       std::size_t expansion = 0) noexcept {
         usearch_sequence_absorb_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.donors = donors;
+        arguments.report = report, arguments.expansion_factor = expansion;
         usearch_sequence_absorb(&arguments);
     }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
@@ -1229,11 +1396,37 @@ struct sequence_verbs_t {
         usearch_sequence_health(&arguments);
     }
     static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                      std::size_t expansion = 0) noexcept {
         usearch_sequence_split_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_sequence_split(&arguments);
+    }
+    using refinement_t = usearch_sequence_refinement_t;
+    static void refinement_init(index_t index, usearch_executor_t executor, refinement_t* refinement,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_refinement_init_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement;
+        usearch_sequence_refinement_init(&arguments);
+    }
+    static void refinement_next(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                usearch_progress_t progress, std::size_t* reselected, std::size_t* changed,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_refinement_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.progress = progress;
+        arguments.reselected = reselected, arguments.changed = changed;
+        usearch_sequence_refinement_next(&arguments);
+    }
+    static void refinement_finish(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_refinement_finish_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.report = report;
+        usearch_sequence_refinement_finish(&arguments);
     }
     using cursor_t = usearch_sequence_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1276,6 +1469,8 @@ struct shapes_verbs_t {
     using index_t = usearch_shapes_index_t;
     using description_t = usearch_shapes_index_description_t;
     using geometry_t = usearch_shapes_metadata_t;
+    using metadata_t = usearch_shapes_metadata_t;
+    using metric_t = usearch_shapes_metric_t;
     using values_t = usearch_tape_view_t;
     using queries_t = usearch_tape_view_t;
     static constexpr std::string_view name_k = "shapes";
@@ -1329,6 +1524,31 @@ struct shapes_verbs_t {
         arguments.ram = ram;
         usearch_shapes_load_ram(&arguments);
     }
+    static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                            usearch_bytes_view_t* monolith, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_save_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.monolith = monolith, arguments.arena = arena;
+        usearch_shapes_save_buffer(&arguments);
+    }
+    static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
+                                usearch_ram_options_t ram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_load_ram_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.ram = ram;
+        usearch_shapes_load_ram_buffer(&arguments);
+    }
+    static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
+                                     usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_metadata_read_buffer_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.metadata = metadata;
+        usearch_shapes_metadata_read_buffer(&arguments);
+    }
+    static char const* metric_name(metric_t metric) noexcept { return usearch_shapes_metric_name(metric); }
+    static metric_t metric_from_name(usearch_bytes_view_t name) noexcept {
+        return usearch_shapes_metric_from_name(name);
+    }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const&, usearch_outcome_t* outcome) noexcept {
         usearch_shapes_load_vram_t arguments {};
@@ -1363,16 +1583,19 @@ struct shapes_verbs_t {
         usearch_shapes_clear(&arguments);
     }
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, std::size_t expansion = 0) noexcept {
         usearch_shapes_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_shapes_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr,
+                       std::size_t expansion = 0) noexcept {
         usearch_shapes_absorb_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.donors = donors;
+        arguments.report = report, arguments.expansion_factor = expansion;
         usearch_shapes_absorb(&arguments);
     }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
@@ -1383,11 +1606,37 @@ struct shapes_verbs_t {
         usearch_shapes_health(&arguments);
     }
     static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                      std::size_t expansion = 0) noexcept {
         usearch_shapes_split_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_shapes_split(&arguments);
+    }
+    using refinement_t = usearch_shapes_refinement_t;
+    static void refinement_init(index_t index, usearch_executor_t executor, refinement_t* refinement,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_refinement_init_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement;
+        usearch_shapes_refinement_init(&arguments);
+    }
+    static void refinement_next(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                usearch_progress_t progress, std::size_t* reselected, std::size_t* changed,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_refinement_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.progress = progress;
+        arguments.reselected = reselected, arguments.changed = changed;
+        usearch_shapes_refinement_next(&arguments);
+    }
+    static void refinement_finish(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_refinement_finish_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.report = report;
+        usearch_shapes_refinement_finish(&arguments);
     }
     using cursor_t = usearch_shapes_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1445,6 +1694,7 @@ struct geospatial_verbs_t {
     using index_t = usearch_geospatial_index_t;
     using description_t = usearch_geospatial_index_description_t;
     using geometry_t = geospatial_geometry_t;
+    using metadata_t = usearch_geospatial_metadata_t;
     using values_t = usearch_geospatial_observation_t const*;
     using queries_t = geospatial_queries_t;
     static constexpr std::string_view name_k = "geospatial";
@@ -1500,6 +1750,28 @@ struct geospatial_verbs_t {
         arguments.ram = ram, arguments.terrain = geometry.terrain;
         usearch_geospatial_load_ram(&arguments);
     }
+    static void save_buffer(index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                            usearch_bytes_view_t* monolith, usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_save_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.monolith = monolith, arguments.arena = arena;
+        usearch_geospatial_save_buffer(&arguments);
+    }
+    static void load_ram_buffer(index_t* index, usearch_executor_t executor, usearch_bytes_view_t buffer,
+                                usearch_ram_options_t ram, geometry_t const& geometry,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_load_ram_buffer_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.ram = ram, arguments.terrain = geometry.terrain;
+        usearch_geospatial_load_ram_buffer(&arguments);
+    }
+    static void metadata_read_buffer(usearch_executor_t executor, usearch_bytes_view_t buffer, metadata_t* metadata,
+                                     usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_metadata_read_buffer_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome, arguments.buffer = buffer;
+        arguments.metadata = metadata;
+        usearch_geospatial_metadata_read_buffer(&arguments);
+    }
     static void load_vram(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
                           usearch_vram_options_t vram, geometry_t const& geometry,
                           usearch_outcome_t* outcome) noexcept {
@@ -1536,16 +1808,19 @@ struct geospatial_verbs_t {
         usearch_geospatial_clear(&arguments);
     }
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, std::size_t expansion = 0) noexcept {
         usearch_geospatial_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_geospatial_refine(&arguments);
     }
     static void absorb(index_t index, usearch_executor_t executor, index_t* donors, std::size_t count,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr,
+                       std::size_t expansion = 0) noexcept {
         usearch_geospatial_absorb_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.donors = donors;
+        arguments.report = report, arguments.expansion_factor = expansion;
         usearch_geospatial_absorb(&arguments);
     }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
@@ -1556,11 +1831,37 @@ struct geospatial_verbs_t {
         usearch_geospatial_health(&arguments);
     }
     static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                      std::size_t expansion = 0) noexcept {
         usearch_geospatial_split_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+        arguments.expansion_factor = expansion;
         usearch_geospatial_split(&arguments);
+    }
+    using refinement_t = usearch_geospatial_refinement_t;
+    static void refinement_init(index_t index, usearch_executor_t executor, refinement_t* refinement,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_refinement_init_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement;
+        usearch_geospatial_refinement_init(&arguments);
+    }
+    static void refinement_next(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                usearch_progress_t progress, std::size_t* reselected, std::size_t* changed,
+                                usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_refinement_next_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.progress = progress;
+        arguments.reselected = reselected, arguments.changed = changed;
+        usearch_geospatial_refinement_next(&arguments);
+    }
+    static void refinement_finish(index_t index, usearch_executor_t executor, refinement_t refinement,
+                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_refinement_finish_t arguments {};
+        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+        arguments.refinement = refinement, arguments.report = report;
+        usearch_geospatial_refinement_finish(&arguments);
     }
     using cursor_t = usearch_geospatial_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1622,6 +1923,10 @@ struct handle {
     usearch_residency_t residency = usearch_residency_ram_k;
     geometry_t geometry {};
 
+    /** The block every read of a view covers, which counts the bytes a process read as reads; zero
+     *  outside a view. */
+    u64_t block_bytes = 0;
+
     handle() = default;
     handle(index_t index, session_t& session, usearch_residency_t residency, geometry_t const& geometry) noexcept
         : index(index), session(&session), residency(residency), geometry(geometry) {}
@@ -1629,10 +1934,11 @@ struct handle {
     handle& operator=(handle const&) = delete;
     handle(handle&& other) noexcept
         : index(std::exchange(other.index, nullptr)), session(other.session), residency(other.residency),
-          geometry(other.geometry) {}
+          geometry(other.geometry), block_bytes(other.block_bytes) {}
     handle& operator=(handle&& other) noexcept {
         std::swap(index, other.index), std::swap(session, other.session);
         std::swap(residency, other.residency), std::swap(geometry, other.geometry);
+        std::swap(block_bytes, other.block_bytes);
         return *this;
     }
     ~handle() noexcept { verbs_type_::free(index); }
@@ -1645,8 +1951,8 @@ struct handle {
 };
 
 /** Opens an empty index of @p geometry on @p shards shards of @p session, in RAM for an NVMe
- *  session; zero shards takes one per domain or device. Prints what failed and answers an empty
- *  handle. */
+ *  session; zero shards takes one per path of an NVMe session that names paths, else one per domain
+ *  or device. Prints what failed and answers an empty handle. */
 template <typename verbs_type_>
 handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometry_t const& geometry,
                                std::size_t shards) {
@@ -1655,6 +1961,8 @@ handle<verbs_type_> open_index(session_t& session, typename verbs_type_::geometr
     std::vector<std::int32_t> placement;
     usearch_residency_t const residency = session.residency == usearch_residency_vram_k ? usearch_residency_vram_k
                                                                                         : usearch_residency_ram_k;
+    // An NVMe session places one part per path, so the build spreads over as many shards.
+    if (!shards && session.residency == usearch_residency_nvme_k) shards = session.places.size();
     if (residency == usearch_residency_vram_k)
         verbs_type_::init_vram(&index, geometry, session.vram_options(shards, placement), &outcome);
     else verbs_type_::init_ram(&index, geometry, session.ram_options(shards, placement), &outcome);
@@ -1709,18 +2017,13 @@ void print_fill(handle<verbs_type_> const& index) {
                  usearch_gpu_class_name(described.gpu_class));
 }
 
-/** Saves @p index under @p path and reopens it in @p residency on the same session: loaded into RAM
- *  or onto the session's devices, or viewed on its NVMe executor. Prints what failed and answers an
- *  empty handle. */
+/** Reopens the checkpoint at @p path of @p geometry in @p residency on @p session : loaded into RAM
+ *  or onto @p shards of the session's devices, or viewed on its NVMe executor from the session's
+ *  served paths when it names any. Prints what failed and answers an empty handle. */
 template <typename verbs_type_>
-handle<verbs_type_> save_and_reopen(handle<verbs_type_>&& index, std::string_view path, usearch_residency_t residency) {
-    session_t& session = *index.session;
-    typename verbs_type_::geometry_t const geometry = index.geometry;
+handle<verbs_type_> reopen(session_t& session, std::string_view path, typename verbs_type_::geometry_t const& geometry,
+                           usearch_residency_t residency, std::size_t shards) {
     usearch_outcome_t outcome {};
-    verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
-    if (report_failure(outcome, fmt::format("Saving {}", path))) return {};
-    std::size_t const shards = describe(index).shards_count;
-    index = {};
     typename verbs_type_::index_t reopened = nullptr;
     std::vector<std::int32_t> placement;
     if (residency == usearch_residency_nvme_k)
@@ -1733,7 +2036,27 @@ handle<verbs_type_> save_and_reopen(handle<verbs_type_>&& index, std::string_vie
         verbs_type_::load_ram(&reopened, session.executor, bytes_view(path), session.ram_options(0, placement),
                               geometry, &outcome);
     report_failure(outcome, fmt::format("Reopening {}", path));
-    return {reopened, session, residency, geometry};
+    handle<verbs_type_> opened {reopened, session, residency, geometry};
+    if (residency == usearch_residency_nvme_k && !names_transport_id(path)) {
+        auto const [medium, medium_status] = file_medium_t::open(path);
+        if (succeeded(medium_status)) opened.block_bytes = block_bytes_of(medium);
+    }
+    return opened;
+}
+
+/** Saves @p index under @p path and reopens it in @p residency on the same session, as @ref reopen
+ *  does, first placing an NVMe save's parts on the session's places when it names any. Prints what
+ *  failed and answers an empty handle. */
+template <typename verbs_type_>
+handle<verbs_type_> save_and_reopen(handle<verbs_type_>&& index, std::string_view path, usearch_residency_t residency) {
+    session_t& session = *index.session;
+    typename verbs_type_::geometry_t const geometry = index.geometry;
+    usearch_outcome_t outcome {};
+    verbs_type_::save(index.get(), index.executor(), bytes_view(path), &outcome);
+    if (report_failure(outcome, fmt::format("Saving {}", path))) return {};
+    std::size_t const shards = describe(index).shards_count;
+    index = {};
+    return reopen<verbs_type_>(session, path, geometry, residency, shards);
 }
 
 #pragma endregion Handles
@@ -1875,6 +2198,82 @@ class mapped_rows_t {
     usearch_scalar_t scalar() const noexcept { return scalar_; }
     explicit operator bool() const noexcept { return !parts_.empty(); }
 };
+
+/** Entries end to end and where each starts, as the C interface takes a tape of bytes. */
+struct byte_tape_t {
+    std::string bytes;
+    std::vector<std::size_t> offsets {0};
+
+    std::size_t size() const noexcept { return offsets.size() - 1; }
+    usearch_tape_view_t view() const noexcept { return {bytes.data(), offsets.data(), usearch_scalar_u8_k}; }
+};
+
+/** The lines of @p text as entries, each newline dropped with a carriage return before it. */
+inline byte_tape_t lines_of(bytes_view_t text) {
+    byte_tape_t lines;
+    lines.bytes.reserve(text.size());
+    for (byte_t const byte : text) {
+        char const character = static_cast<char>(byte);
+        if (character != '\n') {
+            lines.bytes.push_back(character);
+            continue;
+        }
+        if (lines.bytes.size() != lines.offsets.back() && lines.bytes.back() == '\r') lines.bytes.pop_back();
+        lines.offsets.push_back(lines.bytes.size());
+    }
+    if (lines.bytes.size() != lines.offsets.back()) lines.offsets.push_back(lines.bytes.size());
+    return lines;
+}
+
+/** Point clouds mapped from two RetriEval files, every cloud's points end to end and the points per
+ *  cloud, and each cloud's first point, as a tape takes them. */
+struct point_clouds_t {
+    mapped_rows_t points;
+    mapped_rows_t counts;
+    std::vector<std::size_t> offsets {0};
+
+    std::size_t size() const noexcept { return offsets.size() - 1; }
+    usearch_tape_view_t view() const noexcept {
+        return {points.view(0, points.rows()).data, offsets.data(), points.scalar()};
+    }
+};
+
+/** Maps the clouds of @p points_path, 3 f32 or f16 columns per point, and @p counts_path, 1 u32
+ *  column per cloud, into @p clouds; false after printing why it cannot. */
+inline bool open_point_clouds(std::string_view points_path, std::string_view counts_path, point_clouds_t& clouds) {
+    auto [points, points_status] = mapped_rows_t::open(points_path);
+    if (failed(points_status) || points.columns() != 3 ||
+        (points.scalar() != usearch_scalar_f32_k && points.scalar() != usearch_scalar_f16_k)) {
+        fmt::println(stderr, "{} must hold 3 f32 or f16 columns per point", points_path);
+        return false;
+    }
+    auto [counts, counts_status] = mapped_rows_t::open(counts_path);
+    if (failed(counts_status) || counts.columns() != 1) {
+        fmt::println(stderr, "{} must hold 1 column per cloud", counts_path);
+        return false;
+    }
+    clouds.points = std::move(points), clouds.counts = std::move(counts);
+    std::uint32_t const* const point_counts = static_cast<std::uint32_t const*>(
+        clouds.counts.view(0, clouds.counts.rows()).data);
+    for (std::size_t cloud = 0; cloud != clouds.counts.rows(); ++cloud)
+        clouds.offsets.push_back(clouds.offsets.back() + point_counts[cloud]);
+    if (clouds.offsets.back() != clouds.points.rows()) {
+        fmt::println(stderr, "{} sums to {} points, {} holds {}", counts_path, clouds.offsets.back(), points_path,
+                     clouds.points.rows());
+        return false;
+    }
+    return true;
+}
+
+/** The relation a geospatial search asks, by the name its flag takes: near, visible, sees or seen;
+ *  unknown for any other. */
+inline usearch_geospatial_relation_t geospatial_relation_of(std::string_view name) noexcept {
+    if (name == "near") return usearch_geospatial_relation_near_k;
+    if (name == "visible") return usearch_geospatial_relation_visible_k;
+    if (name == "sees") return usearch_geospatial_relation_sees_k;
+    if (name == "seen") return usearch_geospatial_relation_seen_k;
+    return usearch_geospatial_relation_unknown_k;
+}
 
 #pragma endregion Datasets
 
@@ -2042,29 +2441,136 @@ inline double ndcg_at(std::size_t k, copied_matches_t const& found, copied_match
     return answerable ? gain_sum / static_cast<double>(answerable) : 0;
 }
 
+/** Reads and bytes the block layer counted for this process's cgroup, summed over its disks. */
+struct cgroup_reads_t {
+    u64_t reads = 0;
+    u64_t bytes = 0;
+};
+
+/** The text of the file @p name in this process's cgroup v2 directory, none where the kernel keeps
+ *  no such file, as off Linux or in the root cgroup. */
+inline std::optional<std::string> cgroup_text(std::string_view name) {
+    std::optional<std::string> const membership = read_text("/proc/self/cgroup");
+    // The unified hierarchy's line reads `0::<path>`.
+    std::size_t const unified = membership ? membership->find("0::") : std::string::npos;
+    if (unified == std::string::npos || (unified && (*membership)[unified - 1] != '\n')) return std::nullopt;
+    std::size_t const end = membership->find('\n', unified);
+    std::string_view const scope = std::string_view {*membership}.substr(unified + 3, end - unified - 3);
+    return read_text(fmt::format("/sys/fs/cgroup{}/{}", scope, name).c_str());
+}
+
+/** What @c /proc/self/io counts this process fetched from the block layer so far, every kernel
+ *  engine's reads included, as reads of @p block_bytes each; none off Linux or without a block. */
+inline std::optional<cgroup_reads_t> process_reads(u64_t block_bytes) {
+    std::optional<std::string> const io = read_text("/proc/self/io");
+    constexpr std::string_view key = "read_bytes: ";
+    std::size_t const found = io ? io->find(key) : std::string::npos;
+    if (!block_bytes || found == std::string::npos) return std::nullopt;
+    cgroup_reads_t counted;
+    std::from_chars_result const parsed = std::from_chars(io->data() + found + key.size(), io->data() + io->size(),
+                                                          counted.bytes);
+    if (parsed.ec != std::errc {}) return std::nullopt;
+    counted.reads = counted.bytes / block_bytes;
+    return counted;
+}
+
+/** What this process's cgroup @c io.stat counts so far, every kernel engine's reads on every
+ *  disk, or what @ref process_reads counts in @p block_bytes reads under a user scope that keeps
+ *  no such file. */
+inline std::optional<cgroup_reads_t> cgroup_reads(u64_t block_bytes) {
+    std::optional<std::string> const stat = cgroup_text("io.stat");
+    if (!stat) return process_reads(block_bytes);
+    cgroup_reads_t counted;
+    std::string_view text {*stat};
+    while (!text.empty()) {
+        std::size_t const space = std::min(text.find_first_of(" \n"), text.size());
+        std::string_view const token = text.substr(0, space);
+        std::string_view const digits = token.substr(token.find('=') + 1);
+        u64_t value = 0;
+        std::from_chars_result const parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+        if (parsed.ec == std::errc {} && token.starts_with("rbytes=")) counted.bytes += value;
+        if (parsed.ec == std::errc {} && token.starts_with("rios=")) counted.reads += value;
+        text.remove_prefix(std::min(space + 1, text.size()));
+    }
+    return counted;
+}
+
+/** The @p quantile of @p samples, reordering them around it. */
+inline double percentile(std::span<u64_t> samples, double quantile) noexcept {
+    std::size_t const rank = static_cast<std::size_t>(quantile * static_cast<double>(samples.size() - 1));
+    std::nth_element(samples.begin(), samples.begin() + rank, samples.end());
+    return static_cast<double>(samples[rank]);
+}
+
+/** Times single-query searches of @p queries on @p index 's executor one after another, from the
+ *  first of @p count on, until @p budget has passed; @p latencies takes each call's nanoseconds. */
+template <typename verbs_type_>
+usearch_outcome_t time_single_queries(handle<verbs_type_>& index, typename verbs_type_::queries_t queries,
+                                      std::size_t count, std::size_t wanted, std::size_t expansion,
+                                      std::chrono::steady_clock::duration budget, std::vector<u64_t>& latencies) {
+    usearch_outcome_t outcome {};
+    latencies.clear();
+    latencies.reserve(count);
+    std::chrono::steady_clock::time_point const deadline = std::chrono::steady_clock::now() + budget;
+    for (std::size_t query = 0; query != count && std::chrono::steady_clock::now() < deadline; ++query) {
+        usearch_matches_view_t matches {};
+        usearch_traversal_stats_t stats {};
+        std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
+        verbs_type_::search(index.get(), index.executor(), index.session->arena, 1, verbs_type_::slice(queries, query),
+                            wanted, expansion, usearch_traversal_walk_k, &matches, &stats, &outcome);
+        latencies.push_back(static_cast<u64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()));
+        if (outcome.status != usearch_status_success_k) return outcome;
+    }
+    return outcome;
+}
+
 /** Searches @p count queries of @p queries at every breadth of @p expansions, printing each
  *  breadth's recall at one and at @p wanted and its nDCG against @p oracle, its throughput and its
- *  distances per query, then handing its matches to @p on_swept as `(expansion, matches)`. */
+ *  distances per query, then handing its matches to @p on_swept as @b (expansion,matches). A view
+ *  on NVMe also prints the reads and bytes its cgroup's @c io.stat counted per query, and the p50
+ *  and p99 of single-query calls over judged queries, timed after the throughput pass for as long
+ *  as that pass took, since each one walks alone. */
 template <typename verbs_type_, typename swept_type_ = dummy_progress_t>
 usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                                copied_matches_t const& oracle, std::span<std::size_t const> expansions,
                                std::size_t wanted, std::size_t batch, swept_type_&& on_swept = {}) {
     usearch_outcome_t outcome {};
+    std::vector<u64_t> latencies;
     for (std::size_t const expansion : expansions) {
         copied_matches_t found;
         usearch_traversal_stats_t stats {};
+        std::optional<cgroup_reads_t> const reads_before = index.residency == usearch_residency_nvme_k
+                                                               ? cgroup_reads(index.block_bytes)
+                                                               : std::nullopt;
         std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
         outcome = search_queries(index, queries, count, batch, wanted, expansion, usearch_traversal_walk_k, stats,
                                  found);
-        double const seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        std::chrono::steady_clock::duration const batched = std::chrono::steady_clock::now() - started;
+        double const seconds = std::chrono::duration<double>(batched).count();
+        std::optional<cgroup_reads_t> const reads_after = reads_before ? cgroup_reads(index.block_bytes) : std::nullopt;
         if (outcome.status != usearch_status_success_k) return outcome;
         fmt::println("- Expansion {}: recall@1 {:.4f} · recall@{} {:.4f} · nDCG@{} {:.4f} over {} judged", expansion,
                      recall_at(1, found, oracle), wanted, recall_at(wanted, found, oracle), wanted,
                      ndcg_at(wanted, found, oracle), oracle.counts.size());
         double const per_query = 1.0 / static_cast<double>(count);
         fmt::println("  {} queries in {:.2f} s · {:.0f} QPS", count, seconds, static_cast<double>(count) / seconds);
-        fmt::println("  per query: {:.0f} distances · {:.0f} visited", stats.computed_distances * per_query,
-                     stats.visited_members * per_query);
+        if (!reads_after)
+            fmt::println("  per query: {:.0f} distances · {:.0f} visited", stats.computed_distances * per_query,
+                         stats.visited_members * per_query);
+        else
+            fmt::println("  per query: {:.0f} distances · {:.0f} visited · {:.1f} reads · {:.1f} KiB",
+                         stats.computed_distances * per_query, stats.visited_members * per_query,
+                         static_cast<double>(reads_after->reads - reads_before->reads) * per_query,
+                         static_cast<double>(reads_after->bytes - reads_before->bytes) * per_query / 1024);
+        if (index.residency == usearch_residency_nvme_k) {
+            std::size_t const judged = std::min(count, oracle.counts.size());
+            outcome = time_single_queries(index, queries, judged, wanted, expansion, batched, latencies);
+            if (outcome.status != usearch_status_success_k) return outcome;
+            if (!latencies.empty())
+                fmt::println("  latency: p50 {:.0f} µs · p99 {:.0f} µs over {} single-query calls",
+                             percentile(latencies, 0.50) / 1e3, percentile(latencies, 0.99) / 1e3, latencies.size());
+        }
         on_swept(expansion, found);
     }
     return outcome;

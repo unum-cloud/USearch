@@ -378,8 +378,8 @@ struct settings_t {
     /** First dataset row to view, keyed by its row - slices one file across independent runs. */
     count_t first_vector {.minimum = 0};
 
-    /** Huge pages the launcher provisioned before starting the process; zero expects none, any
-     *  other value is enforced, so a base-page fallback cannot pass as a huge-page result. */
+    /** Free 1 GiB huge pages the host must hold at launch; zero expects none, any other value is
+     *  enforced, so a base-page fallback cannot pass as a huge-page result. */
     count_t huge_pages {.minimum = 0};
 
     /** Ingest the second half of the rows into a donor index and absorb it into the first, so the
@@ -489,7 +489,7 @@ inline std::array<flag_t, 3> indexer_flags(settings_t& settings) noexcept {
  *  --max-schedule    the newest offered        Scheduling ceiling by wait instruction, or standard
  *  --threads         7/8 of the logical cores  Worker threads
  *  --memory-domain   the heap                  NUMA domain to pin to; all in dense_ram_indexes
- *  --huge-pages      0                         Huge pages provisioned before launch, enforced
+ *  --huge-pages      0                         Free 1 GiB huge pages required at launch, enforced
  *  @endverbatim
  */
 inline std::array<flag_t, 5> cpu_flags(settings_t& settings) noexcept {
@@ -501,8 +501,7 @@ inline std::array<flag_t, 5> cpu_flags(settings_t& settings) noexcept {
         {"--threads", "count", "threads; 7/8 of the logical cores by default", &settings.threads},
         {"--memory-domain", "id", "pin memory & threads to one NUMA domain; `all` in `dense_ram_indexes` only",
          &settings.memory_domain_name},
-        {"--huge-pages", "count", "huge pages provisioned before launch; enforced, so base-page fallbacks fail fast",
-         &settings.huge_pages},
+        tools::huge_pages_flag(settings.huge_pages),
     }};
 }
 
@@ -771,7 +770,6 @@ template <typename index_type_, typename... stream_types_>
 static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u64_t const> id_to_row,
                                    float scale, stream_types_ const&... stream) {
     using scalar_t = typename index_type_::scalar_t;
-    using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
     std::string const path = checkpoint_path_of(settings, index, settings.save_name);
     std::string const scale_text = fmt::format("{}", scale);
@@ -786,18 +784,15 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
         return 0;
     }
     auto [file, map_status] = mapped_file_t::write(path, header.monolith_bytes());
-    // One step's rows at most: a storage chunk never holds more, and the device plan ignores it.
-    auto scratch =
-        nk::matrix<node_id_t>::zeros({min_of(shape.nodes, power_of_two<std::size_t>(20)), shape.connectivity}).value;
-    if (failed(map_status) || (shape.nodes && scratch.empty())) {
-        fmt::println("Failed to map {} or to stage the neighbor scratch", path);
+    if (failed(map_status)) {
+        fmt::println("Failed to map {}", path);
         return 0;
     }
     bytes_span_t const monolith = file.span();
     status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
                                        header.rows_of(monolith, header.neighbors, 0, shape.nodes),
                                        header.rows_of(monolith, norms.column, 0, shape.nodes)},
-                                      synchronization_t::immutable_k, scratch.span(), stream...);
+                                      synchronization_t::immutable_k, stream...);
     if (failed(saved)) {
         fmt::println("Failed to serialize the index: {}", status_to_string(saved));
         return 0;
@@ -1076,20 +1071,6 @@ struct bench_launch {
     machine_t const& machine;
 };
 
-/** Whether the domains report the huge pages `--huge-pages` expects, which the launcher provisions outside the
- *  process; prints why not. */
-inline bool huge_pages_provisioned(machine_t const& machine, settings_t const& settings) {
-    if (!settings.huge_pages.value) return true;
-    std::size_t volume = 0;
-    for (std::size_t domain = 0; domain != machine.memory_domains; ++domain) {
-        std::size_t domain_volume = 0;
-        if (fu_volume_huge_pages_in(machine.topology, domain, &domain_volume) != fu_success_k) continue;
-        volume += domain_volume;
-    }
-    if (!volume) fmt::println("--huge-pages expects {}, but the domains report none", settings.huge_pages.value);
-    return volume != 0;
-}
-
 /** Opens the RetriEval matrix @p path, or the parts its glob pattern names, in the scalar its
  *  extension names, the hop lowering the file's dtype to the C++ wrapper a run is instantiated
  *  over, with the rows of @p queries_path and @p neighbors_path when named, and exits with what
@@ -1176,7 +1157,7 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
     settings.cores = settings.threads.value;
     print(machine);
     print(settings);
-    if (!huge_pages_provisioned(machine, settings)) return 1;
+    if (!tools::huge_pages_provisioned(settings.huge_pages.value)) return 1;
 
     int const exit_code = open_dataset(
         settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,

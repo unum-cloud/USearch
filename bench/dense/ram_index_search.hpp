@@ -347,11 +347,11 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
         changed_per_pass.push_back(pass_result.changed_nodes);
         report.islands_found += pass_result.islands_found;
         report.islands_reconnected += pass_result.islands_reconnected;
-        report.reachable_nodes = pass_result.health.reachable_nodes;
-        report.sweeps = pass_result.health.sweeps;
-        report.sums.visited_members += pass_result.telemetry.visited_members;
-        report.sums.computed_distances += pass_result.telemetry.computed_distances;
-        report.sums.restarts += pass_result.telemetry.restarts;
+        report.reachable_nodes = pass_result.reachability.reachable_nodes;
+        report.sweeps = pass_result.reachability.sweeps;
+        report.sums.visited_members += pass_result.traversal_stats.visited_members;
+        report.sums.computed_distances += pass_result.traversal_stats.computed_distances;
+        report.sums.restarts += pass_result.traversal_stats.restarts;
         progress.tick(pass + 1);
         if (!pass_result.changed_nodes) break;
     }

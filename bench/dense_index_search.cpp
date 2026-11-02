@@ -8,11 +8,12 @@
  *
  *  The index runs as users run it, through a session of the residency `--residency` names. An NVMe
  *  run builds in RAM, saves to `--checkpoint` or the temporary directory, and searches a view of
- *  the checkpoint on storage threads submitting through `--nvme-class`. Every row is keyed by its
- *  global dataset row, so slices built apart keep distinct keys: `--base-vectors` takes a glob of
- *  parts numbering their rows on across each other, and `--first-vector` with `--max-base-vectors`
- *  picks a slice that must lie inside one part, viewed in place. Ground truth names global rows,
- *  and is ignored once a slice reshapes the graph it was computed for.
+ *  the checkpoint on storage threads submitting through the NVMe class. A checkpoint already
+ *  holding a live graph is reopened as it is, with nothing built or saved. Every row is keyed by
+ *  its global dataset row, so slices built apart keep distinct keys: @c --base-vectors takes a
+ *  glob of parts numbering their rows on across each other, and @c --first-vector with
+ *  @c --max-base-vectors picks a slice that must lie inside one part, viewed in place. Ground
+ *  truth names global rows, and is ignored once a slice reshapes the graph it was computed for.
  *
  *  @verbatim
  *  Flag                Default                      Meaning
@@ -40,6 +41,7 @@
 #include <chrono>     // `std::chrono::steady_clock` - the phase clocks
 #include <filesystem> // `std::filesystem::temp_directory_path` - where an NVMe run saves
 #include <string>     // `std::string` - the checkpoint path
+#include <utility>    // `std::exchange` - the builder released before a view serves
 
 #include <fmt/format.h>
 
@@ -168,25 +170,22 @@ int bench_dense_index_search(int argc, char const* const* argv) {
 
     session_t session = open_session(settings, settings.cpu_class);
     if (!session) return 1;
-    usearch_dense_metadata_t const geometry {metric, stored, base.columns(), search.connectivity.value};
-    handle<dense_verbs_t> index = open_index<dense_verbs_t>(session, geometry, settings.shards.value);
-    if (!index) return 1;
-
-    usearch_traversal_stats_t built {};
-    progress_bar_t building {"build", rows, settings.terminal};
-    std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
-    usearch_outcome_t const inserted = insert_entries(index, vectors, rows, first_row, search.batch.value,
-                                                      search.expansion_add.value, built,
-                                                      [&](std::size_t inserted) { building.tick(inserted); });
-    building.finish();
-    if (report_failure(inserted, "Inserting")) return 1;
-    double const build_seconds = seconds_since(build_start);
-    fmt::println("- Build: {} rows in {:.2f} s · {}/s · {:.0f} distances per row", humanized(rows), build_seconds,
-                 humanized(rows / build_seconds),
-                 static_cast<double>(built.computed_distances) / static_cast<double>(rows));
-    if (!refine_passes(index, search.max_refines.value)) return 1;
-    if (search.compact_capacity.value && !compact_in_place(index, search.compact_capacity.value)) return 1;
-    print_fill(index);
+    // A checkpoint holding a graph reopens as it is, so class and thread sweeps share one build.
+    usearch_dense_metadata_t saved {};
+    usearch_outcome_t saved_outcome {};
+    if (!settings.checkpoint.empty()) {
+        usearch_dense_metadata_read_t read {.outcome = &saved_outcome,
+                                            .path = bytes_view(settings.checkpoint),
+                                            .metadata = &saved};
+        usearch_dense_metadata_read(&read);
+    }
+    bool const reused = !settings.checkpoint.empty() && saved_outcome.status == usearch_status_success_k;
+    if (reused && saved.dimensions != base.columns())
+        return fmt::println(stderr, "--checkpoint=\"{}\" holds {} columns, and the vectors {}", settings.checkpoint,
+                            saved.dimensions, base.columns()),
+               1;
+    usearch_dense_metadata_t const geometry =
+        reused ? saved : usearch_dense_metadata_t {metric, stored, base.columns(), search.connectivity.value};
 
     // An NVMe run serves a view of what it built, from the checkpoint it saves.
     std::string const checkpoint =
@@ -194,14 +193,48 @@ int bench_dense_index_search(int argc, char const* const* argv) {
         : settings.residency == usearch_residency_nvme_k
             ? (std::filesystem::temp_directory_path() / "usearch-bench-dense.safegraphs").string()
             : std::string();
-    if (!checkpoint.empty()) {
+    handle<dense_verbs_t> index;
+    if (reused) {
+        fmt::println("- Reusing {}: a live {} graph of {} columns of {}, so nothing is built or saved", checkpoint,
+                     usearch_dense_metric_name(saved.metric), saved.dimensions,
+                     usearch_scalar_name(saved.quantization));
         std::chrono::steady_clock::time_point const reopen_start = std::chrono::steady_clock::now();
-        index = save_and_reopen(std::move(index), checkpoint, settings.residency);
+        index = reopen<dense_verbs_t>(session, checkpoint, geometry, settings.residency, settings.shards.value);
         if (!index) return 1;
         fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, usearch_residency_name(settings.residency),
                      seconds_since(reopen_start));
         print_fill(index);
     }
+    else {
+        index = open_index<dense_verbs_t>(session, geometry, settings.shards.value);
+        if (!index) return 1;
+
+        usearch_traversal_stats_t built {};
+        progress_bar_t building {"build", rows, settings.terminal};
+        std::chrono::steady_clock::time_point const build_start = std::chrono::steady_clock::now();
+        usearch_outcome_t const inserted = insert_entries(index, vectors, rows, first_row, search.batch.value,
+                                                          search.expansion_add.value, built,
+                                                          [&](std::size_t inserted) { building.tick(inserted); });
+        building.finish();
+        if (report_failure(inserted, "Inserting")) return 1;
+        double const build_seconds = seconds_since(build_start);
+        fmt::println("- Build: {} rows in {:.2f} s · {}/s · {:.0f} distances per row", humanized(rows), build_seconds,
+                     humanized(rows / build_seconds),
+                     static_cast<double>(built.computed_distances) / static_cast<double>(rows));
+        if (!refine_passes(index, search.max_refines.value)) return 1;
+        if (search.compact_capacity.value && !compact_in_place(index, search.compact_capacity.value)) return 1;
+        print_fill(index);
+        if (!checkpoint.empty()) {
+            std::chrono::steady_clock::time_point const reopen_start = std::chrono::steady_clock::now();
+            index = save_and_reopen(std::move(index), checkpoint, settings.residency);
+            if (!index) return 1;
+            fmt::println("- Reopened {} as {} in {:.2f} s", checkpoint, usearch_residency_name(settings.residency),
+                         seconds_since(reopen_start));
+            print_fill(index);
+        }
+    }
+    // A view serves on its NVMe executor alone, where the builder's idle workers would only spin.
+    if (index.residency == usearch_residency_nvme_k) usearch_executor_free(std::exchange(session.executor, nullptr));
 
     mapped_rows_t query_file;
     usearch_rows_view_t queries = vectors;

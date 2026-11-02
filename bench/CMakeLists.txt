@@ -25,6 +25,17 @@ target_link_libraries(
                                                  ${USEARCH_PUNNED_LIBRARIES}
 )
 
+# The engine reads bench drives the I/O engines themselves over a live monolith on a drive, beside the matching `fio`
+# line; it links the library only for the C names its shared flags parse.
+add_executable(usearch_bench_nvme_device_reads nvme_device_reads.cpp)
+usearch_setup_target(usearch_bench_nvme_device_reads HOST)
+target_include_directories(
+    usearch_bench_nvme_device_reads PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools
+)
+target_link_libraries(
+    usearch_bench_nvme_device_reads PRIVATE fmt::fmt yyjson forkunion::static ${USEARCH_PUNNED_LIBRARIES}
+)
+
 # The kernel microbench times the distance kits alone, one row per kernel, dtype, capability tier and shape; it links
 # the library only for the C names its shared flags parse.
 add_executable(usearch_bench_dense_ram_metric dense/ram_metric.cpp)
@@ -33,4 +44,4 @@ target_include_directories(
     usearch_bench_dense_ram_metric PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools
                                            ${PROJECT_SOURCE_DIR}/src
 )
-target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt ${USEARCH_PUNNED_LIBRARIES})
+target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt yyjson ${USEARCH_PUNNED_LIBRARIES})
