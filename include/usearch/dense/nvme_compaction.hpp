@@ -351,7 +351,6 @@ struct [[nodiscard]] nvme_compact_plan {
     using vector_norms_t = typename indexes_t::vector_norms_t;
     using search_config_t = typename indexes_t::search_config_t;
     using medium_t = typename indexes_t::medium_t;
-    using extent_t = typename indexes_t::extent_t;
     using walk_t = typename indexes_t::walk_t;
     using results_array_t = typename indexes_t::results_array_t;
     using scratch_allocator_t = typename indexes_t::scratch_allocator_t;
@@ -1073,20 +1072,19 @@ struct [[nodiscard]] nvme_compact_plan {
             }
             return run = 0, columns.back();
         };
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
             std::size_t run = 0;
             staged_column_t const& column = locate(task, run);
             std::size_t const run_rows = run_rows_of(column);
             std::size_t const row = run * run_rows, rows = min_of(run_rows, count - row);
-            return {
-                extent_t {part, column.begin + u64_t(first + row) * column.row_bytes, u64_t(rows) * column.row_bytes}};
+            return {nvme_extent_t {column.begin + u64_t(first + row) * column.row_bytes,
+                                   static_cast<u32_t>(rows * column.row_bytes), part}};
         };
-        auto consume = [&](std::size_t, std::size_t task, auto const& extents, auto const& fetched) noexcept {
+        auto consume = [&](std::size_t, std::size_t task, u64_t, auto const& extents, auto const& fetched) noexcept {
             std::size_t run = 0;
             staged_column_t const& column = locate(task, run);
-            std::memcpy(column.staging + run * run_rows_of(column) * column.row_bytes, fetched[0],
-                        static_cast<std::size_t>(extents[0].bytes));
+            std::memcpy(column.staging + run * run_rows_of(column) * column.row_bytes, fetched[0], extents[0].length);
         };
         auto const [reads, status] = view.scan_reads_(executor, tasks, describe, consume);
         result_.scan_reads += reads;
@@ -1101,11 +1099,11 @@ struct [[nodiscard]] nvme_compact_plan {
                           row_of_type_&& row_of, destination_of_type_&& destination_of, executor_t& executor,
                           nvme_reads_t& reads) noexcept {
         if (!tasks) return status_t::success_k;
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
-            return {extent_t {0, begin + u64_t(row_of(task)) * row_bytes, row_bytes}};
+            return {nvme_extent_t {begin + u64_t(row_of(task)) * row_bytes, static_cast<u32_t>(row_bytes), 0}};
         };
-        auto consume = [&](std::size_t, std::size_t task, auto const&, auto const& fetched) noexcept {
+        auto consume = [&](std::size_t, std::size_t task, u64_t, auto const&, auto const& fetched) noexcept {
             std::memcpy(destination_of(task), fetched[0], row_bytes);
         };
         auto [call, call_status] = view.begin_scans_(executor, 1);
@@ -1442,11 +1440,7 @@ struct [[nodiscard]] nvme_compact_plan {
         traversals_t traversals {scratch_allocator_t {executor.arena(0)}};
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
         status_t refusal = status_t::success_k;
-        auto refuse = [&](status_t status) noexcept {
-            status_t unset = status_t::success_k;
-            if (failed(status))
-                atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
-        };
+        auto refuse = [&](status_t status) noexcept { keep_first_failure<atomic_ref>(refusal, status); };
         // One row per task, as a RAM group inserts, so the threads interleave from the first row.
         auto insert = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             vectors_view_t const inserted_row {reinterpret_cast<scalar_t const*>(values + row * value_row_bytes_()),
@@ -1515,17 +1509,13 @@ struct [[nodiscard]] nvme_compact_plan {
         if (status_t const reserved = index.reserve({nodes}).status; failed(reserved)) return reserved;
         // One call holds the executor for the load, the refine and the writes; it reads no medium.
         typename ram_index_t::insert_config_t const sizing {static_cast<u32_t>(expansion_factor_())};
-        auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {},
+        auto [call, call_status] = nvme_begin_call(executor, std::span<medium_t const> {}, executor.queue_depth(),
                                                    index.traversal_memory_usage(sizing), 0, 0);
         if (failed(call_status)) return call_status;
         traversals_t traversals {scratch_allocator_t {executor.arena(0)}};
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
         status_t refusal = status_t::success_k;
-        auto refuse = [&](status_t status) noexcept {
-            status_t unset = status_t::success_k;
-            if (failed(status))
-                atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
-        };
+        auto refuse = [&](status_t status) noexcept { keep_first_failure<atomic_ref>(refusal, status); };
         {
             auto [load, load_status] = index.plan_load(nodes);
             if (failed(load_status)) return load_status;
@@ -1831,15 +1821,16 @@ struct [[nodiscard]] nvme_compact_plan {
         auto [call, call_status] = target.view.begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
 
-        auto whole_run = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+        auto whole_run = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
             std::size_t const first = task * run_rows;
-            return {
-                extent_t {0, part.neighbors_begin + first * row_bytes, min_of(run_rows, nodes - first) * row_bytes}};
+            return {nvme_extent_t {part.neighbors_begin + first * row_bytes,
+                                   static_cast<u32_t>(min_of(run_rows, nodes - first) * row_bytes), 0}};
         };
-        auto count_links = [&](std::size_t, std::size_t task, auto const& extents, auto const& fetched) noexcept {
+        auto count_links = [&](std::size_t, std::size_t task, u64_t, auto const& extents,
+                               auto const& fetched) noexcept {
             auto const* const neighbors = reinterpret_cast<node_id_t const*>(fetched[0]);
-            for (std::size_t slot = 0; slot != extents[0].bytes / sizeof(node_id_t); ++slot) {
+            for (std::size_t slot = 0; slot != extents[0].length / sizeof(node_id_t); ++slot) {
                 std::size_t const neighbor = neighbors[slot];
                 if (neighbor >= nodes || neighbor == task * run_rows + slot / connectivity) continue;
                 atomic_ref<u64_t> const word {in_links[neighbor / 32]};
@@ -1859,15 +1850,16 @@ struct [[nodiscard]] nvme_compact_plan {
             for (; bound != nodes && islands != capacity; ++bound) islands += !links_of(bound);
             result_.compaction.graph.islands_found += islands;
             alignas(default_alignment_k) std::size_t taken = 0;
-            auto island_rows = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            auto island_rows = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
                 std::size_t const task_first = from + task * run_rows;
                 std::size_t row = task_first + progress, end = min_of(task_first + run_rows, bound);
                 while (row != end && links_of(row)) ++row;
                 if (row == end) return {};
                 progress = row + 1 - task_first;
-                return {extent_t {0, part.neighbors_begin + row * row_bytes, row_bytes}};
+                return {nvme_extent_t {part.neighbors_begin + row * row_bytes, static_cast<u32_t>(row_bytes), 0}};
             };
-            auto pick_targets = [&](std::size_t, std::size_t, auto const& extents, auto const& fetched) noexcept {
+            auto pick_targets = [&](std::size_t, std::size_t, u64_t, auto const& extents,
+                                    auto const& fetched) noexcept {
                 std::size_t const island = static_cast<std::size_t>((extents[0].begin - part.neighbors_begin) /
                                                                     row_bytes);
                 auto const* const neighbors = reinterpret_cast<node_id_t const*>(fetched[0]);

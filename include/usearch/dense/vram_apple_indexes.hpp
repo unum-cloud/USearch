@@ -41,11 +41,15 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the host columns' placement
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `load_config_t`, `safegraphs_read_metadata`
 #include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shards, their keys & routing
+#include "usearch/utilities/ram_walks.hpp"         // `cursor_walk` - the cursor's walk
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/shard_checkpoints.hpp"
 #include "usearch/dense/vram_apple_index.hpp"
 
 namespace unum::usearch::dense {
+
+template <typename indexes_type_>
+struct vram_apple_indexes_cursor;
 
 /**
  *  @brief The sharded index: same-geometry Apple-resident shards viewed as one.
@@ -63,6 +67,10 @@ template <                                        //
     typename wait_type_ = dummy_waiter_t,         //
     typename key_hash_type_ = std::hash<key_type_>>
 struct vram_apple_indexes {
+
+    /** A reader's walk over every shard's published entries: as stored in placement order, or
+     *  breadth-first from the entries it opens on, each with the keys it links to. */
+    using cursor_t = vram_apple_indexes_cursor<vram_apple_indexes>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
     using index_t = vram_apple_index<vector_dtype_, capability_, metal_shared_allocator_t, metal_shared_allocator_t,
@@ -218,6 +226,13 @@ struct vram_apple_indexes {
 
     /** The read-only shard at @p shard. */
     index_t const& shard(std::size_t shard) const noexcept { return *shards_[shard].index; }
+
+    /** The epoch a cursor opens under; @ref still_valid tells whether a destructive window opened
+     *  since. */
+    u64_t read_epoch() const noexcept { return shards_.read_epoch(); }
+
+    /** Whether no destructive window opened since @p epoch, so a cursor's reads still stand. */
+    bool still_valid(u64_t epoch) const noexcept { return shards_.still_valid(epoch); }
 
     /** The geometry every shard keeps, fixed at construction - @ref emplace refused any other. */
     geometry_t geometry() const noexcept { return geometry_; }
@@ -2329,8 +2344,9 @@ struct vram_apple_indexes {
      *  straight out of its part. */
     template <typename plan_type_>
     status_t drain_steps_(plan_type_& plan) noexcept {
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
-                                           nk::matrix_span<node_id_t> scratch) { planned.save(step, scratch); };
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
+            planned.save(step);
+        };
         std::size_t const shards = shards_.size();
         auto const steps = plan.steps();
         std::size_t deepest = 0;
@@ -2340,7 +2356,7 @@ struct vram_apple_indexes {
                 iota_view<std::size_t> const own = plan.steps_of(shard);
                 if (position >= own.size()) continue;
                 status_t stepped = status_t::success_k;
-                if constexpr (saving_k) stepped = plan.save(steps[own.first + position], {});
+                if constexpr (saving_k) stepped = plan.save(steps[own.first + position]);
                 else stepped = plan.load(steps[own.first + position]);
                 if (failed(stepped)) return stepped;
             }
@@ -2383,6 +2399,199 @@ struct vram_apple_indexes {
 
     /** Shared by every mutator for one call, alone by every destructive window; never swapped. */
     alignas(default_alignment_k) shared_mutex_t gate_;
+};
+
+/**
+ *  @brief A reader's walk over the entries of one @c vram_apple_indexes as its shards stood at
+ *      open: every entry as stored, shard after shard, or breadth-first from the start entries,
+ *      each entry once, each with the keys it links to.
+ *
+ *  Every call names the index it walks, which must be the one the cursor opened on. One shard
+ *  cursor per shard copies the neighbor rows of one block of nodes out of unified memory whenever a
+ *  seek leaves the block it holds, so the walk holds no row a growth may free between pulls and
+ *  never blocks a writer, and links stay inside a shard, so each resolves to its key through the
+ *  shard it leaves. A breadth-first walk reaches the nodes below each shard cursor's snapshot at
+ *  open; a stored walk refreshes each shard's watermark as it enters that shard. The walk holds
+ *  only under the epoch the cursor opened in: once a destructive window moved it, every pull
+ *  answers @c contended_k.
+ */
+template <typename indexes_type_>
+struct vram_apple_indexes_cursor {
+    using indexes_t = indexes_type_;
+    using index_t = typename indexes_t::index_t;
+    using key_t = typename indexes_t::key_t;
+    using node_id_t = typename index_t::node_id_t;
+    using walk_t = cursor_walk<node_id_t>;
+    using shard_node_t = typename walk_t::shard_node_t;
+
+    /** Where a pull gathers its entries' links, in the caller's arena: the linked keys end to end,
+     *  and the offset where each entry's run starts. */
+    using links_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using links_keys_t = growing_buffer<key_t, links_allocator_t>;
+    using links_offsets_t = growing_buffer<std::size_t, links_allocator_t>;
+
+    /** One shard as the walk reads it: its watermark as the walk last took it, and the copy of the
+     *  neighbor rows of one block of nodes, as many as one word of visited bits spans. */
+    struct shard_cursor_t {
+        explicit shard_cursor_t(forkunion_allocator_t allocator) noexcept : staged_rows_(allocator) {}
+
+        /**
+         *  @brief Takes the watermark of @p shard and sizes the staging for one block of its rows.
+         *
+         *  @par Statuses:
+         *  - @c bad_alloc_k The staging found no memory.
+         */
+        status_t open(index_t const& shard) noexcept {
+            refresh(shard);
+            return staged_rows_.resize_uninitialized(breadth_first_walk<node_id_t>::lanes_k * shard.connectivity());
+        }
+
+        /** Nodes visible to this cursor; IDs strictly below are walked. */
+        node_id_t visible_count() const noexcept { return visible_count_; }
+
+        /** Widens the snapshot to the nodes @p shard published since. */
+        void refresh(index_t const& shard) noexcept { visible_count_ = static_cast<node_id_t>(shard.size()); }
+
+        /** The row of the node the last seek stood on, raw as stored. */
+        std::span<node_id_t const> neighbors() const noexcept { return sought_row_; }
+
+        /**
+         *  @brief Stands on @p node of @p shard, copying the block of rows it falls in unless the
+         *      staged block holds it.
+         *
+         *  @par Statuses:
+         *  - @c malformed_k The @p node is at or past the snapshot.
+         *  - @c config_mismatch_k The shard holds fewer rows than the snapshot, as a clear left it.
+         */
+        status_t seek(index_t& shard, node_id_t node) noexcept {
+            if (node >= visible_count_) return status_t::malformed_k;
+            std::size_t const row_ids = shard.connectivity();
+            if (node < staged_first_ || node >= staged_first_ + staged_count_) {
+                node_id_t const first = static_cast<node_id_t>(node - node % breadth_first_walk<node_id_t>::lanes_k);
+                node_id_t const count = min_of<node_id_t>(breadth_first_walk<node_id_t>::lanes_k,
+                                                          visible_count_ - first);
+                staged_count_ = 0;
+                std::span<node_id_t> const block = to_writable_span(staged_rows_).first(count * row_ids);
+                if (status_t const staged = shard.neighbors(first, block); failed(staged)) return staged;
+                staged_first_ = first;
+                staged_count_ = count;
+            }
+            sought_row_ = to_span(staged_rows_).subspan((node - staged_first_) * row_ids, row_ids);
+            return status_t::success_k;
+        }
+
+      private:
+
+        /** The neighbor rows of the staged block, @c connectivity IDs per node, raw as stored. */
+        growing_buffer<node_id_t, forkunion_allocator_t> staged_rows_;
+
+        /** The first node of the staged block. */
+        node_id_t staged_first_ = 0;
+
+        /** Nodes in the staged block: none before the first seek, nor after a failed copy. */
+        node_id_t staged_count_ = 0;
+
+        /** The row of the node the last seek stood on, inside @c staged_rows_. */
+        std::span<node_id_t const> sought_row_ {};
+
+        /** The shard's watermark at open or the last refresh: IDs strictly below it are walked. */
+        node_id_t visible_count_ = 0;
+    };
+
+    explicit vram_apple_indexes_cursor(forkunion_allocator_t allocator) noexcept
+        : shard_cursors_(allocator), walk_(allocator), allocator_(allocator) {}
+
+    /**
+     *  @brief Opens the walk over every shard of @p indexes under the epoch it reads now; any
+     *      @p starts make it breadth-first, each key starting from its lowest node in the lowest
+     *      shard holding it, and a key held nowhere starting nothing.
+     *
+     *  @par Statuses:
+     *  - @c bad_alloc_k The cursors, their staging, the visited bits or the frontier got no memory.
+     */
+    status_t open(indexes_t const& indexes, std::span<key_t const> starts) noexcept {
+        epoch_ = indexes.read_epoch();
+        std::size_t const count = indexes.shards_count();
+        if (failed(shard_cursors_.reserve_exactly(count))) return status_t::bad_alloc_k;
+        for (std::size_t shard = 0; shard != count; ++shard) {
+            shard_cursors_.push_back_reserved(shard_cursor_t {allocator_});
+            if (status_t const opened = shard_cursors_.back().open(indexes.shard(shard)); failed(opened)) return opened;
+        }
+        if (starts.empty()) return status_t::success_k;
+        if (status_t const opened = walk_.open_breadth_first(
+                count, [&](std::size_t shard) noexcept { return shard_cursors_[shard].visible_count(); });
+            failed(opened))
+            return opened;
+        for (key_t const& key : starts)
+            for (std::size_t shard = 0; shard != count; ++shard) {
+                node_id_t const visible_count = shard_cursors_[shard].visible_count();
+                node_id_t lowest = visible_count;
+                indexes.shard(shard).find_each(key, [&](node_id_t node) noexcept { lowest = min_of(lowest, node); });
+                if (lowest == visible_count) continue;
+                if (status_t const visited = walk_.visit(static_cast<u32_t>(shard), lowest); failed(visited))
+                    return visited;
+                break;
+            }
+        return status_t::success_k;
+    }
+
+    /**
+     *  @brief Writes up to @p keys.size() next entries' keys into @p keys, gathering each one's
+     *      links into @p links_keys and @p links_offsets when both are named, and answers the
+     *      number of keys written.
+     *
+     *  @par Statuses:
+     *  - @c bad_alloc_k A link or a newly visited entry found no memory; the entries written stand.
+     *  - @c contended_k A destructive window of @p indexes opened since the walk did; none stand.
+     */
+    expected<std::size_t> pull(indexes_t& indexes, std::span<key_t> keys, links_keys_t* links_keys,
+                               links_offsets_t* links_offsets) noexcept {
+        auto enter = [&](u32_t shard) noexcept {
+            shard_cursors_[shard].refresh(indexes.shard(shard));
+            return shard_cursors_[shard].visible_count();
+        };
+        std::size_t written = 0;
+        shard_node_t entry;
+        while (written != keys.size() && walk_.next(entry, shard_cursors_.size(), enter)) {
+            shard_cursor_t& cursor = shard_cursors_[entry.shard];
+            index_t& shard = indexes.shard(entry.shard);
+            if (status_t const sought = cursor.seek(shard, entry.node); failed(sought))
+                return indexes.still_valid(epoch_) ? expected<std::size_t> {written, sought}
+                                                   : expected<std::size_t> {0, status_t::contended_k};
+            std::span<node_id_t const> const neighbors = cursor.neighbors();
+            if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
+                               failed(links_offsets->reserve(links_offsets->size() + 1))))
+                return {written, status_t::bad_alloc_k};
+            for (node_id_t const neighbor : neighbors) {
+                // Rows come raw: a self-loop links nowhere, the sentinels fail both bounds below.
+                if (neighbor == entry.node) continue;
+                // Breadth-first never refreshes, so the bits span the shard cursors' snapshots.
+                if (walk_.breadth_first() && neighbor < cursor.visible_count())
+                    if (status_t const visited = walk_.visit(entry.shard, neighbor); failed(visited))
+                        return {written, visited};
+                if (!links_keys) continue;
+                expected<key_t> const linked = shard.key_of(neighbor);
+                if (succeeded(linked.status)) links_keys->push_back_reserved(linked.value);
+            }
+            if (links_keys) links_offsets->push_back_reserved(links_keys->size());
+            keys[written++] = shard.key_of(entry.node).value;
+        }
+        // Emptied shards keep their storage, so a pull that ran past a window read nothing freed.
+        if (!indexes.still_valid(epoch_)) return {0, status_t::contended_k};
+        return {written, status_t::success_k};
+    }
+
+  private:
+    /** One per shard, in placement order, each over the snapshot it took at open. */
+    growing_buffer<shard_cursor_t, forkunion_allocator_t> shard_cursors_;
+
+    /** The order of the walk and where it stands. */
+    walk_t walk_;
+
+    forkunion_allocator_t allocator_;
+
+    /** The epoch the walk opened under; a pull after a window since answers contended. */
+    u64_t epoch_ = 0;
 };
 
 } // namespace unum::usearch::dense

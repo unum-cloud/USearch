@@ -437,6 +437,23 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
+    /**
+     *  @brief Copies the neighbor rows of the nodes from @p first on, @c connectivity IDs each,
+     *      into the host @p rows, raw as stored, sentinels and self-loops left in; the storage
+     *      lock keeps a growth from freeing the rows mid-copy.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k The @p rows hold no whole number of rows, or the rows pass @c size.
+     */
+    status_t neighbors(node_id_t first, std::span<node_id_t> rows) noexcept {
+        std::size_t const row_ids = connectivity();
+        if (!row_ids || rows.size() % row_ids || std::size_t {first} + rows.size() / row_ids > size())
+            return status_t::config_mismatch_k;
+        shared_lock_t storage {storage_};
+        std::memcpy(rows.data(), neighbor_rows_() + std::size_t {first} * row_ids, rows.size_bytes());
+        return status_t::success_k;
+    }
+
     /** The serialized extents. */
     struct saved_shape_t {
         std::size_t nodes = 0;
@@ -1235,7 +1252,7 @@ struct vram_apple_index {
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The step is empty, or the columns cannot hold its rows.
          */
-        status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
+        status_t save(step_t const& step) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const rows = step.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
@@ -1311,12 +1328,11 @@ struct vram_apple_index {
      *    short for the rows.
      *  - @c uninitialized_k The index never grew.
      */
-    status_t save(columns_t columns, synchronization_t synchronization,
-                  nk::matrix_span<node_id_t> scratch = {}) noexcept {
+    status_t save(columns_t columns, synchronization_t synchronization) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
-            if (status_t const saved = plan.save(step, scratch); failed(saved)) return saved;
+            if (status_t const saved = plan.save(step); failed(saved)) return saved;
         return plan.finish();
     }
 

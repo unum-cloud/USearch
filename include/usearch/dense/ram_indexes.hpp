@@ -36,7 +36,7 @@
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `forkunion_executor_t`, `shared_mutex`
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `load_config_t`, `safegraphs_read_metadata`
 #include "usearch/utilities/ram_shards.hpp"        // `shard_set` - the shards & their routing
-#include "usearch/utilities/ram_walks.hpp"         // `breadth_first_walk`, `cursor_order_t` - the cursor's walk
+#include "usearch/utilities/ram_walks.hpp"         // `cursor_walk` - the cursor's walk
 #include "usearch/utilities/sample.hpp"            // `sample_plan` - the SAMPLE verb's roots, paths & regions
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/shard_checkpoints.hpp"
@@ -455,9 +455,10 @@ struct ram_indexes {
      *  until its first step dispenses the ranges, so a plan dropped before then releases
      *  everything, and a caller spanning several indexes plans on all of them before stepping any,
      *  committing or refusing as a whole. Once stepped, its ranges hold every later turn on their
-     *  shards until it finishes, so it must finish. Planning, each step and @ref finish hold the
-     *  gate's shared side for their own call alone, and claims outstanding refuse every close with
-     *  @c contended_k.
+     *  shards until it finishes, so it must finish. A row walking an empty shard waits for that
+     *  shard's row zero to be wired, so one thread alone places the rows holding it before any
+     *  later ones. Planning, each step and @ref finish hold the gate's shared side for their own
+     *  call alone, and claims outstanding refuse every close with @c contended_k.
      */
     struct [[nodiscard]] insert_plan_t {
 
@@ -901,14 +902,17 @@ struct ram_indexes {
             // Every step bumps it, so it takes its own line, away from the locals workers read.
             alignas(default_alignment_k) std::size_t visited = visited_;
             auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step,
-                                std::size_t thread, nk::matrix_span<node_id_t>) noexcept -> status_t {
+                                std::size_t thread) noexcept -> status_t {
                 typename index_t::refine_plan_t& plan = shard_plans_[shard];
                 bool const reselecting = plan.reselecting();
+                std::size_t const computed_before = traversals[thread].computed_distances;
                 if (status_t const ran = plan.run(step, traversals[thread]); failed(ran)) return ran;
                 if (!reselecting) return status_t::success_k;
                 std::size_t const done = atomic_ref<std::size_t>(visited).fetch_add(step.nodes.size(),
                                                                                     std::memory_order_relaxed) +
                                          step.nodes.size();
+                // A step whose node was not picked walked nothing, so only a walking step reports.
+                if (traversals[thread].computed_distances == computed_before) return status_t::success_k;
                 return on_visited(done, population_) == continuation_t::cancel_k ? status_t::cancelled_k
                                                                                  : status_t::success_k;
             };
@@ -917,7 +921,7 @@ struct ram_indexes {
             std::size_t advancing = 0;
             do {
                 // Every claimed step ran, so a stopped drain's cursors say where the next starts.
-                drained = owner_->drain_steps_(shard_plans_, cursors, executor, 0, run_step);
+                drained = owner_->drain_steps_(shard_plans_, cursors, executor, run_step);
                 if (failed(drained)) break;
                 // The boundary publishing a split's parts shows a search every receiver shard's
                 // rows and keys or none, and forgets this index's inside its window, so the gate is
@@ -2269,6 +2273,7 @@ struct ram_indexes {
             dense_sample_source_t const source {*this, watermarks, {vector, dimensions()}};
             plan_t plan {source, inputs, outputs, config, {scratch, scratch_bytes}};
             status_t status = plan.draw();
+            if (succeeded(status)) status = plan.assign_ordinals();
             if (succeeded(status)) status = plan.assign_coordinates();
             return {plan.result(), status};
         });
@@ -3025,8 +3030,8 @@ struct ram_indexes {
 
         // A step is one storage chunk of a receiving shard, which the donor parts moving there
         // fill in turn, each with its keys; a chunk may straddle several parts.
-        auto copy_chunk = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk, std::size_t,
-                              nk::matrix_span<node_id_t>) noexcept -> status_t {
+        auto copy_chunk = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk,
+                              std::size_t) noexcept -> status_t {
             iota_view<node_id_t> placed {plans[into].base, plans[into].base};
             for (std::size_t from = 0; from != donors && placed.bound < chunk.index_nodes.bound; ++from) {
                 if (!moves_into(from, into)) continue;
@@ -3042,7 +3047,7 @@ struct ram_indexes {
             }
             return status_t::success_k;
         };
-        if (status_t const copied = drain_steps_(plans, to_writable_span(cursors), executor, 0, copy_chunk);
+        if (status_t const copied = drain_steps_(plans, to_writable_span(cursors), executor, copy_chunk);
             failed(copied))
             return copied;
         // Each receiving shard's map takes one writer, its keys invisible until its watermark
@@ -3090,12 +3095,12 @@ struct ram_indexes {
     status_t sweep_reachability_(growing_buffer<plan_type_, forkunion_allocator_t>& plans,
                                  std::span<std::size_t> cursors, executor_t& executor) noexcept {
         for (plan_type_& plan : plans) plan.restart_sweep();
-        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t, nk::matrix_span<node_id_t>) noexcept {
+        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t) noexcept {
             return plans[shard].sweep(step), status_t::success_k;
         };
         for (std::size_t expanded = 1; expanded;) {
             std::memset(cursors.data(), 0, cursors.size_bytes());
-            if (status_t const drained = drain_steps_(plans, cursors, executor, 0, sweep_step); failed(drained))
+            if (status_t const drained = drain_steps_(plans, cursors, executor, sweep_step); failed(drained))
                 return drained;
             expanded = 0;
             for (plan_type_& plan : plans) expanded += plan.advance_level();
@@ -3538,16 +3543,6 @@ struct ram_indexes {
 
 #pragma region Checkpoints
 
-    /** One slab of neighbor IDs from @p arena - the scratch a save chunk rebases through; empty
-     *  when the arena is short. */
-    nk::matrix_span<node_id_t> scratch_of_(typename executor_t::arena_t& arena,
-                                           std::size_t scratch_rows) const noexcept {
-        std::size_t const connectivity = this->connectivity();
-        std::byte* bytes = arena.allocate(scratch_rows * connectivity * sizeof(node_id_t), alignof(node_id_t));
-        if (!bytes) return {};
-        return {reinterpret_cast<node_id_t*>(bytes), scratch_rows, connectivity};
-    }
-
     /** The home shard of @p thread : the first shard on its memory domain, so its drains start
      *  there, or a spread over the shards when none sits there. */
     std::size_t pick_home_shard_(std::size_t thread, executor_t const& executor) const noexcept {
@@ -3562,30 +3557,19 @@ struct ram_indexes {
      *      home shard first, then helps the rest, one atomic cursor per shard being the whole
      *      schedule.
      *
-     *  @p per_step runs one step on the thread that pulled it, with that thread's scratch -
-     *  @p scratch_rows of neighbor IDs, none when zero - and answers a status; the first failure
-     *  wins.
+     *  @p per_step runs one step on the thread that pulled it and answers its status, and the
+     *  first failure wins.
      *
      *  @p cursors is the caller's, one entry per plan, so an audit reuses one across its levels
      *  rather than allocating per level.
      */
     template <typename plan_type_, typename per_step_type_>
     status_t drain_steps_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, std::span<std::size_t> cursors,
-                          executor_t& executor, std::size_t scratch_rows, per_step_type_& per_step) noexcept {
+                          executor_t& executor, per_step_type_& per_step) noexcept {
         std::size_t const shards = plans.size();
         if (cursors.size() != shards) return status_t::config_mismatch_k;
         status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
-            nk::matrix_span<node_id_t> scratch;
-            if (scratch_rows) {
-                scratch = scratch_of_(executor.arena(thread), scratch_rows);
-                if (scratch.empty()) {
-                    status_t expected_status = status_t::success_k;
-                    atomic_ref<status_t>(outcome).compare_exchange_strong(
-                        expected_status, status_t::bad_alloc_k, std::memory_order_relaxed, std::memory_order_relaxed);
-                    return;
-                }
-            }
             std::size_t const home = pick_home_shard_(thread, executor);
             for (std::size_t visited = 0; visited != shards; ++visited) {
                 std::size_t const shard = (home + visited) % shards;
@@ -3596,7 +3580,7 @@ struct ram_indexes {
                 while (!failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) {
                     std::size_t const position = cursor.fetch_add(1, std::memory_order_relaxed);
                     if (position >= steps.size()) break;
-                    status_t const stepped = per_step(shard, steps[position], thread, scratch);
+                    status_t const stepped = per_step(shard, steps[position], thread);
                     if (succeeded(stepped)) continue;
                     status_t expected_status = status_t::success_k;
                     atomic_ref<status_t>(outcome).compare_exchange_strong(
@@ -3611,38 +3595,22 @@ struct ram_indexes {
 
     /** Fans @p plan 's steps out over the executor's threads: each thread drains the run of the
      *  shard it is home to first, then helps the rest, one atomic cursor per shard being the whole
-     *  schedule. A save writes each step with the thread's scratch of neighbor IDs; a load reads
-     *  straight out of its part. The first failure wins and stops the rest. */
+     *  schedule. A save writes each step straight into its part, a load reads each straight out of
+     *  its part, and the first failure wins and stops the rest. */
     template <typename plan_type_>
     status_t drain_steps_(plan_type_& plan, executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
         auto const steps = plan.steps();
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
-                                           nk::matrix_span<node_id_t> scratch) { planned.save(step, scratch); };
-        std::size_t const scratch_rows = saving_k
-                                             ? power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_nodes_log2_k)
-                                             : 0;
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
+            planned.save(step);
+        };
 
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
-        if (scratch_rows)
-            if (status_t const sized = executor.reserve(scratch_rows * connectivity() * sizeof(node_id_t));
-                failed(sized))
-                return sized;
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {shards_.allocator()};
         if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
         status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
-            nk::matrix_span<node_id_t> scratch;
-            if (scratch_rows) {
-                scratch = scratch_of_(executor.arena(thread), scratch_rows);
-                if (scratch.empty()) {
-                    status_t expected_status = status_t::success_k;
-                    atomic_ref<status_t>(outcome).compare_exchange_strong(
-                        expected_status, status_t::bad_alloc_k, std::memory_order_relaxed, std::memory_order_relaxed);
-                    return;
-                }
-            }
             std::size_t const home = pick_home_shard_(thread, executor);
             for (std::size_t visited = 0; visited != shards; ++visited) {
                 std::size_t const shard = (home + visited) % shards;
@@ -3652,7 +3620,7 @@ struct ram_indexes {
                      taken = cursor.fetch_add(1, std::memory_order_relaxed)) {
                     if (failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
                     status_t stepped = status_t::success_k;
-                    if constexpr (saving_k) stepped = plan.save(steps[own.first + taken], scratch);
+                    if constexpr (saving_k) stepped = plan.save(steps[own.first + taken]);
                     else stepped = plan.load(steps[own.first + taken]);
                     if (succeeded(stepped)) continue;
                     status_t expected_status = status_t::success_k;
@@ -3713,7 +3681,7 @@ struct ram_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename index_t::node_id_t;
-    using walk_t = breadth_first_walk<node_id_t>;
+    using walk_t = cursor_walk<node_id_t>;
     using shard_node_t = typename walk_t::shard_node_t;
     using shard_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
 
@@ -3743,11 +3711,10 @@ struct ram_indexes_cursor {
             if (status_t const reserved = shard_cursors_.back().reserve(allocator_); failed(reserved)) return reserved;
         }
         if (starts.empty()) return status_t::success_k;
-        order_ = cursor_order_t::breadth_first_k;
-        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize_uninitialized(count))) return status_t::bad_alloc_k;
-        for (std::size_t shard = 0; shard != count; ++shard) visible[shard] = shard_cursors_[shard].visible_count();
-        if (status_t const opened = walk_.open(to_span(visible)); failed(opened)) return opened;
+        if (status_t const opened = walk_.open_breadth_first(
+                count, [&](std::size_t shard) noexcept { return shard_cursors_[shard].visible_count(); });
+            failed(opened))
+            return opened;
         for (key_t const& key : starts)
             for (std::size_t shard = 0; shard != count; ++shard) {
                 node_id_t const visible_count = shard_cursors_[shard].visible_count();
@@ -3772,19 +3739,27 @@ struct ram_indexes_cursor {
      */
     expected<std::size_t> pull(indexes_t const& indexes, std::span<key_t> keys, links_keys_t* links_keys,
                                links_offsets_t* links_offsets) noexcept {
+        auto enter = [&](u32_t shard) noexcept {
+            shard_cursors_[shard].refresh();
+            return shard_cursors_[shard].visible_count();
+        };
         std::size_t written = 0;
         shard_node_t entry;
-        while (written != keys.size() && next_(entry)) {
+        while (written != keys.size() && walk_.next(entry, shard_cursors_.size(), enter)) {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t const& shard = indexes.shard(entry.shard);
-            if (status_t const sought = cursor.seek(entry.node); failed(sought)) return {written, sought};
+            if (status_t const sought = cursor.seek(entry.node); failed(sought)) {
+                // A window since the open voids every entry this pull wrote, as at the tail.
+                if (!indexes.still_valid(epoch_)) return {0, status_t::contended_k};
+                return {written, sought};
+            }
             std::span<node_id_t const> const neighbors = cursor.neighbors();
             if (links_keys && (failed(links_keys->reserve(links_keys->size() + neighbors.size())) ||
                                failed(links_offsets->reserve(links_offsets->size() + 1))))
                 return {written, status_t::bad_alloc_k};
             for (node_id_t const neighbor : neighbors) {
                 // Breadth-first never refreshes, so the bits span the shard cursors' snapshots.
-                if (order_ == cursor_order_t::breadth_first_k && neighbor < cursor.visible_count())
+                if (walk_.breadth_first() && neighbor < cursor.visible_count())
                     if (status_t const visited = walk_.visit(entry.shard, neighbor); failed(visited))
                         return {written, visited};
                 if (!links_keys) continue;
@@ -3800,33 +3775,13 @@ struct ram_indexes_cursor {
     }
 
   private:
-
-    /** Takes the next entry into @p entry, answering false once the walk ran out. */
-    bool next_(shard_node_t& entry) noexcept {
-        if (order_ == cursor_order_t::breadth_first_k) return walk_.expand(entry);
-        while (next_stored_.shard != shard_cursors_.size()) {
-            if (next_stored_.node < shard_cursors_[next_stored_.shard].visible_count()) {
-                entry = next_stored_;
-                ++next_stored_.node;
-                return true;
-            }
-            next_stored_ = {next_stored_.shard + 1, 0};
-            if (next_stored_.shard != shard_cursors_.size()) shard_cursors_[next_stored_.shard].refresh();
-        }
-        return false;
-    }
-
     /** One per shard, in placement order, each over the snapshot it took at open. */
     growing_buffer<shard_cursor_t, forkunion_allocator_t> shard_cursors_;
 
-    /** The nodes visited and the frontier of a breadth-first walk; untouched by a stored one. */
+    /** The order of the walk and where it stands. */
     walk_t walk_;
 
     forkunion_allocator_t allocator_;
-    cursor_order_t order_ = cursor_order_t::stored_k;
-
-    /** As stored: the entry the next pull starts at. */
-    shard_node_t next_stored_ {};
 
     /** The epoch the walk opened under; a pull after a window since answers contended. */
     u64_t epoch_ = 0;

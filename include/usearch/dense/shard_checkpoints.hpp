@@ -223,10 +223,6 @@ expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, sav
         if (failed(status)) framing = status;
         return safegraphs_part_t {{}, failed(status) ? 0 : header.monolith_bytes(), nodes};
     };
-    if (parts == 1) {
-        std::size_t const monolith = part_at(0).bytes;
-        return {monolith, framing};
-    }
     growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
     if (failed(offsets.resize(parts))) return {0, status_t::bad_alloc_k};
     auto const [bytes, status] = safegraphs_buffer_layout(parts, part_at, config.alignment, to_writable_span(offsets));
@@ -368,19 +364,18 @@ struct [[nodiscard]] shard_save_plan {
     }
 
     /**
-     *  @brief Writes step @p step through its own shard's plan, using @p scratch on the host
-     *      residency; a device shard leaves it untouched.
+     *  @brief Writes step @p step through its own shard's plan.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
      *  - @c config_mismatch_k The step names a retired shard or no part, holds no rows, or the
-     *    columns or, on RAM, @p scratch cannot hold them.
+     *    columns cannot hold them.
      */
-    status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
+    status_t save(step_t const& step) noexcept {
         if (!shards_) return status_t::uninitialized_k;
         std::size_t const part = step.shard - shards_->retired_shards();
         if (step.shard < shards_->retired_shards() || part >= plans_.size()) return status_t::config_mismatch_k;
-        return plans_[part].save(step.inner, scratch);
+        return plans_[part].save(step.inner);
     }
 
     /**
@@ -524,14 +519,10 @@ struct [[nodiscard]] shard_save_plan {
         if (status_t const framed = frame_parts_(config); failed(framed)) return framed;
         std::size_t const parts = headers_.size();
         if (failed(offsets_.resize(parts))) return status_t::bad_alloc_k;
-        std::size_t bytes = headers_[0].monolith_bytes();
-        if (parts > 1) {
-            auto const entry_at = [this](std::size_t part) noexcept { return part_entry_(part); };
-            auto const [laid, status] = safegraphs_buffer_layout(parts, entry_at, config.alignment,
-                                                                 to_writable_span(offsets_));
-            if (failed(status)) return status;
-            bytes = laid;
-        }
+        auto const entry_at = [this](std::size_t part) noexcept { return part_entry_(part); };
+        auto const [bytes, status] = safegraphs_buffer_layout(parts, entry_at, config.alignment,
+                                                              to_writable_span(offsets_));
+        if (failed(status)) return status;
         if (buffer.size() < bytes) return status_t::overflow_k;
         // What the caller's bytes held must not read as a checkpoint until the commit is written.
         std::memset(buffer.data(), 0, parts > 1 ? offsets_[0] : sizeof(safegraphs_prefix_t));
@@ -549,11 +540,8 @@ struct [[nodiscard]] shard_save_plan {
     status_t write_manifest_() noexcept {
         std::size_t const parts = plans_.size();
         if (mappings_.empty())
-            return safegraphs_write_manifest(buffer_, parts, [&](std::size_t part) noexcept {
-                safegraphs_part_t entry = part_entry_(part);
-                entry.offset = offsets_[part];
-                return entry;
-            });
+            return safegraphs_commit_buffer(
+                buffer_, parts, [&](std::size_t part) noexcept { return part_entry_(part); }, to_span(offsets_));
         std::string_view const path = to_string_view(path_);
         std::string_view const base = safegraphs_basename(safegraphs_stem(path));
         growing_buffer<char, forkunion_allocator_t> entry_path {shards_->allocator()};
@@ -602,6 +590,11 @@ struct [[nodiscard]] shard_save_plan {
 #pragma endregion Saves
 
 #pragma region Loads
+
+/** Whether the load plans of @p index_type_ take neighbor rows narrower than the index's own,
+ *  padding them with empty slots - those whose columns name their width. */
+template <typename index_type_>
+concept widens_neighbors = requires(typename index_type_::columns_view_t columns) { columns.connectivity; };
 
 /**
  *  @brief One load in flight across every shard of a set: the mapped parts, one shard plan each,
@@ -662,7 +655,8 @@ struct [[nodiscard]] shard_load_plan {
      *
      *  The reservation comes from @p config, and part @c p goes to live shard @c p, which the
      *  residency opens past the placed ones. Every shard's claim word closes first, and the plan's
-     *  death reopens them.
+     *  death reopens them. Shards that @ref widens_neighbors take parts of a narrower connectivity,
+     *  their rows padded with empty slots.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed, or on VRAM a shard never grew.
@@ -795,10 +789,12 @@ struct [[nodiscard]] shard_load_plan {
         if (!shards_) return status_t::uninitialized_k;
         if (step.shard >= plans_.size() || step.part >= parts_.size()) return status_t::config_mismatch_k;
         safegraphs_catalog_part_t const& part = parts_[step.part];
-        typename index_t::columns_view_t const columns {
+        typename index_t::columns_view_t columns {
             part.header.data_of(part.monolith, part.header.value),
             part.header.data_of(part.monolith, part.header.neighbors),
             norms_column_of(part.header, part.monolith, shard_norms_dtype(*shards_))};
+        if constexpr (widens_neighbors<index_t>)
+            columns.connectivity = regular_width(part.header.neighbors.shape).value_or(0);
         std::size_t const stored_bytes = part.header.key.row_bytes();
         bytes_view_t const part_keys = keys_of_(step.part);
         return plans_[step.shard].load(step.inner, columns, step.source_range, [&](node_id_t row) noexcept {
@@ -894,8 +890,11 @@ struct [[nodiscard]] shard_load_plan {
             total += part.nodes;
         }
 
-        // The shards keep the geometry they were built with, which must match the parts'.
-        if (dimensions != shards[0].index->dimensions() || connectivity != shards[0].index->connectivity())
+        // The shards keep the geometry they were built with, which must match the parts', or on
+        // shards that widen rows have room for them.
+        std::size_t const shard_connectivity = shards[0].index->connectivity();
+        if (dimensions != shards[0].index->dimensions() || connectivity > shard_connectivity ||
+            (connectivity != shard_connectivity && !widens_neighbors<index_t>))
             return status_t::config_mismatch_k;
         if (!shards.capacity() && !total && !config.capacity) return status_t::success_k;
 

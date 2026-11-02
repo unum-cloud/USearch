@@ -20,9 +20,13 @@
  *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load.
  *
  *  A residency whose plans copy nodes in order is driven through
- *  @ref unum::usearch::utilities::serial_executor_t.
+ *  @ref unum::usearch::utilities::serial_executor_t. A checkpoint in one buffer leads with the
+ *  manifest when several shards are live, each part at the aligned offset it lists, as the dense
+ *  tier lays one out.
  */
 #pragma once
+
+#include <cstring> // `std::memset` - a buffer's lead before its manifest commits
 
 #include <string_view> // `std::string_view` - the checkpoint paths
 
@@ -237,6 +241,118 @@ status_t save_shards(shards_type_& shards, residency_type_ residency, std::strin
 }
 
 /**
+ *  @brief Every live shard's part entry, its bytes and nodes, into @p parts, and their offsets
+ *      in one buffer into @p offsets, as @ref safegraphs_buffer_layout lays them; answers the
+ *      buffer's whole size.
+ *
+ *  @par Statuses:
+ *  - @c contended_k A mutator, a batch or an open plan holds a shard.
+ *  - @c config_mismatch_k @p config does not validate, or an element has no interchange dtype.
+ */
+template <typename shards_type_, typename residency_type_, typename codec_type_>
+expected<std::size_t> lay_out_shard_parts_(shards_type_& shards, residency_type_& residency, codec_type_ const& codec,
+                                           save_config_t const& config, std::string_view metric,
+                                           growing_buffer<safegraphs_part_t, forkunion_allocator_t>& parts,
+                                           growing_buffer<std::size_t, forkunion_allocator_t>& offsets) noexcept {
+    using view_t = shard_columns<shards_type_, residency_type_>;
+    std::size_t const retired = shards.retired_shards(), count = shards.size() - retired;
+    if (failed(parts.resize(count)) || failed(offsets.resize(count))) return {0, status_t::bad_alloc_k};
+    for (std::size_t part = 0; part != count; ++part) {
+        view_t view {shards, residency, retired + part};
+        auto const [extents, extents_status] = view.columns_extents(codec);
+        if (failed(extents_status)) return {0, extents_status};
+        auto const [bytes, bytes_status] = safegraphs_storage_requirements(view, codec, config, metric);
+        if (failed(bytes_status)) return {0, bytes_status};
+        parts[part] = {{}, bytes, extents.nodes};
+    }
+    return safegraphs_buffer_layout(
+        count, [&](std::size_t part) noexcept { return parts[part]; }, config.alignment, to_writable_span(offsets));
+}
+
+/**
+ *  @brief Bytes a buffer @ref save_shards of @p shards writes: a lone live shard's monolith, or the
+ *      manifest and every live shard's part it lists.
+ *
+ *  The counts are read now, so a buffer sized here fits a save no entry is inserted before.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No shard is live.
+ *  - @c contended_k A mutator, a batch or an open plan holds a shard.
+ *  - @c config_mismatch_k @p config does not validate, or an element has no interchange dtype.
+ */
+template <typename shards_type_, typename residency_type_, typename codec_type_>
+expected<std::size_t> shard_storage_requirements(shards_type_& shards, residency_type_ residency,
+                                                 codec_type_ const& codec, save_config_t const& config,
+                                                 std::string_view metric) noexcept {
+    if (shards.size() == shards.retired_shards()) return {0, status_t::uninitialized_k};
+    growing_buffer<safegraphs_part_t, forkunion_allocator_t> parts {shards.allocator()};
+    growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
+    return lay_out_shard_parts_(shards, residency, codec, config, metric, parts, offsets);
+}
+
+/**
+ *  @brief Writes the live shards of @p shards into @p buffer: a lone live shard's monolith at its
+ *      head, or the manifest leading it and one monolith per live shard at the offsets it lists,
+ *      the manifest written last as the commit record.
+ *
+ *  Size @p buffer by @ref shard_storage_requirements. Until the commit the buffer's lead is zeroed,
+ *  so a stopped save never reads as a checkpoint. A refusal of @p codec passes through.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No shard is live, a shard's plan is spent, or the pool of @p executor has
+ *    no workers.
+ *  - @c contended_k A mutator, a batch or an open plan holds a shard, or the pool of @p executor
+ *    runs another dispatch.
+ *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
+ *    value disagrees with its shape, or a segment is misaligned.
+ *  - @c overflow_k @p buffer is shorter than the checkpoint.
+ */
+template <typename shards_type_, typename residency_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_ = dummy_progress_t>
+status_t save_shards(shards_type_& shards, residency_type_ residency, bytes_span_t buffer, codec_type_ const& codec,
+                     executor_type_& executor, save_config_t const& config, std::string_view metric,
+                     progress_type_&& progress = {}) noexcept {
+    using view_t = shard_columns<shards_type_, residency_type_>;
+    std::size_t const retired = shards.retired_shards(), count = shards.size() - retired;
+    if (!count) return status_t::uninitialized_k;
+    growing_buffer<safegraphs_part_t, forkunion_allocator_t> parts {shards.allocator()};
+    growing_buffer<std::size_t, forkunion_allocator_t> offsets {shards.allocator()};
+    auto const [bytes, layout_status] = lay_out_shard_parts_(shards, residency, codec, config, metric, parts, offsets);
+    if (failed(layout_status)) return layout_status;
+    if (buffer.size() < bytes) return status_t::overflow_k;
+    std::memset(buffer.data(), 0, offsets[0]);
+    for (std::size_t part = 0; part != count; ++part) {
+        view_t view {shards, residency, retired + part};
+        if (status_t const saved = safegraphs_write_index(buffer.subspan(offsets[part], parts[part].bytes), view, codec,
+                                                          executor, config, metric, progress);
+            failed(saved))
+            return saved;
+    }
+    return safegraphs_commit_buffer(
+        buffer, count, [&](std::size_t part) noexcept { return parts[part]; }, to_span(offsets));
+}
+
+/** Reads the listed @p parts into live shards @c p of @p shards, each opened by the residency
+ *  past the placed ones; the body of both @ref load_shards overloads. */
+template <typename shards_type_, typename residency_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_>
+status_t load_parts_(shards_type_& shards, residency_type_& residency, std::span<safegraphs_catalog_part_t const> parts,
+                     codec_type_ const& codec, executor_type_& executor, load_config_t const& config,
+                     progress_type_&& progress) noexcept {
+    using view_t = shard_columns<shards_type_, residency_type_>;
+    std::size_t const retired = shards.retired_shards();
+    for (std::size_t part = 0; part != parts.size(); ++part) {
+        if (status_t const opened = residency.open_shard_for_part(shards, part); failed(opened)) return opened;
+        view_t view {shards, residency, retired + part};
+        if (status_t const loaded = safegraphs_read_index(parts[part].monolith, view, codec, executor, config,
+                                                          progress);
+            failed(loaded))
+            return loaded;
+    }
+    return status_t::success_k;
+}
+
+/**
  *  Reads the checkpoint at @p path into the placed, empty @p shards, part @c p into live shard
  *  @c p, which the residency opens past the placed ones; the shards past the parts stay empty.
  *  A refusal of @p codec passes through.
@@ -259,7 +375,6 @@ template <typename shards_type_, typename residency_type_, typename codec_type_,
           typename progress_type_ = dummy_progress_t>
 status_t load_shards(shards_type_& shards, residency_type_ residency, std::string_view path, codec_type_ const& codec,
                      executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
-    using view_t = shard_columns<shards_type_, residency_type_>;
     if (shards.empty()) return status_t::uninitialized_k;
     if (shards.entries()) return status_t::config_mismatch_k;
     growing_buffer<mapped_file_t, forkunion_allocator_t> mappings {shards.allocator()};
@@ -268,16 +383,35 @@ status_t load_shards(shards_type_& shards, residency_type_ residency, std::strin
     if (status_t const listed = safegraphs_catalog(path, mappings, parts, extra_columns, shards.allocator());
         failed(listed))
         return listed;
-    std::size_t const retired = shards.retired_shards();
-    for (std::size_t part = 0; part != parts.size(); ++part) {
-        if (status_t const opened = residency.open_shard_for_part(shards, part); failed(opened)) return opened;
-        view_t view {shards, residency, retired + part};
-        if (status_t const loaded = safegraphs_read_index(parts[part].monolith, view, codec, executor, config,
-                                                          progress);
-            failed(loaded))
-            return loaded;
-    }
-    return status_t::success_k;
+    return load_parts_(shards, residency, to_span(parts), codec, executor, config, progress);
+}
+
+/**
+ *  @brief Reads the checkpoint @p buffer holds, a monolith or the manifest leading its parts, into
+ *      the placed, empty @p shards in place, as the path overload reads a file's.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k No shard is placed, or the pool of @p executor has no workers.
+ *  - @c config_mismatch_k The shards hold entries, a column's dtype, shape or key width differs
+ *    from what the shards and @p codec take, or a segment is misaligned.
+ *  - @c malformed_k The buffer lists no part, or a part, its header, columns or sums do not parse.
+ *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
+ *  - @c contended_k The set is sealed while a shard generation must open, a mutator, batch, load
+ *    or plan holds a shard, or the pool of @p executor runs another dispatch.
+ */
+template <typename shards_type_, typename residency_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_ = dummy_progress_t>
+status_t load_shards(shards_type_& shards, residency_type_ residency, bytes_view_t buffer, codec_type_ const& codec,
+                     executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
+    if (shards.empty()) return status_t::uninitialized_k;
+    if (shards.entries()) return status_t::config_mismatch_k;
+    growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts {shards.allocator()};
+    growing_buffer<safegraphs_named_column_t, forkunion_allocator_t> extra_columns {shards.allocator()};
+    if (status_t const listed = checkpoint_source_t {buffer}.read_header(parts, extra_columns, no_device_copy_t {},
+                                                                         shards.allocator());
+        failed(listed))
+        return listed;
+    return load_parts_(shards, residency, to_span(parts), codec, executor, config, progress);
 }
 
 } // namespace unum::usearch::basic

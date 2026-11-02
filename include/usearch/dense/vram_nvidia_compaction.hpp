@@ -687,7 +687,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                                                                          stream);
                 if (failed(save_status)) return save_status;
                 for (typename vram_index_t::save_plan_t::step_t const step : saving.steps())
-                    if (status_t const saved = saving.save(step, {}); failed(saved)) return saved;
+                    if (status_t const saved = saving.save(step); failed(saved)) return saved;
                 if (status_t const saved = saving.finish(); failed(saved)) return saved;
                 // A folding bin's own rows replace the live ones the save staged.
                 std::size_t const state = bin.state + member - bin.first;
@@ -704,8 +704,8 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 bytes_of(static_cast<byte_t const*>(vectors), rows * vectors_row_bytes),
                 bytes_of(static_cast<byte_t const*>(neighbors), rows * neighbors_row_bytes),
                 {}};
-            auto copy_step = [&](std::size_t shard, typename ram_load_plan_t::step_t const& chunk, std::size_t,
-                                 nk::matrix_span<node_id_t>) noexcept -> status_t {
+            auto copy_step = [&](std::size_t shard, typename ram_load_plan_t::step_t const& chunk,
+                                 std::size_t) noexcept -> status_t {
                 if (shard != into) return status_t::success_k;
                 typename ram_load_plan_t::step_t step = chunk;
                 step.index_nodes = {max_of(chunk.index_nodes.first, target_nodes.first),
@@ -727,8 +727,7 @@ struct [[nodiscard]] vram_nvidia_compact_plan {
                 });
             };
             std::memset(cursors.data(), 0, shards * sizeof(std::size_t));
-            if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, 0,
-                                                            copy_step);
+            if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, copy_step);
                 failed(loaded))
                 return loaded;
         }

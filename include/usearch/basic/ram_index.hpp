@@ -1229,20 +1229,21 @@ struct ram_index {
         health_plan(health_plan const&) = delete;
         health_plan& operator=(health_plan const&) = delete;
 
-        /** Step @p position of the plan; an empty step past the end. */
+        /** Step @p position of the plan, the nodes of one bitset word, since @ref sweep writes its
+         *  expanded bits without atomics; an empty step past the end. */
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = position * nodes_schedule_t::nodes_in(0);
-            std::size_t const bound = min_of(first + nodes_schedule_t::nodes_in(0), static_cast<std::size_t>(visible));
+            std::size_t const first = position * lanes_k;
+            std::size_t const bound = min_of(first + lanes_k, static_cast<std::size_t>(visible));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
         }
 
-        /** The plan's steps, positionally; every level sweeps all of them. */
+        /** The plan's steps, positionally, one per bitset word; every level sweeps all of them. */
         indexed_range<health_plan> steps() const noexcept {
-            return {this, index_ ? divide_round_up<std::size_t>(visible, nodes_schedule_t::nodes_in(0)) : 0u};
+            return {this, index_ ? divide_round_up<std::size_t>(visible, lanes_k) : 0u};
         }
 
         /** Turns the audit onto @p index 's IDs below @p visible, which its bitsets must span, and
@@ -1503,14 +1504,14 @@ struct ram_index {
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
 
-        /** Step @p position of the current phase; an empty step past the end. */
+        /** Step @p position of the current phase: one node, a sweep's bitset word, or the whole
+         *  partition; an empty step past the end. */
         step_t operator[](std::size_t position) const noexcept {
-            if (audited_()) return audit[position];
+            if (phase_ == phase_t::audit_k) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
             iota_view<node_id_t> const range = phase_nodes_();
-            std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1)
-                                                                     : nodes_schedule_t::nodes_in(0);
+            std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1) : 1;
             std::size_t const first = range.first + position * width;
             std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
             step.position = position;
@@ -1522,8 +1523,8 @@ struct ram_index {
         indexed_range<refine_plan_t> steps() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ == phase_t::partition_k) return {this, 1u};
-            if (audited_()) return {this, audit.steps().size()};
-            return {this, divide_round_up<std::size_t>(phase_nodes_().size(), nodes_schedule_t::nodes_in(0))};
+            if (phase_ == phase_t::audit_k) return {this, audit.steps().size()};
+            return {this, phase_nodes_().size()};
         }
 
         /**
@@ -1666,15 +1667,12 @@ struct ram_index {
             split_donor_hold_ = {};
         }
 
-        /** Whether the current phase steps over the audit's ranges rather than nodes of its own. */
-        bool audited_() const noexcept {
-            return phase_ == phase_t::audit_k || phase_ == phase_t::reselect_islands_k || phase_ == phase_t::heal_k;
-        }
-
-        /** The nodes the current phase steps over: a donor's, a split donor's, or the round's. */
+        /** The nodes the current phase steps over: a donor's, a split donor's, every audited one
+         *  in the heal, or the round's. */
         iota_view<node_id_t> phase_nodes_() const noexcept {
             if (phase_ == phase_t::copy_k) return copied_nodes_();
             if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, split_nodes_()};
+            if (phase_ == phase_t::reselect_islands_k || phase_ == phase_t::heal_k) return {0, audit.visible};
             return round_nodes_();
         }
 
@@ -3457,15 +3455,22 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
 
-        // Walk against the caller's still-unmoved value; the first node of a virgin index has
-        // nothing to walk to and publishes with an empty neighbors list. The ID is already
-        // dispensed, so a refused walk wires a thinner node rather than abandoning it.
-        if (new_node_id) {
+        // Walk against the caller's still-unmoved value. The ID is already dispensed, so a refused
+        // walk wires a thinner node rather than abandoning it.
+        // The first node of a virgin index finds nothing to walk to and publishes with no
+        // neighbors; a later node walking before any is wired waits for node zero and walks again.
+        node_t& first_node = nodes_[0];
+        while (new_node_id) {
+            std::size_t const saturated_before = context.telemetry.saturated_walks;
             node_id_t const first_invisible_id =
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
             search_around_<synchronization_>(
                 incoming, metric, dispensed_admission_t {this, first_invisible_id, new_node_id}, walk.expansion_factor,
                 connectivity, context.results, context, dummy_fold_t {});
+            if (first_invisible_id || !context.results.empty() || context.telemetry.saturated_walks != saturated_before)
+                break;
+            u32_t const observed = atomic_ref<u32_t>(first_node.state).load(std::memory_order_acquire);
+            if (!(observed & node_t::wired_k)) wait_t {}(&first_node.state, observed, 0u);
         }
         selector(*this, metric, context);
 

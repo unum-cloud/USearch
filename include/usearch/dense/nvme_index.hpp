@@ -255,7 +255,7 @@ struct nvme_index {
         medium_ = medium_t {};
         part_ = {};
         if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
-        return open_part_(path, dtype_t::unknown_k, kernel_, std::allocator<byte_t> {}, medium_, part_);
+        return open_part_(path, dtype_t::unknown_k, kernel_, forkunion_allocator_t {}, medium_, part_);
     }
 
     /** Rows the part holds. */
@@ -579,8 +579,7 @@ struct nvme_index {
         shape.expansion_factor = expansion_factor;
         shape.queue_sizes = nvme_queue_sizes(expansion_factor, connectivity);
         shape.buffers_per_flight = query_type_::key_reads_k == nvme_key_reads_t::scored_k ? 2 : 1;
-        std::size_t const first_hop = max_of<std::size_t>(round_up_to_multiple<std::size_t>(connectivity, 4),
-                                                          connectivity + 1);
+        std::size_t const first_hop = nvme_first_hop(connectivity);
         std::size_t const hop_depth = parts.size() * first_hop * shape.buffers_per_flight;
         // Rows fill the queue first, since a row costs no speculation; depth a short batch leaves
         // idle widens walks.
@@ -685,10 +684,10 @@ struct nvme_index {
                                                    std::span<u64_t> latencies) noexcept {
         if (parts.empty()) return {{}, status_t::uninitialized_k};
         if (!queries_count) return {{}, status_t::success_k};
-        walk_shape_t const shape = walk_shape_<query_type_>(media, parts, kernel, executor.queue_depth(),
-                                                            executor.size(), queries_count, expansion_factor,
-                                                            staged_bytes);
-        auto [call, call_status] = nvme_begin_call(executor, media, shape.scratch_bytes, shape.buffers,
+        std::size_t const queue_depth = nvme_call_depth(executor, media, parts);
+        walk_shape_t const shape = walk_shape_<query_type_>(media, parts, kernel, queue_depth, executor.size(),
+                                                            queries_count, expansion_factor, staged_bytes);
+        auto [call, call_status] = nvme_begin_call(executor, media, queue_depth, shape.scratch_bytes, shape.buffers,
                                                    shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
         if constexpr (query_type_::admitting_k)

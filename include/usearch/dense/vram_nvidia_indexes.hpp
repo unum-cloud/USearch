@@ -2548,8 +2548,9 @@ struct vram_nvidia_indexes {
      *  failing step ends it. A save writes each step, a load reads it straight out of its part. */
     template <typename plan_type_>
     status_t drain_steps_(plan_type_& plan) noexcept {
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
-                                           nk::matrix_span<node_id_t> scratch) { planned.save(step, scratch); };
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
+            planned.save(step);
+        };
         std::size_t const shards = shards_.size();
         auto const steps = plan.steps();
         std::size_t deepest = 0;
@@ -2559,7 +2560,7 @@ struct vram_nvidia_indexes {
                 iota_view<std::size_t> const own = plan.steps_of(shard);
                 if (position >= own.size()) continue;
                 status_t stepped = status_t::success_k;
-                if constexpr (saving_k) stepped = plan.save(steps[own.first + position], {});
+                if constexpr (saving_k) stepped = plan.save(steps[own.first + position]);
                 else stepped = plan.load(steps[own.first + position]);
                 if (failed(stepped)) return stepped;
             }
@@ -2891,15 +2892,16 @@ struct vram_nvidia_indexes {
                                                                       scored_bytes);
             std::span<u32_t const> const offsets_of_rows {reinterpret_cast<u32_t const*>(device_row_offsets),
                                                           row_offsets.size()};
-            std::span<std::size_t const> const offsets_of_nominees {
-                reinterpret_cast<std::size_t const*>(device_nominee_offsets), queries_count + 1};
+            // The nominee offsets stay writable: the top-k tape takes them as its own.
+            std::span<std::size_t> const offsets_of_nominees {reinterpret_cast<std::size_t*>(device_nominee_offsets),
+                                                              queries_count + 1};
             status_t status = status_t::success_k;
             if (nominees_count)
                 status = shards_[0].index->launch_maxsim_fold_(
                     nk::matrix_span<dot_result_t> {reinterpret_cast<dot_result_t*>(partials), nominees_count, longest},
                     partials_bytes, static_cast<u32_t>(shards), offsets_of_rows, offsets_of_nominees,
                     {scores, nominees_count}, first);
-            vram_products_tape_t const nominated {const_cast<std::size_t*>(offsets_of_nominees.data()), keys, nullptr};
+            vram_products_tape_t const nominated {offsets_of_nominees.data(), keys, nullptr};
             vram_products_tape_t const tape {matches.offsets.data(), reinterpret_cast<byte_t*>(matches.keys.data()),
                                              reinterpret_cast<byte_t*>(matches.scores.data())};
             if (succeeded(status))

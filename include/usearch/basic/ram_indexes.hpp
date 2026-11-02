@@ -39,7 +39,7 @@
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the plans' shard plans
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator_t` - the shard table's placement
 #include "usearch/utilities/ram_shards.hpp"  // `shard_set` - the shard table
-#include "usearch/utilities/ram_walks.hpp"   // `breadth_first_walk`, `cursor_order_t` - the cursor's walk
+#include "usearch/utilities/ram_walks.hpp"   // `cursor_walk` - the cursor's walk
 #include "usearch/utilities/sample.hpp"      // `sample_plan` - the SAMPLE verb's roots, paths & regions
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/basic/shard_checkpoints.hpp" // `save_shards`, `load_shards` - the checkpoints of every live shard
@@ -343,7 +343,7 @@ struct ram_indexes {
          *    to publish.
          */
         template <typename codec_type_>
-        static expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard,
+        static expected<columns_extents_t> columns_extents(shards_t const& shards, std::size_t shard,
                                                            codec_type_ const& codec) noexcept {
             return shards[shard].index->columns_extents(codec);
         }
@@ -453,6 +453,68 @@ struct ram_indexes {
         unique_lock_t const held {gate_, std::try_to_lock};
         if (!held) return status_t::contended_k;
         return load_shards(shards_, checkpoint_residency_t {this}, path, codec, executor, config,
+                           std::forward<progress_type_>(progress));
+    }
+
+    /**
+     *  @brief Bytes a buffer @ref save under @p config writes: a lone live shard's monolith, or the
+     *      manifest and every live shard's part it lists.
+     *
+     *  Sizing goes through @c shard_storage_requirements and opens no shard, so the residency it
+     *  takes needs no owner.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is live.
+     *  - @c contended_k A mutator or an open plan holds a shard.
+     *  - @c config_mismatch_k @p config does not validate, or an element has no interchange dtype.
+     */
+    template <typename codec_type_>
+    expected<std::size_t> storage_requirements(codec_type_ const& codec, save_config_t const& config,
+                                               std::string_view metric) const noexcept {
+        return shard_storage_requirements(shards_, checkpoint_residency_t {}, codec, config, metric);
+    }
+
+    /**
+     *  @brief Writes the live shards into @p buffer through @c save_shards, sized by
+     *      @ref storage_requirements, taking the gate as the path form does.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call holds the gate, a mutator or an open plan holds a shard, or the
+     *    pool of @p executor runs another dispatch.
+     *  - @c uninitialized_k No shard is live, or the pool of @p executor has no workers.
+     *  - @c config_mismatch_k @p config does not validate, an element has no interchange dtype, a
+     *    value disagrees with its shape, or a segment is misaligned.
+     *  - @c overflow_k @p buffer is shorter than the checkpoint.
+     */
+    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
+    status_t save(bytes_span_t buffer, codec_type_ const& codec, executor_type_& executor, save_config_t const& config,
+                  std::string_view metric, progress_type_&& progress = {}) noexcept {
+        unique_lock_t const held {gate_, std::try_to_lock};
+        if (!held) return status_t::contended_k;
+        return save_shards(shards_, checkpoint_residency_t {this}, buffer, codec, executor, config, metric,
+                           std::forward<progress_type_>(progress));
+    }
+
+    /**
+     *  @brief Reads the monolith or manifest-led checkpoint in @p buffer into the placed, empty
+     *      shards through @c load_shards, as the path form does.
+     *
+     *  @par Statuses:
+     *  - @c contended_k A call holds the gate, the set is sealed while a shard generation must
+     *    open, a mutator or plan holds a shard, or the pool of @p executor runs another dispatch.
+     *  - @c uninitialized_k No shard is placed, or the pool of @p executor has no workers.
+     *  - @c config_mismatch_k The shards hold entries, a column's dtype, shape or key width
+     *    differs from what the shards and @p codec take, or a segment is misaligned.
+     *  - @c malformed_k The buffer lists no part, or a part, its header, columns or sums do not
+     *    parse.
+     *  - @c overflow_k The nodes pass a shard's node IDs or key multimap.
+     */
+    template <typename codec_type_, typename executor_type_, typename progress_type_ = dummy_progress_t>
+    status_t load(bytes_view_t buffer, codec_type_ const& codec, executor_type_& executor, load_config_t const& config,
+                  progress_type_&& progress = {}) noexcept {
+        unique_lock_t const held {gate_, std::try_to_lock};
+        if (!held) return status_t::contended_k;
+        return load_shards(shards_, checkpoint_residency_t {this}, buffer, codec, executor, config,
                            std::forward<progress_type_>(progress));
     }
 
@@ -807,6 +869,7 @@ struct ram_indexes {
             source_t const source {*this, watermarks, metric, context, coordinates_of};
             plan_t plan {source, inputs, outputs, config, {aligned, scratch_bytes}};
             status_t status = plan.draw();
+            if (succeeded(status)) status = plan.assign_ordinals();
             if (succeeded(status)) status = plan.assign_coordinates();
             return {plan.result(), status};
         });
@@ -1475,7 +1538,7 @@ struct ram_indexes_cursor {
     using index_t = typename indexes_t::index_t;
     using key_t = typename indexes_t::key_t;
     using node_id_t = typename indexes_t::node_id_t;
-    using walk_t = breadth_first_walk<node_id_t>;
+    using walk_t = cursor_walk<node_id_t>;
     using shard_node_t = typename walk_t::shard_node_t;
     using shard_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, forkunion_allocator_t>;
 
@@ -1507,11 +1570,10 @@ struct ram_indexes_cursor {
             shard_cursors_.push_back_reserved(
                 shard_cursor_t {*indexes.shards_[first_shard_ + shard].index, allocator_});
         if (starts.empty()) return status_t::success_k;
-        order_ = cursor_order_t::breadth_first_k;
-        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize_uninitialized(count))) return status_t::bad_alloc_k;
-        for (std::size_t shard = 0; shard != count; ++shard) visible[shard] = shard_cursors_[shard].visible_count();
-        if (status_t const opened = walk_.open(to_span(visible)); failed(opened)) return opened;
+        if (status_t const opened = walk_.open_breadth_first(
+                count, [&](std::size_t shard) noexcept { return shard_cursors_[shard].visible_count(); });
+            failed(opened))
+            return opened;
         for (key_t const& key : starts)
             for (std::size_t shard = 0; shard != count; ++shard) {
                 node_id_t const visible_count = shard_cursors_[shard].visible_count();
@@ -1537,9 +1599,13 @@ struct ram_indexes_cursor {
      */
     expected<std::size_t> pull(indexes_t const& indexes, std::span<key_t> keys, links_keys_t* links_keys,
                                links_offsets_t* links_offsets) noexcept {
+        auto enter = [&](u32_t shard) noexcept {
+            shard_cursors_[shard].refresh();
+            return shard_cursors_[shard].visible_count();
+        };
         std::size_t written = 0;
         shard_node_t entry;
-        while (written != keys.size() && next_(entry)) {
+        while (written != keys.size() && walk_.next(entry, shard_cursors_.size(), enter)) {
             shard_cursor_t& cursor = shard_cursors_[entry.shard];
             index_t const& shard = *indexes.shards_[first_shard_ + entry.shard].index;
             if (status_t const sought = cursor.seek(entry.node); failed(sought)) return {written, sought};
@@ -1549,7 +1615,7 @@ struct ram_indexes_cursor {
                 return {written, status_t::bad_alloc_k};
             for (node_id_t const neighbor : neighbors) {
                 // Breadth-first never refreshes, so the bits span the shard cursors' snapshots.
-                if (order_ == cursor_order_t::breadth_first_k && neighbor < cursor.visible_count())
+                if (walk_.breadth_first() && neighbor < cursor.visible_count())
                     if (status_t const visited = walk_.visit(entry.shard, neighbor); failed(visited))
                         return {written, visited};
                 if (!links_keys) continue;
@@ -1565,37 +1631,17 @@ struct ram_indexes_cursor {
     }
 
   private:
-
-    /** Takes the next entry into @p entry, answering false once the walk ran out. */
-    bool next_(shard_node_t& entry) noexcept {
-        if (order_ == cursor_order_t::breadth_first_k) return walk_.expand(entry);
-        while (next_stored_.shard != shard_cursors_.size()) {
-            if (next_stored_.node < shard_cursors_[next_stored_.shard].visible_count()) {
-                entry = next_stored_;
-                ++next_stored_.node;
-                return true;
-            }
-            next_stored_ = {next_stored_.shard + 1, 0};
-            if (next_stored_.shard != shard_cursors_.size()) shard_cursors_[next_stored_.shard].refresh();
-        }
-        return false;
-    }
-
     /** One per live shard at open, in placement order, each over the snapshot it took then. */
     growing_buffer<shard_cursor_t, forkunion_allocator_t> shard_cursors_;
 
-    /** The nodes visited and the frontier of a breadth-first walk; untouched by a stored one. */
+    /** The order of the walk and where it stands. */
     walk_t walk_;
 
     forkunion_allocator_t allocator_;
-    cursor_order_t order_ = cursor_order_t::stored_k;
 
     /** The position of the first shard walked: the first live one at open, which a clear since
      *  retires in place. */
     std::size_t first_shard_ = 0;
-
-    /** As stored: the entry the next pull starts at. */
-    shard_node_t next_stored_ {};
 
     /** The epoch the walk opened under; a pull after a window since answers contended. */
     u64_t epoch_ = 0;

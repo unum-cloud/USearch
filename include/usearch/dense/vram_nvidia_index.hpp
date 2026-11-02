@@ -1791,9 +1791,9 @@ struct vram_nvidia_index {
      *    short for the rows.
      *  - @c uninitialized_k The index never grew.
      */
-    status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
+    status_t save(columns_t columns, synchronization_t synchronization,
                   typename executor_t::stream_t const& stream) const noexcept {
-        return core_.save(columns, synchronization, scratch, stream);
+        return core_.save(columns, synchronization, stream);
     }
 
     /**

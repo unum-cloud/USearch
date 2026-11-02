@@ -2043,14 +2043,11 @@ struct vram_shard_core {
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
          *
-         *  The scratch is unused here, since the bounce is already host memory; it rides in the
-         *  signature so a caller drives a device plan exactly as it drives a host one.
-         *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The step is empty, or the columns cannot hold its rows.
          */
-        status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
+        status_t save(step_t const& step) noexcept {
             if (!index_) return status_t::uninitialized_k;
             // Shards' steps interleave on one thread, so another shard's device may be current.
             if (failed(vendor_t::select(index_->api(), index_->device_specs().ordinal)))
@@ -2208,12 +2205,12 @@ struct vram_shard_core {
      *    short for the rows.
      *  - @c uninitialized_k The index never grew.
      */
-    status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
+    status_t save(columns_t columns, synchronization_t synchronization,
                   typename executor_t::stream_t const& stream) const noexcept {
         auto [plan, status] = plan_save(columns, synchronization, stream);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
-            if (status_t const saved = plan.save(step, scratch); failed(saved)) return saved;
+            if (status_t const saved = plan.save(step); failed(saved)) return saved;
         return plan.finish();
     }
 

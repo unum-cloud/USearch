@@ -25,8 +25,8 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t` - the magic a view sniffs
-#include "usearch/utilities/nvme_walks.hpp"        // `nvme_read_header`, `nvme_read_metadata`
-#include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`
+#include "usearch/utilities/nvme_walks.hpp"        // `nvme_read_header`, `nvme_parts_cursor` - the cursor's walk
+#include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `arena_allocator`
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_persisted_part`, `safegraphs_read_manifest`
 #include "usearch/basic/nvme_index.hpp"
 
@@ -51,6 +51,9 @@ template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_ty
           typename wait_type_ = fu::standard_yield_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_indexes {
+    template <typename>
+    friend struct nvme_indexes_cursor;
+
   public:
 
     /** The walks every call runs over every part. */
@@ -72,6 +75,11 @@ class nvme_indexes {
     using walk_payload_t = typename catalog_t::walk_payload_t;
     using search_config_t = typename catalog_t::search_config_t;
     using search_result_t = typename catalog_t::search_result_t;
+    using reachability_t = typename catalog_t::reachability_t;
+    using shard_node_t = typename catalog_t::shard_node_t;
+
+    /** The reader's walk over the entries, as stored or breadth-first from start keys. */
+    using cursor_t = nvme_indexes_cursor<nvme_indexes>;
 
     nvme_indexes() = delete;
     explicit nvme_indexes(forkunion_allocator_t allocator) noexcept
@@ -262,6 +270,36 @@ class nvme_indexes {
         return catalog_().read_entries(std::forward<arguments_type_>(arguments)...);
     }
 
+    /**
+     *  @ref nvme_parts_catalog::health over every part: a forward sweep from as many landmarks as
+     *  one search draws, so @c back_sweeps stays zero.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or a read finds its engine's queue
+     *    full.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c io_k A neighbors read came back short.
+     */
+    expected<reachability_t> health(executor_t& executor) const noexcept { return catalog_().health(executor); }
+
+    /**
+     *  @ref nvme_parts_catalog::sample over every part, for 32-bit node IDs.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or the executor holds no threads or pool workers.
+     *  - @c shape_mismatch_k An output's or the shown coordinates' length disagrees.
+     *  - @c bad_alloc_k The arenas cannot hold the scratch.
+     *  - @c contended_k Another call holds the executor, or its pool is running another dispatch.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c io_k A read came back short.
+     */
+    template <typename... arguments_type_>
+    expected<sample_result_t> sample(arguments_type_&&... arguments) const noexcept {
+        return catalog_().sample(std::forward<arguments_type_>(arguments)...);
+    }
+
   private:
     using part_t = typename catalog_t::part_t;
     using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
@@ -302,8 +340,9 @@ class nvme_indexes {
         if (names_transport_id(checkpoint)) return status_t::unsupported_k;
         std::array<byte_t, safegraphs_prefix_t::magic_k.size()> magic {};
         {
-            auto [file, open_status] = seekable_file_t::open(checkpoint, file_mode_t::read_k, allocator_);
+            auto [file, open_status] = file_medium_t::open(checkpoint);
             if (failed(open_status)) return open_status;
+            // A manifest shorter than the magic reads short; parsing it below reports that.
             [[maybe_unused]] status_t const sniffed = file.read_at(0, magic);
         }
         // The magic makes a lone monolith, anything else a manifest naming its parts beside it.
@@ -377,10 +416,7 @@ class nvme_indexes {
                                              resolved_entries[part].size()};
                 opened = open_safegraphs_part_(path, metric, chunk, media_[part], parts_[part]);
             }
-            status_t unset = status_t::success_k;
-            if (failed(opened))
-                atomic_ref<status_t>(failure).compare_exchange_strong(unset, opened, std::memory_order_relaxed,
-                                                                      std::memory_order_relaxed);
+            keep_first_failure<atomic_ref>(failure, opened);
         };
         if (status_t const fanned = executor.for_threads(open_parts); failed(fanned)) return fanned;
         return failure;
@@ -394,6 +430,35 @@ class nvme_indexes {
 
     /** The host allocator behind the catalog, the directories and the paths a view resolves. */
     forkunion_allocator_t allocator_;
+};
+
+/** A reader's walk over the entries of one @c nvme_indexes or @c nvme_index, in the order
+ *  @c ram_indexes_cursor walks the RAM index the parts were saved from: a @c nvme_parts_cursor over
+ *  the index's catalog. Every call names the index it walks, which must be the one it opened on. */
+template <typename indexes_type_>
+struct nvme_indexes_cursor {
+    using indexes_t = indexes_type_;
+    using key_t = typename indexes_t::key_t;
+    using executor_t = typename indexes_t::executor_t;
+    using walk_t = nvme_parts_cursor<key_t, typename indexes_t::node_id_t>;
+    using links_keys_t = typename walk_t::links_keys_t;
+    using links_offsets_t = typename walk_t::links_offsets_t;
+
+    explicit nvme_indexes_cursor(forkunion_allocator_t allocator) noexcept : walk_(allocator) {}
+
+    /** @ref nvme_parts_cursor::open over the catalog of @p indexes. */
+    status_t open(indexes_t const& indexes, std::span<key_t const> starts) noexcept {
+        return walk_.open(indexes.catalog_(), starts);
+    }
+
+    /** @ref nvme_parts_cursor::pull over the catalog of @p indexes. */
+    expected<std::size_t> pull(indexes_t const& indexes, std::span<key_t> keys, links_keys_t* links_keys,
+                               links_offsets_t* links_offsets, executor_t& executor) noexcept {
+        return walk_.pull(indexes.catalog_(), keys, links_keys, links_offsets, executor);
+    }
+
+  private:
+    walk_t walk_;
 };
 
 } // namespace unum::usearch::basic
