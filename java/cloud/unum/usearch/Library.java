@@ -161,11 +161,12 @@ final class Library {
 
     /** The placement layout a residency's verbs take, named @p residency : ram, vram or nvme. */
     static StructLayout placement(String residency) {
-        StructLayout layout = switch (residency) {
-            case "ram" -> RAM_OPTIONS;
-            case "vram" -> VRAM_OPTIONS;
-            default -> NVME_OPTIONS;
-        };
+        StructLayout layout =
+                switch (residency) {
+                    case "ram" -> RAM_OPTIONS;
+                    case "vram" -> VRAM_OPTIONS;
+                    default -> NVME_OPTIONS;
+                };
         return layout.withName(residency);
     }
 

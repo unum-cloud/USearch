@@ -186,7 +186,7 @@ public sealed class DenseIndexTests : IDisposable
     {
         (Func<NativeBytesView, int> Parse, Func<int, IntPtr> Spell, int Last)[] classes =
         [
-            (NativeMethods.usearch_cpu_class_from_name, NativeMethods.usearch_cpu_class_name, 17),
+            (NativeMethods.usearch_cpu_class_from_name, NativeMethods.usearch_cpu_class_name, 18),
             (NativeMethods.usearch_gpu_class_from_name, NativeMethods.usearch_gpu_class_name, 12),
             (NativeMethods.usearch_nvme_class_from_name, NativeMethods.usearch_nvme_class_name, 6),
         ];

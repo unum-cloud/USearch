@@ -237,7 +237,7 @@ struct DenseOptions(ImplicitlyCopyable):
     var connectivity: c_size_t
     """The connections-per-node bound; zero derives."""
     var values_per_key: c_size_t
-    """Upper bound on entries sharing one key; zero derives to one - unique keys."""
+    """Upper bound on entries sharing one key; zero is unbounded."""
 
     def __init__(
         out self,
@@ -254,7 +254,7 @@ struct DenseOptions(ImplicitlyCopyable):
             metric: The metric kind the graph is frozen under.
             quantization: The scalar type vectors are stored as.
             connectivity: The connections-per-node bound; zero derives.
-            values_per_key: Upper bound on entries sharing one key; zero derives to one.
+            values_per_key: Upper bound on entries sharing one key; zero is unbounded.
         """
         self.metric = metric
         self.quantization = quantization
@@ -924,6 +924,7 @@ struct DenseLoadRamArguments(ImplicitlyCopyable):
     var completion: Completion
     var source: BytesView[ImmUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
+    var connectivity: c_size_t
     var values_per_key: c_size_t
     var progress: ProgressArguments
 
@@ -2458,6 +2459,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 Completion.BLOCKING,
                 source,
                 ram,
+                c_size_t(0),
                 c_size_t(values_per_key),
                 ProgressArguments(),
             ),

@@ -44,7 +44,7 @@ class InteropTest {
     /** `AutoCloseable` is Kotlin's `use`, so a handle's lifetime needs no `try`/`finally`. */
     @Test
     fun handlesCloseThroughUse() {
-        Executor.forRam(intArrayOf(), 2, 0).use { pool ->
+        Executor.forRam(intArrayOf(), null, 2, 0).use { pool ->
             val options = DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16)
             DenseIndex.initRam(options, intArrayOf()).use { index ->
                 val receiver = index.on(pool)
@@ -62,7 +62,7 @@ class InteropTest {
     /** A deferred call is `AutoCloseable` too; a coroutine waits with `withContext(Dispatchers.IO) { call.join() }`. */
     @Test
     fun deferredCallsJoinWhereKotlinWaits() {
-        Executor.forRam(intArrayOf(), 0, 0).use { pool ->
+        Executor.forRam(intArrayOf(), null, 0, 0).use { pool ->
             val options = DenseOptions().dimensions(2).quantization(Scalar.BF16)
             DenseIndex.initRam(options, intArrayOf()).use { index ->
                 index.reserve(2)

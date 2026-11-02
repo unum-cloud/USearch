@@ -228,7 +228,7 @@ const index = usearch.DenseIndex.initRam(
     metric: usearch.DenseMetric.Inner, // or Angular, the default, Euclidean, Hamming, Jaccard
     quantization: usearch.Scalar.BF16, // the default, or F16, E5M2, E4M3, E3M2, E2M3, I8, I4x2, U8, U4x2, U1x8
     connectivity: 32, // a power of two; absent derives it from the geometry
-    valuesPerKey: 2, // absent derives it to unique keys
+    valuesPerKey: 2, // absent is unbounded
   },
   [0, 1], // absent spreads the shards over every NUMA node
 );

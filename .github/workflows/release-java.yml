@@ -134,9 +134,46 @@ jobs:
           path: native/
           retention-days: 1
 
+  create_android_library:
+    name: Create Library for Android ${{ matrix.arch }}
+    needs: hooks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      ANDROID_NDK_VERSION: 30.0.16248370
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, abi: arm64-v8a, preset: android_arm64, platform: android-arm64 }
+          - { arch: arm32, abi: armeabi-v7a, preset: android_armv7, platform: android-arm32 }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Install NDK
+        run: ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+      - name: Build Library
+        run: |
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          cmake --preset ${{ matrix.preset }} -B build_release
+          cmake --build build_release --target usearch_shared
+      # The loader names Android libraries under `android-<arch>`, reachable on API 28 and below.
+      - name: Stage Library
+        run: |
+          mkdir -p native/${{ matrix.platform }}
+          cp build_release/libusearch_shared.so native/${{ matrix.platform }}/
+      - name: Upload Library
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-library-${{ matrix.platform }}
+          path: native/
+          retention-days: 1
+
   attach_java:
     name: Attach Java JAR to the Release
-    needs: [create_linux_library, create_macos_library, create_windows_library]
+    needs: [create_linux_library, create_macos_library, create_windows_library, create_android_library]
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -165,7 +202,8 @@ jobs:
           jar tf build/libs/usearch-*.jar > contents.txt
           for library in linux-amd64/libusearch_shared.so linux-arm64/libusearch_shared.so \
             darwin-arm64/libusearch_shared.dylib darwin-amd64/libusearch_shared.dylib \
-            windows-amd64/libusearch_shared.dll windows-arm64/libusearch_shared.dll; do
+            windows-amd64/libusearch_shared.dll windows-arm64/libusearch_shared.dll \
+            android-arm64/libusearch_shared.so android-arm32/libusearch_shared.so; do
             grep -qx "usearch-native/$library" contents.txt || { echo "::error::The JAR lacks $library"; exit 1; }
           done
       - name: Upload JAR

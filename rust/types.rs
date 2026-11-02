@@ -2025,7 +2025,7 @@ mod tests {
         type FromName = unsafe extern "C" fn(usearch_bytes_view_t) -> c_int;
         type Name = unsafe extern "C" fn(c_int) -> *const c_char;
         let classes: [(FromName, Name, c_int); 3] = [
-            (usearch_cpu_class_from_name, usearch_cpu_class_name, 17),
+            (usearch_cpu_class_from_name, usearch_cpu_class_name, 18),
             (usearch_gpu_class_from_name, usearch_gpu_class_name, 12),
             (usearch_nvme_class_from_name, usearch_nvme_class_name, 6),
         ];

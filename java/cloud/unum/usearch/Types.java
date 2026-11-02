@@ -775,8 +775,7 @@ public final class Types {
          * @throws USearchException INVALID_ARGUMENT on a negative count, and OUT_OF_MEMORY when the
          *     scratch cannot be claimed.
          */
-        public static Executor forNvme(
-                String[] paths, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
+        public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
             return spawn(FOR_NVME, Residency.NVME, call -> {
                 call.paths("nvme", paths);
                 call.pinned("nvme", cpuClass);

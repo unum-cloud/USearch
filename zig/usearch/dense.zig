@@ -142,7 +142,7 @@ pub const DenseOptions = struct {
     dimensions: usize = 0,
     /// The optional connections-per-node bound; zero derives.
     connectivity: usize = 0,
-    /// Upper bound on entries sharing one key; zero derives to one - unique keys.
+    /// Upper bound on entries sharing one key; zero is unbounded.
     values_per_key: usize = 0,
 };
 
@@ -239,7 +239,7 @@ pub const DenseLoadRamConfig = struct {
     executor: ?Executor = null,
     /// The memory domains to place the parts on; empty derives every node the process may use.
     memory_domains: []const i32 = &.{},
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -255,7 +255,7 @@ pub const DenseLoadVramConfig = struct {
     executor: ?Executor = null,
     /// The devices to place the parts on; empty derives one free device.
     devices: []const i32 = &.{},
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -271,7 +271,7 @@ pub const DenseLoadRamBufferConfig = struct {
     executor: ?Executor = null,
     /// The memory domains to place shards on; the monolith lands whole on the first.
     memory_domains: []const i32 = &.{},
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -287,7 +287,7 @@ pub const DenseLoadVramBufferConfig = struct {
     executor: ?Executor = null,
     /// The devices to place shards on; the monolith lands whole on the first.
     devices: []const i32 = &.{},
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     values_per_key: usize = 0,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
@@ -494,6 +494,7 @@ const usearch_dense_load_ram_t = extern struct {
     completion: Completion,
     path: BytesView,
     ram: usearch_ram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -516,6 +517,7 @@ const usearch_dense_load_ram_buffer_t = extern struct {
     completion: Completion,
     buffer: BytesView,
     ram: usearch_ram_options_t,
+    connectivity: usize,
     values_per_key: usize,
     progress: usearch_progress_t,
 };
@@ -980,6 +982,7 @@ pub const DenseIndex = extern struct {
             .completion = .blocking,
             .path = .of(path),
             .ram = .of(config.memory_domains),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };
@@ -1018,6 +1021,7 @@ pub const DenseIndex = extern struct {
             .completion = .blocking,
             .buffer = .of(buffer),
             .ram = .of(config.memory_domains),
+            .connectivity = 0,
             .values_per_key = config.values_per_key,
             .progress = .of(config.progress, config.progress_steps),
         };

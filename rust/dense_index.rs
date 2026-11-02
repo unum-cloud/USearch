@@ -81,6 +81,7 @@ pub struct usearch_dense_load_ram_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -105,6 +106,7 @@ pub struct usearch_dense_load_ram_buffer_t {
     pub completion: usearch_completion_t,
     pub buffer: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
+    pub connectivity: usize,
     pub values_per_key: usize,
     pub progress: usearch_progress_t,
 }
@@ -614,7 +616,7 @@ pub struct DenseOptions {
     pub quantization: Scalar,
     /// The connections-per-node bound of the graph; zero derives.
     pub connectivity: usize,
-    /// Upper bound on entries sharing one key; zero derives to one - unique keys.
+    /// Upper bound on entries sharing one key; zero is unbounded.
     pub values_per_key: usize,
     /// The class a host index dispatches as; `None` dispatches as the machine.
     pub cpu_class: Option<CPUClass>,
@@ -783,7 +785,7 @@ pub struct DenseLoadRamConfig<'config> {
     pub memory_domains: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the machine.
     pub cpu_class: Option<CPUClass>,
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -819,7 +821,7 @@ pub struct DenseLoadVramConfig<'config> {
     pub devices: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the devices.
     pub gpu_class: Option<GPUClass>,
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -855,7 +857,7 @@ pub struct DenseLoadRamBufferConfig<'config> {
     pub memory_domains: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the machine.
     pub cpu_class: Option<CPUClass>,
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -895,7 +897,7 @@ pub struct DenseLoadVramBufferConfig<'config> {
     pub devices: &'config [i32],
     /// The class the index dispatches as; `None` dispatches as the devices.
     pub gpu_class: Option<GPUClass>,
-    /// Upper bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
@@ -1642,6 +1644,7 @@ impl DenseIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 ram: ram_options(config.memory_domains, config.cpu_class),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })
@@ -1693,6 +1696,7 @@ impl DenseIndex {
                 completion: usearch_completion_blocking_k,
                 buffer: config.buffer.into(),
                 ram: ram_options(config.memory_domains, config.cpu_class),
+                connectivity: 0,
                 values_per_key: config.values_per_key,
                 progress,
             })

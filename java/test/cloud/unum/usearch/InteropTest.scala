@@ -25,13 +25,15 @@ class InteropTest {
   @JUnitTest
   def batchesTakeScalaArrays(): Unit = {
     val options = new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16)
-    Using.resources(Executor.forRam(Array.emptyIntArray, 2, 0), DenseIndex.initRam(options, Array.emptyIntArray)) {
-      (pool, index) =>
-        val receiver = index.on(pool)
-        receiver.reserve(2)
-        val keys: Array[Key] = Array(Key.of(1), Key.of(2))
-        receiver.insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
-        assertEquals(2L, receiver.describe().size())
+    Using.resources(
+      Executor.forRam(Array.emptyIntArray, null, 2, 0),
+      DenseIndex.initRam(options, Array.emptyIntArray)
+    ) { (pool, index) =>
+      val receiver = index.on(pool)
+      receiver.reserve(2)
+      val keys: Array[Key] = Array(Key.of(1), Key.of(2))
+      receiver.insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
+      assertEquals(2L, receiver.describe().size())
     }
   }
 

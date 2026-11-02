@@ -429,7 +429,8 @@ public class DenseIndexTest {
     public void zeroDimensionsAreRefusedAtInit() {
         assertEquals(
                 Status.CONFIG_MISMATCH,
-                assertThrows(USearchException.class, () -> empty(new DenseOptions())).status());
+                assertThrows(USearchException.class, () -> empty(new DenseOptions()))
+                        .status());
     }
 
     @Test
@@ -779,7 +780,8 @@ public class DenseIndexTest {
             assertEquals(0, drained.written());
             assertEquals(
                     Status.INVALID_ARGUMENT,
-                    assertThrows(USearchException.class, () -> drained.linkCount(0)).status());
+                    assertThrows(USearchException.class, () -> drained.linkCount(0))
+                            .status());
             assertThrows(IllegalStateException.class, () -> batch.key(0));
         }
     }
@@ -864,7 +866,9 @@ public class DenseIndexTest {
                         .status());
         assertEquals(
                 Status.SHAPE_MISMATCH,
-                assertThrows(USearchException.class, () -> Executor.forVram(new int[] {0}, null, new MemorySegment[2], 0, 0))
+                assertThrows(
+                                USearchException.class,
+                                () -> Executor.forVram(new int[] {0}, null, new MemorySegment[2], 0, 0))
                         .status());
     }
 

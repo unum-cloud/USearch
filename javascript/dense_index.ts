@@ -199,7 +199,7 @@ export interface DenseLoadRamConfig {
   memoryDomains?: number[];
   /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
   cpuClass?: string;
-  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -211,7 +211,7 @@ export interface DenseLoadVramConfig {
   devices?: number[];
   /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
   gpuClass?: string;
-  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -223,7 +223,7 @@ export interface DenseLoadRamBufferConfig {
   memoryDomains?: number[];
   /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
   cpuClass?: string;
-  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -235,7 +235,7 @@ export interface DenseLoadVramBufferConfig {
   devices?: number[];
   /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
   gpuClass?: string;
-  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
@@ -332,7 +332,7 @@ export interface DenseOptions {
   quantization?: Scalar;
   /** Neighbors per node; absent derives it from the geometry. */
   connectivity?: number;
-  /** Entries one key may carry; absent derives to unique keys. */
+  /** Entries one key may carry; absent is unbounded. */
   valuesPerKey?: number;
   /** The CPU class a host index dispatches as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
   cpuClass?: string;

@@ -310,7 +310,7 @@ static char const doc_DenseIndex_init_ram[] =                                   
     "  metric (DenseMetric, optional): How two vectors are scored. Defaults to `DenseMetric.ANGULAR`.\n" //
     "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"            //
     "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"            //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                     //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                       //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to shard across, so a\n"                  //
     "    dual-socket box naming two gets two graphs; None derives every node.\n"                         //
     "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"          //
@@ -368,7 +368,7 @@ static char const doc_DenseIndex_init_vram[] =                                  
     "  metric (DenseMetric, optional): How two vectors are scored. Defaults to `DenseMetric.ANGULAR`.\n" //
     "  quantization (Scalar, optional): The stored scalar type. Defaults to `Scalar.BF16`.\n"            //
     "  connectivity (int, optional): Connections per node; 0 derives it from the geometry.\n"            //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"                     //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                       //
     "  devices (Sequence[int], optional): CUDA ordinals to shard across; None derives one\n"             //
     "    free device.\n"                                                                                 //
     "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n"       //
@@ -3036,7 +3036,7 @@ static char const doc_DenseIndex_load_ram[] =                                   
     "  executor (Executor, optional): The workers the read fans out over, one shard per\n"        //
     "    thread; None reads on the calling thread.\n"                                             //
     "  values_per_key (int, optional): Entries sharing one key, which no checkpoint\n"            //
-    "    records; 0 derives to one.\n"                                                            //
+    "    records; 0 is unbounded.\n"                                                              //
     "  progress (callable, optional): Called with (completed, total) shards; returning\n"         //
     "    False stops the read and raises `CancelledError`, creating no index.\n"                  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
@@ -3097,7 +3097,7 @@ static char const doc_DenseIndex_load_ram_buffer[] =                            
     "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
     "  executor (Executor, optional): The workers the copy fans out over; None copies on\n"     //
     "    the calling thread.\n"                                                                 //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"            //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"              //
     "  progress (callable, optional): Called with (completed, total) bytes; returning\n"        //
     "    False stops the read and raises `CancelledError`, creating no index.\n"                //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
@@ -3158,7 +3158,7 @@ static char const doc_DenseIndex_load_vram[] =                                  
     "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
     "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
     "    uploads from the calling thread.\n"                                                       //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"               //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
     "  progress (callable, optional): Called with (completed, total) shards; returning\n"          //
     "    False stops the read and raises `CancelledError`, creating no index.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
@@ -3218,7 +3218,7 @@ static char const doc_DenseIndex_load_vram_buffer[] =                           
     "  gpu_class (GPUClass, optional): The class to dispatch as; None derives the devices' own.\n" //
     "  executor (Executor, optional): The streams the upload runs on, one per device; None\n"      //
     "    uploads from the calling thread.\n"                                                       //
-    "  values_per_key (int, optional): Entries sharing one key; 0 derives to one.\n"               //
+    "  values_per_key (int, optional): Entries sharing one key; 0 is unbounded.\n"                 //
     "  progress (callable, optional): Called with (completed, total) bytes; returning\n"           //
     "    False stops the read and raises `CancelledError`, creating no index.\n"                   //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";

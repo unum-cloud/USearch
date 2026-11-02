@@ -112,9 +112,8 @@ type DenseOptions struct {
 	Quantization Scalar
 	// Connectivity bounds the connections per node in the graph; zero derives.
 	Connectivity uint
-	// ValuesPerKey bounds how many entries may share one key; zero derives to one - unique
-	// keys. Above one is what late interaction needs, a document being one key holding its
-	// token rows.
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded. Above one is
+	// what late interaction needs, a document being one key holding its token rows.
 	ValuesPerKey uint
 	// CPUClass is the class a host index dispatches as; the zero value derives the CPU's own.
 	CPUClass CPUClass
@@ -286,7 +285,7 @@ type DenseLoadRamConfig struct {
 	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
 	CPUClass CPUClass
 	// ValuesPerKey bounds how many entries may share one key, which no checkpoint records; zero
-	// derives to one.
+	// is unbounded.
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to; a stopped load creates no
 	// index.
@@ -306,7 +305,7 @@ type DenseLoadVramConfig struct {
 	Devices []int32
 	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
 	GPUClass GPUClass
-	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to.
 	Progress ProgressCallback
@@ -325,7 +324,7 @@ type DenseLoadRamBufferConfig struct {
 	MemoryDomains []int32
 	// CPUClass is the class to dispatch as; the zero value derives the CPU's own.
 	CPUClass CPUClass
-	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback
@@ -344,7 +343,7 @@ type DenseLoadVramBufferConfig struct {
 	Devices []int32
 	// GPUClass is the class to dispatch as; the zero value derives the devices' own.
 	GPUClass GPUClass
-	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	// ValuesPerKey bounds how many entries may share one key; zero is unbounded.
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback

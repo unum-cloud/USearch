@@ -90,7 +90,7 @@ public readonly struct DenseOptions
     /// <summary>The connections-per-node bound of the graph; zero derives.</summary>
     public ulong Connectivity { get; init; }
 
-    /// <summary>The upper bound on entries sharing one key; zero derives to one - unique keys.</summary>
+    /// <summary>The upper bound on entries sharing one key; zero is unbounded.</summary>
     public ulong ValuesPerKey { get; init; }
 
     /// <summary>An angular <see cref="Scalar.BF16"/> index, with every optional field derived.</summary>
@@ -398,7 +398,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="memoryDomains">Where the parts land, part <c>p</c> on shard <c>p</c> modulo the
     /// shard count; empty derives every node.</param>
     /// <param name="valuesPerKey">The upper bound on entries sharing one key, which no checkpoint
-    /// records; zero derives to one.</param>
+    /// records; zero is unbounded.</param>
     /// <param name="executor">The workers the read fans out over; null reads on the caller's thread.</param>
     /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The new index.</returns>
@@ -437,7 +437,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="path">The checkpoint to read.</param>
     /// <param name="devices">Where the parts land, part <c>p</c> on device <c>p</c> modulo their
     /// count; empty derives one free device.</param>
-    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
+    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
     /// <param name="gpuClass">The class the index dispatches as; null derives the devices' own.</param>
     /// <returns>The new index.</returns>
@@ -474,7 +474,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <see cref="LoadRam"/> does a path. Calls <c>usearch_dense_load_ram_buffer</c>.</summary>
     /// <param name="buffer">The monolith's bytes, copied in before the call returns.</param>
     /// <param name="memoryDomains">The NUMA nodes to place shards on; the monolith lands whole on the first.</param>
-    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
+    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the copy fans out over; null copies on the caller's thread.</param>
     /// <param name="cpuClass">The class the index dispatches as; null derives the CPU's own.</param>
     /// <returns>The new index.</returns>
@@ -511,7 +511,7 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <c>usearch_dense_load_vram_buffer</c>.</summary>
     /// <param name="buffer">The monolith's bytes, in host or device memory.</param>
     /// <param name="devices">The devices to place shards on; the monolith lands whole on the first.</param>
-    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero derives to one.</param>
+    /// <param name="valuesPerKey">The upper bound on entries sharing one key; zero is unbounded.</param>
     /// <param name="executor">The workers the upload runs on; null uploads on the caller's thread.</param>
     /// <param name="gpuClass">The class the index dispatches as; null derives the devices' own.</param>
     /// <returns>The new index.</returns>
@@ -2667,6 +2667,7 @@ internal unsafe struct NativeDenseLoadRam
     public Completion Completion;
     public NativeBytesView Path;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }
@@ -2695,6 +2696,7 @@ internal unsafe struct NativeDenseLoadRamBuffer
     public Completion Completion;
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
+    public nuint Connectivity;
     public nuint ValuesPerKey;
     public NativeProgress Progress;
 }

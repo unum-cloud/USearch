@@ -236,7 +236,7 @@ def test_width_mismatch_is_refused_by_the_engine() raises:
     assert_true(status == Status.SHAPE_MISMATCH, "a three-wide query cannot search a two-wide index")
     assert_equal(
         rendered,
-        "USearch: shape-mismatch [usearch_dense_search]: The rows' width differs from the frozen geometry",
+        "USearch: shape-mismatch [usearch_dense_search]: The rows' width differs from the index's",
         "the failure reads with the engine's own name and message",
     )
 

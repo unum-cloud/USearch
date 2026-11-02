@@ -67,7 +67,7 @@ public struct DenseOptions: Sendable {
     public var quantization: Scalar
     /// The bound on connections per node in the graph; zero derives.
     public var connectivity: Int
-    /// The bound on entries sharing one key; zero derives to one - unique keys.
+    /// The bound on entries sharing one key; zero is unbounded.
     public var valuesPerKey: Int
     /// The class a host index dispatches as; nil derives the CPU's own.
     public var cpuClass: CPUClass?
@@ -555,7 +555,7 @@ public struct DenseLoadRamConfig {
     public var memoryDomains: [Int32]
     /// The class to dispatch as; nil derives the CPU's own.
     public var cpuClass: CPUClass?
-    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with shards placed.
     public var progress: Progress?
@@ -588,7 +588,7 @@ public struct DenseLoadVramConfig {
     public var devices: [Int32]
     /// The class to dispatch as; nil derives the devices' own.
     public var gpuClass: GPUClass?
-    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with shards placed.
     public var progress: Progress?
@@ -620,7 +620,7 @@ public struct DenseLoadRamBufferConfig {
     public var memoryDomains: [Int32]
     /// The class to dispatch as; nil derives the CPU's own.
     public var cpuClass: CPUClass?
-    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with bytes placed.
     public var progress: Progress?
@@ -652,7 +652,7 @@ public struct DenseLoadVramBufferConfig {
     public var devices: [Int32]
     /// The class to dispatch as; nil derives the devices' own.
     public var gpuClass: GPUClass?
-    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    /// The bound on entries sharing one key, which no checkpoint records; zero is unbounded.
     public var valuesPerKey: Int
     /// Called with bytes placed.
     public var progress: Progress?
@@ -965,6 +965,7 @@ public final class DenseIndex: @unchecked Sendable {
                         shard_capacity: 0,
                         cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )
@@ -1029,6 +1030,7 @@ public final class DenseIndex: @unchecked Sendable {
                         shard_capacity: 0,
                         cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
                     ),
+                    connectivity: 0,
                     values_per_key: config.valuesPerKey,
                     progress: progress
                 )

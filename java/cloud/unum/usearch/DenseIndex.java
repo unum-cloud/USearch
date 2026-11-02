@@ -70,7 +70,7 @@ import cloud.unum.usearch.Types.Verb;
  *
  * <pre>{@code
  * DenseOptions options = new DenseOptions().dimensions(2);
- * try (Executor pool = Executor.forRam(new int[0], 0, 0);
+ * try (Executor pool = Executor.forRam(new int[0], null, 0, 0);
  *         Arena arena = new Arena(pool);
  *         DenseIndex index = DenseIndex.initRam(options, new int[0])) {
  *     index.reserve(2);
@@ -194,8 +194,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
 
         /**
-         * The upper bound on entries sharing one key; zero derives to one - unique keys. No
-         * checkpoint records it, so every load takes it as an argument of its own.
+         * The upper bound on entries sharing one key; zero is unbounded. No checkpoint records it,
+         * so every load takes it as an argument of its own.
          *
          * @throws USearchException INVALID_ARGUMENT on a negative bound.
          */
@@ -236,7 +236,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return connectivity;
         }
 
-        /** The upper bound on entries sharing one key; zero means unique keys. */
+        /** The upper bound on entries sharing one key; zero is unbounded. */
         public long valuesPerKey() {
             return valuesPerKey;
         }
@@ -324,8 +324,10 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "size")),
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "capacity")),
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "memory_usage")),
-                    Library.text(CPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "cpu_class"))),
-                    Library.text(GPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "gpu_class"))),
+                    Library.text(
+                            CPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "cpu_class"))),
+                    Library.text(
+                            GPU_CLASS_NAME, description.get(Library.ENUM, Library.offset(DESCRIPTION, "gpu_class"))),
                     description.get(Library.SIZE, Library.offset(DESCRIPTION, "shards_count")));
         }
     }
@@ -370,11 +372,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     after would take it.
      */
     public record RefineReport(
-            long reselected,
-            long changed,
-            long islandsFound,
-            long islandsReconnected,
-            DenseReachability reachability) {
+            long reselected, long changed, long islandsFound, long islandsReconnected, DenseReachability reachability) {
 
         /** Lifts a {@code usearch_refine_report_t}. */
         static RefineReport lift(MemorySegment report) {
@@ -1234,7 +1232,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          */
         public long linkCount(long entry) {
             MemorySegment offsets = linked(entry);
-            return offsets.getAtIndex(ValueLayout.JAVA_LONG, entry + 1) - offsets.getAtIndex(ValueLayout.JAVA_LONG, entry);
+            return offsets.getAtIndex(ValueLayout.JAVA_LONG, entry + 1)
+                    - offsets.getAtIndex(ValueLayout.JAVA_LONG, entry);
         }
 
         /**
@@ -1634,7 +1633,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Copies a checkpoint into a new index in host memory on the caller's thread, over every memory
-     * domain, with unique keys.
+     * domain, with no bound on entries per key.
      *
      * @throws USearchException the statuses {@link #loadRam(String, Executor, int[], CPUClass, long)} names.
      */
@@ -1651,7 +1650,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      * @param memoryDomains NUMA node ids to place the parts on; an empty list derives every node.
      * @param cpuClass the class the index dispatches as, or {@code null} for the CPU's own.
      * @param valuesPerKey the upper bound on entries sharing one key, which no checkpoint records;
-     *     zero derives to one.
+     *     zero is unbounded.
      * @throws USearchException MALFORMED on a checkpoint that ends early, and IO when the file cannot
      *     be read.
      */
@@ -1671,7 +1670,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Uploads a checkpoint into a new index in device memory on the default stream of one free
-     * device, with unique keys.
+     * device, with no bound on entries per key.
      *
      * @throws USearchException the statuses {@link #loadVram(String, Executor, int[], GPUClass, long)} names.
      */
@@ -1687,7 +1686,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *     stream.
      * @param devices CUDA device ordinals to place the parts on; an empty list derives one free device.
      * @param gpuClass the class the index dispatches as, or {@code null} for the devices' own.
-     * @param valuesPerKey the upper bound on entries sharing one key; zero derives to one.
+     * @param valuesPerKey the upper bound on entries sharing one key; zero is unbounded.
      * @throws USearchException DEVICE when no device answers, and the statuses a RAM load names.
      */
     public static DenseIndex loadVram(
@@ -1702,7 +1701,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Copies a monolith from a buffer into a new index in host memory on the caller's thread, with
-     * unique keys.
+     * no bound on entries per key.
      *
      * @throws USearchException the statuses {@link #loadRamBuffer(MemorySegment, Executor, int[], CPUClass, long)}
      *     names.
@@ -1735,7 +1734,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     /**
      * Uploads a monolith from a buffer into a new index in device memory on the default stream of one
-     * free device, with unique keys.
+     * free device, with no bound on entries per key.
      *
      * @throws USearchException the statuses
      *     {@link #loadVramBuffer(MemorySegment, Executor, int[], GPUClass, long)} names.
@@ -1967,6 +1966,17 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 PROGRESS);
     }
 
+    /** {@code usearch_dense_load_ram_*_t}, reading {@code source}, which also names the connectivity to widen to. */
+    private static StructLayout loadingRam(String source) {
+        return Library.opening(
+                Library.padding(),
+                Library.BYTES_VIEW.withName(source),
+                Library.placement("ram"),
+                Library.SIZE.withName("connectivity"),
+                Library.SIZE.withName("values_per_key"),
+                PROGRESS);
+    }
+
     /** {@code usearch_dense_metadata_read_t} or its buffer twin, reading {@code source}. */
     private static StructLayout reading(String source) {
         return MemoryLayout.structLayout(
@@ -1980,9 +1990,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     static final Verb INIT_RAM = new Verb("usearch_dense_init_ram", initializing("ram"));
     static final Verb INIT_VRAM = new Verb("usearch_dense_init_vram", initializing("vram"));
-    static final Verb LOAD_RAM = new Verb("usearch_dense_load_ram", loading("path", "ram"));
+    static final Verb LOAD_RAM = new Verb("usearch_dense_load_ram", loadingRam("path"));
     static final Verb LOAD_VRAM = new Verb("usearch_dense_load_vram", loading("path", "vram"));
-    static final Verb LOAD_RAM_BUFFER = new Verb("usearch_dense_load_ram_buffer", loading("buffer", "ram"));
+    static final Verb LOAD_RAM_BUFFER = new Verb("usearch_dense_load_ram_buffer", loadingRam("buffer"));
     static final Verb LOAD_VRAM_BUFFER = new Verb("usearch_dense_load_vram_buffer", loading("buffer", "vram"));
 
     static final Verb VIEW_RAM = new Verb(
@@ -1994,8 +2004,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     static final Verb VIEW_NVME = new Verb(
             "usearch_dense_view_nvme",
-            Library.opening(
-                    Library.padding(), Library.BYTES_VIEW.withName("path"), Library.placement("nvme")));
+            Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), Library.placement("nvme")));
 
     static final Verb RESERVE =
             new Verb("usearch_dense_reserve", Library.opening(Library.padding(), Library.SIZE.withName("capacity")));

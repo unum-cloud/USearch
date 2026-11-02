@@ -143,7 +143,7 @@ A failing call answers `Failure[status, <|"MessageTemplate"->detail|>]`, where t
 ```wolfram
 result = DenseInsert[index, {44}, {{1.0, 2.0}}];
 If[FailureQ[result], result[[1]]] (* "shape-mismatch" *)
-result["MessageTemplate"] (* "The rows' width differs from the frozen geometry" *)
+result["MessageTemplate"] (* "The rows' width differs from the index's" *)
 ```
 
 Arguments the verb's types do not admit fail as `invalid-argument`, and a call naming a released handle by its ID fails as `uninitialized`.
