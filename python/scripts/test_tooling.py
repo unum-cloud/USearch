@@ -125,6 +125,19 @@ def test_batch_matches_creation_and_methods():
     assert batch_matches.to_list() == [(1, 0.5), (2, 0.6), (3, 0.7), (4, 0.8)]
 
 
+@pytest.mark.parametrize("count, expected_hits", [(None, 2), (1, 1), (2, 2)])
+def test_batch_matches_recall_ignores_unused_slots(count, expected_hits):
+    matches = BatchMatches(
+        keys=np.array([[42, 0], [0, 0], [0, 42], [7, 42]], dtype=np.uint64),
+        distances=np.ones((4, 2), dtype=np.float32),
+        counts=np.array([1, 0, 1, 2]),
+    )
+    expected = np.array([0, 0, 0, 42], dtype=np.uint64)
+
+    assert matches.count_matches(expected, count=count) == expected_hits
+    assert matches.mean_recall(expected, count=count) == expected_hits / len(expected)
+
+
 @pytest.mark.parametrize("k", [1, 2, 3])
 def test_dataset_crop_neighbors(k: int):
     vectors = np.eye(3, dtype=np.float32)
