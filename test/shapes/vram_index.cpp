@@ -150,15 +150,17 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
         for (std::size_t entry = 0; entry != count; ++entry) {
             void const* const query_pack = tape.data() + offsets[count + query];
             void const* const entry_pack = tape.data() + offsets[entry];
-            auto const pairwise = kernel == nk_kernel_hausdorffs_packed_k ? serial_kit_t::hausdorffs
-                                                                          : serial_kit_t::chamfers;
-            failures += expect(pairwise(&query_pack, 1, &entry_pack, 1, &exact[query][entry], sizeof(distance_t),
-                                        nullptr, nullptr) == nk_success_k);
+            distance_t const infinity = std::numeric_limits<distance_t>::infinity();
+            failures += expect(
+                (kernel == nk_kernel_hausdorffs_packed_k
+                     ? serial_kit_t::hausdorffs(&query_pack, 1, &entry_pack, 1, &exact[query][entry],
+                                                sizeof(distance_t), nullptr, &infinity, nullptr)
+                     : serial_kit_t::chamfers(&query_pack, 1, &entry_pack, 1, &exact[query][entry], sizeof(distance_t),
+                                              nullptr, &infinity, nullptr, 0, nullptr)) == nk_success_k);
         }
 
     ram_index_t ram_index;
     shapes_metric<kit_t> metric {kernel, forkunion_allocator_t {}};
-    failures += expect_eq(metric.init(expansion_k * connectivity_32_k), status_t::success_k);
     typename ram_index_t::traversal_context_t ram_context {seed};
     typename value_t::allocator_type const value_allocator {ram_index.get_allocator()};
     failures += expect(bool(ram_index.reserve(count)));

@@ -323,11 +323,11 @@ struct bf16_neon_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_neon;
     static constexpr auto update_accumulator = nk_dot_bf16x8_update_neon;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_neon_;
     static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_neon;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_bf16_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_bf16_neon;
     static constexpr std::size_t step_dimensions = 8;
 };
 #else
@@ -353,10 +353,10 @@ struct bf16_neonbfdot_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_bf16x8_init_neonbfdot;
     static constexpr auto update_accumulator = nk_dot_bf16x8_update_neonbfdot;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_neon_;
     static constexpr auto reduce_accumulators = nk_dot_bf16x8_finalize_neonbfdot;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_bf16_neonbfdot;
     static constexpr std::size_t step_dimensions = 8;
 };
@@ -560,7 +560,7 @@ struct f16_neon_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_f16x8_init_neon;
     static constexpr auto update_accumulator = nk_dot_f16x8_update_neon;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_neon_;
     static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_neon;
     static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
     static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
@@ -579,8 +579,7 @@ struct f16_neon_quads_kit_t {
 
 #if NUMKONG_TARGET_NEONFHM
 
-/** f16 inner-product distance kit - Arm FP16 FML. NumKong has no f16 moments
- *  kernel for this tier, so the norms come from the serial one. */
+/** f16 inner-product distance kit - Arm FP16 FML, with the norms of the NEON f16 moments kernel. */
 struct f16_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
     static constexpr bool compiled_k = true;
@@ -591,11 +590,11 @@ struct f16_neonfhm_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_f16x8_init_neonfhm;
     static constexpr auto update_accumulator = nk_dot_f16x8_update_neonfhm;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b16x8_serial_;
+    static constexpr auto load_tail = nk_partial_load_b16x8_neon_;
     static constexpr auto reduce_accumulators = nk_dot_f16x8_finalize_neonfhm;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_f16_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_f16_neon;
     static constexpr std::size_t step_dimensions = 8;
 };
 #else
@@ -831,10 +830,10 @@ struct e5m2_neonfhm_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfhm;
     static constexpr auto update_accumulator = nk_dot_e5m2x16_update_neonfhm;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e5m2x16_finalize_neonfhm;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_e5m2_neonfhm;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -850,8 +849,7 @@ struct e5m2_neonfhm_quads_kit_t {
 
 #if NUMKONG_TARGET_NEONFP8
 
-/** e5m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e5m2 moments
- *  kernel for this tier, so the norms come from the serial one. */
+/** e5m2 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e5m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     static constexpr bool compiled_k = true;
@@ -862,11 +860,11 @@ struct e5m2_neonfp8_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e5m2x16_init_neonfp8;
     static constexpr auto update_accumulator = nk_dot_e5m2x16_update_neonfp8;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e5m2x16_finalize_neonfp8;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_e5m2_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_e5m2_neon;
     static constexpr std::size_t step_dimensions = 16;
 };
 #else
@@ -1066,10 +1064,10 @@ struct e4m3_neonfhm_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfhm;
     static constexpr auto update_accumulator = nk_dot_e4m3x16_update_neonfhm;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e4m3x16_finalize_neonfhm;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_e4m3_neonfhm;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -1085,8 +1083,7 @@ struct e4m3_neonfhm_quads_kit_t {
 
 #if NUMKONG_TARGET_NEONFP8
 
-/** e4m3 inner-product distance kit - Arm FP8 DOT. NumKong has no e4m3 moments
- *  kernel for this tier, so the norms come from the serial one. */
+/** e4m3 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e4m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     static constexpr bool compiled_k = true;
@@ -1097,11 +1094,11 @@ struct e4m3_neonfp8_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e4m3x16_init_neonfp8;
     static constexpr auto update_accumulator = nk_dot_e4m3x16_update_neonfp8;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e4m3x16_finalize_neonfp8;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_e4m3_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_e4m3_neon;
     static constexpr std::size_t step_dimensions = 16;
 };
 #else
@@ -1232,8 +1229,7 @@ struct e3m2_skylake_quads_kit_t {
 
 #if NUMKONG_TARGET_NEONSDOT
 
-/** e3m2 inner-product distance kit - Arm SDOT. NumKong has no e3m2 moments kernel
- *  for this tier, so the norms come from the serial one. */
+/** e3m2 inner-product distance kit - Arm SDOT, with the norms of the NEON moments kernel. */
 struct e3m2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
     static constexpr bool compiled_k = true;
@@ -1244,11 +1240,11 @@ struct e3m2_neonsdot_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_e3m2x16_update_neonsdot;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_neon;
     static constexpr std::size_t step_dimensions = 16;
 };
 #else
@@ -1263,8 +1259,7 @@ struct e3m2_neonsdot_quads_kit_t {
 
 #if NUMKONG_TARGET_NEONFP8
 
-/** e3m2 inner-product distance kit - Arm FP8 DOT. NumKong has no e3m2 moments
- *  kernel for this tier, so the norms come from the serial one. */
+/** e3m2 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e3m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
     static constexpr bool compiled_k = true;
@@ -1275,11 +1270,11 @@ struct e3m2_neonfp8_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonfp8;
     static constexpr auto update_accumulator = nk_dot_e3m2x16_update_neonfp8;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_neonfp8;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_e3m2_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_e3m2_neon;
     static constexpr std::size_t step_dimensions = 16;
 };
 #else
@@ -1474,10 +1469,10 @@ struct e2m3_neonsdot_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_e2m3x16_update_neonsdot;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -1504,10 +1499,10 @@ struct e2m3_neonfp8_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonfp8;
     static constexpr auto update_accumulator = nk_dot_e2m3x16_update_neonfp8;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_neonfp8;
-    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_e2m3_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -1703,10 +1698,10 @@ struct u8_neonsdot_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_u8x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_u8x16_update_neonsdot;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_u8x16_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_u8_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -1964,10 +1959,10 @@ struct i8_neonsdot_quads_kit_t {
     static constexpr auto init_accumulator = nk_dot_i8x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_i8x16_update_neonsdot;
     static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_serial_;
+    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
     static constexpr auto reduce_accumulators = nk_dot_i8x16_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_serial_;
+    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_neon_;
     static constexpr auto compute_norms = nk_reduce_moments_i8_neonsdot;
     static constexpr std::size_t step_dimensions = 16;
 };
@@ -2167,9 +2162,9 @@ struct u4x2_neonsdot_quads_kit_t {
     static constexpr auto load_step = nk_load_b128_neon_;
     static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
     static constexpr auto reduce_accumulators = nk_dot_u4x32_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_u4_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_u4_neonsdot;
     static constexpr std::size_t step_dimensions = 32;
 };
 #else
@@ -2306,9 +2301,9 @@ struct i4x2_neonsdot_quads_kit_t {
     static constexpr auto load_step = nk_load_b128_neon_;
     static constexpr auto load_tail = nk_partial_load_b4x32_serial_;
     static constexpr auto reduce_accumulators = nk_dot_i4x32_finalize_neonsdot;
-    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_serial_;
-    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_serial_;
-    static constexpr auto compute_norms = nk_reduce_moments_i4_serial;
+    static constexpr auto angular_from_dot = nk_angular_through_i32_from_dot_neon_;
+    static constexpr auto euclidean_from_dot = nk_euclidean_through_i32_from_dot_neon_;
+    static constexpr auto compute_norms = nk_reduce_moments_i4_neonsdot;
     static constexpr std::size_t step_dimensions = 32;
 };
 #else

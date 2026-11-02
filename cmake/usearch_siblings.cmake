@@ -57,7 +57,7 @@ endforeach ()
 set(usearch_sibling_targets_)
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
-    8b3df749915fdcc01e563df8ff119c3e09c04789
+    9c23fc5c21170eec0d4594eb69c8aeee894cf19d
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion

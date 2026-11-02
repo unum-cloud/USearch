@@ -41,14 +41,11 @@ constexpr nk_kernel_kind_t kernel_of(usearch_shapes_metric_t metric) noexcept {
     }
 }
 
-/** A factory of @p metric_type_ under @p metric over a thread's arena, sized for a round of
- *  candidates. */
+/** A factory of @p metric_type_ under @p metric over a thread's arena. */
 template <typename metric_type_>
 auto shapes_metric_factory(usearch_shapes_metric_t metric) noexcept {
-    return [kernel = kernel_of(metric)](thread_allocator_t const& allocator, std::size_t staging) noexcept {
-        metric_type_ made {kernel, allocator};
-        status_t const ready = made.init(staging);
-        return expected<metric_type_> {std::move(made), ready};
+    return [kernel = kernel_of(metric)](thread_allocator_t const& allocator, std::size_t) noexcept {
+        return expected<metric_type_> {metric_type_ {kernel, allocator}, status_t::success_k};
     };
 }
 

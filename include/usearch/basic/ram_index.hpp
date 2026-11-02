@@ -3603,12 +3603,11 @@ struct ram_index {
             ++context.telemetry.saturated_walks;
             return {walk_step_t::exhausted_k, seen};
         }
-        context.staged_ids.clear();
-        metric.reset(query);
         // `visited` may also hold IDs no draw names, like a later batch's nodes, so the size check
         // can only under-sample, never let the probe loop spin.
         node_id_t const sampling_first = admission.sampling_first(), sampling_bound = admission.sampling_bound();
         node_id_t unwired_draws = 0;
+        context.staged_ids.clear();
         while (context.staged_ids.size() != wanted &&
                context.visited.size() < static_cast<std::size_t>(sampling_bound - sampling_first)) {
             node_id_t draw = sampling_first +
@@ -3618,40 +3617,54 @@ struct ram_index {
                 if (++unwired_draws == sampling_bound - admission.first_invisible_id) break;
                 continue;
             }
-            if (metric.push(published_value_of(draw)) == metric_staging_t::refused_k)
-                break; // Unmarked, so a later round may retry it.
             [[maybe_unused]] membership_t const marked = context.visited.insert(draw);
             context.staged_ids.push_back_reserved(draw);
         }
-        std::size_t const staged_count = context.staged_ids.size();
-        if (!staged_count) return {walk_step_t::exhausted_k, status_t::success_k};
-        drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
-        walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
-                                                 std::span<distance_t const>(context.staged_distances));
-        settle_fold(fold);
-        if (demand == walk_demand_t::sated_k) return {walk_step_t::sated_k, status_t::success_k};
-        for (std::size_t lane = 0; lane != staged_count; ++lane) {
-            scored_node_t const scored {context.staged_ids[lane], context.staged_distances[lane]};
-            [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
-            if (status_t const queued = context.frontier.insert(scored_node_t {scored}); failed(queued)) {
-                ++context.telemetry.saturated_walks;
-                return {walk_step_t::advanced_k, queued};
+        // Drawn before any scoring, so a staging size never changes which landmarks a walk sees.
+        std::size_t const drawn_count = context.staged_ids.size();
+        for (std::size_t first = 0; first != drawn_count;) {
+            metric.reset(query);
+            std::size_t staged_count = 0;
+            while (first + staged_count != drawn_count &&
+                   metric.push(published_value_of(context.staged_ids[first + staged_count])) ==
+                       metric_staging_t::staged_k)
+                ++staged_count;
+            if (!staged_count) return {walk_step_t::exhausted_k, status_t::success_k};
+            drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
+            walk_demand_t const demand = fold.absorb(
+                std::span<node_id_t const>(context.staged_ids).subspan(first, staged_count),
+                std::span<distance_t const>(context.staged_distances));
+            settle_fold(fold);
+            if (demand == walk_demand_t::sated_k) return {walk_step_t::sated_k, status_t::success_k};
+            for (std::size_t lane = 0; lane != staged_count; ++lane) {
+                scored_node_t const scored {context.staged_ids[first + lane], context.staged_distances[lane]};
+                [[maybe_unused]] bool const ranked = context.results.insert(scored_node_t {scored}, expansion_factor);
+                if (status_t const queued = context.frontier.insert(scored_node_t {scored}); failed(queued)) {
+                    ++context.telemetry.saturated_walks;
+                    return {walk_step_t::advanced_k, queued};
+                }
             }
+            first += staged_count;
         }
+        if (!drawn_count) return {walk_step_t::exhausted_k, status_t::success_k};
         return {walk_step_t::advanced_k, status_t::success_k};
     }
 
     /** One round's expansion half: peels up to @p filling_nodes frontier entries within the
      *  stopping radius, copies their neighbor lists, and pushes the admission- and visited-filtered
      *  union into the metric, compacted in @c context.staged_ids. A full staging ends the round
-     *  early, with the entry it cut short back on the frontier. */
+     *  early. A staging that fills mid-list scores its IDs through the fold into @p scored_count of
+     *  the round's distances, so a metric of small staging scores as it goes and the round ranks
+     *  once; @c sated_k once the fold ends the walk there. */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
-              typename stopping_type_, typename context_type_>
+              typename stopping_type_, typename context_type_, typename fold_type_>
     walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
                                  std::size_t expansion_factor, std::size_t filling_nodes,
-                                 stopping_type_ const& stopping, context_type_& context) noexcept {
+                                 stopping_type_ const& stopping, context_type_& context, fold_type_&& fold,
+                                 std::size_t& scored_count) noexcept {
         context.staged_ids.clear();
         metric.reset(query);
+        scored_count = 0;
         for (std::size_t expanded_count = 0; expanded_count != filling_nodes && !context.frontier.empty();
              ++expanded_count) {
             scored_node_t const best = context.frontier.top();
@@ -3684,14 +3697,21 @@ struct ram_index {
                 if (!admission.admits(neighbor_id)) continue;
                 if (context.visited.contains(neighbor_id)) continue;
                 if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) {
-                    context.staged_ids.resize_reserved(kept);
-                    // A full staging ends the round: the entry goes back on the frontier, and the
-                    // next round stages the rest of its neighbor list past the IDs this one
-                    // visited. Only a metric refusing an empty round saturates the walk.
-                    if (kept && succeeded(context.frontier.insert(scored_node_t {best})))
-                        return walk_step_t::advanced_k;
-                    ++context.telemetry.saturated_walks;
-                    return walk_step_t::saturated_k;
+                    // A full staging scores what it holds at the round's radius and takes the rest
+                    // of the list; the round still ranks once, at its end. Only a metric refusing
+                    // an empty staging saturates the walk.
+                    if (score_staged_(metric, scored_count, kept, expansion_factor, stopping, context, fold) ==
+                        walk_demand_t::sated_k) {
+                        context.staged_ids.clear();
+                        return walk_step_t::sated_k;
+                    }
+                    scored_count = kept;
+                    metric.reset(query);
+                    if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) {
+                        context.staged_ids.resize_reserved(kept);
+                        ++context.telemetry.saturated_walks;
+                        return walk_step_t::saturated_k;
+                    }
                 }
                 [[maybe_unused]] membership_t const marked = context.visited.insert(neighbor_id);
                 context.staged_ids[kept] = neighbor_id;
@@ -3825,6 +3845,7 @@ struct ram_index {
         // A round expands the nodes whose neighbors fill a walk's candidates, as `round_capacity`
         // sized.
         std::size_t const filling_nodes = divide_round_up(expansion_factor, connectivity);
+        std::size_t scored_count = 0;
         while (true) {
             // An empty frontier seeds: the first round, or a restart after it drained before the
             // candidates filled. Nothing left to seed from ends the walk.
@@ -3837,31 +3858,50 @@ struct ram_index {
                 context.telemetry.restarts += restarting;
                 continue;
             }
-            walk_step_t const expanded = expand_frontier_<synchronization_>(query, metric, admission, expansion_factor,
-                                                                            filling_nodes, stopping, context);
-            if (expanded == walk_step_t::exhausted_k) return;
-            walk_step_t const ranked = rank_round_(metric, expansion_factor, stopping, context, fold);
+            walk_step_t const expanded = expand_frontier_<synchronization_>(
+                query, metric, admission, expansion_factor, filling_nodes, stopping, context, fold, scored_count);
+            if (expanded == walk_step_t::exhausted_k || expanded == walk_step_t::sated_k) return;
+            walk_step_t const ranked = rank_round_(metric, scored_count, expansion_factor, stopping, context, fold);
             if (expanded == walk_step_t::saturated_k || ranked != walk_step_t::advanced_k) return;
         }
     }
 
-    /** One round's scoring half: drains the staged union through the metric, hands it to the fold,
-     *  and pushes what improved the candidates into the frontier, shedding the frontier past the
-     *  full candidates' radius first so the pushes fit. */
+    /** The radius of a round: full stopping candidates only admit what beats their furthest member,
+     *  so that member's distance is it, which a filtered walk takes from its admitted set. */
+    template <typename stopping_type_>
+    static distance_t round_radius_(std::size_t expansion_factor, stopping_type_ const& stopping) noexcept {
+        return stopping.size() == expansion_factor ? stopping.top().distance : unbounded_radius<distance_t>();
+    }
+
+    /** Drains the metric's staging, the round's IDs from @p scored_count to @p staged_count , at
+     *  the round's radius, and hands them to the fold, which may end the walk. */
     template <typename metric_type_, typename stopping_type_, typename context_type_, typename fold_type_>
-    walk_step_t rank_round_(metric_type_& metric, std::size_t expansion_factor, stopping_type_ const& stopping,
-                            context_type_& context, fold_type_&& fold) const noexcept {
+    walk_demand_t score_staged_(metric_type_& metric, std::size_t scored_count, std::size_t staged_count,
+                                std::size_t expansion_factor, stopping_type_ const& stopping, context_type_& context,
+                                fold_type_&& fold) const noexcept {
+        std::size_t const fresh_count = staged_count - scored_count;
+        context.staged_distances.resize_reserved(staged_count);
+        std::span<distance_t> const fresh_distances {context.staged_distances.data() + scored_count, fresh_count};
+        metric.drain(fresh_distances, round_radius_(expansion_factor, stopping));
+        context.telemetry.computed_distances += fresh_count;
+        walk_demand_t const demand = fold.absorb(
+            std::span<node_id_t const>(context.staged_ids).subspan(scored_count, fresh_count),
+            std::span<distance_t const>(fresh_distances));
+        settle_fold(fold);
+        return demand;
+    }
+
+    /** One round's scoring half: scores the staged IDs past the @p scored_count already scored, and
+     *  pushes what improved the candidates into the frontier, shedding the frontier past the full
+     *  candidates' radius first so the pushes fit. */
+    template <typename metric_type_, typename stopping_type_, typename context_type_, typename fold_type_>
+    walk_step_t rank_round_(metric_type_& metric, std::size_t scored_count, std::size_t expansion_factor,
+                            stopping_type_ const& stopping, context_type_& context, fold_type_&& fold) const noexcept {
         std::size_t const staged_count = context.staged_ids.size();
         if (!staged_count) return walk_step_t::advanced_k;
-        // Full stopping candidates only admit what beats their furthest member, so that member's
-        // distance is the radius, which a filtered walk takes from its admitted set.
-        bool const stopping_full = stopping.size() == expansion_factor;
-        drain_round(metric, staged_count, context,
-                    stopping_full ? stopping.top().distance : unbounded_radius<distance_t>());
-        walk_demand_t const demand = fold.absorb(std::span<node_id_t const>(context.staged_ids),
-                                                 std::span<distance_t const>(context.staged_distances));
-        settle_fold(fold);
-        if (demand == walk_demand_t::sated_k) return walk_step_t::sated_k;
+        if (staged_count != scored_count && score_staged_(metric, scored_count, staged_count, expansion_factor,
+                                                          stopping, context, fold) == walk_demand_t::sated_k)
+            return walk_step_t::sated_k;
         if (context.results.size() == expansion_factor &&
             context.frontier.capacity() - context.frontier.size() < staged_count)
             context.frontier.erase_below(context.results.top());

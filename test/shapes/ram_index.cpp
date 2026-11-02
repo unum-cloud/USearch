@@ -38,10 +38,6 @@ constexpr std::size_t shapes_min_points_k = 12;
 /** Points in the largest generated cloud, which sizes every stack buffer below. */
 constexpr std::size_t shapes_max_points_k = 16;
 
-/** Candidates one round may stage: past every round the scenarios open, whole-graph searches over
- *  three node chunks included, so no walk saturates on the metric. */
-constexpr std::size_t shapes_staging_limit_k = 4096;
-
 /** Bytes of the oracle's workspace, enough for Gromov-Wasserstein between two of the largest clouds
  *  in @c f64. */
 constexpr std::size_t shapes_oracle_workspace_k = 32 * 1024;
@@ -145,14 +141,16 @@ typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t::distance_t serial_
     using kit_t = typename shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
     using distance_t = typename kit_t::distance_t;
     alignas(nk_default_alignment_k) byte_t workspace[shapes_oracle_workspace_k];
+    distance_t const unbounded = std::numeric_limits<distance_t>::infinity();
     distance_t distance = 0;
     nk_status_t status = nk_missing_kernel_k;
     switch (kernel) {
     case nk_kernel_chamfers_packed_k:
-        status = kit_t::chamfers(&first, 1, &second, 1, &distance, sizeof(distance_t), nullptr, nullptr);
+        status = kit_t::chamfers(&first, 1, &second, 1, &distance, sizeof(distance_t), nullptr, &unbounded, workspace,
+                                 sizeof(workspace), nullptr);
         break;
     case nk_kernel_hausdorffs_packed_k:
-        status = kit_t::hausdorffs(&first, 1, &second, 1, &distance, sizeof(distance_t), nullptr, nullptr);
+        status = kit_t::hausdorffs(&first, 1, &second, 1, &distance, sizeof(distance_t), nullptr, &unbounded, nullptr);
         break;
     case nk_kernel_wassersteinprocrustes_packed_k:
         status = kit_t::wassersteinprocrustes(&first, 1, &second, 1, &distance, sizeof(distance_t), nullptr, workspace,
@@ -194,7 +192,6 @@ struct shapes_fixture {
     }
     static metric_t make_metric() noexcept {
         metric_t metric(kernel_, forkunion_allocator_t {});
-        [[maybe_unused]] status_t const sized = metric.init(shapes_staging_limit_k);
         return metric;
     }
     static codec<kit_t> make_codec() noexcept { return {}; }
@@ -251,24 +248,30 @@ static_assert(transparent_metric<procrustes_fixture_t::metric_t>);
 static_assert(value_codec<codec<chamfer_fixture_t::kit_t>, chamfer_fixture_t::value_t>);
 static_assert(value_codec<codec<procrustes_fixture_t::kit_t>, procrustes_fixture_t::value_t>);
 
-/** One round of @p metric: the first pack as the query, the rest staged, drained within @p radius
- *  into @p distances. */
+/** Rounds of @p metric: the first pack as the query, the rest staged as they fit, drained within
+ *  @p radius into @p distances. */
 template <typename fixture_type_>
 std::size_t score_round(typename fixture_type_::metric_t& metric,
                         std::vector<typename fixture_type_::value_t> const& packs,
                         std::span<typename fixture_type_::distance_t> distances,
                         typename fixture_type_::distance_t radius) {
     std::size_t failures = 0;
-    metric.reset(packs[0]);
-    for (std::size_t candidate = 0; candidate != distances.size(); ++candidate)
-        failures += expect(metric.push(packs[1 + candidate]) == metric_staging_t::staged_k);
-    metric.drain(distances, radius);
-    failures += expect_eq(metric.status(), status_t::success_k);
+    for (std::size_t first = 0; first != distances.size();) {
+        metric.reset(packs[0]);
+        std::size_t staged = 0;
+        while (first + staged != distances.size() &&
+               metric.push(packs[1 + first + staged]) == metric_staging_t::staged_k)
+            ++staged;
+        failures += expect(staged != 0);
+        metric.drain(distances.subspan(first, staged), radius);
+        failures += expect_eq(metric.status(), status_t::success_k);
+        first += staged;
+    }
     return failures;
 }
 
-/** Every kind through the fixture's kit against the serial oracle: exact at an unbounded radius and
- *  at a zero one, and near zero for the query's mirror image. */
+/** Every kind through the fixture's kit against the serial oracle: exact at an unbounded radius,
+ *  past a zero one where the truth is, and near zero for the query's mirror image. */
 template <typename fixture_type_>
 std::size_t check_shapes_kernels(u64_t seed) {
     using scalar_t = typename fixture_type_::scalar_t;
@@ -294,7 +297,6 @@ std::size_t check_shapes_kernels(u64_t seed) {
         error_stats_t kernel_errors;
         for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
             metric_t metric(kernel, forkunion_allocator_t {});
-            failures += expect_eq(metric.init(candidates_k), status_t::success_k);
             std::array<distance_t, candidates_k> exact, zero_radius;
             failures += score_round<fixture_type_>(metric, packs, exact, unbounded_radius<distance_t>());
             failures += score_round<fixture_type_>(metric, packs, zero_radius, distance_t {});
@@ -302,7 +304,8 @@ std::size_t check_shapes_kernels(u64_t seed) {
             for (std::size_t candidate = 0; candidate != candidates_k; ++candidate) {
                 distance_t const truth = serial_distance<scalar_t>(kernel, packs[0][0], packs[1 + candidate][0]);
                 kernel_errors.add(exact[candidate], truth);
-                kernel_errors.add(zero_radius[candidate], truth);
+                failures += expect(exact[candidate] > 0 ? zero_radius[candidate] > 0
+                                                        : zero_radius[candidate] == exact[candidate]);
             }
         }
         failures += expect_errors("shapes kernels", comparison_family_t::approximate_k, comparison_verdict_t::assert_k,
@@ -386,7 +389,6 @@ std::size_t check_shapes_packing(u64_t seed) {
                 query_t::make(clouds, {}, fixture_type_::kit_t::pack_size, fixture_type_::kit_t::pack).value;
             for (nk_kernel_kind_t const kernel : shapes_kernels_k) {
                 metric_t metric(kernel, forkunion_allocator_t {});
-                failures += expect_eq(metric.init(1), status_t::success_k);
                 metric.reset(query);
                 failures += expect(metric.push(second) == metric_staging_t::staged_k);
                 std::array<distance_t, 1> distances {1};
@@ -441,11 +443,18 @@ std::size_t check_shapes_sharded(u64_t seed) {
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric(), oracle = chamfer_fixture_t::make_metric();
     auto query_of = [&](std::size_t sample) { return entries.pack(entries_k + sample); };
     auto best_of = [&](std::size_t sample) {
-        std::vector<distance_t> distances(entries_k);
-        oracle.reset(packs[entries_k + sample]);
-        for (std::size_t entry = 0; entry != entries_k; ++entry) oracle.push(packs[entry]);
-        oracle.drain(std::span {distances}, unbounded_radius<distance_t>());
-        return *std::min_element(distances.begin(), distances.end());
+        distance_t best = unbounded_radius<distance_t>();
+        std::array<distance_t, 4> distances;
+        for (std::size_t first = 0; first != entries_k;) {
+            oracle.reset(packs[entries_k + sample]);
+            std::size_t staged = 0;
+            while (first + staged != entries_k && oracle.push(packs[first + staged]) == metric_staging_t::staged_k)
+                ++staged;
+            oracle.drain(std::span {distances}.first(staged), unbounded_radius<distance_t>());
+            best = std::min(best, *std::min_element(distances.begin(), distances.begin() + staged));
+            first += staged;
+        }
+        return best;
     };
     return test_basic_sharded<chamfer_indexes_t>(
         seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}.first(entries_k),
@@ -507,11 +516,8 @@ struct chamfer_nvme_fixture_t {
         std::array<std::span<scalar_t const>, 1> const cloud {clouds[entry]};
         return index_type_::value_t::make(cloud, allocator, 0).value;
     }
-    static expected<scratch_metric_t> make_scratch_metric(basic_nvme_scratch_t const& allocator,
-                                                          std::size_t staging) noexcept {
-        scratch_metric_t metric {ram_fixture_t::kernel_k, allocator};
-        status_t const ready = metric.init(staging);
-        return {std::move(metric), ready};
+    static expected<scratch_metric_t> make_scratch_metric(basic_nvme_scratch_t const& allocator, std::size_t) noexcept {
+        return {scratch_metric_t {ram_fixture_t::kernel_k, allocator}, status_t::success_k};
     }
     static expected<query_t> pack(std::span<scalar_t const> points, basic_nvme_scratch_t const& allocator) noexcept {
         std::array<std::span<scalar_t const>, 1> const cloud {points};

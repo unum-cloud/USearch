@@ -5,18 +5,18 @@
  *  @brief Batched shape distances between 3D point clouds of any size, over NumKong's many-to-many
  *      kernels.
  *
- *  The shapes index scores one round at a time: @c reset opens it for a query pack, @c push stages
- *  candidate packs, and @c drain scores every staged candidate in one 1×M kernel call. A metric
- *  here owns its staging and the transport workspace, so one instance serves one thread and
- *  allocates on the scoring path only when a pair is wider than every pair it has seen.
+ *  The shapes index scores a quad at a time: @c reset opens it for a query pack, @c push stages up
+ *  to a quad of candidate packs, and @c drain scores them in one kernel call. A metric here owns
+ *  its arena, so one instance serves one thread and allocates on the scoring path only when a pair
+ *  is wider than every pair it has seen.
  *
  *  @section shapes_ram_metric_kits Kits
  *
  *  A kit binds one ISA's four kernels, Chamfer, Hausdorff, Wasserstein-Procrustes and
- *  Gromov-Wasserstein, with the two transport workspace sizes and the pack, unpack and pack-reading
- *  kernels, which every ISA shares, and the cast that brings a caller's coordinates into the stored
- *  scalar and back out. @c shapes_ladder picks the widest kit this build compiled in under the
- *  requested capability mask, at compile time, so no capability is tested at run time.
+ *  Gromov-Wasserstein, with their three workspace sizes, its pack kernel, the unpack and
+ *  pack-reading kernels, which every ISA shares, and the cast that brings a caller's coordinates
+ *  into the stored scalar and back out. @c shapes_ladder picks the widest kit this build compiled
+ *  in under the requested capability mask, at compile time, so no capability is tested at run time.
  *
  *  @section shapes_ram_metric_bounds Bounds
  *
@@ -28,17 +28,15 @@
  *  - Hausdorff ≥ |Rq − Rs|, since the farthest point of one cloud is at least that far from every
  *    point of the other
  *
- *  Both hold for the exact definitions and are symmetric. The GPU metric settles a Hausdorff
- *  candidate whose bound alone clears the round's radius without reaching the kernel; this one
- *  scores every candidate, since on real walks the bounds settled about 2% of them.
+ *  Both hold for the exact definitions and are symmetric. Chamfer and Hausdorff kernels take the
+ *  round's radius and apply these themselves, as the GPU metric's do, while the transport kinds
+ *  score every candidate exactly.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstdint> // `std::uintptr_t` - where the next pack's boundary falls
 
 #include <limits> // `std::numeric_limits` - the distance a failed round reports
-#include <memory> // `std::align` - the workspace's start on the kernels' boundary
 #include <span>   // `std::span`
 
 #include <numkong/cast.h>     // `nk_cast_serial` & kin - the kits' scalar casts
@@ -106,6 +104,7 @@ struct f32_serial_shapes_kit_t {
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_serial;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_serial;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_serial;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_serial;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -122,11 +121,12 @@ struct f32_neon_shapes_kit_t {
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
-    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_neon;
     static constexpr auto unpack = nk_shapes_unpack_f32_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_neon;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_neon;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_neon;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_neon;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -152,11 +152,12 @@ struct f32_haswell_shapes_kit_t {
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
-    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_haswell;
     static constexpr auto unpack = nk_shapes_unpack_f32_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_haswell;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_haswell;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_haswell;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_haswell;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -182,11 +183,12 @@ struct f32_skylake_shapes_kit_t {
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
-    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_skylake;
     static constexpr auto unpack = nk_shapes_unpack_f32_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_skylake;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_skylake;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_skylake;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_skylake;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -212,11 +214,12 @@ struct f32_rvv_shapes_kit_t {
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
-    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_rvv;
     static constexpr auto unpack = nk_shapes_unpack_f32_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_rvv;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_rvv;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_rvv;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_rvv;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -242,11 +245,12 @@ struct f32_v128relaxed_shapes_kit_t {
     using distance_t = nk_f64_t;
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
-    static constexpr auto pack = nk_shapes_pack_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_v128relaxed;
     static constexpr auto unpack = nk_shapes_unpack_f32_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f32_v128relaxed;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_v128relaxed;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_v128relaxed;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_v128relaxed;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
@@ -275,6 +279,7 @@ struct f16_serial_shapes_kit_t {
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_serial;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_serial;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_serial;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_serial;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -291,11 +296,12 @@ struct f16_neon_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_neon;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_neon;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_neon;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_neon;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_neon;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -322,11 +328,12 @@ struct f16_neonfhm_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_neon;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_neonfhm;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_neonfhm;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_neon;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_neon;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -352,11 +359,12 @@ struct f16_haswell_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_haswell;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_haswell;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_haswell;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_haswell;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_haswell;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -382,11 +390,12 @@ struct f16_skylake_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_skylake;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_skylake;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_skylake;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_skylake;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_skylake;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -412,11 +421,12 @@ struct f16_rvv_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_rvv;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_rvv;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_rvv;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_rvv;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_rvv;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -442,11 +452,12 @@ struct f16_v128relaxed_shapes_kit_t {
     using distance_t = nk_f32_t;
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
-    static constexpr auto pack = nk_shapes_pack_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_v128relaxed;
     static constexpr auto unpack = nk_shapes_unpack_f16_serial;
     static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
     static constexpr auto chamfers = nk_chamfers_packed_f16_v128relaxed;
     static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_v128relaxed;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
     static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_v128relaxed;
     static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_v128relaxed;
     static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
@@ -504,16 +515,11 @@ struct shapes_ladder<nk::f32_t, caps_> {
 #pragma region Metric
 
 /**
- *  @brief One of NumKong's four shape kinds over one round of candidates: @c reset borrows the
- *      query packs, @c push stages candidate packs, and @c drain scores them all in one N×M call
- *      over the N queries.
+ *  @brief One of four shape kinds over one quad of candidates: @c reset borrows the query
+ *      pack, @c push stages up to a quad and then refuses, and @c drain scores what staged.
  *
- *  One instance belongs to one thread and owns its staging and the transport workspace; the C
- *  variants place them in the executor thread's arena. Packs are read in place, never copied: a
- *  candidate stays valid until its round drains, and the query until the next @c reset.
- *
- *  @tparam kit_type_ The kernels, as one @c shapes_ladder names them.
- *  @tparam allocator_type_ Places the staging and the workspace.
+ *  A borrowed pack stays valid until the drain that closes its quad, as the metric concept
+ *  promises; a @b [points,3] cloud is packed into @c round_arena_, which every drain rewinds.
  */
 template <typename kit_type_, typename allocator_type_ = forkunion_allocator_t>
 class shapes_metric {
@@ -522,73 +528,53 @@ class shapes_metric {
     using scalar_t = typename kit_t::scalar_t;
     using distance_t = typename kit_t::distance_t;
     using allocator_t = allocator_type_;
-
-    /** A query may be a pack under any allocator, like one a call builds in its arena. */
     using is_transparent = void;
 
   private:
 
-    /** Which of the four shape kernels scores the rounds. */
+    /** Which of the four shape kernels scores the quads. */
     nk_kernel_kind_t kernel_;
 
     /** A batched @c reset's query packs, gathered into one table the kernels read. */
     growing_buffer<void const*, allocator_t> queries_;
 
-    /** The queries' pack table the kernels read: a single query's own, or @c queries_ for a
-     *  batch. */
+    /** The table the kernels read: a single query's own, or @c queries_ for a batch. */
     std::span<void const* const> query_packs_;
 
-    /** The round's candidate packs in push order. */
-    growing_buffer<void const*, allocator_t> staged_;
+    /** The quad's candidate packs in push order. */
+    quad<void const*> staged_packs_;
 
-    /** The packs of the round's staged clouds, each on NumKong's boundary; it grows only while it
-     *  holds none, so a staged pack never moves. */
-    growing_buffer<byte_t, allocator_t> packed_;
+    /** How many of @c staged_packs_ this quad filled. */
+    std::size_t staged_count_ = 0;
 
-    /** The transport kernels' scratch, one boundary wider than they ask, so its start rounds up to
-     *  their boundary whatever this allocator aligns to. */
-    growing_buffer<byte_t, allocator_t> workspace_;
+    /** The most points in the query or any candidate since @c reset, which sizes the workspace. */
+    std::size_t widest_points_ = 0;
 
-    /** How the last @ref init, @ref reset or @ref drain fared. */
-    status_t last_status_ = status_t::uninitialized_k;
+    /** The packs of staged clouds and the kernels' workspace, rewound by every drain. */
+    growing_arena<allocator_t> round_arena_;
+
+    /** How the last @ref reset or @ref drain fared. */
+    status_t last_status_ = status_t::success_k;
 
   public:
     explicit shapes_metric(nk_kernel_kind_t kernel, allocator_t const& allocator) noexcept
-        : kernel_(kernel), queries_(allocator), staged_(allocator), packed_(allocator), workspace_(allocator) {}
+        : kernel_(kernel), queries_(allocator), round_arena_(allocator) {}
     shapes_metric(shapes_metric const&) = delete;
     shapes_metric& operator=(shapes_metric const&) = delete;
     shapes_metric(shapes_metric&&) noexcept = default;
     shapes_metric& operator=(shapes_metric&&) noexcept = default;
 
-    /**
-     *  @brief Sizes the staging.
-     *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at
-     *      least the index's round capacity, @c max(⌈expansion / connectivity⌉ × connectivity,
-     *      connectivity + 1), or rounds saturate rather than fail.
-     *
-     *  @par Statuses:
-     *  - @c unknown_kind_k A kernel kind other than the four shape kinds.
-     */
-    status_t init(std::size_t staging_limit) noexcept {
-        if (!staging_limit) return status_t::config_mismatch_k;
-        if (kernel_ != nk_kernel_chamfers_packed_k && kernel_ != nk_kernel_hausdorffs_packed_k &&
-            kernel_ != nk_kernel_wassersteinprocrustes_packed_k && kernel_ != nk_kernel_gromovwassersteins_packed_k)
-            return status_t::unknown_kind_k;
-        last_status_ = staged_.reserve_exactly(staging_limit);
-        return last_status_;
-    }
-
-    /** How the last @ref init, @ref reset or @ref drain fared, the only place a failure surfaces,
-     *  since the scoring verbs answer nothing by contract. */
+    /** How the last @ref reset or @ref drain fared, the only place a failure surfaces, since the
+     *  scoring verbs answer nothing by contract. */
     status_t status() const noexcept { return last_status_; }
 
-    /** Opens a round for @p query, which must hold exactly one cloud, discarding whatever the
-     *  previous round staged; the query's own pack table is borrowed. */
+    /** Opens a quad for @p query, which must hold exactly one cloud. */
     template <typename query_allocator_type_>
     void reset(nk::shapes_packed<scalar_t, query_allocator_type_> const& query) noexcept {
-        staged_.clear(), packed_.clear();
+        staged_count_ = 0, round_arena_.clear();
         last_status_ = query.size() == 1 ? status_t::success_k : status_t::shape_mismatch_k;
-        query_packs_ = to_span(query);
+        if (failed(last_status_)) return;
+        query_packs_ = to_span(query), widest_points_ = query.max_points();
     }
 
     /** Opens rounds scoring every query of @p queries at once, each holding exactly one cloud, so
@@ -596,113 +582,94 @@ class shapes_metric {
     template <typename query_allocator_type_>
     void reset(std::span<nk::shapes_packed<scalar_t, query_allocator_type_> const> queries) noexcept {
         if (queries.size() == 1) return reset(queries.front());
-        staged_.clear(), packed_.clear(), queries_.clear();
+        staged_count_ = 0, round_arena_.clear(), queries_.clear(), widest_points_ = 0;
         last_status_ = queries_.reserve(queries.size());
         for (std::size_t query = 0; succeeded(last_status_) && query != queries.size(); ++query) {
             if (queries[query].size() != 1) last_status_ = status_t::shape_mismatch_k;
-            else queries_.push_back_reserved(queries[query][0]);
+            else {
+                queries_.push_back_reserved(queries[query][0]);
+                widest_points_ = max_of(widest_points_, queries[query].max_points());
+            }
         }
         query_packs_ = to_span(queries_);
     }
 
-    /** Stages one candidate's pack, or refuses once the round is full. */
+    /** Stages one candidate's pack, or refuses once the quad is full. */
     template <typename value_allocator_type_>
     basic::metric_staging_t push(nk::shapes_packed<scalar_t, value_allocator_type_> const& candidate) noexcept {
-        if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
-        staged_.push_back_reserved(candidate[0]);
+        if (staged_count_ == staged_packs_.size()) return basic::metric_staging_t::refused_k;
+        staged_packs_[staged_count_++] = candidate[0];
+        widest_points_ = max_of(widest_points_, candidate.max_points());
         return basic::metric_staging_t::staged_k;
     }
 
-    /** Packs a staged @b [points,3] @p cloud into the metric's staging arena and stages it;
-     *  @c refused_k once either is full, so the walk drains first. A pack that fails leaves the
-     *  round failed, as @ref status reports. */
+    /** Packs a @b [points,3] @p cloud into the arena and stages it, or refuses once the quad is
+     *  full. A pack that fails leaves the quad failed, as @ref status reports. */
     basic::metric_staging_t push(nk::matrix_view<scalar_t> cloud) noexcept {
-        if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
+        if (staged_count_ == staged_packs_.size()) return basic::metric_staging_t::refused_k;
         std::size_t const points = cloud.extent(0);
         nk_size_t pack_bytes = 0;
         if (nk_status_t const sized = kit_t::pack_size(points, &pack_bytes); sized != nk_success_k)
             return last_status_ = status_of(sized), basic::metric_staging_t::refused_k;
-        auto pack_offset = [&]() noexcept {
-            std::uintptr_t const start = reinterpret_cast<std::uintptr_t>(packed_.data());
-            return round_up_to_multiple<std::uintptr_t>(start + packed_.size(), nk_default_alignment_k) - start;
-        };
-        if (pack_offset() + pack_bytes > packed_.capacity()) {
-            if (!packed_.empty()) return basic::metric_staging_t::refused_k;
-            if (status_t const grown = packed_.reserve(pack_bytes + nk_default_alignment_k); failed(grown))
-                return last_status_ = grown, basic::metric_staging_t::refused_k;
-        }
-        std::size_t const offset = pack_offset();
-        byte_t* const pack = packed_.data() + offset;
-        packed_.extend_uninitialized(offset + pack_bytes);
+        void* const pack = round_arena_.allocate(pack_bytes, nk_default_alignment_k);
+        if (!pack) return last_status_ = status_t::bad_alloc_k, basic::metric_staging_t::refused_k;
         if (status_t const packed = status_of(kit_t::pack(cloud.raw_values_data(), points, pack, nullptr));
             failed(packed))
             last_status_ = packed;
-        staged_.push_back_reserved(pack);
+        staged_packs_[staged_count_++] = pack;
+        widest_points_ = max_of(widest_points_, points);
         return basic::metric_staging_t::staged_k;
     }
 
     /**
-     *  @brief Scores everything staged, exactly, straight into @p distances, and closes the round.
+     *  @brief Scores the quad within @p radius into @p distances and closes it.
      *
-     *  A failed round reports the largest finite distance, so full candidates reject it and
-     *  unfilled ones admit it last; @ref status is the only signal.
+     *  A failed quad reports the largest finite distance, so full candidates reject it and unfilled
+     *  ones admit it last; @ref status is the only signal.
      *
      *  @param[out] distances One slot per staged candidate, in push order, for every query,
      *      query-major.
+     *  @param[in] radius Chamfer and Hausdorff distances up to it are exact; past it, any value
+     *      past it. The transport kinds score every candidate exactly.
      */
-    void drain(std::span<distance_t> distances, distance_t) noexcept {
-        if (succeeded(last_status_) && !staged_.empty()) last_status_ = score_(distances.data());
+    void drain(std::span<distance_t> distances, distance_t radius) noexcept {
+        if (succeeded(last_status_) && staged_count_) last_status_ = score_(distances.data(), radius);
         if (failed(last_status_))
             for (distance_t& distance : distances) distance = (std::numeric_limits<distance_t>::max)();
-        staged_.clear(), packed_.clear();
+        staged_count_ = 0, round_arena_.clear();
     }
 
   private:
 
-    /** Points in the largest of @p packs. */
-    static std::size_t largest_points_(std::span<void const* const> packs) noexcept {
-        std::size_t largest = 0;
-        for (void const* pack : packs) {
-            nk_size_t points = 0;
-            [[maybe_unused]] nk_status_t const read = kit_t::packed_shape(pack, &points, nullptr, nullptr, nullptr,
-                                                                          nullptr, nullptr, nullptr);
-            largest = max_of<std::size_t>(largest, points);
-        }
-        return largest;
-    }
-
-    /** Scores every query against every staged pack in one call into @p results,
-     *  @b [queries,candidates]. */
-    status_t score_(distance_t* results) noexcept {
+    /** Scores every query against the quad in one call into @p results, @b [queries,candidates],
+     *  with the kernel of the metric's one kind. */
+    status_t score_(distance_t* results, distance_t radius) noexcept {
         void const* const* const queries = query_packs_.data();
-        void const* const* const candidates = staged_.data();
-        std::size_t const queries_count = query_packs_.size(), count = staged_.size();
+        void const* const* const candidates = staged_packs_.data();
+        std::size_t const queries_count = query_packs_.size(), count = staged_count_;
         std::size_t const stride = count * sizeof(distance_t);
-        if (kernel_ == nk_kernel_chamfers_packed_k)
-            return status_of(
-                kit_t::chamfers(queries, queries_count, candidates, count, results, stride, nullptr, nullptr));
         if (kernel_ == nk_kernel_hausdorffs_packed_k)
-            return status_of(
-                kit_t::hausdorffs(queries, queries_count, candidates, count, results, stride, nullptr, nullptr));
+            return status_of(kit_t::hausdorffs(queries, queries_count, candidates, count, results, stride, nullptr,
+                                               &radius, nullptr));
 
-        bool const procrustes = kernel_ == nk_kernel_wassersteinprocrustes_packed_k;
-        std::size_t const query_points = largest_points_(query_packs_),
-                          staged_points = largest_points_(to_span(staged_));
         nk_size_t bytes = 0;
-        nk_status_t const sized = procrustes
-                                      ? kit_t::wassersteinprocrustes_workspace_size(query_points, staged_points, &bytes)
-                                      : kit_t::gromovwassersteins_workspace_size(query_points, staged_points, &bytes);
+        nk_status_t const sized =
+            kernel_ == nk_kernel_chamfers_packed_k
+                ? kit_t::chamfers_workspace_size(widest_points_, widest_points_, &bytes)
+            : kernel_ == nk_kernel_wassersteinprocrustes_packed_k
+                ? kit_t::wassersteinprocrustes_workspace_size(widest_points_, widest_points_, &bytes)
+                : kit_t::gromovwassersteins_workspace_size(widest_points_, widest_points_, &bytes);
         if (sized != nk_success_k) return status_of(sized);
-        // Grows only past the widest pair seen.
-        if (status_t const grown = workspace_.resize_uninitialized(bytes + nk_default_alignment_k); failed(grown))
-            return grown;
-        void* workspace = workspace_.data();
-        std::size_t workspace_bytes = workspace_.size();
-        std::align(nk_default_alignment_k, bytes, workspace, workspace_bytes);
-        return status_of(procrustes ? kit_t::wassersteinprocrustes(queries, queries_count, candidates, count, results,
-                                                                   stride, nullptr, workspace, workspace_bytes, nullptr)
-                                    : kit_t::gromovwassersteins(queries, queries_count, candidates, count, results,
-                                                                stride, nullptr, workspace, workspace_bytes, nullptr));
+        void* const workspace = round_arena_.allocate(bytes, nk_default_alignment_k);
+        if (!workspace) return status_t::bad_alloc_k;
+        if (kernel_ == nk_kernel_chamfers_packed_k)
+            return status_of(kit_t::chamfers(queries, queries_count, candidates, count, results, stride, nullptr,
+                                             &radius, workspace, bytes, nullptr));
+        if (kernel_ == nk_kernel_wassersteinprocrustes_packed_k)
+            return status_of(kit_t::wassersteinprocrustes(queries, queries_count, candidates, count, results, stride,
+                                                          nullptr, workspace, bytes, nullptr));
+        return status_of(kit_t::gromovwassersteins(queries, queries_count, candidates, count, results, stride, nullptr,
+                                                   workspace, bytes, nullptr));
     }
 };
 

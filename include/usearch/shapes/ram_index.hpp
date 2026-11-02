@@ -49,13 +49,12 @@ using value = nk::shapes_packed<scalar_type_, allocator_type_>;
 static_assert(default_alignment_k >= nk_default_alignment_k, "Values would start packs off NumKong's boundary");
 
 /** Clouds out in their inserted pose; clouds in packed again, through the record's own allocator.
- *  Every backend packs as the serial kit does, so a pack moves between classes and towers as is,
- *  and one pose conversion serves the RAM and GPU indexes alike. */
+ *  Every kit packs into one layout that every class and tower reads, though each rounds its own
+ *  way, so a checkpoint keeps poses and one conversion serves the RAM and GPU indexes alike. */
 template <typename kit_type_>
 struct codec {
     using scalar_t = typename kit_type_::scalar_t;
     using raw_t = typename scalar_t::raw_t;
-    using pack_kit_t = typename shapes_ladder<scalar_t, nk_cap_serial_k>::kit_t;
     inline static constexpr dtype_t value_dtype_k = std::is_same_v<scalar_t, nk::f16_t> ? dtype_t::f16_k
                                                                                         : dtype_t::f32_k;
     inline static constexpr column_shape_t value_shape_k = matrix_shape_t {0, 3};
@@ -75,12 +74,12 @@ struct codec {
     static status_t save_pack(bytes_view_t pack, bytes_span_t pose) noexcept {
         nk_size_t points = 0;
         if (status_t const read = status_of(
-                pack_kit_t::packed_shape(pack.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+                kit_type_::packed_shape(pack.data(), &points, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
             failed(read))
             return read;
         if (pose.size() != points * 3 * sizeof(raw_t)) return status_t::config_mismatch_k;
         if (pose.empty()) return status_t::success_k;
-        return status_of(pack_kit_t::unpack(pack.data(), reinterpret_cast<raw_t*>(pose.data()), nullptr));
+        return status_of(kit_type_::unpack(pack.data(), reinterpret_cast<raw_t*>(pose.data()), nullptr));
     }
 
     /**
@@ -92,8 +91,8 @@ struct codec {
     static status_t load_pack(bytes_view_t pose, bytes_span_t pack) noexcept {
         constexpr std::size_t point_bytes_k = 3 * sizeof(raw_t);
         if (pose.size() % point_bytes_k) return status_t::malformed_k;
-        return status_of(pack_kit_t::pack(reinterpret_cast<raw_t const*>(pose.data()), pose.size() / point_bytes_k,
-                                          pack.data(), nullptr));
+        return status_of(kit_type_::pack(reinterpret_cast<raw_t const*>(pose.data()), pose.size() / point_bytes_k,
+                                         pack.data(), nullptr));
     }
 
     /**
@@ -109,7 +108,7 @@ struct codec {
         if (output.size() < pose_bytes) return status_t::overflow_k;
         if (value.empty()) return status_t::success_k;
         nk_size_t pack_bytes = 0;
-        if (status_t const sized = status_of(pack_kit_t::pack_size(value.max_points(), &pack_bytes)); failed(sized))
+        if (status_t const sized = status_of(kit_type_::pack_size(value.max_points(), &pack_bytes)); failed(sized))
             return sized;
         return save_pack({static_cast<byte_t const*>(value[0]), pack_bytes}, output.first(pose_bytes));
     }
@@ -123,8 +122,7 @@ struct codec {
     template <typename value_type_>
     status_t load(bytes_view_t input, value_type_& value) const noexcept {
         std::array const clouds {elements_of<scalar_t>(input)};
-        auto [packed, status] = value_type_::make(clouds, value.get_allocator(), pack_kit_t::pack_size,
-                                                  pack_kit_t::pack);
+        auto [packed, status] = value_type_::make(clouds, value.get_allocator(), kit_type_::pack_size, kit_type_::pack);
         if (nk::failed(status)) return status_of(status);
         value = std::move(packed);
         return status_t::success_k;
