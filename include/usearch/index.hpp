@@ -2407,6 +2407,7 @@ class index_gt {
 
     using candidates_view_t = span_gt<candidate_t const>;
     using candidates_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<candidate_t>;
+    using slots_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<compressed_slot_t>;
     using top_candidates_t = sorted_buffer_gt<candidate_t, std::less<candidate_t>, candidates_allocator_t>;
     using next_candidates_t = max_heap_gt<candidate_t, std::less<candidate_t>, candidates_allocator_t>;
 
@@ -2507,6 +2508,7 @@ class index_gt {
     struct usearch_align_m context_t {
         top_candidates_t top_candidates{};
         top_candidates_t top_for_refine{};
+        buffer_gt<compressed_slot_t, slots_allocator_t> neighbors_before_update{};
         next_candidates_t next_candidates{};
         visits_hash_set_t visits{};
         splitmix64_t level_generator{};
@@ -3392,6 +3394,12 @@ class index_gt {
         if (!next.reserve(config.expansion))
             return result.failed("Out of memory!");
 
+        if (context.neighbors_before_update.size() < connectivity_max) {
+            buffer_gt<compressed_slot_t, slots_allocator_t> neighbors_before_update(connectivity_max);
+            if (!neighbors_before_update)
+                return result.failed("Out of memory!");
+            context.neighbors_before_update = std::move(neighbors_before_update);
+        }
         node_t updated_node = node_at_(updated_slot);
         level_t updated_node_level = updated_node.level();
 
@@ -3424,18 +3432,22 @@ class index_gt {
             if (!search_to_update_(value, metric, prefetch, closest_slot, updated_slot, level, config.expansion,
                                    context))
                 return result.failed("Out of memory!");
-
             candidates_view_t closest_view;
+            span_gt<compressed_slot_t const> old_neighbors_view;
             {
                 node_lock_t updated_lock = node_lock_(updated_slot);
-                // TODO: Go through existing neighbors removing reverse links
-                // for (compressed_slot_t slot : neighbors_(updated_node, level))
-                //     remove_link_(slot, updated_slot, level);
-                neighbors_(updated_node, level).clear();
+                neighbors_ref_t old_neighbors = neighbors_(updated_node, level);
+                std::size_t old_neighbors_count = old_neighbors.size();
+                usearch_assert_m(old_neighbors_count <= context.neighbors_before_update.size(),
+                                 "Insufficient update scratch space");
+                std::copy(old_neighbors.begin(), old_neighbors.end(), context.neighbors_before_update.begin());
+                old_neighbors_view = {context.neighbors_before_update.data(), old_neighbors_count};
+                old_neighbors.clear();
                 closest_view = form_links_to_closest_(metric, updated_slot, level, context);
                 if (closest_view.size())
                     closest_slot = closest_view[0].slot;
             }
+            repair_links_to_old_neighbors_(metric, updated_slot, level, old_neighbors_view, closest_view, context);
             form_reverse_links_(metric, updated_slot, closest_view, value, level, context);
         }
         if (static_cast<vector_key_t>(updated_node.key()) != key)
@@ -4369,6 +4381,61 @@ class index_gt {
         }
 
         return top_view;
+    }
+
+    /**
+     *  @brief  Reconnects old neighbors while preserving links to other surviving nodes.
+     */
+    template <typename metric_at>
+    void repair_links_to_old_neighbors_( //
+        metric_at&& metric, compressed_slot_t updated_slot, level_t level,
+        span_gt<compressed_slot_t const> old_neighbors, candidates_view_t new_neighbors,
+        context_t& context) usearch_noexcept_m {
+
+        std::size_t const connectivity_max = level ? config_.connectivity : config_.connectivity_base;
+        top_candidates_t& top = context.top_for_refine;
+        for (compressed_slot_t neighbor_slot : old_neighbors) {
+            node_lock_t neighbor_lock = node_lock_(neighbor_slot);
+            neighbors_ref_t neighbors = neighbors_(node_at_(neighbor_slot), level);
+            usearch_assert_m(neighbors.size() <= connectivity_max, "Possible corruption - overflow");
+            auto updated_link = std::find_if(neighbors.begin(), neighbors.end(),
+                                             [updated_slot](compressed_slot_t slot) { return slot == updated_slot; });
+            std::size_t const free_slots = connectivity_max - neighbors.size();
+            bool const retained =
+                std::find_if(new_neighbors.begin(), new_neighbors.end(), [neighbor_slot](candidate_t const& candidate) {
+                    return candidate.slot == neighbor_slot;
+                }) != new_neighbors.end();
+            bool const has_reverse_link = updated_link != neighbors.end();
+            bool const replace_updated_link = !free_slots && !retained && has_reverse_link;
+            std::size_t shortcut_limit = replace_updated_link ? 1 : free_slots;
+
+            // Leave room for the updated node's reverse link to avoid pruning this list again.
+            if (retained && !has_reverse_link && shortcut_limit)
+                --shortcut_limit;
+            if (!shortcut_limit)
+                continue;
+            top.clear();
+
+            for (compressed_slot_t slot : old_neighbors) {
+                if (slot == neighbor_slot ||
+                    std::find_if(neighbors.begin(), neighbors.end(),
+                                 [slot](compressed_slot_t neighbor) { return neighbor == slot; }) != neighbors.end())
+                    continue;
+                distance_t distance = context.measure(citerator_at(neighbor_slot), citerator_at(slot), metric);
+                top.insert_reserved({distance, slot});
+            }
+
+            // Preserve links to other nodes, which may have no other incoming edge.
+            candidates_view_t shortcuts =
+                refine_(metric, shortcut_limit, top, context, context.computed_distances_in_refines);
+            if (replace_updated_link) {
+                if (shortcuts.size())
+                    *updated_link = shortcuts[0].slot;
+            } else {
+                for (auto shortcut : shortcuts)
+                    neighbors.push_back(shortcut.slot);
+            }
+        }
     }
 
     template <typename value_at, typename metric_at>
