@@ -17,13 +17,16 @@ These tests assert the GIL contract end-to-end by:
   operation cleanly, surfacing as a Python `RuntimeError`.
 """
 
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 
 import numpy as np
 import pytest
 
-from usearch.index import Index
+from usearch.index import Index, Indexes, search
 
 
 def _background_counter():
@@ -104,7 +107,8 @@ def test_gil_released_during_search():
     )
 
 
-def test_progress_callback_fires_and_completes():
+@pytest.mark.parametrize("threads", [1, 4])
+def test_progress_callback_fires_and_completes(threads):
     """The progress callback runs from a C++ worker thread that must reacquire
     the GIL before invoking the Python callable. It must be able to mutate a
     Python list and return a bool without crashing."""
@@ -118,7 +122,11 @@ def test_progress_callback_fires_and_completes():
         invocations.append((done, total))
         return True
 
-    idx.add(keys, vectors, threads=4, progress=progress)
+    idx.add(keys, vectors, threads=threads, progress=progress)
+
+    np.testing.assert_array_equal(idx[keys], vectors)
+    if threads == 1:
+        assert len(invocations) == len(keys) + 1
 
     assert invocations, "progress callback was never invoked"
     last_done, last_total = invocations[-1]
@@ -151,6 +159,121 @@ def test_progress_callback_can_cancel():
     # that the callback was actually invoked the expected number of times.
     assert len(seen) >= 3
     assert len(idx) <= len(keys)
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("exact", [False, True])
+def test_search_progress_results_and_cancellation(threads, exact):
+    keys, vectors = _big_random_batch(512, 32)
+    _, queries = _big_random_batch(32, 32, seed=7)
+    idx = Index(ndim=32, dtype="f32")
+    idx.add(keys, vectors, threads=1)
+
+    def run(progress=None):
+        if exact:
+            return search(vectors, queries, 5, exact=True, metric="cos", threads=threads, progress=progress)
+        return idx.search(queries, 5, threads=threads, progress=progress)
+
+    expected = run()
+    seen = []
+
+    def progress(done: int, total: int) -> bool:
+        seen.append((done, total))
+        return True
+
+    actual = run(progress)
+    np.testing.assert_array_equal(actual.keys, expected.keys)
+    np.testing.assert_array_equal(actual.distances, expected.distances)
+    total = len(vectors) * len(queries) if exact else len(queries)
+    assert seen[-1] == (total, total)
+    assert all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))
+    if threads == 1:
+        # Every original progress tick, plus the final completion report.
+        assert len(seen) == (len(vectors) if exact else len(queries)) + 1
+
+    def cancel(done: int, total: int) -> bool:
+        return False
+
+    # Exact search has historically reported cancellation as MemoryError.
+    with pytest.raises(MemoryError if exact else RuntimeError):
+        run(cancel)
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_sharded_search_with_and_without_progress(threads):
+    keys, vectors = _big_random_batch(128, 32)
+    shards = [Index(ndim=32, dtype="f32") for _ in range(2)]
+    shards[0].add(keys[:64], vectors[:64], threads=1)
+    shards[1].add(keys[64:], vectors[64:], threads=1)
+    indexes = Indexes(shards)
+    expected = indexes.search(vectors, 5, threads=threads)
+    seen = []
+
+    def progress(done: int, total: int) -> bool:
+        seen.append((done, total))
+        return True
+
+    actual = indexes.search(vectors, 5, threads=threads, progress=progress)
+    np.testing.assert_array_equal(actual.keys, expected.keys)
+    np.testing.assert_array_equal(actual.distances, expected.distances)
+    assert seen
+
+
+@pytest.mark.parametrize("operation", ["add", "search", "exact"])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_no_callback_keyboard_interrupt(operation, threads):
+    """Exercise polling without a Python callback in an isolated interpreter.
+
+    An interrupt must remain a KeyboardInterrupt, rather than being overwritten
+    by an operation error. A subprocess also bounds a broken polling loop.
+    """
+    script = textwrap.dedent("""\
+        import _thread
+        import sys
+        import threading
+        import numpy as np
+        from usearch.index import Index, search
+
+        operation, threads = sys.argv[1], int(sys.argv[2])
+        rng = np.random.default_rng(42)
+        vectors = rng.standard_normal((100_000, 64), dtype=np.float32)
+        idx = Index(ndim=64, dtype="f32")
+        if operation == "search":
+            idx.add(np.arange(4000), vectors[:4000], threads=threads)
+
+        stop = threading.Event()
+        def interrupt():
+            if not stop.wait(0.05):
+                _thread.interrupt_main()
+
+        worker = threading.Thread(target=interrupt)
+        worker.start()
+        try:
+            try:
+                if operation == "add":
+                    idx.add(np.arange(len(vectors)), vectors, threads=threads)
+                elif operation == "search":
+                    idx.search(vectors, 10, threads=threads)
+                else:
+                    search(vectors, vectors[:256], 10, exact=True, threads=threads)
+            except KeyboardInterrupt:
+                if operation == "add":
+                    assert 0 < len(idx) < len(vectors)
+                print("interrupted", flush=True)
+            else:
+                raise AssertionError("operation completed without checking the interrupt")
+        finally:
+            stop.set()
+            worker.join()
+    """)
+    result = subprocess.run(
+        [sys.executable, "-c", script, operation, str(threads)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "interrupted" in result.stdout
 
 
 def test_gil_released_with_progress_callback():
