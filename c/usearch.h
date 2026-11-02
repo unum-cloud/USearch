@@ -414,6 +414,27 @@ USEARCH_EXPORT size_t usearch_filtered_search(                                //
     usearch_key_t* keys, usearch_distance_t* distances, usearch_error_t* error);
 
 /**
+ *  @brief Performs an exact nearest neighbors search with filtering over an index.
+ *  Checks the predicate before computing distances, avoiding graph traversals on unreachable keys.
+ *
+ *  @param index Pointer to the `usearch_index_t` object.
+ *  @param query Pointer to the query vector.
+ *  @param query_kind The scalar type of the query vector.
+ *  @param results_limit Maximum number of results to return.
+ *  @param filter Callback function to filter keys (can be NULL to evaluate all keys).
+ *  @param filter_state User-defined state passed to the filter callback.
+ *  @param[out] found_keys Buffer to store the found keys.
+ *  @param[out] found_distances Buffer to store the distances of the found keys.
+ *  @param[out] error Pointer to an error message string, or NULL if no error occurred.
+ *  @return The number of found nearest neighbors.
+ */
+USEARCH_EXPORT size_t usearch_exact_filtered_search(                                 //
+    usearch_index_t index,                                                           //
+    void const* query, usearch_scalar_kind_t query_kind, size_t results_limit,       //
+    usearch_filtered_search_callback_t filter, void* filter_state,                   //
+    usearch_key_t* found_keys, usearch_distance_t* found_distances, usearch_error_t* error);
+
+/**
  *  @brief Retrieves the vector associated with the given key from the index.
  *  @param[in] index The handle to the USearch index to be queried.
  *  @param[in] key The key of the vector to retrieve.
