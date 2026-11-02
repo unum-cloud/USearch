@@ -745,8 +745,8 @@ typedef struct usearch_refine_report_t {
  *  Names where the index lives, never who walks it: threads belong to the executor the verbs
  *  take. Every modality's RAM lifecycle verbs and the RAM executor take this struct.
  *
- *  The library's own payload blocks always claim huge pages, falling back to base pages where no
- *  pool is provisioned.
+ *  The library's own payload blocks of 1 GiB or more claim 1 GiB huge pages while the host's 1 GiB
+ *  pool covers them, and every other block base pages; 2 MiB pages are never claimed.
  */
 typedef struct usearch_ram_options_t {
 
@@ -1172,9 +1172,10 @@ typedef struct usearch_executor_for_nvme_t {
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
     size_t deferred_limit;
 
-    /** The newest I/O engine every ring may submit through, which degrades down the ladder where
-     *  its setup is refused; @c usearch_nvme_class_unknown_k derives it. Passthrough and SPDK open
-     *  only when pinned, as they need character devices or transport identifiers. */
+    /** The I/O engine every ring submits through, opened exactly or refused with the reason its
+     *  setup gave; @c usearch_nvme_class_unknown_k tries io_uring, then AIO, then blocking reads.
+     *  Passthrough and SPDK open only when named, since one needs character devices and the other
+     *  needs transport identifiers. */
     usearch_nvme_class_t nvme_class;
 } usearch_executor_for_nvme_t;
 
@@ -1189,8 +1190,9 @@ typedef struct usearch_executor_for_nvme_t {
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL paths for a nonzero count, or an unknown
  *    @c nvme_class.
- *  - @c usearch_status_config_mismatch_k Kernel paths mixed with transport identifiers, or SPDK
- *    pinned over kernel paths or a kernel engine over transport identifiers.
+ *  - @c usearch_status_config_mismatch_k Kernel paths mixed with transport identifiers, SPDK
+ *    pinned over kernel paths or a kernel engine over transport identifiers, or more threads than
+ *    an SPDK controller granted I/O queue pairs.
  *  - @c usearch_status_unsupported_k Transport identifiers in a build without SPDK, or a pinned
  *    engine this build lacks.
  */

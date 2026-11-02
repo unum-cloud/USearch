@@ -31,7 +31,10 @@ USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t*
     basic_init_vram(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
-    basic_load_ram<usearch_geospatial_load_ram>(arguments);
+    basic_load_ram<usearch_geospatial_load_ram>(arguments, as_text(arguments->path));
+}
+USEARCH_EXPORT void usearch_geospatial_load_ram_buffer(usearch_geospatial_load_ram_buffer_t* arguments) {
+    basic_load_ram<usearch_geospatial_load_ram_buffer>(arguments, as_bytes(arguments->buffer));
 }
 USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
     basic_load_vram<usearch_geospatial_load_vram>(arguments);
@@ -101,8 +104,15 @@ USEARCH_EXPORT void usearch_geospatial_refinement_finish(usearch_geospatial_refi
 USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
     basic_save<usearch_geospatial_save>(arguments);
 }
+USEARCH_EXPORT void usearch_geospatial_save_buffer(usearch_geospatial_save_buffer_t* arguments) {
+    basic_save_buffer<usearch_geospatial_save_buffer>(arguments);
+}
 USEARCH_EXPORT void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
-    basic_metadata_read<usearch_geospatial_metadata_read, geospatial_traits_t>(arguments);
+    basic_metadata_read<usearch_geospatial_metadata_read, geospatial_traits_t>(arguments, as_text(arguments->path));
+}
+USEARCH_EXPORT void usearch_geospatial_metadata_read_buffer(usearch_geospatial_metadata_read_buffer_t* arguments) {
+    basic_metadata_read<usearch_geospatial_metadata_read_buffer, geospatial_traits_t>(arguments,
+                                                                                      as_bytes(arguments->buffer));
 }
 
 } // extern "C"

@@ -306,11 +306,14 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
                 std::size_t const position = next.fetch_add(1, std::memory_order_relaxed);
                 if (position >= steps.size()) break;
                 auto const step = steps[position];
+                std::size_t const computed_before = scratch.traversals[thread].telemetry.computed_distances;
                 [[maybe_unused]] status_t const ran = plan.run(step, scratch.metrics[thread],
                                                                scratch.traversals[thread], selector);
                 if (!reselecting) continue;
                 std::size_t const nodes = plan.nodes_in(step);
                 std::size_t const done = count_ref_t(ticked).fetch_add(nodes, std::memory_order_relaxed) + nodes;
+                // A step whose node was not picked walked nothing, so only a walking step reports.
+                if (scratch.traversals[thread].telemetry.computed_distances == computed_before) continue;
                 if (ticks(done, population) == continuation_t::cancel_k)
                     flag_ref_t(cancelled).store(true, std::memory_order_relaxed);
             }
@@ -635,6 +638,26 @@ expected<sample_result_t> sample_entries(indexes_type_& indexes, std::size_t con
     return sampled;
 }
 
+/** Samples an NVMe view through its engines, scored by the metric @p make_metric builds over a
+ *  thread's arena against the stored values @p query_of turns into queries, placed by
+ *  @p coordinates_of, and writes each parent's distance in the units search reports. */
+template <typename variant_type_, typename make_metric_type_, typename query_of_type_,
+          typename coordinates_type_ = no_fixed_coordinates_t>
+    requires is_nvme_index<variant_type_>
+expected<sample_result_t> sample_entries(variant_type_& variant, make_metric_type_&& make_metric,
+                                         query_of_type_&& query_of, basic_sample_inputs_t inputs,
+                                         basic_sample_outputs_t outputs, sample_config_t config,
+                                         nvme_executor_t& executor,
+                                         coordinates_type_ const& coordinates_of = {}) noexcept {
+    using metric_t = made_metric<make_metric_type_>;
+    expected<sample_result_t> const sampled = variant.index.sample(inputs, outputs, config, make_metric, query_of,
+                                                                   executor, coordinates_of);
+    if (failed(sampled.status)) return sampled;
+    for (f32_t& distance : outputs.parent_distances.first(sampled.value.written))
+        distance = static_cast<f32_t>(distance * distance_unit<metric_t>);
+    return sampled;
+}
+
 #pragma endregion Fan Outs
 
 #pragma region Lookups and Cursors
@@ -738,13 +761,14 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
     return {held, variant_bodies<traits_type_>::write_values(variant, held, kept_at, memory, outputs)};
 }
 
-/** Pulls the next keys of a RAM or GPU variant's walk into @p memory, gathering their links into
- *  @p links where named. */
-template <typename variant_type_>
+/** Pulls the next keys of a variant's walk into @p memory, gathering their links into @p links
+ *  where named; an NVMe walk reads through the one @p executor, the others take none. */
+template <typename variant_type_, typename... executor_types_>
 expected<std::span<usearch_key_t const>> pull_entries(variant_type_& variant,
                                                       typename variant_type_::index_t::cursor_t& walk,
                                                       links_outputs_t* links, std::size_t wanted,
-                                                      growing_arena<forkunion_allocator_t>& memory) noexcept {
+                                                      growing_arena<forkunion_allocator_t>& memory,
+                                                      executor_types_&... executor) noexcept {
     using key_t = typename variant_type_::index_t::key_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
     // No more entries remain than every shard publishes now, so the carve never outgrows the read.
@@ -752,27 +776,9 @@ expected<std::span<usearch_key_t const>> pull_entries(variant_type_& variant,
     usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
     if (taking && !keys) return {{}, status_t::bad_alloc_k};
     auto const [written, status] = walk.pull(variant.index, std::span<key_t> {reinterpret_cast<key_t*>(keys), taking},
-                                             links ? &links->keys : nullptr, links ? &links->offsets : nullptr);
+                                             links ? &links->keys : nullptr, links ? &links->offsets : nullptr,
+                                             executor...);
     return {{keys, written}, status};
-}
-
-/** Pulls the next keys of an NVMe view into @p memory through the executor. */
-template <typename variant_type_>
-    requires is_nvme_index<variant_type_>
-expected<std::span<usearch_key_t const>> pull_entries(variant_type_& variant, std::size_t& offset, std::size_t wanted,
-                                                      growing_arena<forkunion_allocator_t>& memory,
-                                                      nvme_executor_t& executor) noexcept {
-    std::size_t const taking = min_of(variant.index.size() - offset, wanted);
-    if (!taking) return {{}, status_t::success_k};
-    usearch_key_t* const keys = carve<usearch_key_t>(memory, taking);
-    if (!keys) return {{}, status_t::bad_alloc_k};
-    // The values the read passes along stay unread, as a pull writes keys alone.
-    auto skip = [](std::size_t, std::size_t, auto const&) noexcept {};
-    std::span<us::utilities::uuid_t> const identities {reinterpret_cast<us::utilities::uuid_t*>(keys), taking};
-    if (status_t const read = variant.index.read_entries(offset, identities, executor, skip); failed(read))
-        return {{}, read};
-    offset += taking;
-    return {{keys, taking}, status_t::success_k};
 }
 
 #pragma endregion Lookups and Cursors
@@ -1043,8 +1049,29 @@ struct specialized_variant {
         if constexpr (viewed_k) return status_t::read_only_k;
         else return of(variant).load(path, executor, ticks);
     }
+
+    /** Reads a checkpoint from memory into a RAM variant; a GPU variant reads none from memory
+     *  yet. */
+    static status_t load_buffer(void* variant, bytes_view_t buffer, executor_t& executor,
+                                progress_ticks_t& ticks) noexcept {
+        if constexpr (viewed_k) return status_t::read_only_k;
+        else if constexpr (is_ram_index<variant_t>) return of(variant).load(buffer, executor, ticks);
+        else return status_t::unsupported_k;
+    }
     static status_t save(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
         return of(variant).save(path, executor, ticks);
+    }
+
+    /** Writes a RAM variant's checkpoint into memory; a view already is its checkpoint, and a GPU
+     *  variant writes none to memory yet. */
+    static status_t save_buffer(void* variant, bytes_span_t buffer, executor_t& executor,
+                                progress_ticks_t& ticks) noexcept {
+        if constexpr (is_ram_index<variant_t>) return of(variant).save(buffer, executor, ticks);
+        else return status_t::unsupported_k;
+    }
+    static expected<std::size_t> storage_requirements(void const* variant) noexcept {
+        if constexpr (is_ram_index<variant_t>) return of(variant).storage_requirements();
+        else return {0, status_t::unsupported_k};
     }
     static arena_residency_t residency(void const* variant) noexcept { return arena_residency_of(of(variant)); }
     static std::size_t devices(void const* variant, std::span<arena_residency_t> listed) noexcept {
@@ -1057,6 +1084,9 @@ struct specialized_variant {
                 if (count != listed.size()) listed[count++] = placed;
             });
         return count;
+    }
+    static status_t serves_writes(void const*) noexcept {
+        return viewed_k ? status_t::read_only_k : status_t::success_k;
     }
     static status_t reserve(void* variant, reserve_capacity_t capacity) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
@@ -1233,7 +1263,7 @@ struct specialized_variant {
     }
 
     /** Audits every shard of the variant: a RAM one on the calling thread, a GPU one on its
-     *  shards' streams; an NVMe view audits nothing yet. */
+     *  shards' streams, an NVMe view through its engines, sweeping forward alone. */
     static expected<reachability_t> health(void* variant, executor_t& executor) noexcept {
         if constexpr (is_ram_index<variant_t>) {
             typename variant_t::index_t& index = of(variant).index;
@@ -1243,44 +1273,32 @@ struct specialized_variant {
                 0, thread_allocator_t {executor.arena(0)}};
             return index.health(context);
         }
-        else if constexpr (is_vram_index<variant_t>) return of(variant).index.health(executor);
-        else return {{}, status_t::unsupported_k};
+        else return of(variant).index.health(executor);
     }
 
-    /** Opens a walk over a RAM or GPU variant's shards, breadth-first from @p starts when it names
-     *  any, or an NVMe view's cursor at its first entry, which walks no links. */
+    /** Opens a walk over the variant's shards, breadth-first from @p starts when it names any; an
+     *  NVMe view resolves them on its first pull. */
     static expected<void*> cursor_init(void* variant, std::span<usearch_key_t const> starts) noexcept {
-        if constexpr (viewed_k) {
-            if (!starts.empty()) return {nullptr, status_t::unsupported_k};
-            std::size_t* const opened = new (std::nothrow) std::size_t {0};
-            return {opened, opened ? status_t::success_k : status_t::bad_alloc_k};
-        }
-        else {
-            using cursor_t = typename variant_t::index_t::cursor_t;
-            using key_t = typename variant_t::index_t::key_t;
-            cursor_t* const opened = new (std::nothrow) cursor_t(forkunion_allocator_t {no_memory_domain_k});
-            if (!opened) return {nullptr, status_t::bad_alloc_k};
-            std::span<key_t const> const keys {reinterpret_cast<key_t const*>(starts.data()), starts.size()};
-            if (status_t const walking = opened->open(of(variant).index, keys); failed(walking))
-                return delete opened, expected<void*> {nullptr, walking};
-            return {opened, status_t::success_k};
-        }
+        using cursor_t = typename variant_t::index_t::cursor_t;
+        using key_t = typename variant_t::index_t::key_t;
+        cursor_t* const opened = new (std::nothrow) cursor_t(forkunion_allocator_t {no_memory_domain_k});
+        if (!opened) return {nullptr, status_t::bad_alloc_k};
+        std::span<key_t const> const keys {reinterpret_cast<key_t const*>(starts.data()), starts.size()};
+        if (status_t const walking = opened->open(of(variant).index, keys); failed(walking))
+            return delete opened, expected<void*> {nullptr, walking};
+        return {opened, status_t::success_k};
     }
     static expected<std::span<usearch_key_t const>> cursor_next(void* variant, void* cursor, links_outputs_t* links,
                                                                 std::size_t wanted,
                                                                 growing_arena<forkunion_allocator_t>& memory,
                                                                 executor_t& executor) noexcept {
-        if constexpr (viewed_k) {
-            if (links) return {{}, status_t::unsupported_k};
-            return pull_entries(of(variant), *static_cast<std::size_t*>(cursor), wanted, memory, executor);
-        }
-        else
-            return pull_entries(of(variant), *static_cast<typename variant_t::index_t::cursor_t*>(cursor), links,
-                                wanted, memory);
+        using cursor_t = typename variant_t::index_t::cursor_t;
+        if constexpr (viewed_k)
+            return pull_entries(of(variant), *static_cast<cursor_t*>(cursor), links, wanted, memory, executor);
+        else return pull_entries(of(variant), *static_cast<cursor_t*>(cursor), links, wanted, memory);
     }
     static void cursor_free(void* cursor) noexcept {
-        if constexpr (viewed_k) delete static_cast<std::size_t*>(cursor);
-        else delete static_cast<typename variant_t::index_t::cursor_t*>(cursor);
+        delete static_cast<typename variant_t::index_t::cursor_t*>(cursor);
     }
 
     /** The verb table of the variant, every entry one of the bodies above. */
@@ -1304,6 +1322,7 @@ struct specialized_variant {
             .describe = &describe,
             .matches = &matches,
             // Writes
+            .serves_writes = &serves_writes,
             .reserve = &reserve,
             .clear = &clear,
             .insert = &insert,
@@ -1334,7 +1353,10 @@ struct specialized_variant {
             .sample = &sample,
             // Persistence
             .load = &load,
+            .load_buffer = &load_buffer,
             .save = &save,
+            .save_buffer = &save_buffer,
+            .storage_requirements = &storage_requirements,
         };
     }
 };

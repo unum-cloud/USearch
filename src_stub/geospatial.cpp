@@ -409,6 +409,12 @@ static bool read_from(geospatial_index_t& index, bytes_view_t blob, usearch_outc
     return true;
 }
 
+/** Writes what a checkpoint froze into @p metadata; every geospatial checkpoint reads whole. */
+static bool describe(usearch_geospatial_metadata_t& metadata, geospatial_checkpoint_prefix_t const& prefix) {
+    metadata = {prefix.connectivity};
+    return true;
+}
+
 /** Writes @p shard's whole image into @p blob; false once @p outcome records why not. */
 static bool serialize_shard(geospatial_index_t const& shard, std::vector<std::byte>& blob, usearch_outcome_t* outcome) {
     std::size_t const entries = shard.entries.size();
@@ -479,6 +485,18 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
     keep_going(arguments->progress, 1, 1);
     index->options.terrain = std::move(terrain);
     *arguments->index = index;
+}
+
+void usearch_geospatial_load_ram_buffer(usearch_geospatial_load_ram_buffer_t* arguments) {
+    load_ram_buffer<usearch_geospatial_load_ram_buffer>(
+        arguments, [&](bytes_view_t blob, usearch_outcome_t* outcome) -> usearch_geospatial_index_handle_t* {
+            terrain_grid_t terrain;
+            if (!adopt_terrain(terrain, arguments->terrain, outcome)) return nullptr;
+            usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(
+                blob, outcome);
+            if (index) index->options.terrain = std::move(terrain);
+            return index;
+        });
 }
 
 void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
@@ -996,6 +1014,10 @@ void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
     save_parts(index, arguments->path, arguments->progress, serialize_shard, outcome);
 }
 
+void usearch_geospatial_save_buffer(usearch_geospatial_save_buffer_t* arguments) {
+    save_buffer<usearch_geospatial_save_buffer>(arguments, serialize_shard);
+}
+
 void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
     if (through_executor<usearch_geospatial_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -1003,8 +1025,11 @@ void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* argume
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome) || !read_first_part(blob, arguments->path, outcome)) return;
     geospatial_checkpoint_prefix_t prefix {};
-    if (!parse_prefix(prefix, blob, outcome)) return;
-    *arguments->metadata = {prefix.connectivity};
+    if (parse_prefix(prefix, blob, outcome)) describe(*arguments->metadata, prefix);
+}
+
+void usearch_geospatial_metadata_read_buffer(usearch_geospatial_metadata_read_buffer_t* arguments) {
+    metadata_read_buffer<usearch_geospatial_metadata_read_buffer>(arguments, parse_prefix, describe);
 }
 
 } // extern "C"

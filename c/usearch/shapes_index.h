@@ -218,6 +218,13 @@ typedef enum usearch_shapes_metric_t {
     usearch_shapes_metric_wasserstein_procrustes_k = 4,
 } usearch_shapes_metric_t;
 
+/** The spelling a checkpoint records for a kind, as @c usearch_shapes_metric_chamfer_k spells
+ *  "chamfer"; "unknown" for a value outside the set. */
+USEARCH_EXPORT char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric);
+
+/** Reads a kind back from its spelling; @c usearch_shapes_metric_unknown_k when unrecognized. */
+USEARCH_EXPORT usearch_shapes_metric_t usearch_shapes_metric_from_name(usearch_bytes_view_t name);
+
 /** The arguments of @c usearch_shapes_init_ram - the geometry and metric an empty index freezes,
  *  and where its shards live. */
 typedef struct usearch_shapes_init_ram_t {
@@ -244,7 +251,7 @@ typedef struct usearch_shapes_init_ram_t {
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
 
-    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    /** Upper bound on entries sharing one key; zero is unbounded. */
     size_t values_per_key;
 
     /** The memory domains to place one shard on apiece. */
@@ -283,7 +290,7 @@ typedef struct usearch_shapes_init_vram_t {
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
 
-    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    /** Upper bound on entries sharing one key; zero is unbounded. */
     size_t values_per_key;
 
     /** The devices to place one shard on apiece. */
@@ -325,7 +332,7 @@ typedef struct usearch_shapes_load_ram_t {
     /** The memory domains to place the parts on. */
     usearch_ram_options_t ram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -358,6 +365,57 @@ typedef struct usearch_shapes_load_ram_t {
  */
 USEARCH_EXPORT void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments);
 
+/** The arguments of @c usearch_shapes_load_ram_buffer. */
+typedef struct usearch_shapes_load_ram_buffer_t {
+
+    /** Output for the new index, written by the time the call is final. */
+    usearch_shapes_index_t* index;
+
+    /** The executor the read fans out over, one shard per thread. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Source holding one serialized monolith, or the manifest of several parts leading them. */
+    usearch_bytes_view_t buffer;
+
+    /** The memory domains to place the parts on. */
+    usearch_ram_options_t ram;
+
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
+    size_t values_per_key;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_t progress;
+} usearch_shapes_load_ram_buffer_t;
+
+/**
+ *  @brief Copies a checkpoint from a memory buffer into a new, mutable index in host memory.
+ *
+ *  This places, reports and cancels like @c usearch_shapes_load_ram, which reaches the same
+ *  bytes through a mapping, so @c buffer needs no file behind it, and a mapped file no copy.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
+ *    sums do not parse.
+ *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
+ *  - @c usearch_status_unsupported_k A checkpoint storing points other than @c f16 or @c f32, or
+ *    a pinned class the CPU does not admit.
+ *  - @c usearch_status_uninitialized_k The executor holds no pool workers.
+ *  - @c usearch_status_config_mismatch_k The checkpoint's columns differ from the shards' in
+ *    dtype, shape or key width.
+ *  - @c usearch_status_device_k The executor is not a RAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
+ *    dispatch.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
+ */
+USEARCH_EXPORT void usearch_shapes_load_ram_buffer(usearch_shapes_load_ram_buffer_t* arguments);
+
 /** The arguments of @c usearch_shapes_load_vram. */
 typedef struct usearch_shapes_load_vram_t {
 
@@ -379,7 +437,7 @@ typedef struct usearch_shapes_load_vram_t {
     /** The devices to place the parts on. */
     usearch_vram_options_t vram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with parts placed and their count. */
@@ -691,6 +749,9 @@ typedef struct usearch_shapes_health_t {
  *      its first entry, forward and back. Read-only, so concurrent insertions merely leave fresh
  *      entries out of the audit.
  *
+ *  An NVMe view sweeps forward alone, from entries spaced through each part, so its
+ *  @c back_sweeps stays zero.
+ *
  *  @par Statuses:
  *  - @c usearch_status_device_k The executor's kind does not match the residency.
  *  - @c usearch_status_uninitialized_k No shard is placed, or the executor holds no pool workers
@@ -698,8 +759,8 @@ typedef struct usearch_shapes_health_t {
  *  - @c usearch_status_contended_k Another call holds the executor or its pool, or a destructive
  *    window overlapped the audit twice.
  *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
- *    device.
- *  - @c usearch_status_unsupported_k The handle is an NVMe view, which audits nothing yet.
+ *    device, or an NVMe medium the engines cannot read.
+ *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
  */
 USEARCH_EXPORT void usearch_shapes_health(usearch_shapes_health_t* arguments);
 
@@ -1186,8 +1247,7 @@ typedef struct usearch_shapes_cursor_init_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
- *  - @c usearch_status_unsupported_k The handle lives on a GPU, or names @c starts as an NVMe
- *    view; neither walks links yet.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, which walks no links yet.
  */
 USEARCH_EXPORT void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments);
 
@@ -1237,7 +1297,7 @@ typedef struct usearch_shapes_cursor_next_t {
  *  call given the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:
- *  - @c usearch_status_unsupported_k @c links from an NVMe view, which walks no links yet.
+ *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments);
@@ -1337,8 +1397,8 @@ typedef struct usearch_shapes_sample_t {
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c shown or @c focus for a nonzero count, or
  *    @c shown_coordinates not three @c usearch_scalar_f32_k columns.
- *  - @c usearch_status_unsupported_k The handle lives on a GPU or is an NVMe view; only a RAM
- *    handle samples yet.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, which does not sample yet.
+ *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
  */
 USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments);
 
@@ -1387,6 +1447,56 @@ typedef struct usearch_shapes_save_t {
  */
 USEARCH_EXPORT void usearch_shapes_save(usearch_shapes_save_t* arguments);
 
+/** The arguments of @c usearch_shapes_save_buffer. */
+typedef struct usearch_shapes_save_buffer_t {
+
+    /** The handle to be written. */
+    usearch_shapes_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Output for the checkpoint's bytes and length, inside @c arena. */
+    usearch_bytes_view_t* monolith;
+
+    /** Memory for @c monolith, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The @b optional handler, called with parts written and their count. */
+    usearch_progress_t progress;
+} usearch_shapes_save_buffer_t;
+
+/**
+ *  @brief Saves a mutable index into @c arena: one monolith for a handle of one shard, or a
+ *      manifest leading one part per shard. Demands a mutation-free window; concurrent readers
+ *      keep searching throughout.
+ *
+ *  A lone shard's monolith is the same bytes @c usearch_shapes_save writes. Several shards write
+ *  the manifest first, listing each part by its offset inside the buffer, then every part on the
+ *  header's alignment, each with its shard's own node IDs, so a load opens one shard per part
+ *  again. A cancelled call leaves @c monolith->data @c NULL.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c arena.
+ *  - @c usearch_status_device_k An arena or an executor on another residency or device.
+ *  - @c usearch_status_contended_k The arena serves another call, another call holds the
+ *    executor or its pool, a dispensed batch has yet to publish, or a call, batch, load or plan
+ *    holds the handle.
+ *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint,
+ *    or lives on a GPU, which writes no checkpoint into memory yet.
+ *  - @c usearch_status_uninitialized_k No shard is live, or the executor holds no pool workers.
+ *  - @c usearch_status_config_mismatch_k A stored value disagrees with the shape its column
+ *    records.
+ *  - @c usearch_status_out_of_memory_k The arena cannot grow to the checkpoint's length.
+ */
+USEARCH_EXPORT void usearch_shapes_save_buffer(usearch_shapes_save_buffer_t* arguments);
+
 /** The geometry and metric a checkpoint froze - everything a reader learns without opening it. */
 typedef struct usearch_shapes_metadata_t {
 
@@ -1431,6 +1541,36 @@ typedef struct usearch_shapes_metadata_read_t {
  *    or a header does not parse or spans more bytes than its part.
  */
 USEARCH_EXPORT void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments);
+
+/** The arguments of @c usearch_shapes_metadata_read_buffer. */
+typedef struct usearch_shapes_metadata_read_buffer_t {
+
+    /** The executor the read runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Source holding one serialized monolith, or the manifest of several parts leading them. */
+    usearch_bytes_view_t buffer;
+
+    /** Output for every field the checkpoint froze. */
+    usearch_shapes_metadata_t* metadata;
+} usearch_shapes_metadata_read_buffer_t;
+
+/**
+ *  @brief Reads the fields a checkpoint in a memory buffer froze without loading it, as
+ *      @c usearch_shapes_metadata_read reads them from a path.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a header does not parse or
+ *    spans more bytes than its part.
+ */
+USEARCH_EXPORT void usearch_shapes_metadata_read_buffer(usearch_shapes_metadata_read_buffer_t* arguments);
 
 /** A live index's state. Each counter is read once, so under concurrent insertions they may come
  *  from slightly different moments. */

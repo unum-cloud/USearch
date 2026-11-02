@@ -57,15 +57,6 @@ inline bool monotone_offsets(usearch_tape_view_t tape, std::size_t count) noexce
     return true;
 }
 
-/** Keeps the first failure any thread reports into @p first, through the CPU class's reference. */
-template <template <typename> class atomic_ref_template_>
-void keep_first_failure(status_t& first, status_t status) noexcept {
-    if (succeeded(status)) return;
-    status_t unset = status_t::success_k;
-    atomic_ref_template_<status_t>(first).compare_exchange_strong(unset, status, std::memory_order_relaxed,
-                                                                  std::memory_order_relaxed);
-}
-
 /** Raises @p word to @p value, if it is larger, from any thread, through the CPU class's reference;
  *  a relaxed peek first, so a word already that large is never written. */
 template <template <typename> class atomic_ref_template_, typename word_type_>
@@ -179,6 +170,9 @@ struct basic_verbs {
     bool (*matches)(void const* variant, void const* donor) noexcept;
 
     // Writes
+
+    /** Whether the variant takes writes, which a view refuses with @c read_only_k. */
+    status_t (*serves_writes)(void const* variant) noexcept;
     status_t (*reserve)(void* variant, reserve_capacity_t capacity) noexcept;
     status_t (*clear)(void* variant) noexcept;
     expected<traversal_stats_t> (*insert)(void* variant, usearch_keys_view_t keys, values_t values,
@@ -251,13 +245,18 @@ struct basic_verbs {
     void (*cursor_free)(void* cursor) noexcept;
 
     /** Draws up to the outputs' length around the focus keys, beside and placed among the shown
-     *  ones, never scanning; only a RAM variant samples yet. */
+     *  ones, never scanning; a GPU variant does not sample yet. */
     expected<sample_result_t> (*sample)(void* variant, basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
                                         sample_config_t config, executor_t& executor) noexcept;
 
     // Persistence
     status_t (*load)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    status_t (*load_buffer)(void* variant, bytes_view_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
     status_t (*save)(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Writes the checkpoint into @p buffer, exactly @c storage_requirements bytes long. */
+    status_t (*save_buffer)(void* variant, bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    expected<std::size_t> (*storage_requirements)(void const* variant) noexcept;
 };
 
 /** The variants one modality's class unit compiles for one residency: @c find answers the verb
@@ -414,9 +413,10 @@ struct sequence_traits_t {
         return true;
     }
 
-    /** Reads the kind, widths, costs and connectivity a checkpoint at @p path recorded, the widths
-     *  spelled as decimals between commas, the costs kept as recorded for a freeze to unfold. */
-    static status_t recall(std::string_view path, geometry_t& geometry) noexcept {
+    /** Reads the kind, widths, costs and connectivity @p checkpoint recorded, at a path or in a
+     *  buffer: the widths spelled as decimals between commas, the costs kept for a freeze. */
+    template <typename checkpoint_type_>
+    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
         status_t fields_status = status_t::success_k;
         auto per_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
@@ -437,7 +437,8 @@ struct sequence_traits_t {
                 }
             }
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
+        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
+                                                                       per_field);
         geometry.metric = sequence_metric_of(metadata.metric.view());
         return failed(status) ? status : fields_status;
     }
@@ -603,13 +604,16 @@ struct shapes_traits_t {
         return true;
     }
 
-    /** Reads the kind, scalar, point count and connectivity a checkpoint at @p path recorded. */
-    static status_t recall(std::string_view path, geometry_t& geometry) noexcept {
+    /** Reads the kind, scalar, point count and connectivity @p checkpoint recorded, at a path or in
+     *  a buffer. */
+    template <typename checkpoint_type_>
+    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
         auto per_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
             else if (field.key == "points") geometry.points = decimal_in(field.value);
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
+        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
+                                                                       per_field);
         geometry.metric = shapes_metric_of(metadata.metric.view());
         geometry.quantization = metadata.value_dtype == dtype_t::f16_k   ? usearch_scalar_f16_k
                                 : metadata.value_dtype == dtype_t::f32_k ? usearch_scalar_f32_k
@@ -789,13 +793,15 @@ struct geospatial_traits_t {
         return true;
     }
 
-    /** Reads the connectivity a checkpoint at @p path recorded, the one field beside its
-     *  observations. */
-    static status_t recall(std::string_view path, geometry_t& geometry) noexcept {
+    /** Reads the connectivity @p checkpoint recorded, at a path or in a buffer, the one field
+     *  beside its observations. */
+    template <typename checkpoint_type_>
+    static status_t recall(checkpoint_type_ checkpoint, geometry_t& geometry) noexcept {
         auto per_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "connectivity") geometry.connectivity = decimal_in(field.value);
         };
-        auto const [metadata, status] = safegraphs_read_index_metadata(path, std::allocator<byte_t> {}, per_field);
+        auto const [metadata, status] = safegraphs_read_index_metadata(checkpoint, std::allocator<byte_t> {},
+                                                                       per_field);
         return status;
     }
 

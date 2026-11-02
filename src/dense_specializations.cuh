@@ -354,6 +354,9 @@ struct specialized_index {
         else return of(index).storage_requirements(save_config_of());
     }
 
+    static status_t serves_writes(void const*) noexcept {
+        return viewed_k ? status_t::read_only_k : status_t::success_k;
+    }
     static status_t reserve(void* index, std::size_t capacity) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
         else return of(index).reserve({capacity}).status;
@@ -657,17 +660,10 @@ struct specialized_index {
         });
     }
 
-    /** Opens a cursor over every entry, a RAM or GPU one breadth-first from @p starts when it names
-     *  any; an NVMe view walks no links, so it refuses @p starts, and an index without a cursor of
-     *  its own, Apple's, answers @c unsupported_k. */
+    /** Opens a cursor over every entry, breadth-first from @p starts when it names any, which a
+     *  view resolves on its first pull; an index without a cursor answers @c unsupported_k. */
     static expected<void*> cursor_init(void* index, std::span<key_t const> starts) noexcept {
-        if constexpr (viewed_k) {
-            if (!starts.empty()) return {nullptr, status_t::unsupported_k};
-            typename index_t::cursor_t* const opened = new (std::nothrow) typename index_t::cursor_t(of(index));
-            if (!opened) return {nullptr, status_t::bad_alloc_k};
-            return {opened, status_t::success_k};
-        }
-        else if constexpr (requires { typename index_t::cursor_t; }) {
+        if constexpr (requires { typename index_t::cursor_t; }) {
             typename index_t::cursor_t* const opened = new (std::nothrow)
                 typename index_t::cursor_t(forkunion_allocator_t {no_memory_domain_k});
             if (!opened) return {nullptr, status_t::bad_alloc_k};
@@ -682,11 +678,9 @@ struct specialized_index {
         if constexpr (!requires { typename index_t::cursor_t; }) return {0, status_t::unsupported_k};
         else {
             typename index_t::cursor_t& walk = *static_cast<typename index_t::cursor_t*>(cursor);
-            if constexpr (viewed_k) {
-                if (links) return {0, status_t::unsupported_k};
-                auto const [scanned, status] = walk.read(of(index), keys, rows_span_t {}, executor);
-                return {scanned.count, status};
-            }
+            if constexpr (viewed_k)
+                return walk.pull(of(index), keys, links ? &links->keys : nullptr, links ? &links->offsets : nullptr,
+                                 executor);
             else return walk.pull(of(index), keys, links ? &links->keys : nullptr, links ? &links->offsets : nullptr);
         }
     }
@@ -694,11 +688,10 @@ struct specialized_index {
         if constexpr (requires { typename index_t::cursor_t; }) delete static_cast<typename index_t::cursor_t*>(cursor);
     }
 
-    /** Samples a RAM index; a GPU index does not sample yet, and an NVMe view walks no links, so
-     *  both answer @c unsupported_k. */
+    /** Samples a RAM index or an NVMe view; a GPU index does not sample yet. */
     static expected<sample_result_t> sample(void* index, sample_inputs<key_t> inputs, sample_outputs<key_t> outputs,
                                             sample_config_t config, executor_t& executor) noexcept {
-        if constexpr (is_vram_index<index_type_> || viewed_k) return {{}, status_t::unsupported_k};
+        if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
         else return of(index).sample(inputs, outputs, config, executor);
     }
 
@@ -749,6 +742,7 @@ struct specialized_index {
             .memory_usage = &memory_usage,
             .storage_requirements = &storage_requirements,
             // Writes
+            .serves_writes = &serves_writes,
             .reserve = &reserve,
             .clear = &clear,
             .insert = &insert,

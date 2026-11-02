@@ -139,8 +139,17 @@ struct sequence_ram_variant {
                                 basic::keep_diverse_t {geometry.connectivity}, planning);
     }
     status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Writes the checkpoint under a path, or into a buffer of @ref storage_requirements bytes. */
+    template <typename checkpoint_type_>
+    status_t save(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Reads the checkpoint at a path or in a buffer. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** The bytes a save into memory takes, under the provenance the save records. */
+    expected<std::size_t> storage_requirements() const noexcept;
 
     /** Serving a checkpoint in place answers @c unsupported_k until the index serves it. */
     status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
@@ -237,17 +246,29 @@ status_t with_sequence_provenance(sequence_geometry_t const& geometry,
 }
 
 template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::save(std::string_view path, executor_t& executor,
+template <typename checkpoint_type_>
+status_t sequence_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                 progress_ticks_t& ticks) noexcept {
     return with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
-        return index.save(path, us::sequence::codec_t {}, executor, config, token_of(geometry.metric), ticks);
+        return index.save(checkpoint, us::sequence::codec_t {}, executor, config, token_of(geometry.metric), ticks);
     });
 }
 
 template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::load(std::string_view path, executor_t& executor,
+template <typename checkpoint_type_>
+status_t sequence_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
                                                 progress_ticks_t& ticks) noexcept {
-    return index.load(path, us::sequence::codec_t {}, executor, load_config_t {}, ticks);
+    return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {}, ticks);
+}
+
+template <cpu_class_t cpu_class_>
+expected<std::size_t> sequence_ram_variant<cpu_class_>::storage_requirements() const noexcept {
+    expected<std::size_t> required {0, status_t::success_k};
+    status_t const sized = with_sequence_provenance(geometry, costs, [&](save_config_t const& config) noexcept {
+        required = index.storage_requirements(us::sequence::codec_t {}, config, token_of(geometry.metric));
+        return required.status;
+    });
+    return {required.value, sized};
 }
 
 /** One sequence alternative on block storage: the basic NVMe index over the strings a RAM variant
@@ -280,13 +301,10 @@ struct sequence_nvme_variant {
                                        predicate_t const& predicate, executor_t& executor,
                                        progress_ticks_t& ticks) noexcept;
 
-    /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
-     *  the view serves it. */
+    /** A view already is its checkpoint, so saving answers @c unsupported_k. */
     status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_t::unsupported_k};
-    }
+    expected<sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                     sample_config_t config, executor_t& executor) noexcept;
 };
 
 template <cpu_class_t cpu_class_>
@@ -298,6 +316,21 @@ expected<traversal_stats_t> sequence_nvme_variant<cpu_class_>::search(
             return expected<std::string_view> {chars_at(queries.tape, query_index), status_t::success_k};
         };
         return search_entries(index, queries.count, make_metric, query_of, outputs, config, predicate, executor, ticks);
+    };
+    return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
+}
+
+/** Every stored string is a query as it is read. */
+template <cpu_class_t cpu_class_>
+expected<sample_result_t> sequence_nvme_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                    basic_sample_outputs_t outputs,
+                                                                    sample_config_t config,
+                                                                    executor_t& executor) noexcept {
+    auto with_metric = [&](auto make_metric) noexcept {
+        auto query_of = [](us::sequence::codec_t::view_t stored, thread_allocator_t const&) noexcept {
+            return expected<std::string_view> {stored, status_t::success_k};
+        };
+        return sample_entries(*this, make_metric, query_of, inputs, outputs, config, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }

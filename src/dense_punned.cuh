@@ -118,6 +118,9 @@ struct dense_verbs {
     expected<std::size_t> (*storage_requirements)(void const* index) noexcept;
 
     // Writes
+
+    /** Whether the index takes writes, which a view refuses with @c read_only_k. */
+    status_t (*serves_writes)(void const* index) noexcept;
     status_t (*reserve)(void* index, std::size_t capacity) noexcept;
     status_t (*clear)(void* index) noexcept;
     expected<traversal_stats_t> (*insert)(void* index, keys_view_t keys, rows_view_t rows, insert_config_t config,

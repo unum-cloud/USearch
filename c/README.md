@@ -2,7 +2,7 @@
 
 This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
-It exposes all four modalities: the engine implements dense, sequence and shape indexes, while geospatial indexes are answered today by a brute-force stand-in only.
+It exposes all four modalities, each served by the engine in RAM, on NVMe and on NVIDIA GPUs; `-D USEARCH_BUILD_STUB=1` adds a brute-force stand-in under the same names.
 
 ## Installation
 
@@ -210,7 +210,7 @@ usearch_key_t key_of(uint64_t value) {
 }
 ```
 
-Keys need not be unique: an index admits up to its `values_per_key` entries under one key, one by default, and the count verbs report how many a key holds.
+Keys need not be unique: an index admits up to its `values_per_key` entries under one key, unbounded by default, and the count verbs report how many a key holds.
 A batch passes its keys as a `usearch_keys_view_t`, a pointer and a byte stride, where a zero stride repeats the first key for every row.
 
 ## Errors
@@ -254,7 +254,8 @@ Every dense verb is exported for every residency, and the engine answers what a 
 - VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
   NVIDIA devices answer exact scans, while AMD and Apple ones refuse them with `usearch_status_unsupported_k`.
   Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
-- NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
+  A sequence, shape or geospatial VRAM index answers `save_buffer` with `usearch_status_unsupported_k` for now, and those modalities load from memory into RAM alone, through `load_ram_buffer`.
+- NVMe answers every read verb as RAM does, `sample` and `health` included, refuses every mutating one with `usearch_status_read_only_k`, and refuses `save` and `save_buffer`, since a view already is its checkpoint.
 
 ### GPUs
 
@@ -694,9 +695,9 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
 
 The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch with a linear gap, and overlap, the share of fixed-width windows one side misses of the other.
 Needleman-Wunsch takes `usearch_sequence_weights_t`, a 256×256 substitution matrix with a gap cost, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
-The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
+The verbs mirror the dense ones: `init_ram`, `init_vram`, `load_ram`, `load_vram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` writing tapes into an arena, `cursor_next` writing keys and their links, `absorb`, `split`, `save`, `metadata_read`, the `_buffer` forms of `load_ram`, `save` and `metadata_read`, and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine`, `absorb`, `split`, `sample`, `health` and cursors with `starts` and `links` serve RAM indexes.
+The engine serves every kind, and answers `view_ram` with `usearch_status_unsupported_k`; `refine`, `absorb` and `split` serve RAM indexes, while `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes
@@ -727,73 +728,69 @@ Gromov-Wasserstein compares each side's internal distances.
 All four are invariant to rotation, reflection, translation and point order.
 A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
 The verbs are the sequence ones, where `get` converts to an `outputs_scalar` and returns each shape in its inserted pose, and `count` reports a key's total and largest point counts.
-The engine serves all four kinds in RAM over `f16` or `f32` points, refusing other quantizations, `view_ram`, `refine` and `absorb` with `usearch_status_unsupported_k`, and both VRAM verbs with `usearch_status_device_k`.
+The engine serves all four kinds in RAM and on NVMe over `f16` or `f32` points, refusing other quantizations and `view_ram` with `usearch_status_unsupported_k`, and Chamfer and Hausdorff on NVIDIA GPUs; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
 The stand-in scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## Geospatial Indexes
 
-A geospatial index searches points, paths and rings on and above the WGS-84 ellipsoid, in space and time, in RAM or VRAM.
-Its `layout` fixes the axes every point carries: `surface_k` is latitude and longitude in degrees, `elevated_k` adds metres of altitude, `timed_k` adds seconds, and `elevated_timed_k` adds both.
-The enumerator is not the width, so size a point by its axes: two, three, three and four.
-Its `structure` says whether the order of points in one set means nothing, `cloud_k`, a track, `path_k`, or a closed boundary, `ring_k`:
+A geospatial index searches observations on and above the Earth, like photos, video frames, drone footage and sensor fixes, in RAM, on NVMe or on NVIDIA GPUs.
+Each entry is one `usearch_geospatial_observation_t` of eleven doubles in natural units: latitude and longitude in WGS-84 degrees, altitude in metres above the ellipsoid, the horizontal accuracy, the heading, pitch, heading accuracy and field of view of the device's view cone, how far it saw, and the first and last Unix second it covers.
+A device that recorded nothing for a field leaves it NaN, never zero, and each NaN only widens the tests that read it: an unknown accuracy counts as exact, an unknown view as looking everywhere, an unknown time as always.
+A key may hold several observations, up to the `values_per_key` its creation froze, like a camera's frames or a vehicle's fixes:
 
 ```c
-usearch_geospatial_index_t places = NULL;
-usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &places,
-                                                              .outcome = &outcome,
-                                                              .layout = usearch_geospatial_layout_surface_k,
-                                                              .structure = usearch_geospatial_structure_cloud_k});
+#include <math.h> // `NAN` - a field no device recorded
 
-double const stops[3][2] = {{51.5308, -0.1238}, {51.5320, -0.1233}, {51.5033, -0.1196}};
-size_t const point_offsets[4] = {0, 1, 2, 3}; // three sets of one point each
+usearch_geospatial_index_t places = NULL;
+usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &places, .outcome = &outcome});
+
+usearch_geospatial_observation_t const stops[3] = {
+    // latitude, longitude, altitude, accuracy, heading, pitch, heading accuracy, field, range, begin, end
+    {51.5308, -0.1238, NAN, 5, NAN, NAN, NAN, NAN, NAN, NAN, NAN},
+    {51.5320, -0.1233, NAN, 5, NAN, NAN, NAN, NAN, NAN, NAN, NAN},
+    {51.5033, -0.1196, NAN, 5, NAN, NAN, NAN, NAN, NAN, NAN, NAN},
+};
 usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = places,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 3,
                                                           .keys = {stop_keys, sizeof(usearch_key_t)},
-                                                          .points = {stops, point_offsets, usearch_scalar_f64_k}});
+                                                          .observations = stops});
 ```
 
-Geospatial queries are converted into the index's geometry once and reused, which is what `usearch_geospatial_emplace` is for, and `usearch_geospatial_within` reports every entry inside a radius into an arena, however many there turn out to be:
+`usearch_geospatial_within` reports every entry a `relation` admits inside the `tolerance`, however many there turn out to be, as one tape per query in the arena:
 
 ```c
-usearch_geospatial_emplaced_t near_station = NULL;
-double const station[2] = {51.5308, -0.1238}; // latitude and longitude, in degrees
-usearch_geospatial_emplace(&(usearch_geospatial_emplace_t) {.emplaced = &near_station,
-                                                            .index = places,
-                                                            .executor = executor,
-                                                            .outcome = &outcome,
-                                                            .points = station,
-                                                            .point_count = 1});
-
-usearch_matches_tape_view_t nearby = {0}; // `nearby.offsets[1]` entries, their distances in metres
+usearch_geospatial_observation_t const station = {51.5308, -0.1238, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+usearch_matches_tape_view_t nearby = {0}; // `nearby.offsets[1]` entries, their chords in metres
 usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = places,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 1,
-                                                          .queries = &near_station,
-                                                          .mode = usearch_geospatial_mode_approach_k,
-                                                          .axes = usearch_geospatial_axes_horizontal_k,
+                                                          .queries = &station,
+                                                          .relation = usearch_geospatial_relation_near_k,
                                                           .tolerance = {.metres = 500},
                                                           .matches = &nearby,
                                                           .arena = arena});
-usearch_geospatial_emplaced_free(near_station);
 ```
 
-An emplaced query is not internally synchronized, so build one per thread, and the index it was emplaced against must outlive it.
-`usearch_geospatial_search` ranks the `wanted` best entries per query instead, under one `mode`: nearest `approach_k`, shared-ground `overlap_k`, whole-shape `shape_k`, one-way `coverage_k`, or order-respecting `route_k`, which needs paths.
-`axes` narrows the comparison to the ground track, three dimensions, or every axis with time, and `tolerance` carries the radius in metres and the time window in seconds.
-Scores are metres, except overlap, which counts query points and ranks largest first.
-`insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` lands keys and their links, as every modality's does.
-The remaining verbs are the shapes ones, with `count` reporting a key's total and longest point counts.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which converts onto a sphere rather than the ellipsoid, refuses `overlap_k` with `usearch_status_unknown_kind_k`, ignores deviations, and refuses every VRAM verb with `usearch_status_device_k`.
+`usearch_geospatial_search` ranks the `wanted` nearest entries of each query the relation admits instead, where a zero radius ranks by distance alone.
+Every score is the chord between the two positions in metres, altitude included, which ranks as the great-circle arc does.
+`near_k` admits entries within the radius widened by three standard deviations of both positions' accuracies combined.
+`visible_k` also needs a clear line of sight over the handle's `terrain`, and a handle without one refuses it.
+`sees_k` needs the entry's view cone to hold the query, which cameras see this place, and `seen_k` the query's cone to hold the entry, what this camera sees; both clear the terrain too when the handle has one.
+The tolerance's `seconds` widen the query's interval on both ends, and a query without a time matches entries of any time.
+The terrain is a north-up grid of heights above the ellipsoid, borrowed in place or filled on demand by a callback; a checkpoint never carries it, so every load and view names it again, and a GPU index takes borrowed heights alone.
+The remaining verbs are the shapes ones, where `get` returns observations within the stored rounding, centimetres and milliseconds among them, `count` reports a key's entries, and `sample` places its draws at their Earth-fixed positions.
+The engine serves every relation in RAM, on NVMe and on NVIDIA GPUs, answering `view_ram` with `usearch_status_unsupported_k`; `sample`, `health` and cursors with `starts` and `links` serve RAM indexes and NVMe views.
+The stand-in scans every entry exactly, keeps the doubles inserted, refuses every terrain and so `visible_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## What This Binding Does Not Expose
 
 - __Batched admission.__
   The predicate is one call per key; the span-admission form exists only in the C++ layer, since a C callback per candidate batch would cost more than it amortizes.
 - __Custom metrics.__
-A metric of your own, over payloads of your own, belongs to the C++ baseline tier, whose index takes any batched metric you write; see [`include/usearch/basic/README.md`](../include/usearch/basic/README.md).
+  A metric of your own, over payloads of your own, belongs to the C++ baseline tier, whose index takes any batched metric you write; see [`include/usearch/basic/README.md`](../include/usearch/basic/README.md).
 
 ## Design
 

@@ -514,11 +514,12 @@ static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_me
     metadata->metric = usearch_metric_of(nk_kernel_named(metric.data(), metric.size()));
 }
 
-/** Builds a handle from the geometry @p source holds, placed where @p options name, and copies
- *  @p source into it; a failed or cancelled load frees the handle and leaves @c *index null. */
+/** Builds a handle from the geometry @p source holds, but for a non-zero @p connectivity, placed
+ *  where @p options name, and copies @p source into it; a failed or cancelled load frees the handle
+ *  and leaves @c *index null. */
 template <typename source_type_, typename residency_options_type_>
-static void load_dense_index(source_type_ source, residency_options_type_ const& options, usearch_executor_t executor,
-                             usearch_progress_t progress, usearch_dense_index_t* index,
+static void load_dense_index(source_type_ source, residency_options_type_ const& options, std::size_t connectivity,
+                             usearch_executor_t executor, usearch_progress_t progress, usearch_dense_index_t* index,
                              usearch_outcome_t* outcome) noexcept {
     *index = nullptr;
     constexpr bool from_path_k = std::is_same_v<source_type_, std::string_view>;
@@ -535,6 +536,8 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
+    // A narrower connectivity reaches the shards too, whose load refuses it.
+    if (connectivity) geometry.connectivity = connectivity;
     // More parts than named devices keep a shard each, part `p` on device `p` modulo their count.
     residency_options_type_ placed = options;
     growing_buffer<int32_t> part_devices {global_allocator};
@@ -569,13 +572,15 @@ static void load_dense_index(source_type_ source, residency_options_type_ const&
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Whether each of the @p count handles @p others names is of the very variant @p punned is,
- *  waiting out the calls naming them first; false once @p outcome records why not. The handle
- *  @p self appears among them only when no @p refusal is named. */
+/** Whether @p punned takes writes and each of the @p count handles @p others names is of the very
+ *  variant @p punned is, waiting out the calls naming them first; false once @p outcome records why
+ *  not. The handle @p self appears among them only when no @p refusal is named. */
 template <vendored_residency_t residency_>
 static bool accepts_dense_variants(punned_dense_index<residency_> const& punned, usearch_dense_index_t const* others,
                                    std::size_t count, usearch_dense_index_t self, char const* refusal,
                                    usearch_outcome_t* outcome) noexcept {
+    if (status_t const served = punned.verbs.serves_writes(punned.index); failed(served))
+        return propagate_error(served, outcome);
     for (std::size_t position = 0; position != count; ++position) {
         usearch_dense_index_t const other = others[position];
         if (!other) return propagate_error(usearch_status_invalid_argument_k, outcome, "A handle must not be null");
@@ -1574,29 +1579,29 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
 USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
     if (submitted<usearch_dense_load_ram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    load_dense_index(as_text(arguments->path), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->index, outcome);
+    load_dense_index(as_text(arguments->path), arguments->ram, arguments->connectivity, arguments->executor,
+                     arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (submitted<usearch_dense_load_vram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    load_dense_index(as_text(arguments->path), arguments->vram, arguments->executor, arguments->progress,
+    load_dense_index(as_text(arguments->path), arguments->vram, 0, arguments->executor, arguments->progress,
                      arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    load_dense_index(checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->executor,
-                     arguments->progress, arguments->index, outcome);
+    load_dense_index(checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->connectivity,
+                     arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     // A VRAM `usearch_dense_save_buffer` leaves its checkpoint on the device, where it is read.
-    load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, arguments->executor,
+    load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, 0, arguments->executor,
                      arguments->progress, arguments->index, outcome);
 }
 
@@ -1629,21 +1634,13 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
                 punned, arguments->executor, call_executor, outcome);
             if (!executor) return;
-            auto const [length, status] = punned.verbs.storage_requirements(punned.index);
-            if (failed(status)) return propagate_error(status, outcome), void();
-            std::byte* checkpoint = carve<std::byte>(arena->memory, length);
-            if (!checkpoint)
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
             progress_ticks_t ticks {arguments->progress, punned.verbs.shards_count(punned.index)};
-            status_t const saved = punned.verbs.save_buffer(punned.index, bytes_span_t {checkpoint, length}, *executor,
-                                                            ticks);
-            if (failed(saved)) return propagate_error(saved, outcome), void();
-            // A VRAM checkpoint is written on the host, then uploaded to the arena's device.
-            auto const [published, publish_status] = publish(*arena, checkpoint, length);
-            if (status_t const published = drained(*arena, publish_status); failed(published))
-                return propagate_error(published, outcome, "Failed to copy the checkpoint to the device"), void();
-            *arguments->monolith = {reinterpret_cast<uint8_t const*>(published), length};
-            propagate_error(usearch_status_success_k, outcome, nullptr);
+            save_into_arena(
+                *arena, punned.verbs.storage_requirements(punned.index),
+                [&](bytes_span_t checkpoint) noexcept {
+                    return punned.verbs.save_buffer(punned.index, checkpoint, *executor, ticks);
+                },
+                *arguments->monolith, outcome);
         });
 }
 
@@ -1652,7 +1649,8 @@ USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* a
     call_outcome_t outcome(arguments->outcome);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
-    auto const [source, status] = safegraphs_read_metadata(as_text(arguments->path));
+    // Through the medium a view reads, since a generic char node maps nothing and reports no size.
+    auto const [source, status] = nvme_read_metadata(as_text(arguments->path));
     if (failed(status)) return propagate_error(status, outcome), void();
     adopt_metadata(source, arguments->metadata);
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1808,8 +1806,8 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "SPDK serves transport identifiers, and the kernel engines serve paths"),
                void();
+    // Zero leaves each call's depth to the block queues of the media it reads.
     io_engine_config_t config;
-    config.queue_depth = nvme_queue_depth_k;
     switch (nvme_class) {
     case usearch_nvme_class_posix_k: config.transport = io_transport_t::blocking_k; break;
     case usearch_nvme_class_linux_aio_k: config.transport = io_transport_t::linux_aio_k; break;
@@ -1838,7 +1836,8 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_nvme_executor(*executor, arguments->threads, config, ceiling, outcome)) return delete executor, void();
+    if (!spawn_nvme_executor(*executor, arguments->threads, {nvme.paths, nvme.paths_count}, config, ceiling, outcome))
+        return delete executor, void();
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 

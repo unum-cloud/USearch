@@ -290,6 +290,13 @@ static bool parse_prefix(shapes_checkpoint_prefix_t& prefix, bytes_view_t blob, 
     return fits_blob(blob, sizeof(shapes_checkpoint_prefix_t), prefix.payload_bytes, 1, outcome);
 }
 
+/** Writes what a checkpoint froze into @p metadata, answering whether we implement its metric. */
+static bool describe(usearch_shapes_metadata_t& metadata, shapes_checkpoint_prefix_t const& prefix) {
+    if (!known_metric(prefix.metric)) return false;
+    metadata = {prefix.metric, prefix.quantization, prefix.points, prefix.connectivity};
+    return true;
+}
+
 /** Adopts a checkpoint's configuration, answering whether its metric is one we implement. The
  *  bound on entries per key is the loader's to choose, since no checkpoint records it. */
 static bool adopt(shapes_index_options_t& options, shapes_checkpoint_prefix_t const& prefix) {
@@ -377,6 +384,24 @@ struct usearch_shapes_cursor_handle_t : shapes_cursor_t {};
 
 extern "C" {
 
+char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric) {
+    switch (metric) {
+    case usearch_shapes_metric_chamfer_k: return "chamfer";
+    case usearch_shapes_metric_hausdorff_k: return "hausdorff";
+    case usearch_shapes_metric_gromov_wasserstein_k: return "gromov_wasserstein";
+    case usearch_shapes_metric_wasserstein_procrustes_k: return "wasserstein_procrustes";
+    default: return "unknown";
+    }
+}
+
+usearch_shapes_metric_t usearch_shapes_metric_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_shapes_metric_chamfer_k; code <= usearch_shapes_metric_wasserstein_procrustes_k; ++code) {
+        usearch_shapes_metric_t const metric = static_cast<usearch_shapes_metric_t>(code);
+        if (named(name, usearch_shapes_metric_name(metric))) return metric;
+    }
+    return usearch_shapes_metric_unknown_k;
+}
+
 void usearch_shapes_init_ram(usearch_shapes_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
@@ -416,6 +441,10 @@ void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, 1, 1);
     *arguments->index = index;
+}
+
+void usearch_shapes_load_ram_buffer(usearch_shapes_load_ram_buffer_t* arguments) {
+    load_ram_buffer<usearch_shapes_load_ram_buffer>(arguments, open_checkpoint<usearch_shapes_index_handle_t>);
 }
 
 void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
@@ -885,6 +914,10 @@ void usearch_shapes_save(usearch_shapes_save_t* arguments) {
     save_parts(index, arguments->path, arguments->progress, serialize_shard, outcome);
 }
 
+void usearch_shapes_save_buffer(usearch_shapes_save_buffer_t* arguments) {
+    save_buffer<usearch_shapes_save_buffer>(arguments, serialize_shard);
+}
+
 void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
     if (through_executor<usearch_shapes_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -893,11 +926,12 @@ void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
     if (!read_file(arguments->path, blob, outcome) || !read_first_part(blob, arguments->path, outcome)) return;
     shapes_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return;
-    shapes_index_options_t options {};
-    if (reject_if(!adopt(options, prefix), usearch_status_unknown_kind_k,
-                  "The checkpoint names a metric this build lacks", outcome))
-        return;
-    *arguments->metadata = {options.metric, options.quantization, options.points, options.connectivity};
+    reject_if(!describe(*arguments->metadata, prefix), usearch_status_unknown_kind_k,
+              "The checkpoint names a metric this build lacks", outcome);
+}
+
+void usearch_shapes_metadata_read_buffer(usearch_shapes_metadata_read_buffer_t* arguments) {
+    metadata_read_buffer<usearch_shapes_metadata_read_buffer>(arguments, parse_prefix, describe);
 }
 
 } // extern "C"

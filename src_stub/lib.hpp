@@ -25,7 +25,7 @@
 #include <cmath>   // `std::ldexp`, `std::frexp`
 #include <cstddef> // `std::byte`, `std::size_t`
 #include <cstdint> // `std::uint8_t`
-#include <cstring> // `std::memcmp`
+#include <cstring> // `std::memcmp`, `std::memcpy`
 
 #include <cstdio> // `std::snprintf` - a part's name and a manifest's entry
 
@@ -226,11 +226,14 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_o
 using call_arguments_t = std::variant< //
 
     /* Loading */
-    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,          //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                   //
-    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t, usearch_sequence_load_vram_t,       //
-    usearch_shapes_load_ram_t, usearch_shapes_view_nvme_t, usearch_shapes_load_vram_t,             //
-    usearch_geospatial_load_ram_t, usearch_geospatial_view_nvme_t, usearch_geospatial_load_vram_t, //
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
+    usearch_sequence_load_vram_t,                                                                        //
+    usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
+    usearch_shapes_load_vram_t,                                                                          //
+    usearch_geospatial_load_ram_t, usearch_geospatial_load_ram_buffer_t, usearch_geospatial_view_nvme_t, //
+    usearch_geospatial_load_vram_t,                                                                      //
 
     /* Building */
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
@@ -264,11 +267,14 @@ using call_arguments_t = std::variant< //
     usearch_geospatial_describe_t,                                                                               //
 
     /* Persisting */
-    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, //
-    usearch_dense_metadata_read_buffer_t,                                             //
-    usearch_sequence_save_t, usearch_sequence_metadata_read_t,                        //
-    usearch_shapes_save_t, usearch_shapes_metadata_read_t,                            //
-    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,                    //
+    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t,                //
+    usearch_dense_metadata_read_buffer_t,                                                            //
+    usearch_sequence_save_t, usearch_sequence_save_buffer_t, usearch_sequence_metadata_read_t,       //
+    usearch_sequence_metadata_read_buffer_t,                                                         //
+    usearch_shapes_save_t, usearch_shapes_save_buffer_t, usearch_shapes_metadata_read_t,             //
+    usearch_shapes_metadata_read_buffer_t,                                                           //
+    usearch_geospatial_save_t, usearch_geospatial_save_buffer_t, usearch_geospatial_metadata_read_t, //
+    usearch_geospatial_metadata_read_buffer_t,                                                       //
 
     /* Products */
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
@@ -2017,6 +2023,68 @@ void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progres
     if (!write_file(path, bytes_view_t {reinterpret_cast<std::byte const*>(manifest.data()), manifest.size()}, outcome))
         return;
     keep_going(progress, shards, shards);
+}
+
+/** The body of every modality's @c save_buffer: one monolith in the call's arena holding the image
+ *  @p serialize writes, as @ref save_parts writes a part; a view is its own checkpoint. */
+template <auto verb_, typename arguments_, typename serialize_>
+void save_buffer(arguments_* arguments, serialize_ const& serialize) {
+    if (through_executor<verb_>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->monolith = {};
+    auto& index = *arguments->index;
+    if (reject_if(index.residency == usearch_residency_nvme_k, usearch_status_unsupported_k,
+                  "An NVMe view already is its checkpoint", outcome))
+        return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
+    std::shared_lock readers(index.mutex);
+    if (reject_refining(index, outcome)) return;
+    std::vector<std::byte> blob;
+    if (!serialize(index, blob, outcome)) return;
+    if (!keep_going(arguments->progress, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+    std::byte* const monolith = carve<std::byte>(*arena, blob.size(), outcome);
+    if (!monolith) return;
+    std::memcpy(monolith, blob.data(), blob.size());
+    *arguments->monolith = as_bytes(bytes_view_t {monolith, blob.size()});
+    keep_going(arguments->progress, 1, 1);
+}
+
+/** The body of every modality's @c load_ram_buffer: a new handle over the checkpoint in the call's
+ *  buffer, which @p open reads as <tt>open(blob, outcome) → handle*</tt>, null once it records why. */
+template <auto verb_, typename arguments_, typename open_>
+void load_ram_buffer(arguments_* arguments, open_ const& open) {
+    if (through_executor<verb_>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The checkpoint must not be empty",
+                  outcome))
+        return;
+    if (!keep_going(arguments->progress, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+    auto* const index = open(as_readable_bytes(arguments->buffer), outcome);
+    if (!index) return;
+    index->options.values_per_key = arguments->values_per_key;
+    keep_going(arguments->progress, 1, 1);
+    *arguments->index = index;
+}
+
+/** The body of every modality's @c metadata_read_buffer: the prefix @p parse reads from the call's
+ *  buffer, written out by @p describe, which answers false for a metric this build lacks. */
+template <auto verb_, typename arguments_, typename prefix_, typename metadata_>
+void metadata_read_buffer(arguments_* arguments, bool (*parse)(prefix_&, bytes_view_t, usearch_outcome_t*),
+                          bool (*describe)(metadata_&, prefix_ const&)) {
+    if (through_executor<verb_>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->metadata = {};
+    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The buffer must not be empty",
+                  outcome))
+        return;
+    prefix_ prefix {};
+    if (!parse(prefix, as_readable_bytes(arguments->buffer), outcome)) return;
+    reject_if(!describe(*arguments->metadata, prefix), usearch_status_unknown_kind_k,
+              "The checkpoint names a metric this build lacks", outcome);
 }
 
 #pragma endregion Files

@@ -260,8 +260,17 @@ struct geospatial_ram_variant {
                                        search_config_t search, predicate_t const& predicate,
                                        growing_arena<forkunion_allocator_t>& staging, executor_t& executor,
                                        progress_ticks_t& ticks) noexcept;
-    status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Writes the checkpoint under a path, or into a buffer of @ref storage_requirements bytes. */
+    template <typename checkpoint_type_>
+    status_t save(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Reads the checkpoint at a path or in a buffer, then widens to its largest deviation. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** The bytes a save into memory takes, under the provenance the save records. */
+    expected<std::size_t> storage_requirements() const noexcept;
 
     /** Serving a checkpoint in place answers @c unsupported_k until the index serves it. */
     status_t view(std::string_view) noexcept { return status_t::unsupported_k; }
@@ -696,28 +705,36 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
     return {scratch.telemetry(), status_t::success_k};
 }
 
-/** Places each draw at its Earth-fixed position in Earth radii, and reports each parent's chord in
- *  metres, as search does. */
-template <cpu_class_t cpu_class_>
-expected<sample_result_t> geospatial_ram_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
-                                                                     basic_sample_outputs_t outputs,
-                                                                     sample_config_t config,
-                                                                     executor_t& executor) noexcept {
+/** Places each draw at its Earth-fixed position in Earth radii and reports each parent's chord in
+ *  metres, as search does, whichever residency's walk @p sample runs, called as
+ *  <tt>sample(coordinates_of) → expected<sample_result_t></tt>. */
+template <typename sample_type_>
+expected<sample_result_t> sample_on_earth(basic_sample_outputs_t outputs, sample_type_&& sample) noexcept {
     constexpr f64_t radius_centimetres_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS *
                                            us::geospatial::centimetres_per_metre_k;
-    auto const coordinates_of = [](value_t const& value, std::span<f32_t, 3> xyz) noexcept {
+    auto const coordinates_of = [](us::geospatial::earth_observation_t const& value, std::span<f32_t, 3> xyz) noexcept {
         xyz[0] = static_cast<f32_t>(value.position.x_centimetres / radius_centimetres_k);
         xyz[1] = static_cast<f32_t>(value.position.y_centimetres / radius_centimetres_k);
         xyz[2] = static_cast<f32_t>(value.position.z_centimetres / radius_centimetres_k);
     };
-    expected<sample_result_t> const sampled = sample_entries(index, widest_list(), terrain.metric_factory(), inputs,
-                                                             outputs, config, executor, coordinates_of);
+    expected<sample_result_t> const sampled = sample(coordinates_of);
     if (failed(sampled.status)) return sampled;
     // The metric scores squared centimetres, which search reports as metres.
     for (f32_t& distance : outputs.parent_distances.first(sampled.value.written))
         distance = static_cast<f32_t>(std::sqrt(static_cast<f64_t>(distance)) /
                                       us::geospatial::centimetres_per_metre_k);
     return sampled;
+}
+
+template <cpu_class_t cpu_class_>
+expected<sample_result_t> geospatial_ram_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                     basic_sample_outputs_t outputs,
+                                                                     sample_config_t config,
+                                                                     executor_t& executor) noexcept {
+    return sample_on_earth(outputs, [&](auto const& coordinates_of) noexcept {
+        return sample_entries(index, widest_list(), terrain.metric_factory(), inputs, outputs, config, executor,
+                              coordinates_of);
+    });
 }
 
 template <cpu_class_t cpu_class_>
@@ -841,21 +858,43 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
     return {scratch.telemetry(), status_t::success_k};
 }
 
-template <cpu_class_t cpu_class_>
-status_t geospatial_ram_variant<cpu_class_>::save(std::string_view path, executor_t& executor,
-                                                  progress_ticks_t& ticks) noexcept {
+/** Hands @p write, as <tt>write(config) → status_t</tt>, the save configuration recording the
+ *  connectivity @p geometry froze, as every residency's checkpoint records it. */
+template <typename write_type_>
+status_t with_geospatial_provenance(geospatial_geometry_t const& geometry, write_type_&& write) noexcept {
     std::array<char, 24> connectivity_text;
     std::array<safegraphs_custom_field_t, 1> const fields {
         {{"connectivity", decimal_of(geometry.connectivity, connectivity_text)}}};
     save_config_t config;
     config.provenance = fields;
-    return index.save(path, us::geospatial::earth_observation_codec_t {}, executor, config, token_of(geometry), ticks);
+    return write(config);
 }
 
 template <cpu_class_t cpu_class_>
-status_t geospatial_ram_variant<cpu_class_>::load(std::string_view path, executor_t& executor,
+template <typename checkpoint_type_>
+status_t geospatial_ram_variant<cpu_class_>::save(checkpoint_type_ checkpoint, executor_t& executor,
                                                   progress_ticks_t& ticks) noexcept {
-    if (status_t const loaded = index.load(path, us::geospatial::earth_observation_codec_t {}, executor,
+    return with_geospatial_provenance(geometry, [&](save_config_t const& config) noexcept {
+        return index.save(checkpoint, us::geospatial::earth_observation_codec_t {}, executor, config,
+                          token_of(geometry), ticks);
+    });
+}
+
+template <cpu_class_t cpu_class_>
+expected<std::size_t> geospatial_ram_variant<cpu_class_>::storage_requirements() const noexcept {
+    expected<std::size_t> required {0, status_t::success_k};
+    status_t const sized = with_geospatial_provenance(geometry, [&](save_config_t const& config) noexcept {
+        required = index.storage_requirements(us::geospatial::earth_observation_codec_t {}, config, token_of(geometry));
+        return required.status;
+    });
+    return {required.value, sized};
+}
+
+template <cpu_class_t cpu_class_>
+template <typename checkpoint_type_>
+status_t geospatial_ram_variant<cpu_class_>::load(checkpoint_type_ checkpoint, executor_t& executor,
+                                                  progress_ticks_t& ticks) noexcept {
+    if (status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
                                            load_config_t {}, ticks);
         failed(loaded))
         return loaded;
@@ -911,13 +950,10 @@ struct geospatial_nvme_variant {
                                        growing_arena<forkunion_allocator_t>& staging, executor_t& executor,
                                        progress_ticks_t& ticks) noexcept;
 
-    /** A view already is its checkpoint, so saving answers @c unsupported_k, as does sampling until
-     *  the view serves it. */
+    /** A view already is its checkpoint, so saving answers @c unsupported_k. */
     status_t save(std::string_view, executor_t&, progress_ticks_t&) noexcept { return status_t::unsupported_k; }
-    expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
-                                     executor_t&) noexcept {
-        return {{}, status_t::unsupported_k};
-    }
+    expected<sample_result_t> sample(basic_sample_inputs_t inputs, basic_sample_outputs_t outputs,
+                                     sample_config_t config, executor_t& executor) noexcept;
 
   private:
 
@@ -1107,6 +1143,20 @@ expected<traversal_stats_t> geospatial_nvme_variant<cpu_class_>::search(
             outputs.scores[query * wanted + match] = std::sqrt(outputs.scores[query * wanted + match]) /
                                                      us::geospatial::centimetres_per_metre_k;
     return ranked;
+}
+
+template <cpu_class_t cpu_class_>
+expected<sample_result_t> geospatial_nvme_variant<cpu_class_>::sample(basic_sample_inputs_t inputs,
+                                                                      basic_sample_outputs_t outputs,
+                                                                      sample_config_t config,
+                                                                      executor_t& executor) noexcept {
+    auto query_of = [](value_t const& stored, thread_allocator_t const&) noexcept {
+        return expected<value_t> {stored, status_t::success_k};
+    };
+    return sample_on_earth(outputs, [&](auto const& coordinates_of) noexcept {
+        return sample_entries(*this, terrain.metric_factory(), query_of, inputs, outputs, config, executor,
+                              coordinates_of);
+    });
 }
 
 #if USEARCH_ARCH_CUDA_

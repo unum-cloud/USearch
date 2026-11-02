@@ -390,6 +390,13 @@ static bool parse_prefix(sequence_checkpoint_prefix_t& prefix, bytes_view_t blob
     return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table + widths, prefix.payload_bytes, 1, outcome);
 }
 
+/** Writes what a checkpoint froze into @p metadata, answering whether its metric is one we know. */
+static bool describe(usearch_sequence_metadata_t& metadata, sequence_checkpoint_prefix_t const& prefix) {
+    if (!known_metric(prefix.metric)) return false;
+    metadata = {prefix.metric, prefix.connectivity};
+    return true;
+}
+
 /** Adopts a checkpoint's configuration, answering whether its metric is one we know. The bound
  *  on entries per key is the loader's to choose, since no checkpoint records it. */
 static bool adopt(sequence_index_options_t& options, sequence_checkpoint_prefix_t const& prefix) {
@@ -499,6 +506,24 @@ struct usearch_sequence_cursor_handle_t : sequence_cursor_t {};
 
 extern "C" {
 
+char const* usearch_sequence_metric_name(usearch_sequence_metric_t metric) {
+    switch (metric) {
+    case usearch_sequence_metric_levenshtein_bytes_k: return "levenshtein";
+    case usearch_sequence_metric_levenshtein_utf8_k: return "levenshtein-utf8";
+    case usearch_sequence_metric_needleman_wunsch_k: return "needleman-wunsch";
+    case usearch_sequence_metric_overlap_k: return "overlap";
+    default: return "unknown";
+    }
+}
+
+usearch_sequence_metric_t usearch_sequence_metric_from_name(usearch_bytes_view_t name) {
+    for (int code = usearch_sequence_metric_levenshtein_bytes_k; code <= usearch_sequence_metric_overlap_k; ++code) {
+        usearch_sequence_metric_t const metric = static_cast<usearch_sequence_metric_t>(code);
+        if (named(name, usearch_sequence_metric_name(metric))) return metric;
+    }
+    return usearch_sequence_metric_unknown_k;
+}
+
 void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
@@ -563,6 +588,12 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, 1, 1);
     *arguments->index = index;
+}
+
+void usearch_sequence_load_ram_buffer(usearch_sequence_load_ram_buffer_t* arguments) {
+    load_ram_buffer<usearch_sequence_load_ram_buffer>(arguments, [&](bytes_view_t blob, usearch_outcome_t* outcome) {
+        return open_checkpoint<usearch_sequence_index_handle_t>(blob, arguments->weights, outcome);
+    });
 }
 
 void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
@@ -1013,6 +1044,10 @@ void usearch_sequence_save(usearch_sequence_save_t* arguments) {
     save_parts(index, arguments->path, arguments->progress, serialize_shard, outcome);
 }
 
+void usearch_sequence_save_buffer(usearch_sequence_save_buffer_t* arguments) {
+    save_buffer<usearch_sequence_save_buffer>(arguments, serialize_shard);
+}
+
 void usearch_sequence_metadata_read(usearch_sequence_metadata_read_t* arguments) {
     if (through_executor<usearch_sequence_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -1021,11 +1056,12 @@ void usearch_sequence_metadata_read(usearch_sequence_metadata_read_t* arguments)
     if (!read_file(arguments->path, blob, outcome) || !read_first_part(blob, arguments->path, outcome)) return;
     sequence_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return;
-    sequence_index_options_t options {};
-    if (reject_if(!adopt(options, prefix), usearch_status_unknown_kind_k,
-                  "The checkpoint names a metric this build lacks", outcome))
-        return;
-    *arguments->metadata = {options.metric, options.connectivity};
+    reject_if(!describe(*arguments->metadata, prefix), usearch_status_unknown_kind_k,
+              "The checkpoint names a metric this build lacks", outcome);
+}
+
+void usearch_sequence_metadata_read_buffer(usearch_sequence_metadata_read_buffer_t* arguments) {
+    metadata_read_buffer<usearch_sequence_metadata_read_buffer>(arguments, parse_prefix, describe);
 }
 
 } // extern "C"

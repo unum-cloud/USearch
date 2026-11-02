@@ -472,20 +472,7 @@ void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
 }
 
 void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
-    if (through_executor<usearch_dense_load_ram_buffer>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->index = nullptr;
-    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The checkpoint must not be empty",
-                  outcome))
-        return;
-    if (!keep_going(arguments->progress, 0, 1))
-        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
-    usearch_dense_index_handle_t* const index = open_checkpoint<usearch_dense_index_handle_t>(
-        as_readable_bytes(arguments->buffer), outcome);
-    if (!index) return;
-    index->options.values_per_key = arguments->values_per_key;
-    keep_going(arguments->progress, 1, 1);
-    *arguments->index = index;
+    load_ram_buffer<usearch_dense_load_ram_buffer>(arguments, open_checkpoint<usearch_dense_index_handle_t>);
 }
 
 void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
@@ -1033,25 +1020,7 @@ void usearch_dense_save(usearch_dense_save_t* arguments) {
 }
 
 void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
-    if (through_executor<usearch_dense_save_buffer>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->monolith = {};
-    usearch_dense_index_handle_t& index = *arguments->index;
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
-    if (!arena) return;
-    std::shared_lock readers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    std::size_t const entries = index.entries.size();
-    std::optional<std::size_t> const length = serialized_bytes(index, entries);
-    if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
-        return;
-    if (!keep_going(arguments->progress, 0, 1))
-        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
-    std::byte* const monolith = carve<std::byte>(*arena, *length, outcome);
-    if (!monolith) return;
-    write_into(index, entries, bytes_span_t {monolith, *length});
-    *arguments->monolith = as_bytes(bytes_view_t {monolith, *length});
-    keep_going(arguments->progress, 1, 1);
+    save_buffer<usearch_dense_save_buffer>(arguments, serialize_shard);
 }
 
 void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
@@ -1067,16 +1036,7 @@ void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
 }
 
 void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments) {
-    if (through_executor<usearch_dense_metadata_read_buffer>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->metadata = {};
-    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The buffer must not be empty",
-                  outcome))
-        return;
-    dense_checkpoint_prefix_t prefix {};
-    if (!parse_prefix(prefix, as_readable_bytes(arguments->buffer), outcome)) return;
-    reject_if(!describe(*arguments->metadata, prefix), usearch_status_unknown_kind_k,
-              "The checkpoint names a metric this build lacks", outcome);
+    metadata_read_buffer<usearch_dense_metadata_read_buffer>(arguments, parse_prefix, describe);
 }
 
 void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {

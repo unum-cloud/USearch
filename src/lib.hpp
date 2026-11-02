@@ -1439,11 +1439,14 @@ static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_cl
 using deferred_arguments_t = std::variant< //
 
     /* Loading */
-    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,          //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                   //
-    usearch_sequence_load_ram_t, usearch_sequence_view_nvme_t, usearch_sequence_load_vram_t,       //
-    usearch_shapes_load_ram_t, usearch_shapes_view_nvme_t, usearch_shapes_load_vram_t,             //
-    usearch_geospatial_load_ram_t, usearch_geospatial_view_nvme_t, usearch_geospatial_load_vram_t, //
+    usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
+    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
+    usearch_sequence_load_vram_t,                                                                        //
+    usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
+    usearch_shapes_load_vram_t,                                                                          //
+    usearch_geospatial_load_ram_t, usearch_geospatial_load_ram_buffer_t, usearch_geospatial_view_nvme_t, //
+    usearch_geospatial_load_vram_t,                                                                      //
 
     /* Building */
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
@@ -1477,11 +1480,14 @@ using deferred_arguments_t = std::variant< //
     usearch_geospatial_describe_t,                                                                               //
 
     /* Persisting */
-    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, //
-    usearch_dense_metadata_read_buffer_t,                                             //
-    usearch_sequence_save_t, usearch_sequence_metadata_read_t,                        //
-    usearch_shapes_save_t, usearch_shapes_metadata_read_t,                            //
-    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,                    //
+    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t,                //
+    usearch_dense_metadata_read_buffer_t,                                                            //
+    usearch_sequence_save_t, usearch_sequence_save_buffer_t, usearch_sequence_metadata_read_t,       //
+    usearch_sequence_metadata_read_buffer_t,                                                         //
+    usearch_shapes_save_t, usearch_shapes_save_buffer_t, usearch_shapes_metadata_read_t,             //
+    usearch_shapes_metadata_read_buffer_t,                                                           //
+    usearch_geospatial_save_t, usearch_geospatial_save_buffer_t, usearch_geospatial_metadata_read_t, //
+    usearch_geospatial_metadata_read_buffer_t,                                                       //
 
     /* Products */
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
@@ -1512,10 +1518,6 @@ struct deferred_call_t {
 
 /** Slots a deferred table holds when its constructor names no limit. */
 inline constexpr std::size_t deferred_limit_default_k = 64;
-
-/** Reads every NVMe engine keeps in flight: deep enough to cover a device's latency, which the C
- *  interface leaves to the library. */
-inline constexpr std::size_t nvme_queue_depth_k = 64;
 
 /** The state behind @c usearch_executor_t: the discovered topology a RAM or NVMe executor was
  *  spawned over, its deferred table, and one residency's executor; the variant is the kind tag, so
@@ -1555,15 +1557,52 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     return &handle;
 }
 
+/** The fewest hardware queues of any disk or SPDK controller under @p paths, opened as views open
+ *  them; zero when none answers. */
+inline std::size_t nvme_fewest_queues(std::span<usearch_bytes_view_t const> paths) noexcept {
+    std::size_t fewest = 0;
+    for (usearch_bytes_view_t const path : paths) {
+        std::string_view const named {reinterpret_cast<char const*>(path.data), path.length};
+        io_device_queues_t queues;
+#if USEARCH_WITH_LINUX_SPDK
+        if (names_transport_id(named)) {
+            auto const [name_space, open_status] = spdk_medium_t::open(named);
+            if (succeeded(open_status)) queues = device_queues_of(name_space);
+        }
+#endif
+        if (!names_transport_id(named)) queues = device_queues_of(file_medium_t::open(named).value);
+        if (queues.hardware_queues && (!fewest || queues.hardware_queues < fewest)) fewest = queues.hardware_queues;
+    }
+    return fewest;
+}
+
+/** The threads an NVMe executor spawns when its caller names none: ForkUnion's default, capped by
+ *  @p queues, the fewest hardware queues of its media, so no two threads share a queue; zero,
+ *  ForkUnion's own default, when the cores are unknown. */
+inline std::size_t nvme_default_threads(fu_topology_t topology, std::size_t queues) noexcept {
+    auto const [cores, cores_status] = forkunion_executor_t::default_threads(topology);
+    if (failed(cores_status)) return 0;
+    return queues ? min_of(cores, queues) : cores;
+}
+
 /** Discovers the topology and spawns @p threads into @p handle under @p ceiling, each opening the
- *  engine @p config names, answering @p handle, or null once the outcome records why not. */
+ *  engine @p config names, answering @p handle, or null once the outcome records why not; zero
+ *  threads takes @ref nvme_default_threads over the media under @p paths. */
 inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
+                                              std::span<usearch_bytes_view_t const> paths,
                                               io_engine_config_t const& config, cpu_ceiling_t ceiling,
                                               usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
     handle.topology.reset(topology);
+    std::size_t const queues = nvme_fewest_queues(paths);
+    // Each SPDK thread holds a queue pair of its own, and a controller grants only so many.
+    if (config.transport == io_transport_t::linux_spdk_k && queues && threads > queues)
+        return propagate_error(usearch_status_config_mismatch_k, outcome,
+                               "More threads than the SPDK controller granted I/O queue pairs"),
+               nullptr;
+    if (!threads) threads = nvme_default_threads(topology, queues);
     auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling));
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
@@ -1586,10 +1625,11 @@ template <typename multi_type_>
     requires is_nvme_index<multi_type_>
 inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
+    // Zero leaves each call's depth to the block queues of the media it reads.
     io_engine_config_t config;
-    config.queue_depth = nvme_queue_depth_k;
     config.transport = io_transport_t::blocking_k;
-    return spawn_nvme_executor(call_executor, 1, config, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value, outcome);
+    return spawn_nvme_executor(call_executor, 1, {}, config, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value,
+                               outcome);
 }
 
 /** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
@@ -1987,6 +2027,25 @@ inline void publish_sample(arguments_type_ const& arguments, sample_staging_t co
     *arguments.parents = {staging.parents, staging.scores, staging.counts, 1};
     *arguments.coordinates = {staging.coordinates, 3 * sizeof(f32_t), 3, usearch_scalar_f32_k};
     *arguments.written = written;
+}
+
+/** Writes the @p required bytes of a checkpoint into @p arena through @p save, as
+ *  <tt>save(bytes_span_t) → status_t</tt>, and points @p monolith at its published copy. */
+template <typename save_type_>
+inline void save_into_arena(usearch_arena_handle_t& arena, expected<std::size_t> required, save_type_&& save,
+                            usearch_bytes_view_t& monolith, usearch_outcome_t* outcome) noexcept {
+    if (failed(required.status)) return propagate_error(required.status, outcome), void();
+    std::byte* const checkpoint = carve<std::byte>(arena.memory, required.value);
+    if (!checkpoint)
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+    if (status_t const saved = save(bytes_span_t {checkpoint, required.value}); failed(saved))
+        return propagate_error(saved, outcome), void();
+    // A device checkpoint is written on the host, then uploaded to the arena's device.
+    auto const [published, publish_status] = publish(arena, checkpoint, required.value);
+    if (status_t const uploaded = drained(arena, publish_status); failed(uploaded))
+        return propagate_error(uploaded, outcome, "Failed to copy the checkpoint to the device"), void();
+    monolith = {reinterpret_cast<uint8_t const*>(published), required.value};
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 /** The run read as text - a path, which is bytes that happen to decode. The ABI spells a byte

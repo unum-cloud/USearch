@@ -244,18 +244,22 @@ void basic_init_ram(arguments_type_* arguments) noexcept {
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Loads the checkpoint at @p path into the freshly placed @p punned on the executor @p arguments
- *  name; false once @p outcome records why not. */
-template <typename traits_type_, vendored_residency_t residency_, typename arguments_type_>
-bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, std::string_view path,
+/** Loads @p checkpoint, at a path or in memory, into the freshly placed @p punned on the executor
+ *  @p arguments name; false once @p outcome records why not. */
+template <typename traits_type_, vendored_residency_t residency_, typename checkpoint_type_, typename arguments_type_>
+bool basic_load_variant(punned_basic_index<traits_type_, residency_> punned, checkpoint_type_ checkpoint,
                         arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
     usearch_executor_handle_t call_executor;
     typename punned_basic_index<traits_type_, residency_>::executor_t* const executor = executor_of(
         punned, arguments.executor, call_executor, outcome);
     if (!executor) return false;
     progress_ticks_t ticks {arguments.progress, executor->size()};
-    status_t const loaded = punned.verbs.load(punned.variant, path, *executor, ticks);
-    if (loaded == status_t::config_mismatch_k && safegraphs_read_metadata(path).value.neighbors_dtype == dtype_t::u64_k)
+    status_t loaded = status_t::success_k;
+    if constexpr (std::is_same_v<checkpoint_type_, bytes_view_t>)
+        loaded = punned.verbs.load_buffer(punned.variant, checkpoint, *executor, ticks);
+    else loaded = punned.verbs.load(punned.variant, checkpoint, *executor, ticks);
+    if (loaded == status_t::config_mismatch_k &&
+        safegraphs_read_metadata(checkpoint).value.neighbors_dtype == dtype_t::u64_k)
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "The checkpoint's node IDs are 64-bit; the library's shards hold 32-bit IDs");
     return propagate_error(loaded, outcome);
@@ -351,17 +355,21 @@ void basic_init_vram(arguments_type_* arguments) noexcept {
 #endif
 }
 
-template <auto verb_, typename arguments_type_>
-void basic_load_ram(arguments_type_* arguments) noexcept {
+/** Copies @p checkpoint, a path or the bytes of one in memory, into a new RAM index. */
+template <auto verb_, typename arguments_type_, typename checkpoint_type_>
+void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noexcept {
     using handle_t = handle_of<arguments_type_>;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
-    std::string_view const path = as_text(arguments->path);
+    if (checkpoint.empty())
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+    if (status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
-    auto load = [&](auto const& punned) noexcept { return basic_load_variant(punned, path, *arguments, outcome); };
+    auto load = [&](auto const& punned) noexcept {
+        return basic_load_variant(punned, checkpoint, *arguments, outcome);
+    };
     handle_t* const index = make_basic_cpu_handle<handle_t, vendored_residency_t::ram_k>(geometry, *arguments,
                                                                                          arguments->ram, outcome, load);
     if (index) *arguments->index = index;
@@ -509,6 +517,8 @@ void* basic_open_refinement(handle_type_ const* index, punned_basic_index<traits
                             std::size_t receivers_count, split_config_t config,
                             typename punned_basic_index<traits_type_, residency_>::executor_t& executor,
                             usearch_outcome_t* outcome) noexcept {
+    if (status_t const served = punned.verbs.serves_writes(punned.variant); failed(served))
+        return propagate_error(served, outcome), nullptr;
     if (!accepts_basic_variants(index, punned, donors, count, "An index cannot absorb itself", outcome) ||
         !accepts_basic_variants(index, punned, receivers, receivers_count, "An index cannot split into itself",
                                 outcome))
@@ -979,8 +989,32 @@ void basic_save(arguments_type_* arguments) noexcept {
     });
 }
 
+/** Writes the checkpoint into the arena, one monolith or a manifest leading its parts. */
+template <auto verb_, typename arguments_type_>
+void basic_save_buffer(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->monolith = {};
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                          punned.verbs.residency(punned.variant), {}, outcome);
+        if (!arena) return;
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        progress_ticks_t ticks {arguments->progress, executor->size()};
+        save_into_arena(
+            *arena, punned.verbs.storage_requirements(punned.variant),
+            [&](bytes_span_t checkpoint) noexcept {
+                return punned.verbs.save_buffer(punned.variant, checkpoint, *executor, ticks);
+            },
+            *arguments->monolith, outcome);
+    });
+}
+
 /** Draws around the focus keys beside the shown ones, writing every output on the arena's host
- *  pages; only a RAM variant samples yet. */
+ *  pages; a GPU variant does not sample yet. */
 template <auto verb_, typename arguments_type_>
 void basic_sample(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
@@ -1027,15 +1061,17 @@ void basic_split(arguments_type_* arguments) noexcept {
     propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more");
 }
 
-/** Reads the geometry a checkpoint recorded without loading it; @p traits_type_ names the modality,
- *  since the call names no handle. */
-template <auto verb_, typename traits_type_, typename arguments_type_>
-void basic_metadata_read(arguments_type_* arguments) noexcept {
+/** Reads the geometry @p checkpoint, a path or the bytes of one in memory, recorded without loading
+ *  it; @p traits_type_ names the modality, since the call names no handle. */
+template <auto verb_, typename traits_type_, typename arguments_type_, typename checkpoint_type_>
+void basic_metadata_read(arguments_type_* arguments, checkpoint_type_ checkpoint) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
+    if (checkpoint.empty())
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
     typename traits_type_::geometry_t geometry;
-    if (status_t const recalled = traits_type_::recall(as_text(arguments->path), geometry); failed(recalled))
+    if (status_t const recalled = traits_type_::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
     *arguments->metadata = traits_type_::metadata_of(geometry);
     propagate_error(usearch_status_success_k, outcome, nullptr);

@@ -25,10 +25,21 @@ struct usearch_shapes_refinement_handle_t {
 
 extern "C" {
 
+USEARCH_EXPORT char const* usearch_shapes_metric_name(usearch_shapes_metric_t metric) {
+    std::string_view const token = token_of(metric);
+    // Every token is a string literal, so its data ends in a terminator.
+    return token.empty() ? "unknown" : token.data();
+}
+USEARCH_EXPORT usearch_shapes_metric_t usearch_shapes_metric_from_name(usearch_bytes_view_t name) {
+    return shapes_metric_of(as_text(name));
+}
 USEARCH_EXPORT void usearch_shapes_init_ram(usearch_shapes_init_ram_t* arguments) { basic_init_ram(arguments); }
 USEARCH_EXPORT void usearch_shapes_init_vram(usearch_shapes_init_vram_t* arguments) { basic_init_vram(arguments); }
 USEARCH_EXPORT void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
-    basic_load_ram<usearch_shapes_load_ram>(arguments);
+    basic_load_ram<usearch_shapes_load_ram>(arguments, as_text(arguments->path));
+}
+USEARCH_EXPORT void usearch_shapes_load_ram_buffer(usearch_shapes_load_ram_buffer_t* arguments) {
+    basic_load_ram<usearch_shapes_load_ram_buffer>(arguments, as_bytes(arguments->buffer));
 }
 USEARCH_EXPORT void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
     basic_load_vram<usearch_shapes_load_vram>(arguments);
@@ -91,8 +102,14 @@ USEARCH_EXPORT void usearch_shapes_refinement_finish(usearch_shapes_refinement_f
 USEARCH_EXPORT void usearch_shapes_save(usearch_shapes_save_t* arguments) {
     basic_save<usearch_shapes_save>(arguments);
 }
+USEARCH_EXPORT void usearch_shapes_save_buffer(usearch_shapes_save_buffer_t* arguments) {
+    basic_save_buffer<usearch_shapes_save_buffer>(arguments);
+}
 USEARCH_EXPORT void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
-    basic_metadata_read<usearch_shapes_metadata_read, shapes_traits_t>(arguments);
+    basic_metadata_read<usearch_shapes_metadata_read, shapes_traits_t>(arguments, as_text(arguments->path));
+}
+USEARCH_EXPORT void usearch_shapes_metadata_read_buffer(usearch_shapes_metadata_read_buffer_t* arguments) {
+    basic_metadata_read<usearch_shapes_metadata_read_buffer, shapes_traits_t>(arguments, as_bytes(arguments->buffer));
 }
 
 } // extern "C"

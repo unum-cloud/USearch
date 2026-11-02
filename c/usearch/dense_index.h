@@ -130,13 +130,13 @@
  *  device walk, and an AMD or Apple one refuses a @c usearch_traversal_scan_k scan, both with
  *  @c usearch_status_unsupported_k; RAM and NVMe answer both. @c usearch_dense_cursor_init answers
  *  on RAM, while VRAM vectors are read back by key or by search. @c usearch_dense_split answers on
- *  both, @c usearch_dense_sample on RAM alone, and @c usearch_dense_search_stream_init on neither.
+ *  both, @c usearch_dense_sample on RAM and NVMe, and @c usearch_dense_search_stream_init on none.
  *
- *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
- *  @c usearch_dense_health included, its entries read through the executor's engines, though its
- *  cursor walks no links: @c starts and @c links answer @c usearch_status_unsupported_k there.
- *  Every mutating verb answers @c usearch_status_read_only_k, and saving answers
- *  @c usearch_status_unsupported_k, since a view already is its checkpoint.
+ *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor with its
+ *  @c starts and @c links, @c usearch_dense_health and @c usearch_dense_sample included, its
+ *  entries read through the executor's engines. Every mutating verb answers
+ *  @c usearch_status_read_only_k, and saving answers @c usearch_status_unsupported_k, since a view
+ *  already is its checkpoint.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
@@ -288,7 +288,7 @@ typedef struct usearch_dense_init_ram_t {
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
 
-    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    /** Upper bound on entries sharing one key; zero is unbounded. */
     size_t values_per_key;
 
     /** The memory domains to place one shard on apiece. */
@@ -328,7 +328,7 @@ typedef struct usearch_dense_init_vram_t {
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
 
-    /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
+    /** Upper bound on entries sharing one key; zero is unbounded. */
     size_t values_per_key;
 
     /** The devices to place one shard on apiece, by USearch ordinal. */
@@ -368,7 +368,11 @@ typedef struct usearch_dense_load_ram_t {
      *  named domains opened over them in turn. */
     usearch_ram_options_t ram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Neighbor IDs per node, at least the checkpoint's, whose wider rows keep the stored neighbors
+     *  and leave the rest empty for a refine to fill; zero keeps the checkpoint's. */
+    size_t connectivity;
+
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with shards placed. */
@@ -379,11 +383,12 @@ typedef struct usearch_dense_load_ram_t {
  *  @brief Copies a checkpoint into a new, mutable index in host memory, shard by shard.
  *  @ref dense_index_serialization
  *
- *  The geometry and metric come from the checkpoint's own headers. Point @c path at the
- *  @c .safegraphs.json manifest, never at one of the parts it enumerates. The manifest is a small
- *  catalog that names every part and resolves each one relative to itself, so a checkpoint spread
- *  over a hundred files is opened by naming a single one. Naming a part directly is legal and
- *  loads exactly that part as a monolith, which is a fragment of the index rather than the index.
+ *  The geometry and metric come from the checkpoint's own headers, and only a non-zero
+ *  @c connectivity widens the rows. Point @c path at the @c .safegraphs.json manifest, never at one
+ *  of the parts it enumerates. The manifest is a small catalog that names every part and resolves
+ *  each one relative to itself, so a checkpoint spread over a hundred files is opened by naming a
+ *  single one. Naming a part directly is legal and loads exactly that part as a monolith, which is
+ *  a fragment of the index rather than the index.
  *
  *  Where the parts end up is the call's own memory domains, never the manifest's: part @c p is
  *  written whole on shard @c p, and shards past the placed ones open over those domains in turn, so
@@ -402,8 +407,9 @@ typedef struct usearch_dense_load_ram_t {
  *    CPU does not admit.
  *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
  *    no pool workers.
- *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, or the checkpoint's
- *    geometry, dtypes or metric differ from the shards'.
+ *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, a @c connectivity
+ *    narrower than the checkpoint's, or the checkpoint's geometry, dtypes or metric differ from the
+ *    shards'.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -433,7 +439,7 @@ typedef struct usearch_dense_load_vram_t {
      *  devices opened over them in turn. */
     usearch_vram_options_t vram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with shards placed. */
@@ -484,7 +490,10 @@ typedef struct usearch_dense_load_ram_buffer_t {
     /** The memory domains to place shards on; part @c p is written whole on shard @c p. */
     usearch_ram_options_t ram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Neighbor IDs per node, at least the checkpoint's, as @c usearch_dense_load_ram takes it. */
+    size_t connectivity;
+
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with bytes placed. */
@@ -508,8 +517,9 @@ typedef struct usearch_dense_load_ram_buffer_t {
  *    CPU does not admit.
  *  - @c usearch_status_uninitialized_k No memory domain to place a shard on, or the executor holds
  *    no pool workers.
- *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, or the checkpoint's
- *    geometry, dtypes or metric differ from the shards'.
+ *  - @c usearch_status_config_mismatch_k A memory domain refusing a shard, a @c connectivity
+ *    narrower than the checkpoint's, or the checkpoint's geometry, dtypes or metric differ from the
+ *    shards'.
  *  - @c usearch_status_device_k The executor is not a RAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor, or its pool runs another
  *    dispatch.
@@ -540,7 +550,7 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** The devices to place shards on; part @c p is written whole on shard @c p. */
     usearch_vram_options_t vram;
 
-    /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
     size_t values_per_key;
 
     /** The @b optional handler, called with bytes placed. */
@@ -1477,8 +1487,7 @@ typedef struct usearch_dense_cursor_init_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c starts for a nonzero @c starts_count.
- *  - @c usearch_status_unsupported_k The handle lives on a GPU, or names @c starts as an NVMe
- *    view; neither walks links yet.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, which walks no links yet.
  */
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments);
 
@@ -1527,7 +1536,7 @@ typedef struct usearch_dense_cursor_next_t {
  *  the same arena, however the cursor moves meanwhile.
  *
  *  @par Statuses:
- *  - @c usearch_status_unsupported_k @c links from an NVMe view, which walks no links yet.
+ *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
  *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  */
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
@@ -1627,8 +1636,8 @@ typedef struct usearch_dense_sample_t {
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k @c NULL @c shown or @c focus for a nonzero count, or
  *    @c shown_coordinates not three @c usearch_scalar_f32_k columns.
- *  - @c usearch_status_unsupported_k The handle lives on a GPU or is an NVMe view; only a RAM
- *    handle samples yet.
+ *  - @c usearch_status_unsupported_k The handle lives on a GPU, which does not sample yet.
+ *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
  */
 USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments);
 
