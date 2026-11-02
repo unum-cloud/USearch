@@ -10,9 +10,12 @@
  *  neighbors cluster by template while the bytes differ; Needleman-Wunsch aligns them packed two
  *  bits apiece under transition and transversion costs. Each cell checks the verbs a caller
  *  reaches: the sequences land under their keys across the shards and each counts once and reads
- *  back, a walk keeps most of the exact scan's top ten, a RAM index refines and absorbs while a GPU
- *  one refuses both, the index saves and reloads into every residency and as a view byte for byte,
- *  an NVMe view answers and refuses every write, and a cleared index holds nothing.
+ *  back, a walk keeps most of the exact scan's top ten, a RAM index refines, through a handle too,
+ *  and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
+ *  entry and a sample draws distinct ones, the index saves into memory and back and into every
+ *  residency and as a view byte for byte, an NVMe view answers, audits, walks and samples and
+ *  refuses every write, a RAM index splits into two with every key in one part, a cleared index
+ *  holds nothing and ends a cursor opened before it, and every metric's name reads back.
  */
 #include <array>  // `std::array` - the templates, the window widths
 #include <string> // `std::string` - the strings, the cells' names
@@ -153,13 +156,20 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     failures += expect_gets(index, sizes.sequences);
     failures += expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
     failures += expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_unsupported_k);
+    failures += expect_health(index, sizes.sequences);
+    failures += expect_cursor(index, sizes.sequences);
+    failures += expect_sample(index, sizes.sequences);
+    failures += expect_buffer_round_trip(index, queries, sizes.queries, sequence_expansion_k, 0.8,
+                                         usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-sequence-{:016x}", stream_key(seed, name));
     failures += expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8,
                                    stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
+    failures += expect_refinement(index, sequences.view(), sizes.sequences, usearch_status_unsupported_k);
     failures += expect_absorbed(index, donated.view(), sizes.donor_sequences, sizes.sequences,
                                 usearch_status_unsupported_k);
-    return failures + expect_cleared(index);
+    failures += expect_split(index, usearch_status_unsupported_k);
+    return failures + expect_cleared(index, sequences.view());
 }
 
 std::size_t check_sequence_abi(settings_t const& settings) {
@@ -169,6 +179,8 @@ std::size_t check_sequence_abi(settings_t const& settings) {
     constexpr std::array<std::string_view, 4> metric_names_k {"levenshtein", "levenshtein-utf8", "overlap",
                                                               "needleman-wunsch"};
     std::size_t failures = 0;
+    if (settings.filter.selects("sequence metric names"))
+        failures += report("sequence metric names", expect_metric_names<sequence_verbs_t>());
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         // The best class sweeps every metric, and a pinned class the first.
         std::size_t const metrics_count = cell.cpu_class == usearch_cpu_class_unknown_k ? metrics_k.size() : 1;

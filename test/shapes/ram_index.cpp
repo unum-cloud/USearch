@@ -15,6 +15,7 @@
 #include <cmath>   // `std::sqrt`, `std::fabs`, `std::fmax`
 #include <cstring> // `std::memcmp` - unpacked poses and packs compared as bytes
 
+#include <algorithm>   // `std::min_element` - the best of a full round
 #include <array>       // `std::array` - points, handmade triples, the kernel rounds
 #include <bit>         // `std::bit_cast` - the keys
 #include <limits>      // `std::numeric_limits` - the oracle's failure sentinel
@@ -402,39 +403,134 @@ std::size_t check_shapes_packing(u64_t seed) {
     return failures;
 }
 
-/** A saved monolith read back from storage, every cloud a ragged entry of points the view locates
- *  through its directory and each round packs again. */
-std::size_t check_shapes_nvme(u64_t seed) {
-    using fixture_t = chamfer_fixture_t;
-    using scalar_t = fixture_t::scalar_t;
-    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    using metric_t = shapes_metric<fixture_t::kit_t, scratch_t>;
-    using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<scratch_t>::rebind_alloc<char>>;
-    using nvme_indexes_t = us::basic::nvme_indexes<codec<fixture_t::kit_t>, us::utilities::uuid_t, u32_t,
-                                                   fixture_t::distance_t, blocking_files_engine<>>;
-    std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(32, stream_key(seed, "nvme"));
+/** The sharded index of Chamfer shards over the heap, and the clouds its cells hold. */
+using chamfer_shard_index_t = shapes::ram_index<chamfer_fixture_t::kit_t, us::utilities::uuid_t, flaky_waiter_t,
+                                                fu::standard_atomic_ref, forkunion_allocator_t>;
+using chamfer_indexes_t = us::basic::ram_indexes<chamfer_shard_index_t>;
 
-    auto make_cloud = [&](std::size_t entry, counting_allocator_t const& allocator) {
-        return fixture_t::pack(clouds[entry], allocator);
+/** @p count clouds from @p seed under keys of their own, packed afresh by every call of
+ *  @ref values, as a sharded cell's plans consume them. */
+struct chamfer_entries_t {
+    using scalar_t = chamfer_fixture_t::scalar_t;
+    using value_t = chamfer_shard_index_t::value_t;
+
+    std::vector<std::vector<scalar_t>> clouds;
+    std::vector<us::utilities::uuid_t> keys;
+
+    chamfer_entries_t(std::size_t count, u64_t seed) : clouds(make_clouds<scalar_t>(count, seed)), keys(count) {
+        for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = chamfer_fixture_t::make_key(seed + entry);
+    }
+    value_t pack(std::size_t entry) const {
+        std::array<std::span<scalar_t const>, 1> const cloud {clouds[entry]};
+        return value_t::make(cloud, forkunion_allocator_t {no_memory_domain_k}, 0).value;
+    }
+    std::vector<value_t> values(std::size_t count) const {
+        std::vector<value_t> packed;
+        for (std::size_t entry = 0; entry != count; ++entry) packed.push_back(pack(entry));
+        return packed;
+    }
+};
+
+/** Clouds over sharded indexes, as @c test_basic_sharded checks, held to the best a full round of
+ *  the same metric over every cloud scores. */
+std::size_t check_shapes_sharded(u64_t seed) {
+    using distance_t = chamfer_fixture_t::distance_t;
+    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k * basic_connectivity_k;
+    chamfer_entries_t const entries {entries_k + basic_recall_samples_k, stream_key(seed, "plural")};
+    std::vector<chamfer_shard_index_t::value_t> const packs = entries.values(entries_k + basic_recall_samples_k);
+    chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric(), oracle = chamfer_fixture_t::make_metric();
+    auto query_of = [&](std::size_t sample) { return entries.pack(entries_k + sample); };
+    auto best_of = [&](std::size_t sample) {
+        std::vector<distance_t> distances(entries_k);
+        oracle.reset(packs[entries_k + sample]);
+        for (std::size_t entry = 0; entry != entries_k; ++entry) oracle.push(packs[entry]);
+        oracle.drain(std::span {distances}, unbounded_radius<distance_t>());
+        return *std::min_element(distances.begin(), distances.end());
     };
-    auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
-        metric_t metric {fixture_t::kernel_k, allocator};
+    return test_basic_sharded<chamfer_indexes_t>(
+        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}.first(entries_k),
+        [&] { return entries.values(entries_k); }, query_of, best_of);
+}
+
+/** 600 clouds in a sharded index of two shards split into two sharded indexes of two, as
+ *  @c test_basic_sharded_split checks. */
+std::size_t check_shapes_sharded_split(u64_t seed) {
+    constexpr std::size_t entries_k = 600;
+    chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_split")};
+    chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
+    return test_basic_sharded_split<chamfer_indexes_t>(
+        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); });
+}
+
+/** Clouds sampled from two shards, as @c test_basic_sharded_sample checks. */
+std::size_t check_shapes_sample(u64_t seed) {
+    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_sample")};
+    chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
+    return test_basic_sharded_sample<chamfer_indexes_t>(
+        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); },
+        no_fixed_coordinates_t {});
+}
+
+/** Clouds walked by a cursor over two shards, as @c test_basic_sharded_cursor checks. */
+std::size_t check_shapes_cursor(u64_t seed) {
+    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cursor")};
+    chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
+    return test_basic_sharded_cursor<chamfer_indexes_t>(
+        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); });
+}
+
+/** Chamfer over storage: every cloud a ragged entry of points the view locates through its
+ *  directory and each round packs again. */
+struct chamfer_nvme_fixture_t {
+    using ram_fixture_t = chamfer_fixture_t;
+    using kit_t = ram_fixture_t::kit_t;
+    using scalar_t = ram_fixture_t::scalar_t;
+    using shard_index_t =
+        shapes::ram_index<kit_t, us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+    template <typename engine_type_, typename node_id_type_ = u32_t>
+    using nvme_t = us::basic::nvme_indexes<codec<kit_t>, us::utilities::uuid_t, node_id_type_,
+                                           ram_fixture_t::distance_t, engine_type_>;
+    using scratch_metric_t = shapes_metric<kit_t, basic_nvme_scratch_t>;
+    using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<basic_nvme_scratch_t>::rebind_alloc<char>>;
+    using coordinates_t = no_fixed_coordinates_t;
+    static constexpr std::string_view metric_token_k = "chamfer";
+
+    std::vector<std::vector<scalar_t>> clouds;
+
+    explicit chamfer_nvme_fixture_t(u64_t seed) : clouds(make_clouds<scalar_t>(32, stream_key(seed, "nvme"))) {}
+    std::size_t size() const noexcept { return clouds.size(); }
+    template <typename index_type_>
+    typename index_type_::value_t make_value(std::size_t entry,
+                                             typename index_type_::allocator_t const& allocator) const {
+        std::array<std::span<scalar_t const>, 1> const cloud {clouds[entry]};
+        return index_type_::value_t::make(cloud, allocator, 0).value;
+    }
+    static expected<scratch_metric_t> make_scratch_metric(basic_nvme_scratch_t const& allocator,
+                                                          std::size_t staging) noexcept {
+        scratch_metric_t metric {ram_fixture_t::kernel_k, allocator};
         status_t const ready = metric.init(staging);
-        return expected<metric_t> {std::move(metric), ready};
-    };
-    auto query_of = [&](std::size_t query, scratch_t const& allocator) noexcept {
-        std::array<std::span<scalar_t const>, 1> const query_clouds {clouds[query]};
-        auto [packed, packed_status] = query_t::make(query_clouds, allocator, 0);
-        return expected<query_t> {std::move(packed), status_of(packed_status)};
-    };
-    auto matches = [&](std::size_t entry, nk::matrix_view<scalar_t> const& view) noexcept {
+        return {std::move(metric), ready};
+    }
+    static expected<query_t> pack(std::span<scalar_t const> points, basic_nvme_scratch_t const& allocator) noexcept {
+        std::array<std::span<scalar_t const>, 1> const cloud {points};
+        auto [packed, packed_status] = query_t::make(cloud, allocator, 0);
+        return {std::move(packed), status_of(packed_status)};
+    }
+    expected<query_t> query_of(std::size_t entry, basic_nvme_scratch_t const& allocator) const noexcept {
+        return pack(clouds[entry], allocator);
+    }
+    static expected<query_t> stored_query(nk::matrix_view<scalar_t> const& stored,
+                                          basic_nvme_scratch_t const& allocator) noexcept {
+        return pack({stored.data(), stored.extent(0) * 3}, allocator);
+    }
+    bool matches(std::size_t entry, nk::matrix_view<scalar_t> const& view) const noexcept {
         std::vector<scalar_t> const& cloud = clouds[entry];
         return view.extent(0) * 3 == cloud.size() &&
                std::memcmp(view.data(), cloud.data(), cloud.size() * sizeof(scalar_t)) == 0;
-    };
-    return test_basic_nvme_view<fixture_t, nvme_indexes_t>(seed, clouds.size(), "chamfer", make_cloud, make_metric,
-                                                           query_of, matches);
-}
+    }
+};
 
 std::size_t check_shapes(settings_t const& settings) {
     std::size_t failures = 0;
@@ -450,7 +546,11 @@ std::size_t check_shapes(settings_t const& settings) {
     failures += check_shapes_codec<procrustes_fixture_t>(settings.seed);
     failures += check_shapes_packing<chamfer_fixture_t>(settings.seed);
     failures += check_shapes_packing<procrustes_fixture_t>(settings.seed);
-    failures += check_shapes_nvme(settings.seed);
+    failures += check_shapes_sharded(settings.seed);
+    failures += check_shapes_sharded_split(settings.seed);
+    failures += check_shapes_sample(settings.seed);
+    failures += check_shapes_cursor(settings.seed);
+    failures += test_basic_nvme_engines(chamfer_nvme_fixture_t {settings.seed}, "shapes", settings.seed);
     return report("shapes", failures);
 }
 

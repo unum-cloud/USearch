@@ -720,6 +720,54 @@ std::size_t test_dense_vram_indexes_split_refused(u64_t seed, typename indexes_t
     return failures;
 }
 
+/** Two shards walk as one: a cursor yields every entry once as stored, and from the first key
+ *  breadth-first that key first and each reached entry once, every link a key the index holds once
+ *  and the offsets closing each entry's run in order; a shard copies its neighbor rows out only
+ *  whole and inside its watermark; and a cursor opened before a clear answers @c contended_k after
+ *  it, reading nothing. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_vram_indexes_cursor(u64_t seed, typename indexes_type_::executor_t& placement) {
+    using key_t = typename indexes_type_::key_t;
+    using scalar_t = typename indexes_type_::scalar_t;
+    using cursor_t = typename indexes_type_::cursor_t;
+    using node_id_t = typename indexes_type_::index_t::node_id_t;
+    std::size_t const rows = 2 * dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver {placement};
+    if (failed(driver.status)) return failures + expect(false);
+    auto const vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_cursor"));
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = dense_key<key_t>(1 + row);
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes, placement)) && succeeded(place_shards(indexes, placement)));
+    failures += expect_eq(indexes.reserve({rows}).status, status_t::success_k);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys.data(), rows}, vectors.view(), driver.executor).status));
+    failures += expect(indexes.shard(0).size() && indexes.shard(1).size());
+
+    failures += expect_sharded_cursor(indexes, keys[0], rows, connectivity_16_k + 1);
+
+    typename indexes_type_::index_t& shard = indexes.shard(0);
+    std::size_t const row_ids = shard.connectivity();
+    std::vector<node_id_t> staged(row_ids + 1);
+    std::span<node_id_t> const whole = std::span {staged}.first(row_ids);
+    failures += expect_eq(shard.neighbors(0, whole), status_t::success_k);
+    failures += expect_eq(shard.neighbors(0, std::span {staged}), status_t::config_mismatch_k);
+    failures += expect_eq(shard.neighbors(static_cast<node_id_t>(shard.size()), whole), status_t::config_mismatch_k);
+
+    cursor_t cursor {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect_eq(cursor.open(indexes, {}), status_t::success_k);
+    std::array<key_t, 4> read_keys {};
+    auto const [before, before_status] = cursor.pull(indexes, std::span<key_t> {read_keys}, nullptr, nullptr);
+    failures += expect(succeeded(before_status) && before == read_keys.size());
+    failures += expect_eq(indexes.clear(), status_t::success_k);
+    auto const [after, after_status] = cursor.pull(indexes, std::span<key_t> {read_keys}, nullptr, nullptr);
+    failures += expect(after_status == status_t::contended_k && after == 0);
+    return failures;
+}
+
 /** A vendor this build leaves out composes nothing, so its shard instantiates empty. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
 std::size_t test_vram_indexes_configuration(char const*, u64_t, executor_type_&) {
@@ -830,6 +878,7 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, execut
         failures_count += test_dense_vram_indexes_split<indexes_t, kernel_>(seed, executor);
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
         failures_count += test_dense_vram_indexes_split_refused<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_vram_indexes_cursor<indexes_t, kernel_>(seed, executor);
     // Apple's tower has no compaction into RAM.
     if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
         for (std::size_t const shards : {std::size_t {2}, std::size_t {2} * (connectivity_16_k + 1)})

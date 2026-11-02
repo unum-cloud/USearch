@@ -10,12 +10,15 @@
  *  hundredth of jitter, so neighbors cluster by template while point counts vary per entry; the
  *  alignment metrics, which iterate over every pair of points, take fewer and smaller clouds. Each
  *  cell checks the verbs a caller reaches: the shapes land under their keys across the shards and
- *  each counts once, a walk keeps most of the exact scan's top ten, a RAM index refines and absorbs
- *  while a GPU one refuses both, the index saves and reloads into every residency and as a view, an
- *  NVMe view answers and refuses every write, and a cleared index holds nothing. Stored poses round
- *  twice, packed at insert and unpacked at save, so a RAM index's poses come back within that band
- *  of each cloud's extent after each of three save and load cycles, and a reloaded index ranks
- *  within the distance band it implies.
+ *  each counts once, a walk keeps most of the exact scan's top ten, a RAM index refines, through a
+ *  handle too, and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors
+ *  walk every entry and a sample draws distinct ones, the index saves into memory and back and into
+ *  every residency and as a view, an NVMe view answers, audits, walks and samples and refuses every
+ *  write, a RAM index splits into two with every key in one part, a cleared index holds nothing and
+ *  ends a cursor opened before it, and every metric's name reads back. Stored poses round twice,
+ *  packed at insert and unpacked at save, so a RAM index's poses come back within that band of each
+ *  cloud's extent after each of three save and load cycles, and a reloaded index ranks within the
+ *  distance band it implies.
  */
 #include <cmath> // `std::sqrt` - a point's move from its coordinates' bands
 
@@ -172,14 +175,21 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     if (failures) return failures;
     failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
     failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_unsupported_k);
+    failures += expect_health(index, sizes.shapes);
+    failures += expect_cursor(index, sizes.shapes);
+    failures += expect_sample(index, sizes.shapes);
+    failures += expect_buffer_round_trip(index, queries, sizes.queries, shapes_expansion_k, 0.8,
+                                         usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-shapes-{:016x}", stream_key(seed, name));
     if (cell.residency == usearch_residency_ram_k) failures += expect_poses_round_trip(index, stem + "-poses");
     failures += expect_persistence(cell, index, shapes.view(), queries, sizes.queries, shapes_expansion_k, 0.8, stem,
                                    saved_bytes_t::differing_k,
                                    shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return failures;
+    failures += expect_refinement(index, shapes.view(), sizes.shapes, usearch_status_unsupported_k);
     failures += expect_absorbed(index, donated.view(), sizes.donor_shapes, sizes.shapes, usearch_status_unsupported_k);
-    return failures + expect_cleared(index);
+    failures += expect_split(index, usearch_status_unsupported_k);
+    return failures + expect_cleared(index, shapes.view());
 }
 
 std::size_t check_shapes_abi(settings_t const& settings) {
@@ -190,6 +200,8 @@ std::size_t check_shapes_abi(settings_t const& settings) {
                                                               "wasserstein-procrustes"};
     constexpr std::size_t gpu_metrics_k = 2;
     std::size_t failures = 0;
+    if (settings.filter.selects("shapes metric names"))
+        failures += report("shapes metric names", expect_metric_names<shapes_verbs_t>());
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_unknown_k)) {
         // The best class sweeps every metric, and a pinned class the first.
         std::size_t const metrics_count = cell.cpu_class == usearch_cpu_class_unknown_k ? metrics_k.size() : 1;

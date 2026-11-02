@@ -9,9 +9,12 @@
  *  Observations are points spread over a city's square kilometre on flat ground. Each cell checks
  *  the verbs a caller reaches: the points land under their keys across the shards and each counts
  *  once and reads back, a walk keeps most of the exact scan's top ten, a containment walk reports
- *  every entry of the scan's top ten inside its radius, a RAM index refines and absorbs while a GPU
- *  one refuses both, the index saves and reloads into every residency and as a view byte for byte,
- *  an NVMe view answers and refuses every write, and a cleared index holds nothing.
+ *  every entry of the scan's top ten inside its radius, a RAM index refines, through a handle too,
+ *  and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
+ *  entry and a sample draws distinct ones, the index saves into memory and back and into every
+ *  residency and as a view byte for byte, an NVMe view answers, audits, walks and samples and
+ *  refuses every write, a RAM index splits into two with every key in one part, and a cleared index
+ *  holds nothing and ends a cursor opened before it.
  */
 #include <algorithm> // `std::find`, `std::nth_element` - the contained keys, the radius
 #include <limits>    // `std::numeric_limits` - unrecorded fields
@@ -140,13 +143,20 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     failures += expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k,
                                usearch_status_unsupported_k);
     failures += expect_within(index, queries);
+    failures += expect_health(index, geospatial_entries_k);
+    failures += expect_cursor(index, geospatial_entries_k);
+    failures += expect_sample(index, geospatial_entries_k);
+    failures += expect_buffer_round_trip(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8,
+                                         usearch_status_unsupported_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-geospatial-{:016x}", stream_key(seed, name));
     failures += expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k,
                                    0.8, stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
+    failures += expect_refinement(index, points.data(), geospatial_entries_k, usearch_status_unsupported_k);
     failures += expect_absorbed(index, donated.data(), geospatial_donor_entries_k, geospatial_entries_k,
                                 usearch_status_unsupported_k);
-    return failures + expect_cleared(index);
+    failures += expect_split(index, usearch_status_unsupported_k);
+    return failures + expect_cleared(index, points.data());
 }
 
 std::size_t check_geospatial_abi(settings_t const& settings) {

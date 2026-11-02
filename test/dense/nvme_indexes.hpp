@@ -401,9 +401,8 @@ std::size_t test_nvme_indexes_filtered(u64_t seed) {
 }
 
 /** The key scans against the RAM group's lookups, a key shared by every third entry and absent keys
- *  included: every count, verdict and true total agrees, and every key's exported entries are its
- *  earliest in placement order, as the cursor reads them; an output narrower than a stored row is
- *  refused. */
+ *  included: every count, verdict and true total agrees, every key's exported entries are its
+ *  earliest in placement order, as @c read_entries reads them, and a narrower output is refused. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_key_scans(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
@@ -444,8 +443,7 @@ std::size_t test_nvme_indexes_key_scans(u64_t seed) {
     // The whole view in placement order, which ranks every key's entries by part and node.
     std::vector<key_t> placed_keys(rows_count);
     auto placed_rows = make_vectors<scalar_t>(rows_count, dimensions, 0);
-    typename nvme_type_::cursor_t cursor {viewed};
-    failures += expect_eq(cursor.read(viewed, std::span {placed_keys}, placed_rows.span(), driver.executor).status,
+    failures += expect_eq(viewed.read_entries(0, std::span {placed_keys}, placed_rows.span(), driver.executor).status,
                           status_t::success_k);
     std::size_t const row_bytes = dense_rows_bytes(reference.vectors.view(), 1);
     for (std::size_t probe = 0; probe != probes.size(); ++probe) {
@@ -489,6 +487,11 @@ u32_t block_bytes_of(nvme_reblocked_medium<block_bytes_> const& medium) noexcept
 template <u32_t block_bytes_>
 u64_t byte_base_of(nvme_reblocked_medium<block_bytes_> const&) noexcept {
     return 0;
+}
+
+template <u32_t block_bytes_>
+io_device_queues_t device_queues_of(nvme_reblocked_medium<block_bytes_> const& medium) noexcept {
+    return medium.file.queues;
 }
 
 /** The file a kernel engine reads a @ref nvme_reblocked_medium through. */
@@ -578,8 +581,8 @@ std::size_t test_nvme_indexes_straddling(u64_t seed) {
     return failures;
 }
 
-/** The cursor exports the entries the RAM group's cursor does, keys and vectors alike and in
- *  placement order, through reads that cross the parts' ends; then it answers no more entries. */
+/** The cursor walks the entries the RAM group's cursor does, in placement order, then answers no
+ *  more, and @c read_entries reads their vectors back through reads crossing the parts' ends. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_cursor(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
@@ -597,8 +600,9 @@ std::size_t test_nvme_indexes_cursor(u64_t seed) {
     // The RAM cursor hands out keys alone, so its rows come back through `get`, one per key.
     typename nvme_reference<nvme_type_>::ram_t::cursor_t ram_cursor {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect_eq(ram_cursor.open(reference.built, {}), status_t::success_k);
-    typename nvme_type_::cursor_t nvme_cursor {viewed};
-    std::vector<key_t> ram_keys(chunk), nvme_keys(chunk);
+    typename nvme_type_::cursor_t nvme_cursor {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect_eq(nvme_cursor.open(viewed, {}), status_t::success_k);
+    std::vector<key_t> ram_keys(chunk), nvme_keys(chunk), placed_keys(chunk);
     std::vector<std::size_t> ram_entries(chunk);
     auto ram_rows = make_vectors<scalar_t>(chunk, dimensions, 0),
          nvme_rows = make_vectors<scalar_t>(chunk, dimensions, 0);
@@ -612,14 +616,19 @@ std::size_t test_nvme_indexes_cursor(u64_t seed) {
                                 rows_span_t {ram_rows.span()}.slice(0, ram_read),
                                 std::span {ram_entries.data(), ram_read}, 1, reference.builder.executor),
             status_t::success_k);
-        auto const [nvme_read, status] = nvme_cursor.read(viewed, std::span {nvme_keys}, nvme_rows.span(),
-                                                          driver.executor);
+        auto const [nvme_pulled, status] = nvme_cursor.pull(viewed, std::span {nvme_keys}, nullptr, nullptr,
+                                                            driver.executor);
         failures += expect_eq(status, status_t::success_k);
-        failures += expect_eq(nvme_read.count, ram_read);
-        if (!ram_read || nvme_read.count != ram_read) break;
-        failures += expect(nvme_read.scan_reads.count >= 2);
+        failures += expect_eq(nvme_pulled, ram_read);
+        auto const [placed, placed_status] = viewed.read_entries(exported, std::span {placed_keys}, nvme_rows.span(),
+                                                                 driver.executor);
+        failures += expect_eq(placed_status, status_t::success_k);
+        failures += expect_eq(placed.count, ram_read);
+        if (!ram_read || nvme_pulled != ram_read || placed.count != ram_read) break;
+        failures += expect(placed.scan_reads.count >= 2);
         for (std::size_t row = 0; row != ram_read; ++row) {
             failures += expect(nvme_keys[row] == ram_keys[row]);
+            failures += expect(placed_keys[row] == ram_keys[row]);
             failures += expect(std::memcmp(nvme_rows.view().row(row).as_vector().byte_data(),
                                            ram_rows.view().row(row).as_vector().byte_data(), row_bytes) == 0);
         }
@@ -1132,8 +1141,8 @@ std::size_t test_nvme_index_search(u64_t seed) {
     if (failed(driver.status) || failures) return failures + expect(false);
 
     std::vector<key_t> placed_keys(rows_count);
-    typename nvme_type_::cursor_t cursor {whole};
-    failures += expect_eq(cursor.read(whole, std::span {placed_keys}, {}, driver.executor).status, status_t::success_k);
+    failures += expect_eq(whole.read_entries(0, std::span {placed_keys}, {}, driver.executor).status,
+                          status_t::success_k);
 
     auto const queries = reference.leading_rows(queries_count);
     nvme_rankings<nvme_type_> const ram = reference.exhaustive_rankings(queries, wanted);
@@ -1821,9 +1830,9 @@ std::size_t test_nvme_widened_keys(u64_t seed) {
 
     std::vector<uuid_t> placed_keys(rows_count);
     auto placed_rows = make_vectors<scalar_t>(rows_count, dimensions, 0);
-    typename wide_t::cursor_t cursor {wide};
-    failures += expect_eq(cursor.read(wide, std::span {placed_keys}, placed_rows.span(), wide_driver.executor).status,
-                          status_t::success_k);
+    failures += expect_eq(
+        wide.read_entries(0, std::span {placed_keys}, placed_rows.span(), wide_driver.executor).status,
+        status_t::success_k);
     std::vector<bool> found(rows_count);
     for (uuid_t const& key : placed_keys) {
         u64_t const number = number_of(key);
@@ -1977,13 +1986,11 @@ std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span
     std::vector<key_t> files_keys(rows_count), spdk_keys(rows_count);
     auto files_placed = make_vectors<scalar_t>(rows_count, dimensions, 0);
     auto spdk_placed = make_vectors<scalar_t>(rows_count, dimensions, 0);
-    typename files_t::cursor_t files_cursor {files};
-    typename spdk_t::cursor_t spdk_cursor {direct};
     failures += expect_eq(
-        files_cursor.read(files, std::span {files_keys}, files_placed.span(), files_driver.executor).status,
+        files.read_entries(0, std::span {files_keys}, files_placed.span(), files_driver.executor).status,
         status_t::success_k);
     failures += expect_eq(
-        spdk_cursor.read(direct, std::span {spdk_keys}, spdk_placed.span(), spdk_driver.executor).status,
+        direct.read_entries(0, std::span {spdk_keys}, spdk_placed.span(), spdk_driver.executor).status,
         status_t::success_k);
     failures += expect(files_keys == spdk_keys);
     failures += expect(same_rows(files_placed, spdk_placed, rows_count));

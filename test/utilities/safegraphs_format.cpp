@@ -258,9 +258,9 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         std::vector<uuid_t> keys(nodes_k * wanted_k);
         std::vector<f32_t> distances(nodes_k * wanted_k);
         std::vector<std::size_t> counts(nodes_k);
-        auto const [found, search_status] = viewed.search(nodes_k, make_metric, query_of, executor, search_config,
-                                                          std::span<uuid_t> {keys}, std::span<f32_t> {distances},
-                                                          std::span<std::size_t> {counts});
+        auto const [found, search_status] = viewed.search(nodes_k, make_metric, query_of, std::span<uuid_t> {keys},
+                                                          std::span<f32_t> {distances}, std::span<std::size_t> {counts},
+                                                          search_config, executor);
         failures += expect_eq(search_status, status_t::success_k);
         for (std::size_t query = 0; query != nodes_k; ++query)
             failures += ranked_alike(query, std::span<uuid_t const> {keys}.subspan(query * wanted_k, wanted_k),
@@ -317,6 +317,15 @@ static std::size_t expect_wide_nodes_refused(u64_t seed) {
         widened_view_t viewed {forkunion_allocator_t {}};
         failures += expect_eq(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor),
                               status_t::config_mismatch_k);
+        // The little-endian header length follows the magic; 2^63 bytes is past any file.
+        unsigned char const header_length[8] = {0, 0, 0, 0, 0, 0, 0, 0x80};
+        std::FILE* const corrupted = std::fopen(path, "r+b");
+        failures += expect(corrupted != nullptr);
+        failures += expect(std::fseek(corrupted, 8, SEEK_SET) == 0 && std::fwrite(header_length, 1, 8, corrupted) == 8);
+        std::fclose(corrupted);
+        widened_view_t corrupted_view {forkunion_allocator_t {}};
+        failures += expect_eq(corrupted_view.view(path, {}, embeddings_fixture_t::metric_k, executor),
+                              status_t::malformed_k);
     }
     fu_topology_delete(topology);
     std::remove(path);

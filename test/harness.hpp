@@ -20,13 +20,14 @@
 #include <cmath>   // `std::fabs`, `std::fmax`, `std::sqrt` - the statistics of `expect_errors`
 #include <cstdio>  // `std::remove` - a viewed checkpoint's files
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
-#include <cstring> // `std::memset` - the scribble over a freed block
+#include <cstring> // `std::memset`, `std::memcmp` - the scribble over a freed block, the drawn keys
 
-#include <algorithm>   // `std::sort`, `std::unique` - the dispensed-ID density check
+#include <algorithm>   // `std::sort`, `std::unique`, `std::any_of`, `std::find` - the dispensed IDs, draws, cursors
 #include <array>       // `std::array` - one latent point of the sign sketches
 #include <bit>         // `std::bit_cast` - the units in the last place of `error_stats_t`
 #include <chrono>      // `std::chrono::microseconds` - the flaky waiter's oversleep
 #include <limits>      // `std::numeric_limits` - the unbounded allocation budget
+#include <optional>    // `std::optional` - a yielded key's minted offset
 #include <span>        // `std::span` - the dispensed-ID density check
 #include <string>      // `std::string` - a cell's checkpoint stem
 #include <string_view> // `std::string_view` - the stream names
@@ -39,6 +40,7 @@
 #include <numkong/vector.hpp>
 
 #include "usearch/types.h" // `usearch_version_name`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
+#include "usearch/utilities/ram_buffers.hpp" // `growing_arena` - a sharded cursor's links
 #include "usearch/utilities/types.hpp"
 
 #include "abi.hpp" // `tools::settings_t`, `tools::copied_matches_t` - what every suite shares
@@ -508,6 +510,44 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
     return vectors;
 }
 
+/** A cursor over the sharded @p indexes, pulled @p chunk keys at a time, yields each of its
+ *  @p entries once as stored, and from @p start breadth-first that key first and each reached entry
+ *  once, every link a key @p indexes holds once and each entry's run closing at ordered offsets. */
+template <typename indexes_type_>
+std::size_t expect_sharded_cursor(indexes_type_& indexes, typename indexes_type_::key_t const& start,
+                                  std::size_t entries, std::size_t chunk) {
+    using key_t = typename indexes_type_::key_t;
+    using cursor_t = typename indexes_type_::cursor_t;
+    std::size_t failures = 0;
+    for (std::span<key_t const> const starts : {std::span<key_t const> {}, std::span<key_t const> {&start, 1}}) {
+        growing_arena<forkunion_allocator_t> arena {forkunion_allocator_t {no_memory_domain_k}};
+        typename cursor_t::links_allocator_t const links_allocator {arena};
+        typename cursor_t::links_keys_t links {links_allocator};
+        typename cursor_t::links_offsets_t offsets {links_allocator};
+        cursor_t cursor {forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect_eq(cursor.open(indexes, starts), status_t::success_k);
+        std::vector<key_t> pulled_keys(chunk), pulled;
+        while (true) {
+            auto const [read, status] = cursor.pull(indexes, std::span {pulled_keys}, &links, &offsets);
+            failures += expect_eq(status, status_t::success_k);
+            if (!read || failed(status)) break;
+            pulled.insert(pulled.end(), pulled_keys.begin(), pulled_keys.begin() + read);
+        }
+        std::size_t repeated = 0, foreign = 0;
+        for (auto yielded = pulled.begin(); yielded != pulled.end(); ++yielded)
+            repeated += std::find(pulled.begin(), yielded, *yielded) != yielded;
+        for (key_t const& linked : links) foreign += indexes.count(linked) != 1;
+        failures += expect_eq(repeated, 0u);
+        failures += expect_eq(foreign, 0u);
+        failures += expect_eq(offsets.size(), pulled.size());
+        failures += expect(std::is_sorted(offsets.begin(), offsets.end()) &&
+                           (offsets.empty() || offsets[offsets.size() - 1] == links.size()));
+        failures += starts.empty() ? expect_eq(pulled.size(), entries)
+                                   : expect(pulled.size() > 1 && pulled.size() <= entries && pulled[0] == start);
+    }
+    return failures;
+}
+
 using us::tools::copied_matches_t;
 using us::tools::copy_matches;
 
@@ -559,6 +599,11 @@ inline constexpr std::size_t cell_batch_k = 384;
 
 /** Matches a cell judges per query. */
 inline constexpr std::size_t cell_wanted_k = 10;
+
+/** Whether @p first and @p second are the same key, byte for byte. */
+inline bool same_key(usearch_key_t const& first, usearch_key_t const& second) noexcept {
+    return !std::memcmp(first.bytes, second.bytes, sizeof(first.bytes));
+}
 
 /** Inserts @p count entries of @p inputs into the empty @p index under their keys, which must
  *  spread across the cell's shards and each count once where the residency serves a count. */
@@ -616,10 +661,198 @@ std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_:
     return check(recall >= floor);
 }
 
+/** An audit reaches every one of @p count entries. */
+template <typename verbs_type_>
+std::size_t expect_health(handle<verbs_type_>& index, std::size_t count) {
+    usearch_outcome_t outcome {};
+    usearch_reachability_t reachability {};
+    verbs_type_::health(index.get(), index.executor(), &reachability, &outcome);
+    return check(outcome) + check(reachability.audited == count && reachability.reachable == count);
+}
+
+/** A cursor over @p index yields each of its @p count entries once as stored, and from the first
+ *  entry's key breadth-first that key first and then only what links lead to, once each; every
+ *  yielded and linked key was minted, and a walk past one entry hands links. */
+template <typename verbs_type_>
+std::size_t expect_cursor(handle<verbs_type_>& index, std::size_t count) {
+    usearch_key_t const start = key_of_offset(index.session->seed, 0);
+    std::size_t failures = 0;
+    for (std::span<usearch_key_t const> const starts : {std::span<usearch_key_t const> {}, std::span {&start, 1}}) {
+        usearch_outcome_t outcome {};
+        typename verbs_type_::cursor_t cursor = nullptr;
+        verbs_type_::cursor_init(index.get(), starts, &cursor, &outcome);
+        failures += check(outcome);
+        if (!cursor) continue;
+        std::vector<bool> yielded(count);
+        std::size_t pulled = 0, repeated = 0, unminted = 0, unordered = 0, written = 0, linked_count = 0;
+        bool started = starts.empty();
+        while (true) {
+            usearch_keys_view_t keys {};
+            usearch_keys_tape_view_t links {};
+            verbs_type_::cursor_next(index.get(), index.executor(), index.session->arena, cursor, cell_batch_k, &keys,
+                                     &links, &written, &outcome);
+            failures += check(outcome);
+            if (outcome.status != usearch_status_success_k || !written) break;
+            std::vector<usearch_key_t> batch(written);
+            std::vector<std::size_t> offsets(written + 1);
+            failures += check(download(batch.data(), keys.data, written * sizeof(usearch_key_t)));
+            failures += check(download(offsets.data(), links.offsets, offsets.size() * sizeof(std::size_t)));
+            std::vector<usearch_key_t> linked(offsets.back());
+            failures += check(download(linked.data(), links.keys, linked.size() * sizeof(usearch_key_t)));
+            if (!pulled && !starts.empty()) started = same_key(batch[0], start);
+            for (std::size_t entry = 0; entry != written; ++entry) {
+                std::optional<u64_t> const offset = offset_of_key(index.session->seed, batch[entry]);
+                unminted += !offset || *offset >= count;
+                if (offset && *offset < count) repeated += yielded[*offset], yielded[*offset] = true;
+                unordered += offsets[entry] > offsets[entry + 1];
+            }
+            for (usearch_key_t const& key : linked) unminted += !offset_of_key(index.session->seed, key);
+            pulled += written, linked_count += linked.size();
+        }
+        verbs_type_::cursor_free(cursor);
+        failures += check(started) + check(repeated == 0) + check(unminted == 0) + check(unordered == 0) +
+                    check(pulled < 2 || linked_count > 0);
+        failures += starts.empty() ? check(pulled == count) : check(pulled > 1 && pulled <= count);
+    }
+    return failures;
+}
+
+/** A sample of the whole of @p index draws as many of its @p count entries as it wants, each a
+ *  distinct minted key, its key's only entry, hanging from an earlier draw at finite coordinates,
+ *  and an equal seed draws the same keys again; a GPU index refuses it and says why. */
+template <typename verbs_type_>
+std::size_t expect_sample(handle<verbs_type_>& index, std::size_t count) {
+    std::size_t const wanted = std::min(cell_wanted_k, count);
+    std::array<std::vector<usearch_key_t>, 2> drawn;
+    std::size_t failures = 0;
+    for (std::vector<usearch_key_t>& keys : drawn) {
+        usearch_outcome_t outcome {};
+        sample_outputs_view_t outputs {};
+        verbs_type_::sample(index.get(), index.executor(), index.session->arena, {}, {}, {}, wanted,
+                            index.session->seed, outputs, &outcome);
+        if (index.residency == usearch_residency_vram_k)
+            return check(outcome.status == usearch_status_unsupported_k && outcome.message);
+        if (check(outcome)) return failures + 1;
+        failures += check(outputs.written == wanted);
+        keys.resize(outputs.written);
+        std::vector<std::size_t> ordinals(outputs.written), parented(outputs.written);
+        std::vector<usearch_key_t> parents(outputs.written * outputs.parents.columns);
+        std::vector<f32_t> coordinates(outputs.written * outputs.coordinates.stride / sizeof(f32_t));
+        failures += check(download(keys.data(), outputs.keys.data, keys.size() * sizeof(usearch_key_t)));
+        failures += check(download(ordinals.data(), outputs.entry_ordinals, ordinals.size() * sizeof(std::size_t)));
+        failures += check(download(parented.data(), outputs.parents.counts, parented.size() * sizeof(std::size_t)));
+        failures += check(download(parents.data(), outputs.parents.keys, parents.size() * sizeof(usearch_key_t)));
+        failures += check(download(coordinates.data(), outputs.coordinates.data, coordinates.size() * sizeof(f32_t)));
+        auto const drawn_before = [&](usearch_key_t const& key, std::size_t draw) {
+            return std::any_of(keys.begin(), keys.begin() + draw,
+                               [&](usearch_key_t const& earlier) { return same_key(earlier, key); });
+        };
+        std::size_t misdrawn = 0;
+        for (std::size_t draw = 0; draw != keys.size(); ++draw) {
+            std::optional<u64_t> const offset = offset_of_key(index.session->seed, keys[draw]);
+            misdrawn += !offset || *offset >= count || ordinals[draw] != 0 || drawn_before(keys[draw], draw);
+            misdrawn += parented[draw] && !drawn_before(parents[draw * outputs.parents.columns], draw);
+            f32_t const* const point = coordinates.data() + draw * outputs.coordinates.stride / sizeof(f32_t);
+            misdrawn += !std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2]);
+        }
+        failures += check(misdrawn == 0);
+    }
+    return failures + check(drawn[0].size() == drawn[1].size() &&
+                            std::equal(drawn[0].begin(), drawn[0].end(), drawn[1].begin(), same_key));
+}
+
+/** Splitting @p index , whose entries are keyed by its first offsets, into two empty receivers of
+ *  its own session and shard count leaves @p index empty and every key in one receiver once, where
+ *  the residency counts entries; an NVMe view refuses it as read-only and a GPU index answers
+ *  @p on_device, a refusal saying why. */
+template <typename verbs_type_>
+std::size_t expect_split(handle<verbs_type_>& index, usearch_status_t on_device) {
+    usearch_status_t const wanted = index.residency == usearch_residency_nvme_k   ? usearch_status_read_only_k
+                                    : index.residency == usearch_residency_vram_k ? on_device
+                                                                                  : usearch_status_success_k;
+    typename verbs_type_::description_t const before = describe(index);
+    std::array<handle<verbs_type_>, 2> receivers {
+        open_index<verbs_type_>(*index.session, index.geometry, before.shards_count),
+        open_index<verbs_type_>(*index.session, index.geometry, before.shards_count)};
+    if (!receivers[0] || !receivers[1]) return 1;
+    std::array<typename verbs_type_::index_t, 2> const handles {receivers[0].get(), receivers[1].get()};
+    usearch_outcome_t outcome {};
+    usearch_refine_report_t report {};
+    verbs_type_::split(index.get(), index.executor(), handles.data(), handles.size(), index.session->seed, &report,
+                       &outcome);
+    if (wanted != usearch_status_success_k) return check(outcome.status == wanted && outcome.message);
+    std::size_t failures = check(outcome);
+    failures += check(describe(index).size == 0 &&
+                      describe(receivers[0]).size + describe(receivers[1]).size == before.size);
+    std::size_t miscounted = 0;
+    for (std::size_t offset = 0; offset != before.size; ++offset) {
+        usearch_key_t const key = key_of_offset(index.session->seed, offset);
+        std::size_t landed = 0;
+        for (handle<verbs_type_>& receiver : receivers) {
+            std::size_t entries = 0;
+            verbs_type_::count(receiver.get(), receiver.executor(), key, &entries, &outcome);
+            if (outcome.status == usearch_status_unsupported_k) return failures;
+            landed += entries;
+        }
+        miscounted += landed != 1;
+    }
+    return failures + check(miscounted == 0);
+}
+
+/** A RAM index saves into its session's arena, whose bytes name their metadata, and loads from them
+ *  into RAM again with as many entries over as many shards, a walk at @p expansion keeping @p floor
+ *  of the exact scan's top ten over the first @p count queries of @p queries; an NVMe view refuses
+ *  the save as unsupported and a GPU index answers @p on_device, a refusal saying why. */
+template <typename verbs_type_>
+std::size_t expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_type_::queries_t queries,
+                                     std::size_t count, std::size_t expansion, double floor,
+                                     usearch_status_t on_device) {
+    usearch_status_t const wanted = index.residency == usearch_residency_nvme_k   ? usearch_status_unsupported_k
+                                    : index.residency == usearch_residency_vram_k ? on_device
+                                                                                  : usearch_status_success_k;
+    usearch_outcome_t outcome {};
+    usearch_bytes_view_t monolith {};
+    verbs_type_::save_buffer(index.get(), index.executor(), index.session->arena, &monolith, &outcome);
+    if (wanted != usearch_status_success_k) return check(outcome.status == wanted && outcome.message);
+    std::size_t failures = check(outcome);
+    if (failures) return failures;
+    std::string bytes(monolith.length, '\0');
+    failures += check(download(bytes.data(), monolith.data, bytes.size()));
+    typename verbs_type_::metadata_t metadata {};
+    verbs_type_::metadata_read_buffer(index.session->executor, bytes_view(bytes), &metadata, &outcome);
+    failures += check(outcome) + check(metadata.connectivity != 0);
+    std::vector<std::int32_t> placement;
+    typename verbs_type_::index_t copy = nullptr;
+    verbs_type_::load_ram_buffer(&copy, index.session->executor, bytes_view(bytes),
+                                 index.session->ram_options(0, placement), index.geometry, &outcome);
+    failures += check(outcome);
+    handle<verbs_type_> reloaded {copy, *index.session, usearch_residency_ram_k, index.geometry};
+    if (!reloaded) return failures + 1;
+    typename verbs_type_::description_t const original = describe(index), restored = describe(reloaded);
+    failures += check(restored.size == original.size && restored.shards_count == original.shards_count);
+    return failures + expect_walk_recall(reloaded, queries, count, expansion, floor);
+}
+
+/** Every metric kind the modality spells reads back by its name, and "unknown" reads back as the
+ *  unknown kind. */
+template <typename verbs_type_>
+std::size_t expect_metric_names() {
+    using metric_t = typename verbs_type_::metric_t;
+    std::size_t spelled = 0, misread = 0;
+    for (u32_t kind = 1; std::string_view {verbs_type_::metric_name(static_cast<metric_t>(kind))} != "unknown";
+         ++kind) {
+        metric_t const metric = static_cast<metric_t>(kind);
+        misread += verbs_type_::metric_from_name(bytes_view(verbs_type_::metric_name(metric))) != metric;
+        ++spelled;
+    }
+    return check(spelled > 0) + check(misread == 0) +
+           check(verbs_type_::metric_from_name(bytes_view("unknown")) == metric_t {});
+}
+
 /** The index round-trips through all residencies under @p stem, as @ref check_checkpoint_round_trip
  *  judges it on the first @p count queries of @p queries, within @p score_band where stored entries
- *  round; in an NVMe cell its saved view then answers the same walk and refuses every write, one
- *  entry of @p inputs included. */
+ *  round; in an NVMe cell its saved view then answers the same walk, audits, walks, samples and
+ *  refuses every write, one entry of @p inputs included. */
 template <typename verbs_type_>
 std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& index,
                                typename verbs_type_::values_t inputs, typename verbs_type_::queries_t queries,
@@ -641,10 +874,16 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
     };
     std::size_t failures = check_checkpoint_round_trip(index, stem, cell.shards, bytes, score_band, search);
     if (cell.residency != usearch_residency_nvme_k) return failures;
+    std::size_t const entries = describe(index).size;
     handle<verbs_type_> view = save_and_reopen(std::move(index), stem + "-view.safegraphs", usearch_residency_nvme_k);
     failures += check(bool(view));
     if (view) {
         failures += expect_walk_recall(view, queries, count, expansion, floor);
+        failures += expect_health(view, entries);
+        failures += expect_cursor(view, entries);
+        failures += expect_sample(view, entries);
+        failures += expect_split(view, usearch_status_unsupported_k);
+        failures += expect_buffer_round_trip(view, queries, count, expansion, floor, usearch_status_unsupported_k);
         usearch_outcome_t outcome {};
         usearch_key_t const key = key_of_offset(view.session->seed, 0);
         verbs_type_::insert(view.get(), view.executor(), 1, keys_view({&key, 1}), inputs, 0, nullptr, &outcome);
@@ -696,6 +935,42 @@ std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::que
     return failures + check(recall_after >= recall_before);
 }
 
+/** A refinement opened on @p index holds it closed to an insertion of the first entry of @p inputs
+ *  under a fresh key, pulls its handler cancels at their first report carry the running totals on
+ *  until the pass ends, no more entries changing than were re-selected, and its finish reports at
+ *  least the changes the pulls made and audits all @p count entries, the refused one never landing;
+ *  a VRAM index whose tower still declares its refinement answers @p on_device when it opens. */
+template <typename verbs_type_>
+std::size_t expect_refinement(handle<verbs_type_>& index, typename verbs_type_::values_t inputs, std::size_t count,
+                              usearch_status_t on_device) {
+    usearch_outcome_t outcome {};
+    typename verbs_type_::refinement_t refinement = nullptr;
+    verbs_type_::refinement_init(index.get(), index.executor(), &refinement, &outcome);
+    if (index.residency == usearch_residency_vram_k && on_device != usearch_status_success_k)
+        return check(outcome.status == on_device && !refinement);
+    std::size_t failures = check(outcome);
+    if (!refinement) return failures + 1;
+    usearch_key_t const fresh = key_of_offset(index.session->seed, count);
+    verbs_type_::insert(index.get(), index.executor(), 1, keys_view({&fresh, 1}), inputs, 0, nullptr, &outcome);
+    failures += check(outcome.status == usearch_status_contended_k);
+    usearch_progress_t const cancelling {[](std::size_t, std::size_t, void*) noexcept { return usearch_cancel_k; },
+                                         nullptr, 0};
+    std::size_t reselected = 0, changed = 0, shrunk = 0, pulls = 0;
+    // Every pull finishes at least one report's slice of the entries before its handler cancels it.
+    do {
+        std::size_t pulled_reselected = 0, pulled_changed = 0;
+        verbs_type_::refinement_next(index.get(), index.executor(), refinement, cancelling, &pulled_reselected,
+                                     &pulled_changed, &outcome);
+        shrunk += pulled_reselected < reselected || pulled_changed < changed || pulled_changed > pulled_reselected;
+        reselected = pulled_reselected, changed = pulled_changed;
+    } while (outcome.status == usearch_status_cancelled_k && ++pulls <= count);
+    failures += check(outcome) + check(shrunk == 0);
+    usearch_refine_report_t report {};
+    verbs_type_::refinement_finish(index.get(), index.executor(), refinement, &report, &outcome);
+    failures += check(outcome) + check(report.changed >= changed && report.reachability.audited == count);
+    return failures + check(describe(index).size == count);
+}
+
 /** A donor of @p count entries of @p inputs, keyed past the index's own @p first_offset entries,
  *  absorbs whole: its slot is consumed and the sizes add up; a device index answers @p on_device
  *  instead, where absorption is not implemented yet. */
@@ -715,12 +990,27 @@ std::size_t expect_absorbed(handle<verbs_type_>& index, typename verbs_type_::va
     return failures + check(describe(index).size == first_offset + count);
 }
 
-/** A cleared index holds nothing. */
+/** A cleared index holds nothing, and a cursor opened over its entries before the clear answers
+ *  @c contended_k after it; an index a split emptied first takes the first entry of @p inputs
+ *  back, since clearing nothing need not end a cursor. */
 template <typename verbs_type_>
-std::size_t expect_cleared(handle<verbs_type_>& index) {
+std::size_t expect_cleared(handle<verbs_type_>& index, typename verbs_type_::values_t inputs) {
+    usearch_traversal_stats_t stats {};
+    std::size_t failures = 0;
+    if (!describe(index).size) failures += check(insert_entries(index, inputs, 1, 0, cell_batch_k, 0, stats));
     usearch_outcome_t outcome {};
+    typename verbs_type_::cursor_t cursor = nullptr;
+    verbs_type_::cursor_init(index.get(), {}, &cursor, &outcome);
+    failures += check(outcome);
     verbs_type_::clear(index.get(), index.executor(), &outcome);
-    return check(outcome) + check(describe(index).size == 0);
+    failures += check(outcome) + check(describe(index).size == 0);
+    if (!cursor) return failures + 1;
+    usearch_keys_view_t keys {};
+    std::size_t written = 0;
+    verbs_type_::cursor_next(index.get(), index.executor(), index.session->arena, cursor, cell_batch_k, &keys, nullptr,
+                             &written, &outcome);
+    verbs_type_::cursor_free(cursor);
+    return failures + check(outcome.status == usearch_status_contended_k && written == 0);
 }
 
 } // namespace abi

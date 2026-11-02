@@ -9,10 +9,13 @@
  *  Each cell builds one index the way a binding does, through a session of its residency, and
  *  checks what a caller observes. The vectors land under their keys across the shards; every key
  *  counts once and reads back; nine in ten vectors find themselves first, and a walk keeps nine in
- *  ten of the exact scan's top ten; a predicate admits only what it admits; refinements settle and
- *  an audit reaches every entry; the index saves and reloads into every residency and as a view,
- *  and an NVMe view serves the same searches and refuses every write; a donor absorbs whole; a RAM
- *  index compacts into one shard; a cleared index holds nothing.
+ *  ten of the exact scan's top ten; a predicate admits only what it admits; refinements settle, an
+ *  audit reaches every entry, cursors walk every entry and a sample draws distinct ones; the index
+ *  saves into memory and back, and into every residency and as a view, and an NVMe view serves the
+ *  same searches, audits, walks and samples and refuses every write; a refinement handle holds the
+ *  index closed while its cancelled pulls carry their totals on; a donor absorbs whole; a RAM index
+ *  compacts into one shard; the index splits into two with every key in one part; a cleared index
+ *  holds nothing and ends a cursor opened before it; every metric's name reads back.
  */
 #include <cstring> // `std::memcmp` - the keys' order
 
@@ -126,17 +129,6 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     return check(outside == 0 && !found.keys.empty());
 }
 
-/** An audit reaches every entry. */
-static std::size_t expect_health(handle<dense_verbs_t>& index, std::size_t count) {
-    usearch_outcome_t outcome {};
-    usearch_reachability_t reachability {};
-    usearch_dense_health_t health {};
-    health.index = index.get(), health.executor = index.executor(), health.outcome = &outcome;
-    health.reachability = &reachability;
-    usearch_dense_health(&health);
-    return check(outcome) + check(reachability.audited == count && reachability.reachable == count);
-}
-
 /** A RAM index compacts in place under a capacity of every entry and keeps every entry; the shards
  *  it emptied stay as idle slots, which the description counts among the live ones. */
 static std::size_t expect_compact(handle<dense_verbs_t>& index, std::size_t count) {
@@ -172,18 +164,26 @@ static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t co
     failures += expect_predicate(index, rows, dense_rows_k);
     failures += expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
     failures += expect_health(index, dense_rows_k);
+    failures += expect_cursor(index, dense_rows_k);
+    failures += expect_sample(index, dense_rows_k);
+    failures += expect_buffer_round_trip(index, rows, dense_queries_k, dense_expansion_k, 0.9,
+                                         usearch_status_success_k);
     std::string const stem = fmt::format("/tmp/usearch-abi-dense-{:016x}", seed);
     failures += expect_persistence(cell, index, rows, rows, dense_queries_k, dense_expansion_k, 0.9, stem,
                                    saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
+    failures += expect_refinement(index, rows, dense_rows_k, usearch_status_success_k);
     nk::matrix<nk::f32_t> const donated = dense_rows(cell.scalar, dense_donor_rows_k, ~seed);
     failures += expect_absorbed(index, rows_of(donated), dense_donor_rows_k, dense_rows_k, usearch_status_success_k);
     if (cell.residency == usearch_residency_ram_k) failures += expect_compact(index, dense_rows_k + dense_donor_rows_k);
-    return failures + expect_cleared(index);
+    failures += expect_split(index, usearch_status_success_k);
+    return failures + expect_cleared(index, rows);
 }
 
 std::size_t check_dense_abi(settings_t const& settings) {
     std::size_t failures = 0;
+    if (settings.filter.selects("dense metric names"))
+        failures += report("dense metric names", expect_metric_names<dense_verbs_t>());
     for (sweep_cell_t const& cell : diagonal_sweep(usearch_scalar_bf16_k)) {
         std::string const name = "dense " + name_of(cell);
         if (settings.filter.selects(name))

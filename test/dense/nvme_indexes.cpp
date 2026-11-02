@@ -10,21 +10,28 @@
 using namespace unum::usearch;
 
 std::size_t test::dense::check_nvme_indexes(settings_t const& settings) {
-    if (!settings.filter.selects("nvme_indexes")) return 0;
+    // The family's name selects every cell, and a cell's own name selects it alone.
+    auto const selects = [&](char const* name) {
+        return settings.filter.selects("nvme_indexes") || settings.filter.selects(name);
+    };
     std::size_t failures_count = 0;
-    failures_count += test_nvme_configuration<blocking_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
-        "nvme bf16+dot+blocking", settings.seed);
+    if (char const* name = "nvme bf16+dot+blocking"; selects(name))
+        failures_count += test_nvme_configuration<blocking_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(name,
+                                                                                                       settings.seed);
 #if USEARCH_WITH_LINUX_AIO
-    failures_count += test_nvme_configuration<linux_aio_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
-        "nvme bf16+dot+linux-aio", settings.seed);
+    if (char const* name = "nvme bf16+dot+linux-aio"; selects(name))
+        failures_count += test_nvme_configuration<linux_aio_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(name,
+                                                                                                        settings.seed);
 #endif
 #if USEARCH_WITH_LINUX_URING
-    failures_count += test_nvme_configuration<linux_uring_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
-        "nvme bf16+dot+linux-uring", settings.seed);
+    if (char const* name = "nvme bf16+dot+linux-uring"; selects(name))
+        failures_count += test_nvme_configuration<linux_uring_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
+            name, settings.seed);
 #endif
 #if USEARCH_WITH_LINUX_SPDK
-    failures_count += test_nvme_spdk_configuration<nk_bf16_k, nk_kernel_dot_k>("nvme bf16+dot+linux-spdk",
-                                                                               settings.seed, settings.nvme_paths);
+    if (char const* name = "nvme bf16+dot+linux-spdk"; selects(name))
+        failures_count += test_nvme_spdk_configuration<nk_bf16_k, nk_kernel_dot_k>(name, settings.seed,
+                                                                                   settings.nvme_paths);
 #endif
     return failures_count;
 }

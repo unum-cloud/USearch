@@ -153,12 +153,11 @@ std::size_t test_dense_vram_one_way_islands(make_index_type_ const& make_index, 
         std::size_t const connectivity = static_cast<std::size_t>(built.connectivity());
         auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
         auto saved_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity}).value;
-        auto scratch = nk::matrix<node_id_t>::zeros({nodes_count, connectivity}).value;
-        failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
-        if (saved_vectors.empty() || saved_neighbors.empty() || scratch.empty()) return failures;
+        failures += expect(!saved_vectors.empty() && !saved_neighbors.empty());
+        if (saved_vectors.empty() || saved_neighbors.empty()) return failures;
         failures += expect_eq(
             dense_save(built, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
-                       synchronization_t::exclusive_k, scratch.span()),
+                       synchronization_t::exclusive_k),
             status_t::success_k);
         // No landmark: they sit at multiples of the rows over the connectivity.
         node_id_t const sink = static_cast<node_id_t>(nodes_count - 1);

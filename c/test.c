@@ -1328,7 +1328,8 @@ uint64_t value_of(usearch_key_t key) {
 }
 
 /** A Euclidean index over @p rows, each under the key of its position but row 1, which shares row
- *  0's key, so one key holds two entries. */
+ *  0's key, so one key holds two entries; refined, since a concurrent build reaches every row from
+ *  row 0 only after a refine, and the cursor tests step the graph rather than judge the build. */
 usearch_dense_index_t create_neighborhood(float const* rows, usearch_executor_t executor) {
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t index = NULL;
@@ -1354,6 +1355,8 @@ usearch_dense_index_t create_neighborhood(float const* rows, usearch_executor_t 
         .count = neighborhood_rows_k,
         .keys = {keys, sizeof(usearch_key_t)},
         .vectors = {rows, neighborhood_dimensions_k * sizeof(float), neighborhood_dimensions_k, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = index, .executor = executor, .outcome = &outcome});
     expect(!outcome.message, outcome.message);
     return index;
 }
@@ -1834,6 +1837,64 @@ void test_sequence_round_trip(void) {
         usearch_sequence_save(
             &(usearch_sequence_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
         expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage already is its checkpoint");
+        usearch_reachability_t reachability = {0};
+        usearch_sequence_health(&(usearch_sequence_health_t) {.index = viewed,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .reachability = &reachability});
+        expect(!outcome.message, outcome.message);
+        expect(reachability.audited == 4 && reachability.reachable == 4,
+               "A view from storage audits and reaches every entry");
+        usearch_key_t const start = key_of(0);
+        usearch_sequence_cursor_t walk = NULL;
+        usearch_sequence_cursor_init(&(usearch_sequence_cursor_init_t) {.index = viewed,
+                                                                        .outcome = &outcome,
+                                                                        .starts_count = 1,
+                                                                        .starts = &start,
+                                                                        .cursor = &walk});
+        expect(!outcome.message, outcome.message);
+        usearch_keys_view_t walked = {0};
+        usearch_keys_tape_view_t links = {0};
+        size_t walked_count = 0;
+        usearch_sequence_cursor_next(&(usearch_sequence_cursor_next_t) {.index = viewed,
+                                                                        .executor = storage,
+                                                                        .outcome = &outcome,
+                                                                        .cursor = walk,
+                                                                        .keys = &walked,
+                                                                        .links = &links,
+                                                                        .written = &walked_count,
+                                                                        .arena = arena,
+                                                                        .wanted = 4});
+        expect(!outcome.message, outcome.message);
+        expect(walked_count > 1 && value_of(walked.data[0]) == 0 && links.offsets[walked_count] > links.offsets[0],
+               "A cursor over storage starts at its start key and hands every entry's links");
+        usearch_sequence_cursor_free(walk);
+        usearch_keys_view_t sampled_keys = {0};
+        size_t const* sampled_ordinals = NULL;
+        usearch_matches_view_t sampled_parents = {0};
+        usearch_rows_view_t sampled_coordinates = {0};
+        size_t sampled = 0;
+        usearch_sequence_sample(&(usearch_sequence_sample_t) {.index = viewed,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .keys = &sampled_keys,
+                                                              .entry_ordinals = &sampled_ordinals,
+                                                              .parents = &sampled_parents,
+                                                              .coordinates = &sampled_coordinates,
+                                                              .written = &sampled,
+                                                              .arena = arena,
+                                                              .wanted = 4,
+                                                              .seed = 42});
+        expect(!outcome.message, outcome.message);
+        expect_eq(sampled, 4, "A view from storage samples every entry it holds");
+        usearch_bytes_view_t monolith = {0};
+        usearch_sequence_save_buffer(&(usearch_sequence_save_buffer_t) {.index = viewed,
+                                                                        .executor = storage,
+                                                                        .outcome = &outcome,
+                                                                        .monolith = &monolith,
+                                                                        .arena = arena});
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage saves into no buffer");
+        expect(outcome.message != NULL, "A view's refusal to save says why");
         usearch_sequence_free(viewed);
     }
     usearch_executor_free(storage);
@@ -3440,9 +3501,21 @@ void test_nvme_view(size_t const dimensions) {
     usearch_dense_save(
         &(usearch_dense_save_t) {.index = view, .executor = storage, .outcome = &outcome, .path = path_view});
     expect_eq(outcome.status, usearch_status_unsupported_k, "A view already is its checkpoint");
-
     usearch_arena_free(arena);
     usearch_dense_free(view);
+
+    // A checkpoint cut inside its header holds no index in any format the library reads.
+    FILE* const truncated = fopen(path, "wb");
+    expect(truncated != NULL && fwrite(path, 1, 12, truncated) == 12, "Failed to truncate the checkpoint");
+    fclose(truncated);
+    usearch_dense_index_t truncated_view = NULL;
+    usearch_dense_view_nvme(&(usearch_dense_view_nvme_t) {.index = &truncated_view,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .path = path_view});
+    expect(outcome.status != usearch_status_success_k && truncated_view == NULL,
+           "A view must refuse a checkpoint cut inside its header");
+
     usearch_executor_free(storage);
     remove(path);
     free(data);

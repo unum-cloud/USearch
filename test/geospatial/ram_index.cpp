@@ -67,11 +67,12 @@ struct positions_fixture_t {
         geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
+    using metric_t = chord_metric_t;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
     }
-    static chord_metric_t make_metric() { return make_chord_metric(); }
+    static metric_t make_metric() { return make_chord_metric(); }
     static earth_observation_codec_t make_codec() { return {}; }
     static us::utilities::uuid_t make_key(std::size_t ordinal) {
         return std::bit_cast<us::utilities::uuid_t>(
@@ -445,28 +446,72 @@ static std::size_t check_observations_admits() {
     return failures;
 }
 
-/** A saved monolith read back from storage, every observation a fixed 32-byte entry the view reads
- *  without a directory and decodes in place. */
-static std::size_t check_positions_nvme(u64_t seed) {
-    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
-    using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
-                                                   blocking_files_engine<>>;
-    allocation_ledger_t ledger;
-    std::vector<earth_observation_t> const values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"),
-                                                                                     counting_allocator_t {ledger});
-    auto make_value = [&](std::size_t entry, counting_allocator_t const&) { return values[entry]; };
-    auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
-        metric_t metric {allocator};
+/** Chord distances over storage: every observation a fixed 32-byte entry the view reads without a
+ *  directory and decodes in place, placed by its own position when sampled. */
+struct positions_nvme_fixture_t {
+    using ram_fixture_t = positions_fixture_t;
+    using shard_index_t =
+        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+    template <typename engine_type_, typename node_id_type_ = u32_t>
+    using nvme_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, node_id_type_, nk_u64_t,
+                                           engine_type_>;
+    using scratch_metric_t = chord_metric<i32_serial_geospatial_kit_t, basic_nvme_scratch_t>;
+    using query_t = earth_observation_t;
+    static constexpr std::string_view metric_token_k = "chord";
+
+    /** Each position in units of the equatorial radius, as the library samples observations. */
+    struct coordinates_t {
+        void operator()(earth_observation_t const& value, std::span<f32_t, 3> xyz) const noexcept {
+            constexpr f64_t radius_centimetres_k = NUMKONG_EARTH_ELLIPSOID_EQUATORIAL_RADIUS * centimetres_per_metre_k;
+            xyz[0] = static_cast<f32_t>(value.position.x_centimetres / radius_centimetres_k);
+            xyz[1] = static_cast<f32_t>(value.position.y_centimetres / radius_centimetres_k);
+            xyz[2] = static_cast<f32_t>(value.position.z_centimetres / radius_centimetres_k);
+        }
+    };
+
+    std::vector<earth_observation_t> values;
+
+    explicit positions_nvme_fixture_t(u64_t seed) {
+        allocation_ledger_t ledger;
+        values = positions_fixture_t::make_values(64, stream_key(seed, "nvme"), counting_allocator_t {ledger});
+    }
+    std::size_t size() const noexcept { return values.size(); }
+    template <typename index_type_>
+    earth_observation_t make_value(std::size_t entry, typename index_type_::allocator_t const&) const noexcept {
+        return values[entry];
+    }
+    static expected<scratch_metric_t> make_scratch_metric(basic_nvme_scratch_t const& allocator,
+                                                          std::size_t staging) noexcept {
+        scratch_metric_t metric {allocator};
         status_t const ready = metric.init(staging);
-        return expected<metric_t> {std::move(metric), ready};
+        return {std::move(metric), ready};
+    }
+    expected<query_t> query_of(std::size_t entry, basic_nvme_scratch_t const&) const noexcept {
+        return {values[entry], status_t::success_k};
+    }
+    static expected<query_t> stored_query(earth_observation_t const& stored, basic_nvme_scratch_t const&) noexcept {
+        return {stored, status_t::success_k};
+    }
+    bool matches(std::size_t entry, earth_observation_t const& view) const noexcept { return view == values[entry]; }
+};
+
+/** Positions sampled from two shards, as @c test_basic_sharded_sample checks, each placed by its
+ *  own position. */
+static std::size_t check_positions_sample(u64_t seed) {
+    using index_t =
+        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+    constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
+    allocation_ledger_t ledger;
+    std::vector<us::utilities::uuid_t> keys(entries_k);
+    for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = positions_fixture_t::make_key(entry);
+    auto make_values = [&] {
+        return positions_fixture_t::make_values(entries_k, stream_key(seed, "plural_sample"),
+                                                counting_allocator_t {ledger});
     };
-    auto query_of = [&](std::size_t query, scratch_t const&) noexcept {
-        return expected<earth_observation_t> {values[query], status_t::success_k};
-    };
-    auto matches = [&](std::size_t entry, earth_observation_t const& view) noexcept { return view == values[entry]; };
-    return test_basic_nvme_view<positions_fixture_t, nvme_indexes_t>(seed, values.size(), "chord", make_value,
-                                                                     make_metric, query_of, matches);
+    chord_metric_t metric = make_chord_metric();
+    return test_basic_sharded_sample<us::basic::ram_indexes<index_t>>(
+        seed, metric, std::span<us::utilities::uuid_t const> {keys}, make_values,
+        positions_nvme_fixture_t::coordinates_t {});
 }
 
 /** Containment over storage finds what the radius walk finds in RAM: for every probe and radius, a
@@ -575,7 +620,8 @@ std::size_t check_geospatial(settings_t const& settings) {
     failures += check_positions_selector(settings.seed);
     failures += check_positions_long_links(settings.seed);
     failures += check_positions_radius(settings.seed);
-    failures += check_positions_nvme(settings.seed);
+    failures += check_positions_sample(settings.seed);
+    failures += test_basic_nvme_engines(positions_nvme_fixture_t {settings.seed}, "geospatial", settings.seed);
     failures += check_positions_nvme_within(settings.seed);
     return report("geospatial", failures);
 }

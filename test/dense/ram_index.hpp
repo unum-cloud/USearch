@@ -36,7 +36,8 @@ static bool ram_index_row_matches(index_type_ const& index, node_id_t node, vect
 
 /** A lone index keeps its keys without a reservation: the first insert grows it, every key resolves
  *  to both of its rows through @c key_of, @c count, @c find_each and @c get, a split carries every
- *  key beside its row, and a save and load round trip keeps every key. */
+ *  key beside its row, and a save and load round trip keeps every key, into a wider index too,
+ *  whose rows one refine grows past the saved width while every node stays reachable. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -112,9 +113,8 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
         auto const shape = saved.saved_shape();
         auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
         auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
-        auto scratch = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
         failures += expect_eq(saved.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
-                                         synchronization_t::exclusive_k, scratch.span()),
+                                         synchronization_t::exclusive_k),
                               status_t::success_k);
         std::vector<key_t> saved_keys(shape.nodes);
         for (node_id_t node = 0; node != shape.nodes; ++node) saved_keys[node] = saved.key_of(node).value;
@@ -133,6 +133,45 @@ static std::size_t test_ram_index_keys(make_index_type_ const& make_index, u64_t
                      !ram_index_row_matches(restored, node, vectors, rows_of_key(saved_keys[node]) + 1);
         }
         failures += expect_eq(wrong, 0u);
+
+        // A wider index takes the saved rows with empty tails, and one refine grows rows past them.
+        iota_view<node_id_t> const saved_nodes {0, static_cast<node_id_t>(shape.nodes)};
+        std::unique_ptr<index_type_> const widened_ptr = make_index(
+            ledger, {shape.dimensions, static_cast<connectivity_t>(2 * shape.connectivity)});
+        index_type_& widened = *widened_ptr;
+        typename index_type_::columns_view_t const narrow_columns {
+            .vectors = dense_matrix_bytes(saved_vectors.view()),
+            .neighbors = dense_matrix_bytes(saved_neighbors.view()),
+            .connectivity = shape.connectivity,
+        };
+        failures += expect_eq(widened.load(narrow_columns, to_span(saved_keys), shape.nodes, saved_nodes),
+                              status_t::success_k);
+        failures += expect(succeeded(widened.refine(saved_nodes, {}, context).status));
+        auto const wide_shape = widened.saved_shape();
+        failures += expect_eq(wide_shape.connectivity, 2 * shape.connectivity);
+        auto wide_vectors = nk::matrix<scalar_t>::zeros({wide_shape.nodes, wide_shape.dimensions}).value;
+        auto wide_neighbors = nk::matrix<node_id_t>::zeros({wide_shape.nodes, wide_shape.connectivity}).value;
+        failures += expect_eq(widened.save({dense_matrix_bytes(wide_vectors), dense_matrix_bytes(wide_neighbors)},
+                                           synchronization_t::exclusive_k),
+                              status_t::success_k);
+        // A back-link into a full row keeps only its diverse picks, so rows grow but need not fill.
+        nk::matrix_view<node_id_t> const wide_rows = wide_neighbors.view();
+        std::size_t grown_rows = 0;
+        for (std::size_t row = 0; row != wide_shape.nodes; ++row)
+            grown_rows += wide_rows(row, shape.connectivity) != node_id_unknown_k;
+        failures += expect(grown_rows != 0);
+        auto const [reachability, health_status] = dense_audit_health(widened, context);
+        failures += expect(succeeded(health_status));
+        failures += expect_eq(reachability.reachable_nodes, reachability.audited_nodes);
+        // The wider rows never fit back into the narrower index.
+        std::unique_ptr<index_type_> const narrowed_ptr = make_index(ledger);
+        typename index_type_::columns_view_t const wide_columns {
+            .vectors = dense_matrix_bytes(wide_vectors.view()),
+            .neighbors = dense_matrix_bytes(wide_neighbors.view()),
+            .connectivity = wide_shape.connectivity,
+        };
+        failures += expect_eq(narrowed_ptr->load(wide_columns, to_span(saved_keys), shape.nodes, saved_nodes),
+                              status_t::config_mismatch_k);
     }
     return failures + expect_eq(ledger.live_bytes, 0);
 }
