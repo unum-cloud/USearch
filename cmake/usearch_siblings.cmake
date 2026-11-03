@@ -57,7 +57,7 @@ endforeach ()
 set(usearch_sibling_targets_)
 usearch_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG numkong::header https://github.com/ashvardanian/NumKong
-    9c23fc5c21170eec0d4594eb69c8aeee894cf19d
+    15fd1f4ce83b99e0387ad29559d170e970a5a771
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
@@ -65,7 +65,7 @@ usearch_sibling(
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla
-    cff25ca8f55aa223dd6ab437b8665009e928e493
+    bfc0877a5e39c18a53cfea73b189053561cf28df
 )
 usearch_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE smashtable::header https://github.com/ashvardanian/SmashTable

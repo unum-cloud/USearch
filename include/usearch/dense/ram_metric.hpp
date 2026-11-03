@@ -1175,12 +1175,12 @@ struct e3m2_haswell_quads_kit_t {
     static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x32_state_haswell_t;
-    using step_vec_t = nk_b256_vec_t;
+    using step_vec_t = nk_b512_vec_t;
     using finalized_vec_t = nk_b128_vec_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x32_init_haswell;
     static constexpr auto update_accumulator = nk_dot_e3m2x32_update_haswell;
-    static constexpr auto load_step = nk_load_b256_haswell_;
-    static constexpr auto load_tail = nk_partial_load_b8x32_serial_;
+    static constexpr auto load_step = nk_load_e3m2x32_to_i16x32_haswell_;
+    static constexpr auto load_tail = nk_partial_load_e3m2x32_to_i16x32_haswell_;
     static constexpr auto reduce_accumulators = nk_dot_e3m2x32_finalize_haswell;
     static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_haswell_;
     static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_haswell_;
@@ -1204,18 +1204,18 @@ struct e3m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
-    using accumulator_t = nk_dot_e3m2x64_state_skylake_t;
+    using accumulator_t = nk_dot_e3m2x32_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
     using finalized_vec_t = nk_b128_vec_t;
-    static constexpr auto init_accumulator = nk_dot_e3m2x64_init_skylake;
-    static constexpr auto update_accumulator = nk_dot_e3m2x64_update_skylake;
-    static constexpr auto load_step = nk_load_b512_skylake_;
-    static constexpr auto load_tail = nk_partial_load_b8x64_skylake_;
-    static constexpr auto reduce_accumulators = nk_dot_e3m2x64_finalize_skylake;
+    static constexpr auto init_accumulator = nk_dot_e3m2x32_init_skylake;
+    static constexpr auto update_accumulator = nk_dot_e3m2x32_update_skylake;
+    static constexpr auto load_step = nk_load_e3m2x32_to_i16x32_skylake_;
+    static constexpr auto load_tail = nk_partial_load_e3m2x32_to_i16x32_skylake_;
+    static constexpr auto reduce_accumulators = nk_dot_e3m2x32_finalize_skylake;
     static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_haswell_;
     static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_haswell_;
     static constexpr auto compute_norms = nk_reduce_moments_e3m2_skylake;
-    static constexpr std::size_t step_dimensions = 64;
+    static constexpr std::size_t step_dimensions = 32;
 };
 #else
 
@@ -1235,12 +1235,12 @@ struct e3m2_neonsdot_quads_kit_t {
     static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonsdot_t;
-    using step_vec_t = nk_b128_vec_t;
+    using step_vec_t = nk_b256_vec_t;
     using finalized_vec_t = nk_b128_vec_t;
     static constexpr auto init_accumulator = nk_dot_e3m2x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_e3m2x16_update_neonsdot;
-    static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
+    static constexpr auto load_step = nk_load_e3m2x16_to_i16x16_neonsdot_;
+    static constexpr auto load_tail = nk_partial_load_e3m2x16_to_i16x16_neonsdot_;
     static constexpr auto reduce_accumulators = nk_dot_e3m2x16_finalize_neonsdot;
     static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
     static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
@@ -1468,8 +1468,8 @@ struct e2m3_neonsdot_quads_kit_t {
     using finalized_vec_t = nk_b128_vec_t;
     static constexpr auto init_accumulator = nk_dot_e2m3x16_init_neonsdot;
     static constexpr auto update_accumulator = nk_dot_e2m3x16_update_neonsdot;
-    static constexpr auto load_step = nk_load_b128_neon_;
-    static constexpr auto load_tail = nk_partial_load_b8x16_neon_;
+    static constexpr auto load_step = nk_load_e2m3x16_to_i8x16_neonsdot_;
+    static constexpr auto load_tail = nk_partial_load_e2m3x16_to_i8x16_neonsdot_;
     static constexpr auto reduce_accumulators = nk_dot_e2m3x16_finalize_neonsdot;
     static constexpr auto angular_from_dot = nk_angular_through_f32_from_dot_neon_;
     static constexpr auto euclidean_from_dot = nk_euclidean_through_f32_from_dot_neon_;
