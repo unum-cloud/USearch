@@ -1474,6 +1474,49 @@ void test_load_after_metric_make() {
 }
 
 /**
+ *  @brief  Renames and removes keys in a memory-mapped index.
+ *
+ *  A viewed index is read-only, so `rename` and the batch `remove`, like `add` and the
+ *  single-key `remove`, must report an error instead of writing keys into the mapped file.
+ */
+void test_rename_and_remove_in_view() {
+    std::printf("Testing rename and remove in a viewed index\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 4;
+    float const vector[dimensions] = {1, 2, 3, 4};
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind<f32_t>());
+    index_t::state_result_t built = index_t::make(metric);
+    expect(built);
+    expect(built.index.try_reserve(1));
+    expect(built.index.add(1, vector));
+    char const* path = "tmp_rename_in_view.usearch";
+    expect(built.index.save(path));
+
+    index_t::state_result_t viewed = index_t::make(metric);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    index_t::labeling_result_t renamed = viewed.index.rename(1, 2);
+    expect(!renamed);
+    expect_eq(renamed.completed, 0u);
+    renamed.error.release();
+    expect_eq(viewed.index.rename(1, 1).completed, 1u);
+
+    std::int64_t const keys[] = {1};
+    index_t::labeling_result_t removed = viewed.index.remove(std::begin(keys), std::end(keys));
+    expect(!removed);
+    expect_eq(removed.completed, 0u);
+    removed.error.release();
+
+    expect(viewed.index.contains(1));
+    expect(!viewed.index.contains(2));
+    expect_eq(viewed.index.size(), 1u);
+
+    std::remove(path);
+}
+
+/**
  *  @brief  Feeds `load` and `view` corrupted and truncated index files.
  *
  *  The entry slot and the top level come from the graph header and seed every search, so an
@@ -1702,6 +1745,7 @@ int main(int, char**) {
     test_isolate();
     test_compact();
     test_load_after_metric_make();
+    test_rename_and_remove_in_view();
     test_view_of_corrupted_file();
     test_level_generators();
     return 0;
