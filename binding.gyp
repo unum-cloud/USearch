@@ -69,6 +69,9 @@
                     {
                         "defines": [
                             "USEARCH_USE_OPENMP=0",
+                            # NumKong is linked statically from `numkong_lib`, not imported from its DLL, so its
+                            # functions must not be declared `__declspec(dllimport)`, which `NK_DYNAMIC` defaults to.
+                            "NK_DYNAMIC=",
                         ],
                     },
                 ],
