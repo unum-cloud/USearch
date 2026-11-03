@@ -20,6 +20,7 @@
 #include <limits>  // `std::numeric_limits`
 
 #include <algorithm>     // `std::shuffle`
+#include <atomic>        // `std::atomic`
 #include <random>        // `std::default_random_engine`
 #include <stdexcept>     // `std::terminate`
 #include <thread>        // `std::thread`
@@ -1716,6 +1717,151 @@ void test_concurrent_add_reachability() {
 
 
 /**
+ *  @brief  Counts the keys in @p live that one exhaustive search for @p query doesn't return. A search for every
+ *          member visits every node it can reach from where its descent lands, so this finds parts of the graph
+ *          that are cut off from there, even if a search for their own vectors still lands inside them.
+ */
+template <typename index_at, typename key_at>
+std::size_t count_missing_from(index_at const& index, float const* query, std::vector<key_at> const& live) {
+    std::vector<key_at> keys(index.size());
+    std::size_t found = index.search(query, index.size()).dump_to(keys.data());
+    std::sort(keys.begin(), keys.begin() + found);
+    std::size_t missing = 0;
+    for (key_at key : live)
+        missing += !std::binary_search(keys.begin(), keys.begin() + found, key);
+    return missing;
+}
+
+/**
+ *  @brief  Regression test: `remove` followed by `add` reuses the removed node's slot and moves it. Points on a line
+ *          link only to their neighbors on the line, so the removed node is the only bridge between the two halves,
+ *          and moving it far away used to cut one half off.
+ *          The reproducer is cpegeric's, from #821.
+ */
+void test_remove_add_bridge() {
+    constexpr std::size_t total = 1000, moved = total + 1;
+    std::vector<std::vector<float>> vectors(moved + 1);
+    for (std::size_t i = 0; i != vectors.size(); ++i)
+        vectors[i] = {static_cast<float>(i), 1.0f, 2.0f};
+    vectors[moved] = {777.2f, 1.0f, 2.0f};
+
+    for (std::size_t removed : {std::size_t(100), std::size_t(500)}) {
+        metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+        index_dense_t index = index_dense_t::make(metric);
+        expect(index.try_reserve(moved + 1));
+        for (std::size_t i = 1; i <= total; ++i)
+            expect(bool(index.add(i, vectors[i].data())));
+        expect_eq(index.remove(removed).completed, std::size_t(1));
+        expect(bool(index.add(moved, vectors[moved].data())));
+
+        std::vector<index_dense_t::vector_key_t> live;
+        for (std::size_t i = 1; i <= moved; ++i)
+            if (i != removed)
+                live.push_back(i);
+        expect_eq(count_missing_from(index, vectors[moved].data(), live), std::size_t(0));
+        expect_eq(count_missing_from(index, vectors[1].data(), live), std::size_t(0));
+    }
+}
+
+/**
+ *  @brief  Keeps surviving vectors searchable when a deleted bridge is replaced by a distant point.
+ *          Contributed by Ofek Lev in #801.
+ */
+template <typename key_at, typename slot_at> void test_replacing_bridge() {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    for (std::size_t seed_count : {1u, 15u})
+        for (float shift : {0.f, 100.f})
+            for (float replacement : {0.f, 0.5f, 3000.f}) {
+                index_dense_config_t config;
+                config.expansion_search = 1000;
+                if (seed_count == 1) {
+                    config.connectivity = 2;
+                    config.connectivity_base = 4;
+                }
+                typename index_t::state_result_t result = index_t::make(metric, config);
+                expect(result);
+                index_t& index = result.index;
+                expect(index.try_reserve(seed_count + 3));
+                auto add = [&](key_at key, float coordinate) {
+                    float vector[3] = {shift + coordinate, 0.f, 0.f};
+                    expect(index.add(key, vector));
+                };
+                for (std::size_t i = 0; i != seed_count; ++i)
+                    add(static_cast<key_at>(i), 10.f + static_cast<float>(i));
+                add(100, 0.f);
+                add(103, -1.f);
+                expect_eq(index.remove(100).completed, 1u);
+
+                float query[3] = {shift, 0.f, 0.f};
+                {
+                    auto found = index.search(query, 1);
+                    expect(found);
+                    expect_eq(found.size(), 1u);
+                    expect_eq(static_cast<key_at>(found[0].member.key), static_cast<key_at>(103));
+                }
+                add(105, replacement);
+                expect_eq(index.size(), seed_count + 2);
+                expect(!index.contains(100));
+                expect(index.contains(103));
+                float stored[3] = {};
+                expect_eq(index.get(103, stored), 1u);
+                expect(stored[0] == shift - 1.f);
+
+                // An exhaustive graph traversal must still reach every surviving point.
+                auto found = index.search(query, index.size());
+                expect(found);
+                expect_eq(found.size(), index.size());
+                key_at expected = static_cast<key_at>(replacement < 1.f ? 105 : 103);
+                expect_eq(static_cast<key_at>(found[0].member.key), expected);
+            }
+}
+
+/**
+ *  @brief  Preserves links outside a replaced bridge's neighborhood when neighbor lists are full.
+ *          Contributed by Ofek Lev in #801.
+ */
+template <typename key_at, typename slot_at> void test_replacing_saturated_bridge() {
+    using index_t = index_dense_gt<key_at, slot_at>;
+    index_dense_config_t config;
+    config.connectivity = 2;
+    config.connectivity_base = 4;
+    config.expansion_search = 1000;
+    auto result = index_t::make(metric_punned_t(2, metric_kind_t::l2sq_k, scalar_kind_t::f32_k), config);
+    expect(result);
+    index_t& index = result.index;
+    expect(index.try_reserve(index_limits_t{7, 1}));
+
+    // Key 4 lies outside the replaced key 2's neighborhood.
+    // Its only incoming link comes from key 1's saturated list and must survive the repair.
+    float vectors[7][2] = {{-51.f, 86.f}, {54.f, 36.f},   {-57.f, 50.f}, {-71.f, -57.f},
+                           {90.f, -96.f}, {-41.f, -53.f}, {-8.f, -16.f}};
+    for (std::size_t i = 0; i != 7; ++i)
+        expect(index.add(static_cast<key_at>(i), vectors[i]));
+    expect_eq(index.remove(2).completed, 1u);
+    float replacement[2] = {17.f, 77.f};
+    expect(index.add(7, replacement));
+    expect_eq(index.size(), 7u);
+    expect(!index.contains(2));
+
+    // Replacing the bridge must preserve every surviving point, including its exact match.
+    for (std::size_t i = 0; i != 8; ++i) {
+        if (i == 2)
+            continue;
+        expect(index.contains(static_cast<key_at>(i)));
+        auto found = index.search(i == 7 ? replacement : vectors[i], 1);
+        expect(found);
+        expect_eq(found.size(), 1u);
+        expect_eq(static_cast<key_at>(found[0].member.key), static_cast<key_at>(i));
+        expect_eq(found[0].distance, 0.f);
+    }
+    auto found = index.search(replacement, index.size());
+    expect(found);
+    expect_eq(found.size(), index.size());
+}
+
+/**
  *  @brief  Regression test: many keys with one vector. Every distance between them ties, so their neighbor lists
  *          fill with each other, and most of them used to be left with no incoming link (#815).
  *          The reproducer is clemlesne's, from #815.
@@ -1732,6 +1878,54 @@ void test_equal_vectors_reachability() {
         for (std::size_t key = 0; key != count; ++key)
             expect(bool(index.add(key, vector.data())));
         expect_eq(index.search(vector.data(), count).size(), count);
+    }
+}
+
+/**
+ *  @brief  Regression test: rounds of removing keys and adding new ones into the freed slots, from several threads.
+ *          Concurrent moves of neighboring nodes must not cut off what each of them bridged.
+ *          The rounds follow cpegeric's churn test from #821.
+ */
+void test_remove_add_churn_reachability(std::size_t threads) {
+    constexpr std::size_t dimensions = 16, initial = 2000, rounds = 10, per_round = 200;
+    std::size_t const total = initial + rounds * per_round;
+    std::mt19937 generator(7);
+    auto uniform = [&] { return static_cast<float>((double(generator()) + 0.5) / 4294967296.0 * 2.0 - 1.0); };
+    std::vector<std::vector<float>> centers(20, std::vector<float>(dimensions));
+    for (auto& center : centers)
+        std::generate(center.begin(), center.end(), uniform);
+    std::vector<std::vector<float>> vectors(total, std::vector<float>(dimensions));
+    for (std::size_t i = 0; i != total; ++i)
+        for (std::size_t dim = 0; dim != dimensions; ++dim)
+            vectors[i][dim] = centers[i % centers.size()][dim] + 0.05f * uniform();
+
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+    index_dense_t index = index_dense_t::make(metric);
+    expect(index.try_reserve(index_limits_t(initial, threads)));
+    std::vector<index_dense_t::vector_key_t> live(initial);
+    for (std::size_t i = 0; i != initial; ++i)
+        expect(bool(index.add(i, vectors[i].data()))), live[i] = i;
+
+    std::size_t next = initial;
+    for (std::size_t round = 0; round != rounds; ++round) {
+        std::shuffle(live.begin(), live.end(), generator);
+        for (std::size_t i = 0; i != per_round; ++i)
+            expect_eq(index.remove(live[live.size() - 1 - i]).completed, std::size_t(1));
+        live.resize(live.size() - per_round);
+        std::vector<std::thread> pool;
+        std::atomic<std::size_t> task{0};
+        std::size_t const first = next;
+        for (std::size_t thread = 0; thread != threads; ++thread)
+            pool.emplace_back([&, thread] {
+                for (std::size_t i; (i = task++) < per_round;)
+                    index.add(first + i, vectors[first + i].data(), thread);
+            });
+        for (auto& worker : pool)
+            worker.join();
+        for (std::size_t i = 0; i != per_round; ++i)
+            live.push_back(next++);
+        expect_eq(index.size(), initial);
+        expect_eq(count_missing_from(index, vectors[live.front()].data(), live), std::size_t(0));
     }
 }
 
@@ -1836,6 +2030,13 @@ int main(int, char**) {
     test_level_generators();
     test_base_level_in_links();
     test_concurrent_add_reachability();
+    test_remove_add_bridge();
+    test_replacing_bridge<std::int64_t, std::uint32_t>();
+    test_replacing_bridge<std::uint64_t, uint40_t>();
+    test_replacing_saturated_bridge<std::int64_t, std::uint32_t>();
+    test_replacing_saturated_bridge<std::uint64_t, uint40_t>();
     test_equal_vectors_reachability();
+    test_remove_add_churn_reachability(1);
+    test_remove_add_churn_reachability(8);
     return 0;
 }
