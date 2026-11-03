@@ -473,7 +473,7 @@ USEARCH_EXPORT usearch_distance_t usearch_distance(       //
  *  @param[in] scalar_kind The scalar type used in the vectors.
  *  @param[in] dimensions The number of dimensions in each vector.
  *  @param[in] metric_kind The metric kind used for distance calculation between vectors.
- *  @param[in] count Upper bound on the number of neighbors to search, the "k" in "kANN".
+ *  @param[in] count Number of neighbors to search, the "k" in "kANN". Can't exceed `dataset_size`.
  *  @param[in] threads Upper bound for the number of CPU threads to use.
  *  @param[out] keys Output matrix for `queries_size * count` nearest neighbors keys. Each row of the
  *              matrix must be contiguous in memory, but different rows can be separated by `keys_stride` bytes.

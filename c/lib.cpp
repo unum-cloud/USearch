@@ -508,6 +508,10 @@ USEARCH_EXPORT void usearch_exact_search(                             //
     usearch_error_t* error) {
 
     USEARCH_ASSERT(dataset && queries && keys && distances && error && "Missing arguments");
+    if (count > dataset_count) {
+        *error = "You can't request more matches than in the dataset!";
+        return;
+    }
 
     metric_punned_t metric(dimensions, metric_kind_to_cpp(metric_kind), scalar_kind_to_cpp(scalar_kind));
     executor_default_t executor(threads);
