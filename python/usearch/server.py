@@ -6,7 +6,16 @@ import os
 import numpy as np
 from ucall.rich_posix import Server
 
-from usearch.index import Index, Key, Matches
+from usearch.index import Index, Matches
+
+
+def _one_vector(vector: np.ndarray) -> np.ndarray:
+    array = np.asarray(vector)
+    if array.ndim == 2 and (array.shape[0] == 1 or array.shape[1] == 1):
+        array = array.reshape(-1)
+    if array.ndim != 1:
+        raise ValueError("expected one vector")
+    return np.ascontiguousarray(array)
 
 
 def _ascii_to_vector(string: str) -> np.ndarray:
@@ -60,9 +69,7 @@ def serve(
     @server
     def add_one(key: int, vector: np.ndarray):
         print("adding", key, vector)
-        keys = np.array([key], dtype=Key)
-        vectors = vector.flatten().reshape(vector.shape[0], 1)
-        index.add(keys, vectors)
+        index.add(int(key), _one_vector(vector))
 
     @server
     def add_many(keys: np.ndarray, vectors: np.ndarray):
@@ -71,8 +78,7 @@ def serve(
     @server
     def search_one(vector: np.ndarray, count: int) -> list[dict]:
         print("search", vector, count)
-        vectors = vector.reshape(vector.shape[0], 1)
-        results: Matches = index.search(vectors, count)
+        results: Matches = index.search(_one_vector(vector), count)
         return results.to_list()
 
     @server
