@@ -85,7 +85,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
       - name: Check Java formatting
@@ -341,28 +341,13 @@ jobs:
       - name: Build C/C++ (ARM64)
         run: |
           choco install cmake
-          cmake -G "Visual Studio 17 2022" -A ARM64 -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=0 -D USEARCH_BUILD_TEST_CPP=0 -D USEARCH_BUILD_TEST_C=0
+          cmake -A ARM64 -B build_artifacts -D CMAKE_BUILD_TYPE=RelWithDebInfo -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_SQLITE=0 -D USEARCH_BUILD_TEST_CPP=0 -D USEARCH_BUILD_TEST_C=0
           cmake --build build_artifacts --config RelWithDebInfo
 
       - name: Verify ARM64 build artifacts
         run: |
           if (!(Test-Path "build_artifacts\libusearch_c.dll")) { exit 1 }
           Write-Host "ARM64 DLL built successfully"
-
-  build_docker:
-    name: Build Docker
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Pull Git submodules
-        run: git submodule update --init --recursive
-      - name: Build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          load: true
-          push: false
 
   build_wheels_linux:
     name: Build Python Wheels (Linux)
@@ -581,7 +566,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
         # We skip native compilation with Gradle and focus just on the Java part,
         # assuming the we won't be able to tun the tests without emulation
       - name: Check Java formatting

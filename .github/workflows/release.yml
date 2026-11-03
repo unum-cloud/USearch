@@ -182,7 +182,7 @@ jobs:
       - name: Build library (MSVC ARM64)
         if: matrix.arch == 'arm64'
         run: |
-          cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_SQLITE=0 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_c.dll pkg\
@@ -357,7 +357,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
 
       - name: Install dependencies
         run: |
@@ -423,7 +423,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
 
       - name: Build JNI library
         run: |
@@ -468,7 +468,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
 
       - name: Build JNI library
         run: |
@@ -522,7 +522,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
 
       - name: Install NDK
         uses: nick-fields/retry@v4
@@ -910,7 +910,7 @@ jobs:
         uses: actions/setup-java@v6
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: "adopt"
+          distribution: "temurin"
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
       - name: Build fat JAR with all platforms
