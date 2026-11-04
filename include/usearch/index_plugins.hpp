@@ -3397,8 +3397,9 @@ class exact_search_t {
         executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
             auto start = keys_and_distances_per_query + dataset_count * query_idx;
             if (wanted > 1) {
-                std::partial_sort(start, start + wanted, start + dataset_count, &smaller_distance);
-            } else {
+                std::partial_sort(start, start + (std::min)(wanted, dataset_count), start + dataset_count,
+                                  &smaller_distance);
+            } else if (dataset_count > 0) {
                 auto min_it = std::min_element(start, start + dataset_count, &smaller_distance);
                 if (min_it != start)
                     std::swap(*min_it, *start);
