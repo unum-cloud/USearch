@@ -505,10 +505,38 @@ void test_mini_float_quantizations(size_t const collection_size, size_t const di
     printf("Test: Mini-float quantizations - PASSED\n");
 }
 
+void test_exact_search(void) {
+    printf("Test: Exact search bounds validation...\n");
+    float dataset[3 * 4] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2};
+    float query[4] = {0, 0, 0, 0};
+    usearch_key_t keys[5];
+    usearch_distance_t distances[5];
+    usearch_error_t error = NULL;
+
+    /* Requesting count (5) > dataset_count (3) should fail with an error without memory corruption */
+    usearch_exact_search(dataset, 3, sizeof(float) * 4, query, 1, sizeof(float) * 4, usearch_scalar_f32_k, 4,
+                         usearch_metric_l2sq_k, 5, 1, keys, sizeof(usearch_key_t), distances,
+                         sizeof(usearch_distance_t), &error);
+    expect(error != NULL, "Expected error when count exceeds dataset_count in exact search");
+    expect(strcmp(error, "You can't request more matches than in the dataset!") == 0, error);
+
+    /* Requesting count <= dataset_count should succeed */
+    error = NULL;
+    usearch_exact_search(dataset, 3, sizeof(float) * 4, query, 1, sizeof(float) * 4, usearch_scalar_f32_k, 4,
+                         usearch_metric_l2sq_k, 2, 1, keys, sizeof(usearch_key_t), distances,
+                         sizeof(usearch_distance_t), &error);
+    expect(!error, error);
+    expect_eq(keys[0], 0, "Closest key should be 0");
+
+    printf("Test: Exact search bounds validation - PASSED\n");
+}
+
 int main(int argc, char const* argv[]) {
     install_crash_handlers();
     printf("Running tests...\n");
     printf("USearch version: %s\n", usearch_version());
+
+    test_exact_search();
 
     size_t collection_sizes[] = {11, 512};
     size_t dimensions[] = {83, 2}; // Not all distance functions make sense for 1 dimensional data
