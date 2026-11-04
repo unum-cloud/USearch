@@ -1690,6 +1690,9 @@ class index_dense_gt {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
 
         labeling_result_t result;
+        if (typed_->is_immutable())
+            return result.failed("Can't remove from an immutable index");
+
         unique_lock_t lookup_lock(slot_lookup_mutex_);
         std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         // Grow the removed entries ring, if needed
@@ -1737,6 +1740,8 @@ class index_dense_gt {
             result.completed = count(from);
             return result;
         }
+        if (typed_->is_immutable())
+            return result.failed("Can't rename in an immutable index");
 
         unique_lock_t lookup_lock(slot_lookup_mutex_);
 
