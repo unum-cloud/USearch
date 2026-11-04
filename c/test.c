@@ -261,6 +261,33 @@ void test_find_vector(size_t const collection_size, size_t const dimensions) {
 }
 
 /**
+ *  Exact search returns exactly `count` matches per query, so asking for more matches than there are vectors in the
+ *  dataset must fail with an error, instead of sorting and exporting past the end of the results.
+ */
+void test_exact_search_count(void) {
+    printf("Test: Exact Search Count...\n");
+
+    float dataset[3 * 4] = {0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2};
+    float query[4] = {0, 0, 0, 0};
+    usearch_key_t keys[5];
+    usearch_distance_t distances[5];
+    size_t const stride = 4 * sizeof(float);
+    usearch_error_t error = NULL;
+
+    usearch_exact_search(dataset, 3, stride, query, 1, stride, usearch_scalar_f32_k, 4, usearch_metric_l2sq_k, 5, 1,
+                         keys, sizeof(keys), distances, sizeof(distances), &error);
+    expect(error, "Requesting more matches than vectors in the dataset must fail");
+
+    error = NULL;
+    usearch_exact_search(dataset, 3, stride, query, 1, stride, usearch_scalar_f32_k, 4, usearch_metric_l2sq_k, 3, 1,
+                         keys, sizeof(keys), distances, sizeof(distances), &error);
+    expect(!error, error);
+    expect(keys[0] == 0 && keys[1] == 1 && keys[2] == 2, "Exact search must rank every vector in the dataset");
+
+    printf("Test: Exact Search Count - PASSED\n");
+}
+
+/**
  *  This test checks the ability of the index to handle multiple vectors associated with the same key. It initializes
  *  the index with the multi-option enabled, reserves space, and adds multiple vectors with the same key. The test then
  *  retrieves vectors associated with the key from the index and checks the count of retrieved vectors.
@@ -524,6 +551,8 @@ int main(int argc, char const* argv[]) {
             test_mini_float_quantizations(collection_sizes[index], dimensions[jdx]);
         }
     }
+
+    test_exact_search_count();
 
     (void)argc;
     (void)argv;
