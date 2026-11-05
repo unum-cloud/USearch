@@ -905,7 +905,8 @@ public final class DenseIndex: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: options.cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                    cpu_class: options.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    memory_limit: 0
                 )
             )
             usearch_dense_init_ram(&arguments)
@@ -963,7 +964,8 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
                         shard_capacity: 0,
-                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                        memory_limit: 0
                     ),
                     connectivity: 0,
                     values_per_key: config.valuesPerKey,
@@ -1028,7 +1030,8 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains: domains,
                         memory_domains_count: config.memoryDomains.count,
                         shard_capacity: 0,
-                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                        cpu_class: config.cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                        memory_limit: 0
                     ),
                     connectivity: 0,
                     values_per_key: config.valuesPerKey,
@@ -1102,7 +1105,8 @@ public final class DenseIndex: @unchecked Sendable {
                     outcome: callState.outcome,
                     completion: callState.completion,
                     path: path,
-                    nvme: nvme
+                    nvme: nvme,
+                    ram: nil
                 )
                 usearch_dense_view_nvme(&arguments)
             }
@@ -1926,6 +1930,7 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             traversal: config.traversal.raw,
             predicate: predicate,
+            hints: nil,
             progress: progress,
             stats: config.stats?.raw
         )
@@ -1966,6 +1971,7 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             traversal: Traversal.walk.raw,
             predicate: usearch_predicate_t(),
+            hints: nil,
             progress: progress,
             stats: config.stats?.raw
         )

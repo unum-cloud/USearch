@@ -46,7 +46,7 @@
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator_t`
 #include "usearch/utilities/ram_sorts.hpp"         // `partial_sort` - the order located reads merge in
-#include "usearch/utilities/ram_tables.hpp"        // `membership_t`, `chunked_multimap` - the listed keys
+#include "usearch/utilities/ram_tables.hpp"        // `chunked_multimap`, `fingerprint_multimap` - listed and held keys
 #include "usearch/utilities/ram_walks.hpp"         // `cursor_walk` - a parts cursor's order
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_metadata`, `safegraphs_widened_key`
 #include "usearch/utilities/sample.hpp"            // `sample_plan` - what a SAMPLE call over parts draws through
@@ -272,9 +272,96 @@ enum class nvme_key_reads_t : u8_t {
     scored_k,
 };
 
+/**
+ *  @brief The key table an NVMe view holds in RAM: per part, a @ref fingerprint_multimap from every
+ *      key's 32-bit fingerprint to the nodes stored under it, sized once for the part's rows.
+ *
+ *  A probe answers candidates in RAM, and distinct keys may share a fingerprint, so each candidate
+ *  is confirmed by one read of its key row. The parts' key columns fill the table once, from any
+ *  number of threads at a time.
+ */
+template <typename key_type_, typename node_id_type_, template <typename> class atomic_ref_template_>
+class nvme_resident_keys {
+  public:
+    using key_t = key_type_;
+    using node_id_t = node_id_type_;
+    using map_t = fingerprint_multimap<node_id_t, forkunion_allocator_t, atomic_ref_template_>;
+
+    explicit nvme_resident_keys(forkunion_allocator_t allocator) noexcept : parts_(allocator), allocator_(allocator) {}
+
+    /** The 32-bit fingerprint @p key is filed under. */
+    static u32_t fingerprint(key_t const& key) noexcept {
+        return static_cast<u32_t>(mix_bits(static_cast<u64_t>(std::hash<key_t> {}(key))) >> 32);
+    }
+
+    /** Bytes the tables of @p parts hold once reserved. */
+    template <typename part_type_>
+    static std::size_t memory_usage_for(std::span<part_type_ const> parts) noexcept {
+        std::size_t bytes = 0;
+        for (part_type_ const& part : parts) bytes += map_t::reserved_bytes(part.nodes);
+        return bytes;
+    }
+
+    /**
+     *  @brief Reserves an empty table for every part of @p parts, dropping any held before.
+     *
+     *  @par Statuses:
+     *  - @c bad_alloc_k A table could not be allocated.
+     */
+    template <typename part_type_>
+    status_t reserve(std::span<part_type_ const> parts) noexcept {
+        parts_.clear();
+        if (failed(parts_.reserve_exactly(parts.size()))) return status_t::bad_alloc_k;
+        for (part_type_ const& part : parts) {
+            parts_.push_back_reserved(map_t {allocator_});
+            if (failed(parts_.back().reserve(part.nodes))) return parts_.clear(), status_t::bad_alloc_k;
+        }
+        return status_t::success_k;
+    }
+
+    /** Files @p node of part @p part under the fingerprint of @p key, while other threads file. */
+    void insert(u32_t part, key_t const& key, node_id_t node) noexcept { parts_[part].insert(fingerprint(key), node); }
+
+    /**
+     *  @brief Invokes @p callback for every node filed in part @p part under @p key 's fingerprint.
+     *  @return The slots probed.
+     */
+    template <typename callback_type_>
+    std::size_t find_each(u32_t part, key_t const& key, callback_type_&& callback) const noexcept {
+        return parts_[part].find_each(fingerprint(key), callback);
+    }
+
+    /** Whether no table is held. */
+    bool empty() const noexcept { return parts_.empty(); }
+
+    /** Drops every table. */
+    void reset() noexcept { parts_.reset(); }
+
+    /** Bytes the tables hold. */
+    std::size_t memory_usage() const noexcept {
+        std::size_t bytes = parts_.memory_usage();
+        for (map_t const& held : parts_) bytes += held.memory_usage();
+        return bytes;
+    }
+
+  private:
+    growing_buffer<map_t, forkunion_allocator_t> parts_;
+    forkunion_allocator_t allocator_;
+};
+
 #pragma endregion Parts
 
 #pragma region Walks
+
+/** A hinted landmark of one walk: the node its hint's fingerprint found, and which hint of the
+ *  walk's query it answers. */
+template <typename node_id_type_>
+struct nvme_seed {
+    node_id_type_ node {};
+    u32_t hint = 0;
+};
+
+static_assert(sizeof(nvme_seed<u32_t>) == 8, "A seed is an 8-byte hot entry");
 
 /** The three queue reservations one walk starts from, at one expansion over parts whose widest row
  *  holds @c connectivity neighbors - derived once with the call's shape and carried in it. */
@@ -305,11 +392,16 @@ std::size_t nvme_widest_row(std::span<part_type_ const> parts) noexcept {
     return widest;
 }
 
+/** The landmarks one walk seeds over nodes of @p connectivity neighbors: that many, in whole
+ *  quads, which also bounds the hints it takes. */
+constexpr std::size_t nvme_landmarks(std::size_t connectivity) noexcept {
+    return round_up_to_multiple<std::size_t>(connectivity, quad_lanes_k);
+}
+
 /** The reads one walk's first hop keeps in flight over nodes of at most @p connectivity neighbors:
- *  its landmarks, seeded in whole quads of that many, or one expansion and every neighbor of it,
- *  whichever is more. */
+ *  its landmarks, or one expansion and every neighbor of it, whichever is more. */
 constexpr std::size_t nvme_first_hop(std::size_t connectivity) noexcept {
-    return max_of<std::size_t>(round_up_to_multiple<std::size_t>(connectivity, quad_lanes_k), connectivity + 1);
+    return max_of<std::size_t>(nvme_landmarks(connectivity), connectivity + 1);
 }
 
 /** Where a walk stands between its reads. */
@@ -317,6 +409,10 @@ enum class nvme_walk_stage_t : u8_t {
 
     /** Finished, its candidates merged into its query, or never primed. */
     finished_k,
+
+    /** The key rows of its hinted landmarks are in flight in hop slot zero, each compared to its
+     *  hint before the walk seeds. */
+    confirming_k,
 
     /** Its landmarks are in flight in hop slot zero, and every entry that arrives enters the
      *  frontier; spare hop slots may already expand the landmarks that finished. */
@@ -342,6 +438,9 @@ enum class nvme_purpose_t : u8_t {
 
     /** A key row, for a keyed fold or a written result. */
     key_k,
+
+    /** A hinted landmark's key row, compared to its hint before its walk seeds. */
+    confirm_k,
 };
 
 /** One scored, expanded or resolved entry in flight. Its first read arrives in the buffer of the
@@ -362,7 +461,8 @@ struct nvme_flight {
     /** Reads still to arrive: two for a keyed score, one otherwise. */
     u8_t reads_left = 0;
 
-    /** What its fetched row does: @c score_k scores, @c expand_k expands, @c key_k resolves. */
+    /** What its fetched row does: @c score_k scores, @c expand_k expands, @c key_k resolves,
+     *  @c confirm_k confirms a hinted landmark. */
     nvme_purpose_t purpose = nvme_purpose_t::score_k;
 };
 
@@ -549,6 +649,7 @@ class query_walker {
 
         scratch_allocator_t const allocator {arena_};
         nvme_queue_sizes_t const queue_sizes = shape_.queue_sizes;
+        std::size_t const landmarks = nvme_landmarks(nvme_widest_row(parts_));
         for (std::size_t walk = 0; walk != walks; ++walk) {
             walk_t& constructed = *new (walk_slots + walk) walk_t {allocator};
             walks_ = {walk_slots, walk + 1};
@@ -557,6 +658,11 @@ class query_walker {
                 failed(constructed.visited.reserve(queue_sizes.visited)) ||
                 (query_t::admitting_k && failed(constructed.admitted.reserve(queue_sizes.results))))
                 return status_t::bad_alloc_k;
+            if constexpr (requires { constructed.seed_slots; }) {
+                nvme_seed<node_id_t>* const seed_slots = carve_<nvme_seed<node_id_t>>(landmarks);
+                if (!seed_slots) return status_t::bad_alloc_k;
+                constructed.seed_slots = {seed_slots, landmarks};
+            }
         }
         for (std::size_t query = 0; query != queries; ++query) {
             query_t& constructed = *new (query_slots + query) query_t {inputs_, allocator};
@@ -768,9 +874,9 @@ class query_walker {
         io_request_t const request = nvme_covering_read(row_begin_(flight, purpose), row_bytes_(flight, purpose),
                                                         block_bytes_of(media_[shard]), shard, buffer, flight.issuer);
         backlog_[backlog_size_++] = request;
-        nvme_reads_t& reads = purpose == nvme_purpose_t::expand_k ? telemetry_.neighbor_reads
-                              : purpose == nvme_purpose_t::key_k  ? telemetry_.key_reads
-                                                                  : telemetry_.value_reads;
+        nvme_reads_t& reads = purpose == nvme_purpose_t::expand_k  ? telemetry_.neighbor_reads
+                              : purpose == nvme_purpose_t::score_k ? telemetry_.value_reads
+                                                                   : telemetry_.key_reads;
         reads += nvme_reads_t {1, request.length};
     }
 
@@ -816,29 +922,84 @@ class query_walker {
                 walk.stage = nvme_walk_stage_t::seeding_k;
                 std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
                 std::memset(hop_flights.data(), 0, hop_flights.size_bytes());
-                std::size_t const landmarks = round_up_to_multiple<std::size_t>(parts_[shard].connectivity,
-                                                                                quad_lanes_k);
-                if (!seed_landmarks_(walk_index, landmarks)) finish_walk_(walk_index);
+                if constexpr (requires { walk.seeds; }) walk.seeds = {};
+                if constexpr (requires { primed.find_hinted(shard, walk.seed_slots); }) {
+                    walk.seeds = walk.seed_slots.first(
+                        primed.find_hinted(shard, walk.seed_slots.first(nvme_landmarks(parts_[shard].connectivity))));
+                    if (!walk.seeds.empty() && primed.confirms_hints()) {
+                        confirm_seeds_(walk_index);
+                        continue;
+                    }
+                }
+                if (!seed_landmarks_(walk_index, nvme_landmarks(parts_[shard].connectivity))) finish_walk_(walk_index);
             }
         }
     }
 
     /** Issues up to @p count fresh landmarks of walk @p walk_index as one hop, answering how
-     *  many. A walk seeds only with nothing in flight, so the hop takes slot zero. */
+     *  many: its seeds first, each taken once and skipped when already visited, then uniform
+     *  draws. A walk seeds only with nothing in flight, so the hop takes slot zero. */
     std::size_t seed_landmarks_(u32_t walk_index, std::size_t count) noexcept {
         walk_t& walk = walks_[walk_index];
         node_id_t const nodes = parts_[walk.shard].nodes;
         if (failed(walk.visited.reserve(walk.visited.size() + count))) return saturate_(walk), 0;
         std::size_t issued = 0;
-        for (; issued != count && walk.visited.size() < nodes; ++issued) {
-            node_id_t landmark = uniform_below<node_id_t> {nodes}(walk.random_generator);
-            while (walk.visited.contains(landmark)) landmark = landmark + 1 == nodes ? 0 : landmark + 1;
+        while (issued != count && walk.visited.size() < nodes) {
+            node_id_t landmark = nodes;
+            if constexpr (requires { walk.seeds; })
+                if (!walk.seeds.empty()) {
+                    landmark = walk.seeds.front().node;
+                    walk.seeds = walk.seeds.subspan(1);
+                    if (walk.visited.contains(landmark)) continue;
+                }
+            if (landmark == nodes) {
+                landmark = uniform_below<node_id_t> {nodes}(walk.random_generator);
+                while (walk.visited.contains(landmark)) landmark = landmark + 1 == nodes ? 0 : landmark + 1;
+            }
             [[maybe_unused]] membership_t const membership = walk.visited.insert(landmark);
             issue_score_(walk_index, landmark, 0);
+            ++issued;
         }
         std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
         hop_flights[0] = static_cast<u32_t>(issued);
         return issued;
+    }
+
+    /** Issues one key read per seed of walk @p walk_index in hop slot zero, each confirming its
+     *  seed's hint before the walk seeds. */
+    void confirm_seeds_(u32_t walk_index) noexcept {
+        walk_t& walk = walks_[walk_index];
+        walk.stage = nvme_walk_stage_t::confirming_k;
+        for (u32_t slot = 0; slot != walk.seeds.size(); ++slot) {
+            u32_t const flight = take_flight_();
+            flights_[flight] = flight_t {walk_index, walk.seeds[slot].node, slot, 1, nvme_purpose_t::confirm_k};
+            issue_row_read_(flight, nvme_purpose_t::confirm_k, flight);
+        }
+        std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
+        hop_flights[0] = static_cast<u32_t>(walk.seeds.size());
+    }
+
+    /** Keeps the seed of @p flight_index when its fetched key is its hint's, and once the last of
+     *  its walk's seeds arrived, seeds the walk from the kept ones ahead of its draws. */
+    void confirm_fetched_key_(u32_t flight_index) noexcept {
+        if constexpr (requires(query_t& query, key_t const& key) { query.confirm_hint(u32_t {}, key); }) {
+            flight_t const& flight = flights_[flight_index];
+            u32_t const walk_index = flight.issuer;
+            walk_t& walk = walks_[walk_index];
+            nvme_seed<node_id_t>& seed = walk.seed_slots[flight.position];
+            key_t const stored = safegraphs_widened_key<key_t>(
+                fetched_row_(flight_index, nvme_purpose_t::confirm_k, flight_index), parts_[walk.shard].key_dtype);
+            if (!queries_[walk.query_slot].confirm_hint(seed.hint, stored)) seed.node = parts_[walk.shard].nodes;
+            release_flight_(flight_index);
+            std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
+            if (--hop_flights[0]) return;
+            std::size_t kept = 0;
+            for (nvme_seed<node_id_t> const candidate : walk.seeds)
+                if (candidate.node != parts_[walk.shard].nodes) walk.seed_slots[kept++] = candidate;
+            walk.seeds = walk.seed_slots.first(kept);
+            walk.stage = nvme_walk_stage_t::seeding_k;
+            if (!seed_landmarks_(walk_index, nvme_landmarks(parts_[walk.shard].connectivity))) finish_walk_(walk_index);
+        }
     }
 
     void issue_score_(u32_t walk_index, node_id_t node, u32_t hop) noexcept {
@@ -890,6 +1051,7 @@ class query_walker {
             resolve_query_(slot_index);
             return false;
         }
+        case nvme_purpose_t::confirm_k: confirm_fetched_key_(flight_index); return false;
         }
         return false;
     }
@@ -1330,7 +1492,8 @@ struct nvme_scan_lane {
 
 /**
  *  @brief Scans the reads of @p tasks_count tasks over every thread of @p executor, as many slots
- *      in flight per thread as its engine's depth, and answers the reads issued.
+ *      in flight per thread as its engine's depth and its staging buffers allow, answering how
+ *      many reads it issued.
  *
  *  A thread claims a task whole and asks @p describe for its reads in turn, as
  *  <tt>describe(task, progress)</tt> with @p progress zero at the claim and kept between the calls;
@@ -1350,7 +1513,8 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
     using lane_t = nvme_scan_lane<reads_per_task_, atomic_ref_template_, typename executor_type_::engine_t,
                                   describe_type_, consume_type_>;
     using slot_t = typename lane_t::slot_t;
-    std::size_t const depth = max_of<std::size_t>(executor.queue_depth(), 1);
+    std::size_t const depth = max_of<std::size_t>(
+        min_of(executor.queue_depth(), executor.buffers_cut().buffers / reads_per_task_), 1);
     alignas(default_alignment_k) std::size_t cursor = 0;
     status_t failure = status_t::success_k;
     nvme_reads_t issued;
@@ -1392,7 +1556,7 @@ bool nvme_extends_read(medium_type_ const& medium, nvme_extent_t const& read, nv
 /**
  *  @brief Reads the bytes @p extent_of locates for every entry of @p nodes, as
  *      <tt>extent_of(position) noexcept → nvme_extent_t</tt>, and hands each non-empty extent's to
- *      @p on_entry as <tt>on_entry(position, bytes)</tt> on the thread that read them.
+ *      @p on_entry as <tt>on_entry(thread, position, bytes)</tt> on the thread that read them.
  *
  *  The entries sort by locator in thread zero's arena, and extents whose blocks touch merge into
  *  one read while it fits a staging buffer of @p buffer_bytes, the reads taken as the tasks of
@@ -1430,12 +1594,13 @@ status_t nvme_read_located(executor_type_& executor, std::span<typename executor
         nvme_extent_t const last = extent_of(sorted[run_starts[run_index + 1] - 1]);
         return {nvme_extent_t {first.begin, static_cast<u32_t>(last.begin + last.length - first.begin), first.medium}};
     };
-    auto consume = [&](std::size_t, std::size_t run_index, u64_t, std::array<nvme_extent_t, 1> const& reads,
+    auto consume = [&](std::size_t thread, std::size_t run_index, u64_t, std::array<nvme_extent_t, 1> const& reads,
                        std::array<byte_t const*, 1> const& fetched) noexcept {
         for (std::size_t rank = run_starts[run_index]; rank != run_starts[run_index + 1]; ++rank) {
             nvme_extent_t const located = extent_of(sorted[rank]);
             if (located.length)
-                on_entry(sorted[rank], bytes_view_t {fetched[0] + (located.begin - reads[0].begin), located.length});
+                on_entry(thread, sorted[rank],
+                         bytes_view_t {fetched[0] + (located.begin - reads[0].begin), located.length});
         }
     };
     return nvme_scan_reads<1, atomic_ref_template_>(executor, media, run_starts.size() - 1, describe, consume).status;

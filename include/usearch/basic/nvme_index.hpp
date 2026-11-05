@@ -695,7 +695,7 @@ class nvme_parts_catalog {
         return nvme_read_located<atomic_ref>(
             executor, media_, staging_bytes_(media_, parts_), nodes,
             [&](std::size_t position) noexcept { return row_extent_(nodes[position], nvme_purpose_t::key_k); },
-            [&](std::size_t position, bytes_view_t row) noexcept {
+            [&](std::size_t, std::size_t position, bytes_view_t row) noexcept {
                 keys[position] = safegraphs_widened_key<key_t>(row.data(), parts_[nodes[position].shard].key_dtype);
             });
     }
@@ -743,7 +743,7 @@ class nvme_parts_catalog {
         return nvme_read_located<atomic_ref>(
             executor, media_, staging_bytes_(media_, parts_), entries,
             [&](std::size_t position) noexcept { return row_extent_(entries[position], nvme_purpose_t::expand_k); },
-            [&](std::size_t position, bytes_view_t row) noexcept {
+            [&](std::size_t, std::size_t position, bytes_view_t row) noexcept {
                 std::memcpy(neighbors.data() + offsets[position], row.data(), row.size());
             });
     }
@@ -999,7 +999,8 @@ class nvme_parts_catalog {
             return part.neighbors_begin + (part.neighbor_starts.empty() ? u64_t(node) * part.connectivity
                                                                         : part.neighbor_starts.select(node)) *
                                               sizeof(node_id_t);
-        case nvme_purpose_t::key_k: return part.keys_begin + u64_t(node) * part.key_row_bytes;
+        case nvme_purpose_t::key_k:
+        case nvme_purpose_t::confirm_k: return part.keys_begin + u64_t(node) * part.key_row_bytes;
         }
         return 0;
     }
@@ -1016,7 +1017,8 @@ class nvme_parts_catalog {
                         ? u64_t(part.connectivity)
                         : part.neighbor_starts.select(node + 1) - part.neighbor_starts.select(node)) *
                    sizeof(node_id_t);
-        case nvme_purpose_t::key_k: return part.key_row_bytes;
+        case nvme_purpose_t::key_k:
+        case nvme_purpose_t::confirm_k: return part.key_row_bytes;
         }
         return 0;
     }

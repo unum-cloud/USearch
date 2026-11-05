@@ -565,6 +565,8 @@ pub const usearch_ram_options_t = extern struct {
     shard_capacity: usize = 0,
     /// The class to dispatch as; zero derives the CPU's own.
     cpu_class: usearch_cpu_class_t = 0,
+    /// Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling.
+    memory_limit: usize = 0,
 
     pub fn of(memory_domains: []const i32) usearch_ram_options_t {
         return .{ .memory_domains = memory_domains.ptr, .memory_domains_count = memory_domains.len };

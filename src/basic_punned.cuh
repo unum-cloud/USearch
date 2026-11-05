@@ -219,9 +219,9 @@ struct basic_verbs {
     status_t (*serves_search)(void const* variant, queries_t const& queries) noexcept;
 
     /** A device walk stages its queries on the arena's host @p pages, where it writes its
-     *  matches. */
-    expected<traversal_stats_t> (*search)(void* variant, queries_t queries, matches_outputs_t& outputs,
-                                          search_config_t config, predicate_t predicate,
+     *  matches; a variant whose walks take no @p hints refuses them with @c unsupported_k. */
+    expected<traversal_stats_t> (*search)(void* variant, queries_t queries, usearch_matches_view_t const* hints,
+                                          matches_outputs_t& outputs, search_config_t config, predicate_t predicate,
                                           growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
                                           progress_ticks_t& ticks) noexcept;
     status_t (*serves_within)(void const* variant, within_queries_t const& queries,

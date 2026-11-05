@@ -693,7 +693,8 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
 }
 
 /** A MaxSim scan scores every key exactly once though its rows span shards: keeping every key, it
- *  writes each document once at its exact total and counts each once. */
+ *  writes each document once at its exact total and counts each once; a hint of the best document
+ *  keeps it at the narrowest walk, its rows on both shards seeding every row's walk. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -757,6 +758,29 @@ static std::size_t test_ram_indexes_maxsim_spanning(u64_t seed) {
             score_errors.add(found_scores[rank], exact[document]);
         }
         for (std::size_t const times : placed) failures += expect_eq(times, 1u);
+
+        // A hint of the best document seeds every row's walk with all its rows across both shards,
+        // so the narrowest walk keeps it at its exact total, and a key held nowhere is counted.
+        std::size_t best = 0;
+        for (std::size_t document = 0; document != documents_count; ++document)
+            if (exact[document] > exact[best]) best = document;
+        auto hint_keys = nk::matrix<key_t>::zeros({1, 2}).value;
+        hint_keys(0, 0) = dense_key<key_t>(1 + best);
+        hint_keys(0, 1) = dense_key<key_t>(1 + documents_count);
+        std::array<std::size_t, 1> const hint_counts {2};
+        search_config_t narrow {};
+        narrow.expansion_factor = 1;
+        offsets[0] = 0;
+        auto const [hinted, hinted_status] = indexes.maxsim(
+            queries, std::span<std::size_t const> {query_offsets}, std::span {scored}, matches, {narrow, 1},
+            driver.executor, to_writable_span(driver.traversals),
+            ranked_hints_view<key_t> {hint_keys.view(), std::span<std::size_t const> {hint_counts}});
+        failures += expect(succeeded(hinted_status)) + expect_eq(hinted.missing_hints, 1u);
+        failures += expect_eq(offsets[1], 1u);
+        if (offsets[1] == 1) {
+            failures += expect_eq(dense_key_number(found_keys[0]) - 1, best);
+            score_errors.add(found_scores[0], exact[best]);
+        }
         return failures + expect_errors("spanning maxsim scores", comparison_family_t::approximate_k,
                                         comparison_verdict_t::assert_k, score_errors, 0);
     }
@@ -847,6 +871,127 @@ static std::size_t test_ram_indexes_exact_scans(u64_t seed) {
     }
 }
 
+/** Hints seed every shard's walk: zero-count hints rank exactly as none, a hint of each query's
+ *  exact nearest ranks it first at a narrow breadth, keys no shard holds are counted exactly, a
+ *  warm second call ranks alike in the hint slots the first reserved, a query counting more hints
+ *  than they are wide refuses, and a key stored under several nodes stages every one of them. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+static std::size_t test_ram_indexes_hints(u64_t seed) {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    using node_id_t = typename index_t::node_id_t;
+    using search_config_t = typename indexes_type_::search_config_t;
+    using search_result_t = typename indexes_type_::search_result_t;
+    constexpr std::size_t rows_count = 2000, queries_count = 64, wanted = 10, shared_count = 8, hint_columns = 3;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    // One thread walks the queries in order from one seed, so two calls rank alike.
+    dense_indexes_executor<indexes_type_> driver {1};
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows_count}).status));
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "hints"));
+    // The leading rows share key one, so the keys from two up to their count are held nowhere.
+    std::vector<key_t> keys(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row < shared_count ? 1 : 1 + row);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+    auto const queries = vectors(nk::range(rows_count - queries_count, rows_count), nk::slice);
+    auto exact_keys = nk::matrix<key_t>::zeros({queries_count, 1}).value;
+    auto exact_distances = nk::matrix<distance_t>::zeros({queries_count, 1}).value;
+    std::vector<std::size_t> exact_counts(queries_count);
+    search_config_t const scan {.traversal = traversal_t::scan_k};
+    failures += expect(succeeded(drive_search(indexes, queries, exact_keys.span(), exact_distances.span(),
+                                              std::span {exact_counts}, scan, driver)
+                                     .status));
+
+    // Each query's exact nearest, then two keys held nowhere.
+    auto hint_keys = nk::matrix<key_t>::zeros({queries_count, hint_columns}).value;
+    std::vector<std::size_t> hint_counts(queries_count, hint_columns), zero_counts(queries_count, 0);
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        hint_keys(query, 0) = exact_keys(query, 0);
+        hint_keys(query, 1) = dense_key<key_t>(2);
+        hint_keys(query, 2) = dense_key<key_t>(rows_count + 1 + query);
+    }
+    search_config_t narrow {};
+    narrow.expansion_factor = 16;
+    struct ranked_t {
+        nk::matrix<key_t> keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+        nk::matrix<distance_t> distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
+        std::vector<std::size_t> counts = std::vector<std::size_t>(queries_count);
+        expected<search_result_t> result {};
+    };
+    auto search = [&](ranked_t& ranked, ranked_hints_view<key_t> hints) {
+        ranked_matches_span<key_t, distance_t> const matches {ranked.keys.span(), ranked.distances.span(),
+                                                              std::span {ranked.counts}};
+        ranked.result = indexes.search(queries, matches, narrow, driver.executor, to_writable_span(driver.traversals),
+                                       hints);
+        failures += expect(succeeded(ranked.result.status));
+    };
+    ranked_t plain, zero, hinted, warm;
+    search(plain, {});
+    search(zero, {hint_keys.view(), std::span<std::size_t const> {zero_counts}});
+    search(hinted, {hint_keys.view(), std::span<std::size_t const> {hint_counts}});
+    node_id_t const* const hinted_slots = driver.traversals[0].hinted_ids.data();
+    std::byte const* const held_slots = driver.traversals[0].hinted_held.data();
+    search(warm, {hint_keys.view(), std::span<std::size_t const> {hint_counts}});
+    failures += expect(driver.traversals[0].hinted_ids.data() == hinted_slots);
+    failures += expect(driver.traversals[0].hinted_held.data() == held_slots);
+    failures += expect(warm.counts == hinted.counts);
+    failures += expect(std::memcmp(warm.keys.data(), hinted.keys.data(), queries_count * wanted * sizeof(key_t)) == 0);
+
+    failures += expect(zero.counts == plain.counts);
+    failures += expect(std::memcmp(zero.keys.data(), plain.keys.data(), queries_count * wanted * sizeof(key_t)) == 0);
+    failures += expect(
+        std::memcmp(zero.distances.data(), plain.distances.data(), queries_count * wanted * sizeof(distance_t)) == 0);
+    failures += expect_eq(zero.result.value.computed_distances, plain.result.value.computed_distances);
+    failures += expect_eq(zero.result.value.missing_hints, 0u) + expect_eq(plain.result.value.missing_hints, 0u);
+    failures += expect_eq(hinted.result.value.missing_hints, 2 * queries_count);
+
+    // A query counting more hints than the matrix is wide refuses before any walk.
+    std::vector<std::size_t> too_many = hint_counts;
+    too_many.back() = hint_columns + 1;
+    ranked_t refused;
+    ranked_matches_span<key_t, distance_t> const refused_matches {refused.keys.span(), refused.distances.span(),
+                                                                  std::span {refused.counts}};
+    failures += expect_eq(
+        indexes
+            .search(queries, refused_matches, narrow, driver.executor, to_writable_span(driver.traversals),
+                    {hint_keys.view(), std::span<std::size_t const> {too_many}})
+            .status,
+        status_t::shape_mismatch_k);
+
+    std::size_t plain_hits = 0, hinted_hits = 0;
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        f64_t const exact = exact_distances(query, 0), tolerance = 1e-3 * max_of(std::fabs(exact), 1.0);
+        plain_hits += plain.counts[query] && plain.distances(query, 0) <= exact + tolerance;
+        hinted_hits += hinted.counts[query] && hinted.distances(query, 0) <= exact + tolerance;
+    }
+    failures += expect(hinted_hits >= plain_hits);
+    failures += expect_eq(hinted_hits, queries_count);
+
+    key_t const shared_key = dense_key<key_t>(1);
+    std::size_t staged_count = 0;
+    std::array<node_id_t, shared_count> slots;
+    std::byte held {0};
+    for (std::size_t shard = 0; shard != indexes.shards_count(); ++shard) {
+        index_t const& shard_index = indexes.shard(shard);
+        std::span<node_id_t const> const staged = std::span<node_id_t const> {slots}.first(shard_index.stage_hints_(
+            std::span<key_t const> {&shared_key, 1}, static_cast<node_id_t>(shard_index.size()),
+            std::span<node_id_t> {slots}, bytes_span_t {&held, 1}));
+        staged_count += staged.size();
+        typename index_t::keyed_t const& shard_keys = shard_index.keys();
+        for (node_id_t const node : staged) failures += expect_eq(dense_key_number(shard_keys[node]), 1u);
+    }
+    failures += expect_eq(staged_count, shared_count);
+    failures += expect(held == std::byte {1});
+    return failures;
+}
+
 template <                                          //
     nk_dtype_t dtype_, nk_kernel_kind_t kernel_,    //
     typename waiter_type_ = fu::standard_yield_t,   //
@@ -892,6 +1037,7 @@ static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) 
     failures_count += test_ram_indexes_filtered_algebra<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_maxsim_spanning<indexes_t, kernel_>(seed);
     failures_count += test_ram_indexes_exact_scans<indexes_t, kernel_>(seed);
+    failures_count += test_ram_indexes_hints<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 

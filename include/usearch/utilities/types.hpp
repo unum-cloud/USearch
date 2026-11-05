@@ -952,13 +952,17 @@ struct traversal_stats_t {
      *  appended node against the list's owner, then re-selecting it. */
     std::size_t computed_distances_in_reverse_refines = 0;
 
+    /** Hint keys no shard held an entry under. */
+    std::size_t missing_hints = 0;
+
     traversal_stats_t operator-(traversal_stats_t const& before) const noexcept {
         return {computed_distances - before.computed_distances,
                 visited_members - before.visited_members,
                 restarts - before.restarts,
                 saturated_walks - before.saturated_walks,
                 computed_distances_in_refines - before.computed_distances_in_refines,
-                computed_distances_in_reverse_refines - before.computed_distances_in_reverse_refines};
+                computed_distances_in_reverse_refines - before.computed_distances_in_reverse_refines,
+                missing_hints - before.missing_hints};
     }
 
     /** Folds another walk's or thread's counters in, every one a spend that adds. */
@@ -969,6 +973,7 @@ struct traversal_stats_t {
         saturated_walks += other.saturated_walks;
         computed_distances_in_refines += other.computed_distances_in_refines;
         computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
+        missing_hints += other.missing_hints;
         return *this;
     }
 };

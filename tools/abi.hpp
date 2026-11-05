@@ -30,6 +30,7 @@
  *  --shard-capacity    unbounded        Entries one shard holds before another shard generation opens
  *  --checkpoint        none             File or device address to save a built index to and reopen it from
  *  --huge-pages        0                Free 1 GiB huge pages the host must hold at launch, enforced
+ *  --nvme-ram          0                RAM an NVMe view's key table may take, like 24G; zero holds none
  *  @endverbatim
  *
  *  Every flag also reads its default from a @c RETRIEVAL_ variable named after it, the one
@@ -139,6 +140,11 @@ struct counts_t {
     [[nodiscard]] std::span<std::size_t const> view() const noexcept { return {values.data(), size}; }
 };
 
+/** A byte count: an integer, or one suffixed K, M, G or T for its binary multiple, like 24G. */
+struct bytes_t {
+    std::size_t value = 0;
+};
+
 /** Whether a flag without a value appeared. */
 enum class switch_t : bool {
     absent_k,
@@ -182,7 +188,8 @@ struct flag_t {
     std::string_view placeholder;
     std::string_view help;
     std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*,
-                 filter_t*, usearch_residency_t*, usearch_cpu_class_t*, usearch_gpu_class_t*, usearch_nvme_class_t*>
+                 filter_t*, usearch_residency_t*, usearch_cpu_class_t*, usearch_gpu_class_t*, usearch_nvme_class_t*,
+                 bytes_t*>
         destination;
 };
 
@@ -236,6 +243,25 @@ struct arguments_t {
         text.remove_prefix(comma + 1);
     }
     return counts.size < counts.minimum_size ? argument_status_t::too_few_items_k : argument_status_t::parsed_k;
+}
+
+/** Parses a byte count into @p bytes: digits, then an optional K, M, G or T. */
+[[nodiscard]] inline argument_status_t parse_bytes(std::string_view text, bytes_t& bytes) noexcept {
+    std::size_t shift = 0;
+    if (!text.empty()) switch (text.back()) {
+        case 'K': shift = 10; break;
+        case 'M': shift = 20; break;
+        case 'G': shift = 30; break;
+        case 'T': shift = 40; break;
+        default: break;
+        }
+    if (shift) text.remove_suffix(1);
+    std::uint64_t parsed = 0;
+    if (argument_status_t const status = parse_integer_(text, parsed); status != argument_status_t::parsed_k)
+        return status;
+    if (parsed > (std::numeric_limits<std::size_t>::max() >> shift)) return argument_status_t::out_of_range_k;
+    bytes.value = static_cast<std::size_t>(parsed) << shift;
+    return argument_status_t::parsed_k;
 }
 
 /** A positive duration in whole milliseconds or seconds, like "200ms" or "10s". */
@@ -322,6 +348,7 @@ template <typename enumeration_type_>
         return assign_named_(value, **gpu_class, usearch_gpu_class_from_name, usearch_gpu_class_name);
     if (usearch_nvme_class_t* const* nvme_class = std::get_if<usearch_nvme_class_t*>(&flag.destination))
         return assign_named_(value, **nvme_class, usearch_nvme_class_from_name, usearch_nvme_class_name);
+    if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.destination)) return parse_bytes(value, **bytes);
     return argument_status_t::unexpected_value_k;
 }
 
@@ -406,6 +433,7 @@ template <typename enumeration_type_>
     if (std::holds_alternative<usearch_nvme_class_t*>(flag.destination))
         return "an NVMe class like posix or linux-uring";
     if (std::holds_alternative<switch_t*>(flag.destination)) return "no value";
+    if (std::holds_alternative<bytes_t*>(flag.destination)) return "bytes like 4096 or 24G";
     return "a value";
 }
 
@@ -641,6 +669,9 @@ struct settings_t {
      *  enforced, so a base-page fallback cannot pass as a huge-page result. */
     count_t huge_pages {.minimum = 0};
 
+    /** RAM an NVMe view's key table may take; zero holds none, so key verbs and hints refuse. */
+    bytes_t nvme_ram;
+
     /** Whether stdout is a terminal, so progress redraws one line instead of printing deciles. */
     bool terminal = false;
 };
@@ -651,8 +682,16 @@ inline flag_t huge_pages_flag(count_t& huge_pages) noexcept {
             "free 1 GiB huge pages required at launch; enforced, so base-page fallbacks fail fast", &huge_pages};
 }
 
+/** The flags an NVMe view's residency takes, into @p settings. */
+inline std::array<flag_t, 1> residency_flags(settings_t& settings) noexcept {
+    return {{
+        {"--nvme-ram", "bytes", "RAM an NVMe view's key table may take, like 24G; zero, the default, holds none",
+         &settings.nvme_ram},
+    }};
+}
+
 /** The flags every binary reading a @ref settings_t takes. */
-inline std::array<flag_t, 10> settings_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 11> settings_flags(settings_t& settings) noexcept {
     return {{
         {"--filter", "pattern", "checks to run, as a regex or a substring; every one by default", &settings.filter},
         {"--residency", "name", "where an index lives: ram, vram or nvme; ram by default", &settings.residency},
@@ -672,6 +711,7 @@ inline std::array<flag_t, 10> settings_flags(settings_t& settings) noexcept {
          "file or device address, like /dev/nvme1n1@64GiB, to save the built index to and reopen",
          &settings.checkpoint},
         huge_pages_flag(settings.huge_pages),
+        residency_flags(settings).front(),
     }};
 }
 
@@ -729,7 +769,7 @@ inline settings_t read_settings(int argc, char const* const* argv, std::string_v
                                 std::span<flag_t const> binary_flags = {}) {
     settings_t settings = read_environment();
     std::vector<flag_t> flags(binary_flags.begin(), binary_flags.end());
-    std::array<flag_t, 10> const shared = settings_flags(settings);
+    std::array<flag_t, 11> const shared = settings_flags(settings);
     flags.insert(flags.end(), shared.begin(), shared.end());
     parse_or_exit(argc, argv, synopsis, flags);
     if (!huge_pages_provisioned(settings.huge_pages.value)) std::exit(1);
@@ -846,6 +886,14 @@ struct session_t {
     /** The NVMe executor views serve on; null outside an NVMe session. */
     usearch_executor_t storage = nullptr;
 
+    /** The RAM every view's key table may take, @c memory_limit zero holding none. */
+    usearch_ram_options_t nvme_ram {};
+
+    /** The RAM options a view takes: none while @c nvme_ram holds nothing. */
+    usearch_ram_options_t const* nvme_ram_options() const noexcept {
+        return nvme_ram.memory_limit ? &nvme_ram : nullptr;
+    }
+
     /** Where every call's outputs land: host pages, or the first device of a VRAM session. */
     usearch_arena_t arena = nullptr;
 
@@ -924,6 +972,7 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
     session.cpu_class = pinned;
     session.gpu_class = settings.gpu_class;
     session.shard_capacity = settings.shard_capacity.value;
+    session.nvme_ram.memory_limit = settings.nvme_ram.value;
     fu_topology_t topology = nullptr;
     std::size_t domains_count = 0;
     if (fu_topology_new(&topology) == fu_success_k && fu_memory_domains_count(topology, &domains_count) == fu_success_k)
@@ -1059,13 +1108,13 @@ struct dense_verbs_t {
     }
     static void search(index_t index, usearch_executor_t executor, usearch_arena_t arena, std::size_t count,
                        queries_t queries, std::size_t wanted, std::size_t expansion, usearch_traversal_t traversal,
-                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
+                       usearch_matches_view_t const* hints = nullptr) noexcept {
         usearch_dense_search_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.queries = queries, arguments.matches = matches, arguments.arena = arena;
         arguments.wanted = wanted, arguments.expansion_factor = expansion, arguments.traversal = traversal;
-        arguments.stats = stats;
+        arguments.hints = hints, arguments.stats = stats;
         usearch_dense_search(&arguments);
     }
     static void save(index_t index, usearch_executor_t executor, usearch_bytes_view_t path,
@@ -1114,10 +1163,11 @@ struct dense_verbs_t {
         usearch_dense_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_nvme_options_t nvme, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                          usearch_nvme_options_t nvme, usearch_ram_options_t const* ram, geometry_t const&,
+                          usearch_outcome_t* outcome) noexcept {
         usearch_dense_view_nvme_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
-        arguments.nvme = nvme;
+        arguments.nvme = nvme, arguments.ram = ram;
         usearch_dense_view_nvme(&arguments);
     }
     static void describe(index_t index, usearch_executor_t executor, description_t* description,
@@ -1289,8 +1339,9 @@ struct sequence_verbs_t {
     }
     static void search(index_t index, usearch_executor_t executor, usearch_arena_t arena, std::size_t count,
                        queries_t queries, std::size_t wanted, std::size_t expansion, usearch_traversal_t traversal,
-                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
+                       usearch_matches_view_t const* hints = nullptr) noexcept {
+        if (hints) return void(*outcome = {usearch_status_unsupported_k, "Sequence searches take no hints"});
         usearch_sequence_search_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.queries = queries, arguments.matches = matches, arguments.arena = arena;
@@ -1346,7 +1397,7 @@ struct sequence_verbs_t {
         usearch_sequence_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_nvme_options_t nvme, geometry_t const& geometry,
+                          usearch_nvme_options_t nvme, usearch_ram_options_t const*, geometry_t const& geometry,
                           usearch_outcome_t* outcome) noexcept {
         usearch_sequence_view_nvme_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
@@ -1502,9 +1553,10 @@ struct shapes_verbs_t {
     }
     static void search(index_t index, usearch_executor_t executor, usearch_arena_t arena, std::size_t count,
                        queries_t queries, std::size_t wanted, std::size_t expansion, usearch_traversal_t traversal,
-                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
+                       usearch_matches_view_t const* hints = nullptr) noexcept {
         usearch_shapes_search_t arguments {};
+        arguments.hints = hints;
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.queries = queries, arguments.matches = matches, arguments.arena = arena;
         arguments.wanted = wanted, arguments.expansion_factor = expansion, arguments.traversal = traversal;
@@ -1557,7 +1609,8 @@ struct shapes_verbs_t {
         usearch_shapes_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_nvme_options_t nvme, geometry_t const&, usearch_outcome_t* outcome) noexcept {
+                          usearch_nvme_options_t nvme, usearch_ram_options_t const*, geometry_t const&,
+                          usearch_outcome_t* outcome) noexcept {
         usearch_shapes_view_nvme_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
         arguments.nvme = nvme;
@@ -1727,8 +1780,9 @@ struct geospatial_verbs_t {
     }
     static void search(index_t index, usearch_executor_t executor, usearch_arena_t arena, std::size_t count,
                        queries_t queries, std::size_t wanted, std::size_t expansion, usearch_traversal_t traversal,
-                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats,
-                       usearch_outcome_t* outcome) noexcept {
+                       usearch_matches_view_t* matches, usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,
+                       usearch_matches_view_t const* hints = nullptr) noexcept {
+        if (hints) return void(*outcome = {usearch_status_unsupported_k, "Geospatial searches take no hints"});
         usearch_geospatial_search_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
         arguments.count = count, arguments.queries = queries.observations, arguments.relation = queries.relation;
@@ -1781,7 +1835,7 @@ struct geospatial_verbs_t {
         usearch_geospatial_load_vram(&arguments);
     }
     static void view_nvme(index_t* index, usearch_executor_t executor, usearch_bytes_view_t path,
-                          usearch_nvme_options_t nvme, geometry_t const& geometry,
+                          usearch_nvme_options_t nvme, usearch_ram_options_t const*, geometry_t const& geometry,
                           usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_view_nvme_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.path = path;
@@ -2027,8 +2081,8 @@ handle<verbs_type_> reopen(session_t& session, std::string_view path, typename v
     typename verbs_type_::index_t reopened = nullptr;
     std::vector<std::int32_t> placement;
     if (residency == usearch_residency_nvme_k)
-        verbs_type_::view_nvme(&reopened, session.storage, bytes_view(path), session.nvme_options(), geometry,
-                               &outcome);
+        verbs_type_::view_nvme(&reopened, session.storage, bytes_view(path), session.nvme_options(),
+                               session.nvme_ram_options(), geometry, &outcome);
     else if (residency == usearch_residency_vram_k)
         verbs_type_::load_vram(&reopened, session.executor, bytes_view(path), session.vram_options(shards, placement),
                                geometry, &outcome);
@@ -2321,27 +2375,32 @@ inline copied_matches_t copy_matches(usearch_matches_view_t const& matches, std:
     return copied;
 }
 
-/** Searches @p count queries of @p queries in batches of @p batch, copying every match to @p copied
- *  and summing the telemetry into @p totals. */
+/** Searches @p count queries of @p queries in batches of @p batch, each batch handed its rows of
+ *  the optional @p hints, copying every match to @p copied and its telemetry into @p totals. */
 template <typename verbs_type_>
 usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                                  std::size_t batch, std::size_t wanted, std::size_t expansion,
                                  usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
-                                 copied_matches_t& copied) {
+                                 copied_matches_t& copied, usearch_matches_view_t const* hints = nullptr) {
     usearch_outcome_t outcome {};
     std::size_t const batch_queries = std::max<std::size_t>(1, std::min(batch, count));
     for (std::size_t first = 0; first < count; first += batch_queries) {
         std::size_t const sliced = std::min(batch_queries, count - first);
         usearch_matches_view_t matches {};
         usearch_traversal_stats_t stats {};
+        usearch_matches_view_t const sliced_hints = hints
+                                                        ? usearch_matches_view_t {hints->keys + first * hints->columns,
+                                                                                  nullptr, hints->counts + first,
+                                                                                  hints->columns}
+                                                        : usearch_matches_view_t {};
         verbs_type_::search(index.get(), index.executor(), index.session->arena, sliced,
                             verbs_type_::slice(queries, first), wanted, expansion, traversal, &matches, &stats,
-                            &outcome);
+                            &outcome, hints ? &sliced_hints : nullptr);
         if (outcome.status != usearch_status_success_k) return outcome;
         if (!append_matches(matches, sliced, copied))
             return {usearch_status_device_k, "The matches could not be read back"};
         totals.visited_members += stats.visited_members, totals.computed_distances += stats.computed_distances;
-        totals.restarts += stats.restarts;
+        totals.restarts += stats.restarts, totals.missing_hints += stats.missing_hints;
     }
     return outcome;
 }
@@ -2799,8 +2858,8 @@ std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string 
 
     if (session.storage) {
         copy = nullptr;
-        verbs_type_::view_nvme(&copy, session.storage, bytes_view(path), session.nvme_options(), index.geometry,
-                               &outcome);
+        verbs_type_::view_nvme(&copy, session.storage, bytes_view(path), session.nvme_options(),
+                               session.nvme_ram_options(), index.geometry, &outcome);
         failures += check(outcome);
         judge_copy(copy, usearch_residency_nvme_k, stem + "-nvme");
     }

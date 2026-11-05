@@ -513,4 +513,83 @@ class keyed_nodes {
     nodes_map_t nodes_;
 };
 
+/**
+ *  @brief A multimap of 32-bit fingerprints to 32-bit nodes, sized once for a known count of nodes:
+ *      one open-addressing array of 8-byte entries, filled from any number of threads at once and
+ *      probed wait-free once filled.
+ *
+ *  An entry packs the node above the fingerprint into one word, and the all-ones word marks an
+ *  empty slot, as no node reaches the all-ones ID. An insert claims its slot by a compare-exchange
+ *  of that word, and a probe walks linearly from the slot the fingerprint scales to until an empty
+ *  one. Slots outnumber nodes by a third, a load of three quarters, so a probe for absent or
+ *  repeated fingerprints walks about eight entries, one or two cache lines.
+ */
+template <typename node_id_type_, typename allocator_type_ = std::allocator<byte_t>,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref>
+class fingerprint_multimap {
+    static_assert(sizeof(node_id_type_) == sizeof(u32_t), "A fingerprint and a node pack into one 8-byte entry");
+
+  public:
+    using node_id_t = node_id_type_;
+    using allocator_t = allocator_type_;
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    fingerprint_multimap() = delete;
+    explicit fingerprint_multimap(allocator_t const& allocator) noexcept : entries_(allocator) {}
+
+    /** Slots a table of @p nodes nodes holds: a third more than its nodes, at least one empty. */
+    static constexpr std::size_t slots_for(std::size_t nodes) noexcept { return nodes + nodes / 3 + 1; }
+
+    /** Bytes a table of @p nodes nodes holds. */
+    static constexpr std::size_t reserved_bytes(std::size_t nodes) noexcept { return slots_for(nodes) * sizeof(u64_t); }
+
+    /**
+     *  @brief Sizes the table for @p nodes nodes and empties it, dropping whatever it held.
+     *
+     *  @par Statuses:
+     *  - @c bad_alloc_k The slots could not be allocated.
+     */
+    status_t reserve(std::size_t nodes) noexcept {
+        if (failed(entries_.resize_uninitialized(slots_for(nodes)))) return status_t::bad_alloc_k;
+        std::memset(entries_.data(), 0xFF, entries_.size() * sizeof(u64_t));
+        return status_t::success_k;
+    }
+
+    /** Files @p node under @p fingerprint, beside any number of threads filing others. */
+    void insert(u32_t fingerprint, node_id_t node) noexcept {
+        u64_t const entry = (u64_t {node} << 32) | fingerprint;
+        for (std::size_t slot = first_slot_(fingerprint);; slot = slot + 1 == entries_.size() ? 0 : slot + 1) {
+            u64_t empty = empty_k;
+            if (atomic_ref<u64_t>(entries_[slot])
+                    .compare_exchange_strong(empty, entry, std::memory_order_relaxed, std::memory_order_relaxed))
+                return;
+        }
+    }
+
+    /** Invokes @p callback for every node filed under @p fingerprint. @return The slots probed. */
+    template <typename callback_type_>
+    std::size_t find_each(u32_t fingerprint, callback_type_&& callback) const noexcept {
+        std::size_t probed = 1;
+        for (std::size_t slot = first_slot_(fingerprint); entries_[slot] != empty_k;
+             slot = slot + 1 == entries_.size() ? 0 : slot + 1, ++probed)
+            if (static_cast<u32_t>(entries_[slot]) == fingerprint)
+                callback(static_cast<node_id_t>(entries_[slot] >> 32));
+        return probed;
+    }
+
+    /** Bytes the slots span. */
+    std::size_t memory_usage() const noexcept { return entries_.memory_usage(); }
+
+  private:
+    inline static constexpr u64_t empty_k = ~u64_t {0};
+
+    /** The slot @p fingerprint scales to, spreading mixed fingerprints evenly over any count. */
+    std::size_t first_slot_(u32_t fingerprint) const noexcept {
+        return static_cast<std::size_t>((u64_t {fingerprint} * entries_.size()) >> 32);
+    }
+
+    growing_buffer<u64_t, allocator_t> entries_;
+};
+
 } // namespace unum::usearch::utilities

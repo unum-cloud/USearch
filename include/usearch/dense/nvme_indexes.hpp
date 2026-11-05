@@ -7,14 +7,14 @@
  *      rewrites its parts.
  *
  *  A view opens the manifest or the monolith a RAM or VRAM index saved, keeps every part's medium
- *  and column offsets, and nothing per node, so its memory never grows with the rows. Every verb
- *  borrows an executor and attaches the parts' media to its engines for the call alone, so any
- *  executor reaching the same devices serves any view. Walks rank rows by shard and node, and only
- *  the rows a verb writes resolve into keys, one key read each, once the row's walks finished;
- *  a filtered search and attention read every scored row's key beside its value as well. Key
- *  lookups are bulk scans of the key columns, matched against an exact table of the batch; the
- *  cursor scans the key and value columns, and the health audit the neighbors columns. A shard is
- *  the position a verb scatters over, and a part the SafeGraphs file behind it, one per shard.
+ *  and column offsets, and per node only the key table @c hold_keys builds within its limit.
+ *  Every verb borrows an executor and attaches the parts' media to its engines for the call alone,
+ *  so any executor reaching the same devices serves any view. Walks rank rows by shard and node,
+ *  and only the rows a verb writes resolve into keys, one key read each, once the row's walks
+ *  finished; a filtered search and attention read every scored row's key beside its value as well.
+ *  Key lookups probe that table and confirm each candidate with one key read, and refuse without
+ *  one; the cursor scans the key and value columns, and the health audit the neighbors columns.
+ *  A shard is the position a verb scatters over, and a part the SafeGraphs file behind it.
  */
 #pragma once
 
@@ -129,7 +129,7 @@ struct nvme_indexes {
     /** Every index names the host allocator its catalog of parts sits on. */
     nvme_indexes() = delete;
     explicit nvme_indexes(forkunion_allocator_t allocator) noexcept
-        : media_(allocator), parts_(allocator), allocator_(allocator) {}
+        : media_(allocator), parts_(allocator), allocator_(allocator), resident_keys_(allocator) {}
     nvme_indexes(nvme_indexes&&) noexcept = default;
     nvme_indexes& operator=(nvme_indexes&&) noexcept = default;
     nvme_indexes(nvme_indexes const&) = delete;
@@ -166,10 +166,43 @@ struct nvme_indexes {
     status_t view(std::string_view path, std::span<std::string_view const> paths = {}) noexcept {
         media_.clear();
         parts_.clear();
+        resident_keys_.reset();
         kernel_ = nk_kernel_unknown_k;
         status_t const viewed = view_(path, paths);
         if (failed(viewed)) media_.clear(), parts_.clear(), kernel_ = nk_kernel_unknown_k;
         return viewed;
+    }
+
+    /**
+     *  @brief Builds the key table in @p allocator 's domain within @p memory_limit bytes, zero
+     *      setting no ceiling, scanning every part's key column once.
+     *
+     *  Without a key table, the key lookups of @ref count, @ref contains, @ref get,
+     *  @ref find_first, @ref sample, a MaxSim and hinted walks refuse with @c unsupported_k rather
+     *  than scan every key. With one, each looked-up key probes it and confirms every candidate
+     *  with one key read.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
+     *  - @c bad_alloc_k The key table passes @p memory_limit or cannot be allocated; the view then
+     *    holds none.
+     *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c config_mismatch_k A medium the engines cannot read.
+     */
+    status_t hold_keys(forkunion_allocator_t allocator, std::size_t memory_limit, executor_t& executor) noexcept {
+        resident_keys_ = resident_keys_t {allocator};
+        if (parts_.empty()) return status_t::uninitialized_k;
+        if (memory_limit && resident_keys_t::memory_usage_for(to_span(parts_)) > memory_limit)
+            return status_t::bad_alloc_k;
+        if (status_t const reserved = resident_keys_.reserve(to_span(parts_)); failed(reserved)) return reserved;
+        auto [call, call_status] = begin_scans_(executor, 1);
+        status_t const scanned = failed(call_status) ? call_status
+                                                     : scan_key_rows_(executor, [&](std::size_t, key_t const& key,
+                                                                                    shard_node_t locator) noexcept {
+                                                           resident_keys_.insert(locator.shard, key, locator.node);
+                                                       });
+        if (failed(scanned)) resident_keys_.reset();
+        return scanned;
     }
 
     /** The distance kind the parts were built for, as @ref view read it; unknown before one. */
@@ -209,9 +242,9 @@ struct nvme_indexes {
     /** Connections per node, frozen with the geometry. */
     std::size_t connectivity() const noexcept { return parts_.empty() ? 0 : parts_[0].connectivity; }
 
-    /** Bytes the index occupies: the catalog of parts alone, whatever the rows. */
+    /** Bytes the index occupies: the catalog of parts and the key table it holds. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(nvme_indexes) + media_.memory_usage() + parts_.memory_usage();
+        return sizeof(nvme_indexes) + media_.memory_usage() + parts_.memory_usage() + resident_keys_.memory_usage();
     }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
@@ -234,23 +267,32 @@ struct nvme_indexes {
      *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per query row, from its first primed walk to
      *      its final write; empty collects none.
+     *  @param[in] hints Optional keys per query whose rows every shard's walk takes as landmarks
+     *      ahead of its draws, in hint order; a scan ignores them.
+     *
+     *  A query takes as many hint keys as a walk draws landmarks, the connectivity rounded up to
+     *  whole quads. Each walk probes the key table @ref hold_keys built and confirms its
+     *  candidates with one key read each, and a key no shard holds counts as a missing hint.
      *
      *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
      *  @c io_k.
      *
      *  @par Statuses:
+     *  - @c unsupported_k A walk handed @p hints while no key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
-     *  - @c config_mismatch_k @p matches or @p latencies disagree with the batch or each other, the
-     *    queries are not as wide as the rows, or a medium the engines cannot read.
+     *  - @c config_mismatch_k @p matches, @p latencies or non-empty @p hints disagree with the
+     *    batch or each other, the queries are not as wide as the rows, or a medium the engines
+     *    cannot read.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
+     *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
     template <typename score_type_>
     expected<search_result_t> search(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
-                                     search_config_t config, executor_t& executor,
-                                     std::span<u64_t> latencies = {}) noexcept {
-        return search_if(queries, matches, config, dummy_predicate_t {}, executor, latencies);
+                                     search_config_t config, executor_t& executor, std::span<u64_t> latencies = {},
+                                     ranked_hints_view<key_t> hints = {}) noexcept {
+        return search_if(queries, matches, config, dummy_predicate_t {}, executor, latencies, hints);
     }
 
     /**
@@ -278,7 +320,7 @@ struct nvme_indexes {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         dummy_predicate_t predicate;
         return search_rows_(queries, heads, executor, config, matches.keys, matches.scores, matches.counts, predicate,
-                            latencies);
+                            latencies, {});
     }
 
     /**
@@ -296,19 +338,22 @@ struct nvme_indexes {
      *  @param[in,out] executor The threads, as the batched @ref search takes them.
      *  @param[out] latencies Steady-clock nanoseconds per query row, as the batched @ref search
      *      collects them.
+     *  @param[in] hints Optional keys per query seeding every walk, as in the batched @ref search.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
-     *  - @c config_mismatch_k @p matches or @p latencies disagree with the batch or each other, the
-     *    queries are not as wide as the rows, or a medium the engines cannot read.
+     *  - @c config_mismatch_k @p matches, @p latencies or non-empty @p hints disagree with the
+     *    batch or each other, the queries are not as wide as the rows, or a medium the engines
+     *    cannot read.
      *  - @c unsupported_layout_k @p matches are not packed along their rows.
+     *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
      */
     template <typename score_type_, typename predicate_type_>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<u64_t> latencies = {}) noexcept {
+                                        std::span<u64_t> latencies = {}, ranked_hints_view<key_t> hints = {}) noexcept {
         static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
@@ -316,7 +361,7 @@ struct nvme_indexes {
         if (config.traversal == traversal_t::scan_k)
             return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies);
         return search_rows_(queries, dummy_heads_t {}, executor, config, matches.keys, matches.scores, matches.counts,
-                            predicate, latencies);
+                            predicate, latencies, hints);
     }
 
     /**
@@ -337,10 +382,10 @@ struct nvme_indexes {
                                        walk_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<u64_t> latencies = {}) noexcept {
+                                        std::span<u64_t> latencies = {}, ranked_hints_view<key_t> hints = {}) noexcept {
         if (config.traversal == traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
         return search_rows_(queries, dummy_heads_t {}, executor, config, matches.keys, matches.scores, matches.counts,
-                            predicate, latencies);
+                            predicate, latencies, hints);
     }
 
     /**
@@ -361,7 +406,7 @@ struct nvme_indexes {
                                        scan_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<u64_t> latencies = {}) noexcept {
+                                        std::span<u64_t> latencies = {}, ranked_hints_view<key_t> = {}) noexcept {
         if (config.traversal != traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
         return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies);
     }
@@ -452,6 +497,9 @@ struct nvme_indexes {
      *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *  @param[out] latencies Steady-clock nanoseconds per query row of a walk, as @ref search
      *      collects them; normalization follows the last row.
+     *  @param[in] hints Optional keys per query whose rows every row's walk takes as landmarks
+     *      ahead of its draws, as @ref search takes them, a key no shard holds counted once per
+     *      query; a scan ignores them.
      *
      *  The thread ranking a query stages its run at the query's stride, and the offsets publish
      *  once every query is done.
@@ -462,9 +510,10 @@ struct nvme_indexes {
     template <typename score_type_>
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                      std::span<std::size_t> scored, products_tape<key_t, score_type_> matches,
-                                     maxsim_config_t config, executor_t& executor,
-                                     std::span<u64_t> latencies = {}) noexcept {
-        return maxsim_if(queries, query_offsets, scored, matches, config, dummy_predicate_t {}, executor, latencies);
+                                     maxsim_config_t config, executor_t& executor, std::span<u64_t> latencies = {},
+                                     ranked_hints_view<key_t> hints = {}) noexcept {
+        return maxsim_if(queries, query_offsets, scored, matches, config, dummy_predicate_t {}, executor, latencies,
+                         hints);
     }
 
     /**
@@ -482,9 +531,14 @@ struct nvme_indexes {
      *      @ref search_if asks it, a scan once per distinct key.
      *  @param[in,out] executor The threads, as @ref maxsim takes them.
      *  @param[out] latencies Steady-clock nanoseconds per query, as @ref maxsim collects them.
+     *  @param[in] hints Optional keys per query seeding every row's walk, as in @ref maxsim.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p query_offsets is empty.
+     *  - @c config_mismatch_k @p query_offsets is empty, or non-empty @p hints differ in length
+     *    from the queries.
+     *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
+     *  - @c unsupported_k A walk handed @p hints while no key table is held, or a second pass's key
+     *    lookup that neither a table nor @ref view 's scans serve.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c config_mismatch_k The parts do not rank by dot.
      *  - @c shape_mismatch_k A query with no rows.
@@ -498,7 +552,8 @@ struct nvme_indexes {
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         std::span<std::size_t> scored, products_tape<key_t, score_type_> matches,
                                         maxsim_config_t maxsim_config, predicate_type_&& predicate,
-                                        executor_t& executor, std::span<u64_t> latencies = {}) noexcept {
+                                        executor_t& executor, std::span<u64_t> latencies = {},
+                                        ranked_hints_view<key_t> hints = {}) noexcept {
         search_config_t const config = maxsim_config.search;
         std::size_t const wanted = maxsim_config.wanted;
         static_assert(!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> ||
@@ -508,7 +563,10 @@ struct nvme_indexes {
         using query_t = search_query<dummy_heads_t, std::remove_reference_t<predicate_type_>, distance_t>;
         if (query_offsets.empty()) return {{}, status_t::config_mismatch_k};
         std::size_t const queries_count = query_offsets.size() - 1, threads = executor.size();
+        if (status_t const refusal = hints_refusal(hints, queries_count); failed(refusal)) return {{}, refusal};
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (!hints.counts.empty() && resident_keys_.empty() && config.traversal == traversal_t::walk_k)
+            return {{}, status_t::unsupported_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         for (std::size_t query = 0; query != queries_count; ++query)
             if (query_offsets[query + 1] <= query_offsets[query]) return {{}, status_t::shape_mismatch_k};
@@ -520,20 +578,20 @@ struct nvme_indexes {
         if (!queries_count) return {{}, status_t::success_k};
         std::memset(scored.data(), 0, scored.size_bytes());
 
-        // One call serves every pass: a walk's engines and arenas, then two scans.
+        // One call serves every pass: a walk's engines and arenas, then two scans, and the hints.
         bool const scanning = config.traversal == traversal_t::scan_k;
         walk_shape_t const shape = scanning ? walk_shape_t {}
                                             : index_t::template walk_shape_<query_t>(
                                                   to_span(media_), to_span(parts_), kernel_,
                                                   nvme_call_depth(executor, to_span(media_), to_span(parts_)), threads,
                                                   rows_count, non_zero_expansion_factor(config),
-                                                  staged_rows_bytes(vector_dtype_k, 1, queries.columns));
+                                                  query_t::staged_bytes(queries.columns, 0));
         std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, rows_count, queries.columns);
         std::size_t const shared_bytes = staged_bytes + slice_t::reserved_bytes(rows_count * sizeof(vector_norms_t)) +
                                          slice_t::reserved_bytes(threads * wanted * sizeof(maxsim_ranked<total_t>));
-        auto [call, call_status] = scanning
-                                       ? begin_scans_<2>(executor, 2, shared_bytes)
-                                       : begin_scans_(executor, 2, shared_bytes + shape.scratch_bytes, shape.buffers);
+        auto [call, call_status] = scanning ? begin_scans_<2>(executor, 2, shared_bytes)
+                                            : begin_scans_(executor, hints.counts.empty() ? 2 : 3,
+                                                           shared_bytes + shape.scratch_bytes, shape.buffers);
         if (failed(call_status)) return {{}, call_status};
         if (status_t const opened = open_predicate(predicate, executor); failed(opened)) return {{}, opened};
         scratch_allocator_t const scratch {executor.arena(0)};
@@ -551,7 +609,7 @@ struct nvme_indexes {
                                                                     executor, wanted, scored, matches, predicate)
                                                      : walk_maxsim_(queries, query_offsets, query_rows,
                                                                     to_span(query_norms), shape, executor, wanted,
-                                                                    scored, matches, predicate, latencies);
+                                                                    scored, matches, predicate, latencies, hints);
         if (ranked) matches.publish_runs(scored);
         return ranked;
     }
@@ -642,8 +700,8 @@ struct nvme_indexes {
 #pragma region Key Scans
 
     /**
-     *  @brief The entries stored under every key of @p keys: one scan over every part's key column,
-     *      matched against an exact table of the batch.
+     *  @brief The entries stored under every key of @p keys, looked up as @ref view allows: probed
+     *      in the key table, or matched in one scan over every part's key column.
      *
      *  @param[in] keys The keys to count, repeats and absent ones included.
      *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
@@ -652,6 +710,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k @p entries and @p keys differ in length, or a medium the engines
      *    cannot read.
+     *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
@@ -663,7 +722,7 @@ struct nvme_indexes {
         if (keys.empty()) return status_t::success_k;
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
-        return scan_keys_(keys, executor, [&](std::size_t, std::size_t position, shard_node_t) noexcept {
+        return lookup_keys_(keys, executor, [&](std::size_t, std::size_t position, shard_node_t) noexcept {
             atomic_ref<std::size_t>(entries[position]).add(1, std::memory_order_relaxed);
         });
     }
@@ -687,8 +746,8 @@ struct nvme_indexes {
     }
 
     /**
-     *  @brief Up to @p wanted rows of every key of @p keys, and every key's true total: one scan of
-     *      the key columns, then one value-row read per kept row.
+     *  @brief Up to @p wanted rows of every key of @p keys, and every key's true total: one lookup
+     *      as @ref count takes it, then one value-row read per kept row.
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
      *  @param[out] vectors @b [keys·wanted,dimensions] in any scalar NumKong casts into, where row
@@ -703,6 +762,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k @p entries and @p keys differ in length, @p vectors hold another
      *    count of rows or narrower ones, or a medium the engines cannot read.
+     *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
@@ -729,7 +789,7 @@ struct nvme_indexes {
         if (!stripes) return status_t::bad_alloc_k;
         // nvcc mislowers a bare over-aligned placement `new`, so a standard template builds them.
         std::uninitialized_value_construct_n(stripes, stripes_count);
-        status_t const scanned = scan_keys_(
+        status_t const scanned = lookup_keys_(
             keys, executor, [&](std::size_t, std::size_t position, shard_node_t locator) noexcept {
                 std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
                 shard_node_t* const rows = kept.data() + position * wanted;
@@ -774,15 +834,15 @@ struct nvme_indexes {
             return {{}, status_t::config_mismatch_k};
         std::size_t const count = min_of(keys.size(), size() - min_of(first, size()));
         if (!count) return {{}, status_t::success_k};
-        std::size_t const key_runs = runs_count_(first, count, key_column_k);
-        std::size_t const value_runs = vectors.rows ? runs_count_(first, count, value_column_k) : 0;
+        std::size_t const key_runs = runs_count_(first, count, key_column_k, staging_bytes_());
+        std::size_t const value_runs = vectors.rows ? runs_count_(first, count, value_column_k, staging_bytes_()) : 0;
         rows_span_t const target {vectors.data, vectors.rows, dimensions(), vectors.stride, vectors.dtype};
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return {{}, call_status};
         // Tasks below `key_runs` read keys, the rest read values.
         auto run_of = [&](std::size_t task) noexcept {
-            return task < key_runs ? locate_run_(first, count, task, key_column_k)
-                                   : locate_run_(first, count, task - key_runs, value_column_k);
+            return task < key_runs ? locate_run_(first, count, task, key_column_k, staging_bytes_())
+                                   : locate_run_(first, count, task - key_runs, value_column_k, staging_bytes_());
         };
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
@@ -816,7 +876,7 @@ struct nvme_indexes {
 
     /**
      *  @brief The earliest entry of every key of @p keys, in part then node order as @ref get
-     *      orders them, through one scan of the key columns.
+     *      orders them, through one lookup as @ref count takes it.
      *
      *  @param[in] keys The keys to locate, repeats and absent ones included.
      *  @param[out] locators The earliest entry under each key, parallel to @p keys; a key held
@@ -826,6 +886,7 @@ struct nvme_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k @p locators and @p keys differ in length, or a medium the engines
      *    cannot read.
+     *  - @c unsupported_k No key table is held.
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c overflow_k A staging region's byte count overflows.
@@ -839,7 +900,7 @@ struct nvme_indexes {
         if (failed(call_status)) return call_status;
         return nvme_find_first<atomic_ref>(keys, locators, to_span(parts_), executor,
                                            [&](std::span<key_t const> scanned, auto&& on_hit) noexcept {
-                                               return scan_keys_(scanned, executor, on_hit);
+                                               return lookup_keys_(scanned, executor, on_hit);
                                            });
     }
 
@@ -869,7 +930,7 @@ struct nvme_indexes {
                 return extent_of_(nodes[position], &nvme_part_t::keys_begin,
                                   parts_[nodes[position].shard].key_row_bytes);
             },
-            [&](std::size_t position, bytes_view_t row) noexcept {
+            [&](std::size_t, std::size_t position, bytes_view_t row) noexcept {
                 keys[position] = safegraphs_widened_key<key_t>(row.data(), parts_[nodes[position].shard].key_dtype);
             });
     }
@@ -912,7 +973,7 @@ struct nvme_indexes {
                 return extent_of_(entries[position], &nvme_part_t::neighbors_begin,
                                   part.connectivity * static_cast<u32_t>(sizeof(node_id_t)));
             },
-            [&](std::size_t position, bytes_view_t row) noexcept {
+            [&](std::size_t, std::size_t position, bytes_view_t row) noexcept {
                 std::memcpy(neighbors.data() + offsets[position], row.data(), row.size());
             });
     }
@@ -981,10 +1042,10 @@ struct nvme_indexes {
      *
      *  The plan draws and places on executor thread zero, the pool thread its engine answers,
      *  inside one call holding the media, and every verb of its source blocks until its round
-     *  lands. One scan of the key columns lists the entries of the shown and focus keys before the
-     *  plan, and one more counts each draw's ordinal after it. Scoring reads one round per
-     *  neighbors row's width: the query's row, then a row and a key per node, scored a quad at a
-     *  time as a walk scores them. Without shown points each draw's row projects through
+     *  lands. One key lookup, as @ref count takes it, lists the entries of the shown and focus keys
+     *  before the plan, and one more counts each draw's ordinal after it. Scoring reads one round
+     *  per neighbors row's width: the query's row, then a row and a key per node, scored a quad at
+     *  a time as a walk scores them. Without shown points each draw's row projects through
      *  @ref sample_projection.
      *
      *  @par Statuses:
@@ -993,6 +1054,7 @@ struct nvme_indexes {
      *  - @c bad_alloc_k The arenas cannot hold the scratch.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
      *  - @c config_mismatch_k A medium the engines cannot read.
+     *  - @c unsupported_k Shown or focus keys, or draws, while no key table is held.
      *  - @c io_k A read came back short; the draws written stand, their later reads unscored.
      */
     expected<sample_result_t> sample(sample_inputs<key_t> inputs, sample_outputs<key_t> outputs, sample_config_t config,
@@ -1008,7 +1070,7 @@ struct nvme_indexes {
             executor, to_span(media_), to_span(parts_), connectivity(), staging_bytes_(), inputs, outputs.keys.size(),
             config,
             [&](std::span<key_t const> scanned, auto&& on_hit) noexcept {
-                return scan_keys_(scanned, executor, on_hit);
+                return lookup_keys_keeping_cut_(scanned, executor, on_hit);
             },
             draw);
     }
@@ -1024,6 +1086,7 @@ struct nvme_indexes {
     using results_array_t = typename index_t::results_array_t;
     using walk_t = typename index_t::walk_t;
     using node_id_t = dense::node_id_t;
+    using resident_keys_t = nvme_resident_keys<key_t, node_id_t, atomic_ref_template_>;
 
 #pragma region Rows
 
@@ -1054,6 +1117,21 @@ struct nvme_indexes {
             nk::matrix_span<key_t> keys;
             nk::matrix_span<score_type_> distances;
             std::span<std::size_t> counts;
+
+            /** The keys each query's walks take as landmarks, and the key table they probe; empty
+             *  counts hint nothing. */
+            ranked_hints_view<key_t> hints;
+            resident_keys_t const* resident_keys = nullptr;
+
+            /** Hint keys no shard held an entry under, summed over the call's queries. */
+            std::size_t* missing_hints = nullptr;
+
+            /** Where each MaxSim query's rows start among the call's, then where the last ends,
+             *  and its seeds, confirmed once for all of its rows: a landmark row per shard,
+             *  query-major, and how many each row holds. Empty unless a MaxSim resolved hints. */
+            std::span<std::size_t const> query_offsets;
+            std::span<nvme_seed<node_id_t> const> resolved_hints;
+            std::span<u32_t const> resolved_counts;
         };
 
         inputs_t const& inputs;
@@ -1065,12 +1143,33 @@ struct nvme_indexes {
         vector_view_t query;
         vector_norms_t query_norms {};
 
+        /** The landmark slots of a walk over the widest part, which bound the hints a query takes;
+         *  zero without hints. */
+        std::size_t hint_slots = 0;
+
+        /** The query's hint keys its walks take, at most @c hint_slots. */
+        std::span<key_t const> hinted_keys;
+
+        /** One bit per key of @c hinted_keys, set once a walk confirmed an entry under it. */
+        std::span<u1x64_t> confirmed_hints;
+
         search_query(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
             : inputs(inputs), locators(allocator), allocator(allocator) {}
 
-        status_t reserve(std::size_t, std::size_t) noexcept {
-            staged = allocator.allocate(staged_rows_bytes(vector_dtype_k, 1, inputs.queries.columns));
+        /** Bytes a slot stages for a query of @p columns, and for @p hint_slots confirmed hints. */
+        static std::size_t staged_bytes(std::size_t columns, std::size_t hint_slots) noexcept {
+            return round_up_to_multiple<std::size_t>(staged_rows_bytes(vector_dtype_k, 1, columns), sizeof(u1x64_t)) +
+                   divide_round_up<std::size_t>(hint_slots, std::numeric_limits<u1x64_t>::digits) * sizeof(u1x64_t);
+        }
+
+        status_t reserve(std::size_t, std::size_t widest_row) noexcept {
+            std::size_t const columns = inputs.queries.columns;
+            hint_slots = inputs.hints.counts.empty() ? 0 : nvme_landmarks(widest_row);
+            staged = allocator.allocate(staged_bytes(columns, hint_slots));
             if (!staged || failed(locators.resize_uninitialized(inputs.keys.extent(1)))) return status_t::bad_alloc_k;
+            std::size_t const rows_bytes = staged_bytes(columns, 0);
+            confirmed_hints = {reinterpret_cast<u1x64_t*>(staged + rows_bytes),
+                               (staged_bytes(columns, hint_slots) - rows_bytes) / sizeof(u1x64_t)};
             return status_t::success_k;
         }
 
@@ -1082,6 +1181,56 @@ struct nvme_indexes {
                         .row(0)
                         .as_vector();
             inputs.counts[row] = 0;
+            if (inputs.hints.counts.empty()) return;
+            std::span<key_t const> const all_hints = hints_of(inputs.hints, row);
+            hinted_keys = all_hints.first(min_of(all_hints.size(), hint_slots));
+            std::memset(confirmed_hints.data(), 0, confirmed_hints.size_bytes());
+        }
+
+        /** Fills @p slots with the entries of shard @p shard the table files under the fingerprints
+         *  of the first hinted keys, or the seeds its MaxSim query resolved, as many as fit,
+         *  answering how many. */
+        std::size_t find_hinted(u32_t shard, std::span<nvme_seed<node_id_t>> slots) const noexcept {
+            if (!inputs.resolved_hints.empty()) {
+                std::size_t const shards = inputs.resolved_counts.size() / (inputs.query_offsets.size() - 1);
+                std::size_t const run = hinted_query_() * shards + shard;
+                std::size_t const stride = inputs.resolved_hints.size() / inputs.resolved_counts.size();
+                std::size_t const count = min_of<std::size_t>(inputs.resolved_counts[run], slots.size());
+                for (std::size_t seed = 0; seed != count; ++seed)
+                    slots[seed] = inputs.resolved_hints[run * stride + seed];
+                return count;
+            }
+            std::size_t candidates = 0;
+            for (u32_t hint = 0; hint != min_of(hinted_keys.size(), slots.size()); ++hint)
+                inputs.resident_keys->find_each(shard, hinted_keys[hint], [&](node_id_t node) noexcept {
+                    if (candidates != slots.size()) slots[candidates++] = {node, hint};
+                });
+            return candidates;
+        }
+
+        /** Whether the seeds @ref find_hinted answers still need a key read each: only probed
+         *  ones, never those a MaxSim resolved. */
+        bool confirms_hints() const noexcept { return inputs.resolved_hints.empty(); }
+
+        /** Whether @p stored is the key of hint @p hint, marking the hint held if so. */
+        bool confirm_hint(u32_t hint, key_t const& stored) noexcept {
+            if (!same_key_(hinted_keys[hint], stored)) return false;
+            confirmed_hints[hint / std::numeric_limits<u1x64_t>::digits] |=
+                u1x64_t {1} << (hint % std::numeric_limits<u1x64_t>::digits);
+            return true;
+        }
+
+        /** The MaxSim query the row belongs to. */
+        std::size_t hinted_query_() const noexcept {
+            std::span<std::size_t const> const offsets = inputs.query_offsets;
+            // The first offset past the row, by halving; the row's query starts one before it.
+            std::size_t low = 0, high = offsets.size();
+            while (low != high) {
+                std::size_t const middle = low + (high - low) / 2;
+                if (offsets[middle] <= row + offsets.front()) low = middle + 1;
+                else high = middle;
+            }
+            return low - 1;
         }
         void rescore_quad(quad<node_id_t> const& ids, quad<vector_view_t> const& vectors,
                           quad<vector_norms_t> const& norms, scores_result<dot_result_t>& scores, std::size_t count,
@@ -1107,8 +1256,15 @@ struct nvme_indexes {
         std::size_t output_count() const noexcept { return found; }
         shard_node_t output_locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve_output_key(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
+
+        /** Writes the row's count, and counts its unconfirmed hints. */
         status_t finish_query() noexcept {
             inputs.counts[row] = found;
+            if (hinted_keys.empty()) return status_t::success_k;
+            std::size_t confirmed = 0;
+            for (u1x64_t const word : confirmed_hints) confirmed += static_cast<std::size_t>(std::popcount(word));
+            atomic_ref<std::size_t>(*inputs.missing_hints)
+                .add(hinted_keys.size() - confirmed, std::memory_order_relaxed);
             return status_t::success_k;
         }
     };
@@ -1341,24 +1497,79 @@ struct nvme_indexes {
                                                             staged_bytes, counts, latencies);
     }
 
-    /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
+    /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies,
+     *  each shard's walk seeded by the rows it holds under the query's @p hints. */
     template <typename score_type_, typename heads_type_, typename predicate_type_>
     expected<search_result_t> search_rows_(rows_view_t queries, heads_type_ const& heads, executor_t& executor,
                                            search_config_t config, nk::matrix_span<key_t> keys,
                                            nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
-                                           predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
+                                           predicate_type_& predicate, std::span<u64_t> latencies,
+                                           ranked_hints_view<key_t> hints) noexcept {
         std::size_t const queries_count = queries.rows;
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (queries_count && queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = hints_refusal(hints, queries_count); failed(refusal)) return {{}, refusal};
+        if (!hints.counts.empty() && resident_keys_.empty()) return {{}, status_t::unsupported_k};
         using query_t = search_query<heads_type_, predicate_type_, score_type_>;
-        typename query_t::inputs_t const inputs {
-            queries, kernel_, &heads, &predicate, non_zero_expansion_factor(config), keys, distances, counts};
-        return walk_queries_<query_t>(queries_count, config, inputs,
-                                      staged_rows_bytes(vector_dtype_k, 1, queries.columns), counts, latencies,
-                                      executor);
+        std::size_t missing_hints = 0;
+        typename query_t::inputs_t inputs {queries, kernel_,   &heads, &predicate, non_zero_expansion_factor(config),
+                                           keys,    distances, counts};
+        inputs.hints = hints, inputs.resident_keys = &resident_keys_, inputs.missing_hints = &missing_hints;
+        expected<search_result_t> found = walk_queries_<query_t>(
+            queries_count, config, inputs, query_t::staged_bytes(queries.columns, hint_slots_(hints)), counts,
+            latencies, executor);
+        found.value.missing_hints = missing_hints;
+        return found;
+    }
+
+    /** Resolves each query's first hints, as many as a walk draws landmarks, once for every row of
+     *  it: one lookup lists their entries, and each query keeps a landmark row of them per shard in
+     *  @p seeds, in hint order, how many each row holds in @p counts, query-major, and adds every
+     *  key no shard holds to @p missing. */
+    status_t resolve_hints_(ranked_hints_view<key_t> hints, executor_t& executor,
+                            growing_buffer<nvme_seed<node_id_t>, scratch_allocator_t>& seeds,
+                            growing_buffer<u32_t, scratch_allocator_t>& counts, std::size_t& missing) const noexcept {
+        std::size_t const queries_count = hints.counts.size(), shards = parts_.size(), slots = hint_slots_(hints);
+        scratch_allocator_t const scratch {executor.arena(0)};
+        growing_buffer<key_t, scratch_allocator_t> keys {scratch};
+        growing_buffer<std::size_t, scratch_allocator_t> starts {scratch};
+        growing_buffer<shard_node_t, scratch_allocator_t> listed {scratch};
+        if (failed(keys.reserve_exactly(queries_count * slots)) ||
+            failed(seeds.resize(queries_count * shards * slots)) || failed(counts.resize(queries_count * shards)))
+            return status_t::bad_alloc_k;
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            std::span<key_t const> const query_hints = hints_of(hints, query);
+            for (key_t const& key : query_hints.first(min_of(query_hints.size(), slots))) keys.push_back_reserved(key);
+        }
+        if (failed(starts.resize(keys.size() + 1))) return status_t::bad_alloc_k;
+        if (status_t const listed_status = nvme_list_entries(
+                to_span(keys), to_writable_span(starts), listed, executor,
+                [&](std::span<key_t const> looked_up, auto&& on_hit) noexcept {
+                    return lookup_keys_(looked_up, executor, on_hit);
+                });
+            failed(listed_status))
+            return listed_status;
+        std::size_t position = 0;
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            std::size_t const taken = min_of(hints.counts[query], slots);
+            for (u32_t hint = 0; hint != taken; ++hint, ++position) {
+                missing += starts[position] == starts[position + 1];
+                for (std::size_t entry = starts[position]; entry != starts[position + 1]; ++entry) {
+                    std::size_t const run = query * shards + listed[entry].shard;
+                    if (counts[run] != slots) seeds[run * slots + counts[run]++] = {listed[entry].node, hint};
+                }
+            }
+        }
+        return status_t::success_k;
+    }
+
+    /** The landmark slots a hinted query's walks fill, which bound the hints it takes: none
+     *  without @p hints. */
+    std::size_t hint_slots_(ranked_hints_view<key_t> hints) const noexcept {
+        return hints.counts.empty() ? 0 : nvme_landmarks(connectivity());
     }
 
 #pragma endregion Rows
@@ -1415,31 +1626,52 @@ struct nvme_indexes {
     /** Bytes of one staging buffer: the covering read of the widest row any part holds. */
     std::size_t staging_bytes_() const noexcept { return index_t::staging_bytes_(to_span(media_), to_span(parts_)); }
 
+    /** Bytes of one key-scan read: a whole request of every medium the parts sit on, so the key
+     *  columns stream in order in requests no disk splits, or a staging buffer where that is more
+     *  or no medium reports its requests. */
+    std::size_t key_scan_bytes_() const noexcept {
+        std::size_t request_bytes = 0;
+        for (medium_t const& medium : media_)
+            if (std::size_t const medium_bytes = std::size_t {device_queues_of(medium).request_kibibytes} * 1024)
+                request_bytes = request_bytes ? min_of(request_bytes, medium_bytes) : medium_bytes;
+        return max_of(request_bytes, staging_bytes_());
+    }
+
     /** Rows of a column @p row_bytes wide that one scan read of part @p part takes: as many as a
      *  staging buffer covers wherever the run starts, and at least one, since it covers any row. */
     std::size_t scan_run_rows_(std::size_t part, std::size_t row_bytes) const noexcept {
+        return scan_run_rows_(part, row_bytes, staging_bytes_());
+    }
+
+    /** Rows of a column @p row_bytes wide that one read of part @p part into a buffer of
+     *  @p buffer_bytes covers wherever the run starts. */
+    std::size_t scan_run_rows_(std::size_t part, std::size_t row_bytes, std::size_t buffer_bytes) const noexcept {
         u64_t const block = block_bytes_of(media_[part]);
-        return static_cast<std::size_t>((staging_bytes_() / block * block - (block - 1)) / row_bytes);
+        return static_cast<std::size_t>((buffer_bytes / block * block - (block - 1)) / row_bytes);
     }
 
     /** Runs of @p column over the @p count placement-order rows from row @p first on, cut at every
-     *  part's end and every scan run, so a row never straddles two reads. */
-    std::size_t runs_count_(std::size_t first, std::size_t count, column_t column) const noexcept {
+     *  part's end and every read of @p buffer_bytes, so a row never straddles two reads. */
+    std::size_t runs_count_(std::size_t first, std::size_t count, column_t column,
+                            std::size_t buffer_bytes) const noexcept {
         std::size_t runs = 0, base = 0;
         for (std::size_t part = 0; part != parts_.size(); base += parts_[part].nodes, ++part) {
             std::size_t const low = max_of(first, base), high = min_of(first + count, base + parts_[part].nodes);
-            if (low < high) runs += divide_round_up(high - low, scan_run_rows_(part, parts_[part].*column.row_bytes));
+            if (low < high)
+                runs += divide_round_up(high - low, scan_run_rows_(part, parts_[part].*column.row_bytes, buffer_bytes));
         }
         return runs;
     }
 
-    /** Run @p run of the runs @c runs_count_ counts, or an empty one past the last. */
-    run_t locate_run_(std::size_t first, std::size_t count, std::size_t run, column_t column) const noexcept {
+    /** Run @p run of the runs @c runs_count_ counts at @p buffer_bytes, or an empty one past the
+     *  last. */
+    run_t locate_run_(std::size_t first, std::size_t count, std::size_t run, column_t column,
+                      std::size_t buffer_bytes) const noexcept {
         std::size_t base = 0;
         for (u32_t part = 0; part != parts_.size(); base += parts_[part].nodes, ++part) {
             std::size_t const low = max_of(first, base), high = min_of(first + count, base + parts_[part].nodes);
             if (low >= high) continue;
-            std::size_t const run_rows = scan_run_rows_(part, parts_[part].*column.row_bytes);
+            std::size_t const run_rows = scan_run_rows_(part, parts_[part].*column.row_bytes, buffer_bytes);
             std::size_t const runs = divide_round_up(high - low, run_rows);
             if (run >= runs) {
                 run -= runs;
@@ -1467,52 +1699,91 @@ struct nvme_indexes {
     }
 
     /**
-     *  @brief Scans every part's key column in runs, matching every row against an exact table of
-     *      @p keys, and calls @p on_hit with the scanning thread, the batch position and the row's
-     *      locator for every match, repeats included.
+     *  @brief Every entry under every key of @p keys, repeats included, as
+     *      <tt>on_hit(thread, position, locator)</tt>, probed in the key table and confirmed by
+     *      one key read apiece.
      *
-     *  The table holds each distinct key's first batch position, the positions sharing it chained
-     *  behind; it is exact, so no row is ever matched by a key it does not hold. Runs inside a call
-     *  @c begin_scans_ began, the table in thread zero's arena.
+     *  Runs inside a call @c begin_scans_ or a walk began, its candidates in thread zero's arena.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k No key table is held.
+     *  - @c bad_alloc_k Thread zero's arena could not hold the candidates.
+     *  - @c io_k A key read came back short.
      */
     template <typename on_hit_type_>
-    status_t scan_keys_(std::span<key_t const> keys, executor_t& executor, on_hit_type_&& on_hit) const noexcept {
-        constexpr std::size_t empty_k = ~std::size_t {0};
-        std::size_t const slots_count = ceil2(max_of<std::size_t>(keys.size() * 2, 16)), mask = slots_count - 1;
+    status_t lookup_keys_(std::span<key_t const> keys, executor_t& executor, on_hit_type_&& on_hit) const noexcept {
+        if (resident_keys_.empty()) return status_t::unsupported_k;
         scratch_allocator_t const scratch {executor.arena(0)};
-        growing_buffer<std::size_t, scratch_allocator_t> heads {scratch}, chains {scratch};
-        if (failed(heads.resize_uninitialized(slots_count)) || failed(chains.resize_uninitialized(keys.size())))
-            return status_t::bad_alloc_k;
-        for (std::size_t& head : heads) head = empty_k;
-        auto slot_of = [&](key_t const& key) noexcept {
-            std::size_t slot = mix_bits(std::hash<key_t> {}(key)) & mask;
-            while (heads[slot] != empty_k && !same_key_(keys[heads[slot]], key)) slot = (slot + 1) & mask;
-            return slot;
-        };
-        for (std::size_t position = 0; position != keys.size(); ++position) {
-            std::size_t const slot = slot_of(keys[position]);
-            if (heads[slot] == empty_k) heads[slot] = position, chains[position] = empty_k;
-            else chains[position] = chains[heads[slot]], chains[heads[slot]] = position;
-        }
+        growing_buffer<shard_node_t, scratch_allocator_t> candidates {scratch};
+        growing_buffer<std::size_t, scratch_allocator_t> positions {scratch};
+        bool refused = false;
+        for (std::size_t position = 0; position != keys.size(); ++position)
+            for (u32_t part = 0; part != parts_.size(); ++part)
+                resident_keys_.find_each(part, keys[position], [&](node_id_t node) noexcept {
+                    refused = refused || failed(candidates.push_back(shard_node_t {part, node})) ||
+                              failed(positions.push_back(position));
+                });
+        if (refused) return status_t::bad_alloc_k;
+        return nvme_read_located<atomic_ref>(
+            executor, to_span(media_), staging_bytes_(), to_span(candidates),
+            [&](std::size_t candidate) noexcept {
+                return extent_of_(candidates[candidate], &nvme_part_t::keys_begin,
+                                  parts_[candidates[candidate].shard].key_row_bytes);
+            },
+            [&](std::size_t thread, std::size_t candidate, bytes_view_t row) noexcept {
+                shard_node_t const locator = candidates[candidate];
+                key_t const stored = safegraphs_widened_key<key_t>(row.data(), parts_[locator.shard].key_dtype);
+                if (same_key_(stored, keys[positions[candidate]])) on_hit(thread, positions[candidate], locator);
+            });
+    }
 
+    /** @ref lookup_keys_ inside a call whose own reads go on through the staging cut it began with,
+     *  which a scan's cut gives back. */
+    template <typename on_hit_type_>
+    status_t lookup_keys_keeping_cut_(std::span<key_t const> keys, executor_t& executor,
+                                      on_hit_type_&& on_hit) const noexcept {
+        io_buffers_cut_t const call_cut = executor.buffers_cut();
+        status_t const looked = lookup_keys_(keys, executor, on_hit);
+        io_buffers_cut_t const scan_cut = executor.buffers_cut();
+        if (scan_cut.buffers == call_cut.buffers && scan_cut.buffer_bytes == call_cut.buffer_bytes) return looked;
+        status_t const restored = executor.reserve_buffers(call_cut.buffers, call_cut.buffer_bytes);
+        return failed(looked) ? looked : restored;
+    }
+
+    /**
+     *  @brief Reads every part's key column once, in order, and hands every row to @p on_row as
+     *      <tt>on_row(thread, key, locator)</tt> on the thread that read it.
+     *
+     *  Runs inside a call @c begin_scans_ or a walk began. The call's staging region is cut into as
+     *  many whole requests of @ref key_scan_bytes_ as it holds, at most one per queue slot, once
+     *  per call: a later scan in the call finds it cut, and a verb reading rows after the scan
+     *  reads them through those buffers, which hold any row.
+     */
+    template <typename on_row_type_>
+    status_t scan_key_rows_(executor_t& executor, on_row_type_&& on_row) const noexcept {
+        io_buffers_cut_t const call_cut = executor.buffers_cut();
+        std::size_t const region_bytes = max_of(call_cut.buffers * call_cut.buffer_bytes, staging_bytes_());
+        std::size_t const request_bytes = key_scan_bytes_();
+        std::size_t const scan_buffers = max_of<std::size_t>(
+            min_of(region_bytes / request_bytes, executor.queue_depth()), 1);
+        std::size_t const read_bytes = min_of(request_bytes, region_bytes / scan_buffers);
+        if (call_cut.buffers != scan_buffers || call_cut.buffer_bytes != read_bytes)
+            if (status_t const cut = executor.reserve_buffers(scan_buffers, read_bytes); failed(cut)) return cut;
         std::size_t const rows_count = size();
         auto describe = [&](std::size_t run, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
-            return {run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k)};
+            return {run_extent_(locate_run_(0, rows_count, run, key_column_k, read_bytes), key_column_k)};
         };
         auto consume = [&](std::size_t thread, std::size_t, u64_t, auto const& extents, auto const& fetched) noexcept {
             nvme_extent_t const& extent = extents[0];
             byte_t const* const bytes = fetched[0];
             nvme_part_t const& part = parts_[extent.medium];
             std::size_t const first = static_cast<std::size_t>((extent.begin - part.keys_begin) / part.key_row_bytes);
-            for (std::size_t row = 0; row != extent.length / part.key_row_bytes; ++row) {
-                key_t const key = safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype);
-                std::size_t const slot = slot_of(key);
-                for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
-                    on_hit(thread, position, shard_node_t {extent.medium, static_cast<node_id_t>(first + row)});
-            }
+            for (std::size_t row = 0; row != extent.length / part.key_row_bytes; ++row)
+                on_row(thread, safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype),
+                       shard_node_t {extent.medium, static_cast<node_id_t>(first + row)});
         };
-        return scan_reads_(executor, runs_count_(0, rows_count, key_column_k), describe, consume).status;
+        return scan_reads_(executor, runs_count_(0, rows_count, key_column_k, read_bytes), describe, consume).status;
     }
 
     /** One match a thread's scan keeps for a query: its distance and its row's key. */
@@ -1662,7 +1933,7 @@ struct nvme_indexes {
                                                                                           : key_column_k;
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 2> {
             if (progress++) return {};
-            run_t const run = locate_run_(0, rows_count, task, runs_column);
+            run_t const run = locate_run_(0, rows_count, task, runs_column, staging_bytes_());
             return {run_extent_(run, key_column_k), run_extent_(run, value_column_k)};
         };
         auto consume = [&](std::size_t thread, std::size_t, u64_t, std::array<nvme_extent_t, 2> const& extents,
@@ -1747,8 +2018,8 @@ struct nvme_indexes {
                 settle_predicate(admits, keep_entry);
             }
         };
-        auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column), describe,
-                                                    consume);
+        auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column, staging_bytes_()),
+                                                    describe, consume);
         search_result_t result;
         result.scan_reads = reads;
         result.computed_distances = rows_count * queries_count;
@@ -1809,7 +2080,7 @@ struct nvme_indexes {
                                            walk_shape_t const& shape, executor_t& executor, std::size_t wanted,
                                            std::span<std::size_t> scored,
                                            products_tape<key_t, score_type_> const& matches, predicate_type_& predicate,
-                                           std::span<u64_t> latencies) noexcept {
+                                           std::span<u64_t> latencies, ranked_hints_view<key_t> hints) noexcept {
         using query_t = search_query<dummy_heads_t, predicate_type_, distance_t>;
         using matches_t = growing_buffer<maxsim_match_t, scratch_allocator_t>;
         std::size_t const queries_count = query_offsets.size() - 1, rows_count = query_rows.extent(0);
@@ -1827,17 +2098,30 @@ struct nvme_indexes {
             return {{}, status_t::bad_alloc_k};
         nk::matrix_span<key_t> const walk_keys {candidates.data(), rows_count, width};
         nk::matrix_span<distance_t> const walk_distances {distances.data(), rows_count, width};
-        typename query_t::inputs_t const inputs {queries.slice(query_offsets.front(), rows_count),
-                                                 kernel_,
-                                                 nullptr,
-                                                 &predicate,
-                                                 width,
-                                                 walk_keys,
-                                                 walk_distances,
-                                                 to_writable_span(walked)};
+        typename query_t::inputs_t inputs {queries.slice(query_offsets.front(), rows_count),
+                                           kernel_,
+                                           nullptr,
+                                           &predicate,
+                                           width,
+                                           walk_keys,
+                                           walk_distances,
+                                           to_writable_span(walked)};
+        // Every row of a query takes the seeds its hints resolve to once.
+        std::size_t missing_hints = 0;
+        growing_buffer<nvme_seed<node_id_t>, scratch_allocator_t> resolved_hints {scratch};
+        growing_buffer<u32_t, scratch_allocator_t> resolved_counts {scratch};
+        if (!hints.counts.empty()) {
+            if (status_t const resolved = resolve_hints_(hints, executor, resolved_hints, resolved_counts,
+                                                         missing_hints);
+                failed(resolved))
+                return {{}, resolved};
+            inputs.query_offsets = query_offsets;
+            inputs.resolved_hints = to_span(resolved_hints), inputs.resolved_counts = to_span(resolved_counts);
+        }
         auto [result, walk_status] = query_walker<index_t, query_t>::run_walks(
             to_span(media_), to_span(parts_), executor, shape, inputs, to_span(walked), latencies);
         result.count = 0;
+        result.missing_hints = missing_hints;
         if (failed(walk_status)) return {result, walk_status};
 
         // Each query gathers its rows' keys behind the previous query's, sorts them by bytes, and
@@ -1873,7 +2157,7 @@ struct nvme_indexes {
         for (std::size_t thread = 0; thread != executor.size(); ++thread)
             listings.push_back_reserved(matches_t {scratch_allocator_t {executor.arena(thread)}});
         status_t listing = status_t::success_k;
-        status_t const scanned = scan_keys_(
+        status_t const scanned = lookup_keys_(
             nominations, executor, [&](std::size_t thread, std::size_t position, shard_node_t locator) noexcept {
                 atomic_ref<std::size_t>(row_starts[position]).add(1, std::memory_order_relaxed);
                 if (failed(listings[thread].push_back({locator, position})))
@@ -1967,18 +2251,18 @@ struct nvme_indexes {
         // Every key, in placement order.
         auto describe_keys = [&](std::size_t run, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
-            return {run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k)};
+            return {run_extent_(locate_run_(0, rows_count, run, key_column_k, staging_bytes_()), key_column_k)};
         };
         auto collect_keys = [&](std::size_t, std::size_t run, u64_t, std::array<nvme_extent_t, 1> const& extents,
                                 std::array<byte_t const*, 1> const& fetched) noexcept {
-            run_t const located = locate_run_(0, rows_count, run, key_column_k);
+            run_t const located = locate_run_(0, rows_count, run, key_column_k, staging_bytes_());
             nvme_part_t const& part = parts_[extents[0].medium];
             for (std::size_t row = 0; row != located.rows; ++row)
                 candidates[located.position + row] = safegraphs_widened_key<key_t>(
                     fetched[0] + row * part.key_row_bytes, part.key_dtype);
         };
-        auto const [key_reads, collect_status] = scan_reads_(executor, runs_count_(0, rows_count, key_column_k),
-                                                             describe_keys, collect_keys);
+        auto const [key_reads, collect_status] = scan_reads_(
+            executor, runs_count_(0, rows_count, key_column_k, staging_bytes_()), describe_keys, collect_keys);
         result.scan_reads += key_reads;
         if (failed(collect_status)) return {result, collect_status};
 
@@ -2036,7 +2320,7 @@ struct nvme_indexes {
                                                                                           : key_column_k;
         auto describe_runs = [&](std::size_t run, u64_t& progress) noexcept -> std::array<nvme_extent_t, 2> {
             if (progress++) return {};
-            run_t const located = locate_run_(0, rows_count, run, runs_column);
+            run_t const located = locate_run_(0, rows_count, run, runs_column, staging_bytes_());
             return {run_extent_(located, key_column_k), run_extent_(located, value_column_k)};
         };
         auto fold_runs = [&](std::size_t, std::size_t, u64_t, std::array<nvme_extent_t, 2> const& extents,
@@ -2058,8 +2342,8 @@ struct nvme_indexes {
                                         });
             }
         };
-        auto const [run_reads, fold_status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column),
-                                                             describe_runs, fold_runs);
+        auto const [run_reads, fold_status] = scan_reads_<2>(
+            executor, runs_count_(0, rows_count, runs_column, staging_bytes_()), describe_runs, fold_runs);
         result.scan_reads += run_reads;
         result.computed_distances += rows_count * queries_rows;
         if (failed(fold_status)) return {result, fold_status};
@@ -2203,7 +2487,7 @@ struct nvme_indexes {
                              std::span<std::size_t> ordinals) const noexcept {
             std::memset(ordinals.data(), 0, ordinals.size_bytes());
             if (keys.empty()) return *rows.failure;
-            status_t const scanned = indexes.scan_keys_(
+            status_t const scanned = indexes.lookup_keys_keeping_cut_(
                 keys, executor, [&](std::size_t, std::size_t position, shard_node_t locator) noexcept {
                     if (locator < nodes[position])
                         atomic_ref<std::size_t>(ordinals[position]).add(1, std::memory_order_relaxed);
@@ -2309,6 +2593,9 @@ struct nvme_indexes {
 
     /** The host allocator behind the catalog and the paths a view resolves. */
     forkunion_allocator_t allocator_;
+
+    /** The key table @ref hold_keys built, every part's; empty when none is held. */
+    resident_keys_t resident_keys_;
 
     /** The distance kind the parts name, every walk ranks by, and every rewrite carries on. */
     nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;

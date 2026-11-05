@@ -121,12 +121,18 @@ struct nvme_placement_t {
 
     /** The class the view dispatches as, @c usearch_cpu_class_unknown_k for the CPU's own. */
     usearch_cpu_class_t cpu_class = usearch_cpu_class_unknown_k;
+
+    /** The RAM a key table may take, borrowed for the call; @c NULL holds none. */
+    usearch_ram_options_t const* ram = nullptr;
+
+    /** The executor a key table fills on; @c NULL with no key table asked for. */
+    usearch_executor_t executor = nullptr;
 };
 
-/** Opens every part of the checkpoint @p nvme names, served in place. */
+/** Opens every part of the checkpoint @p nvme names, served in place, keys held when asked. */
 template <vendored_residency_t residency_>
 static status_t place_shards(punned_dense_index<residency_> const& punned, nvme_placement_t const& nvme) noexcept {
-    return punned.verbs.view(punned.index, nvme.path, nvme.paths);
+    return punned.verbs.view(punned.index, nvme.path, nvme.paths, nvme.ram, nvme.executor);
 }
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
@@ -423,11 +429,12 @@ static bool for_each_dense_chunk(punned_dense_index<residency_> punned, usearch_
 
 /** The matching verbs' sink on one serving variant: keys and scores go to @p outputs as the walk
  *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
- *  one output row, and @p count output rows land. */
+ *  one output row, and @p count output rows land, each chunk taking its rows of @p hints. */
 template <vendored_residency_t residency_, typename verb_type_>
 static bool match_dense_rows(punned_dense_index<residency_> punned, usearch_executor_t executor, //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
-                             std::size_t rows_per_query, matches_outputs_t const& outputs,       //
+                             std::size_t rows_per_query, ranked_hints_view_t hints,              //
+                             matches_outputs_t const& outputs,                                   //
                              search_config_t config, usearch_progress_t progress,                //
                              usearch_traversal_stats_t* stats, usearch_outcome_t* outcome,       //
                              verb_type_&& verb) noexcept {
@@ -442,10 +449,25 @@ static bool match_dense_rows(punned_dense_index<residency_> punned, usearch_exec
         nk::range_t const chunk_range = nk::range(first, first + matched);
         ranked_matches_span_t const matches {keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
                                              std::span<std::size_t> {outputs.counts + first, matched}};
-        return verb(chunk_rows, matches, chunk_config, executor);
+        ranked_hints_view_t const chunk_hints = hints.counts.empty()
+                                                    ? ranked_hints_view_t {}
+                                                    : ranked_hints_view_t {hints.keys(chunk_range, nk::slice),
+                                                                           hints.counts.subspan(first, matched)};
+        return verb(chunk_rows, chunk_hints, matches, chunk_config, executor);
     };
     return for_each_dense_chunk(punned, executor, count * rows_per_query, rows, rows_per_query, config, progress, stats,
                                 outcome, sink);
+}
+
+/** The C hints @p given of @p count queries into @p hints, none when @p given is @c NULL; false
+ *  once @p outcome records why they do not parse. */
+static bool hints_of_view(usearch_matches_view_t const* given, std::size_t count, ranked_hints_view_t& hints,
+                          usearch_outcome_t* outcome) noexcept {
+    if (rejects_hints(given, count, outcome)) return false;
+    if (given && count)
+        hints = {{reinterpret_cast<us::utilities::uuid_t const*>(given->keys), count, given->columns},
+                 {given->counts, count}};
+    return true;
 }
 
 /** Whether every query @p query_offsets cuts holds rows; false once @p outcome records why not. */
@@ -721,7 +743,8 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
-    nvme_placement_t const placement {as_text(arguments->path), to_span(paths), nvme.cpu_class};
+    nvme_placement_t const placement {as_text(arguments->path), to_span(paths), nvme.cpu_class, arguments->ram,
+                                      arguments->executor};
     usearch_dense_index_t const index = with_variant(geometry, placement, outcome);
     if (!index) return;
     *arguments->index = index;
@@ -914,6 +937,8 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     *arguments->matches = {};
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     predicate_t const predicate = predicate_of(arguments->predicate);
+    ranked_hints_view_t hints;
+    if (!hints_of_view(arguments->hints, count, hints, outcome)) return;
     visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
                                         punned_dense_index<residency_> punned) noexcept {
         arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
@@ -939,10 +964,12 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                                                             : carve_matches(arena->memory, count, wanted);
         if (failed(carve_status)) return propagate_error(carve_status, outcome, "Failed to grow the arena"), void();
         bool const searched = match_dense_rows(
-            punned, arguments->executor, count, arguments->queries, 1, outputs,
+            punned, arguments->executor, count, arguments->queries, 1, hints, outputs,
             search_config_of(arguments->expansion_factor, arguments->traversal), arguments->progress, arguments->stats,
-            outcome, [&](auto rows, ranked_matches_span_t matches, search_config_t config, auto& executor) noexcept {
-                return punned.verbs.search(punned.index, rows, matches, config, predicate, executor);
+            outcome,
+            [&](auto rows, ranked_hints_view_t chunk_hints, ranked_matches_span_t matches, search_config_t config,
+                auto& executor) noexcept {
+                return punned.verbs.search(punned.index, rows, chunk_hints, matches, config, predicate, executor);
             });
         if (!searched) return;
         *arguments->matches = outputs.view();
@@ -1492,6 +1519,8 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (!arguments->query_offsets && !rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
     predicate_t const predicate = predicate_of(arguments->predicate);
+    ranked_hints_view_t hints;
+    if (!hints_of_view(arguments->hints, count, hints, outcome)) return;
     visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(
                                         punned_dense_index<residency_> punned) noexcept {
         arena_residency_t const residency = punned.verbs.residency(punned.index, 0);
@@ -1554,8 +1583,14 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
             for (std::size_t query = 0; query <= taking; ++query)
                 rebased[query] = query_offsets[first + query] - first_row;
             products_tape_t const window {tape.keys, tape.scores, tape.offsets.subspan(first, taking + 1), stride};
+            nk::range_t const chunk_range = nk::range(first, first + taking);
+            ranked_hints_view_t const chunk_hints = hints.counts.empty()
+                                                        ? ranked_hints_view_t {}
+                                                        : ranked_hints_view_t {hints.keys(chunk_range, nk::slice),
+                                                                               hints.counts.subspan(first, taking)};
             expected<traversal_stats_t> const found = punned.verbs.maxsim(
-                punned.index, maxsim_queries_view_t {all.slice(first_row, rebased[taking]), {rebased, taking + 1}},
+                punned.index,
+                maxsim_queries_view_t {all.slice(first_row, rebased[taking]), {rebased, taking + 1}, chunk_hints},
                 window, {scored + first, taking}, wanted, config, predicate, *executor);
             if (!crossed(found, arguments->stats, outcome)) return;
             first += taking;

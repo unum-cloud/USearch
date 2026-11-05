@@ -302,7 +302,7 @@ enum class linux_uring_buffer_registration_t : u32_t {
 };
 
 /** Whether io_uring learns of completions by interrupt or by polling the device's queues. */
-enum class linux_uring_reaping_t : u32_t {
+enum class linux_uring_reaping_t : u8_t {
 
     /** Interrupt-driven completions. */
     interrupted_k,
@@ -341,6 +341,10 @@ struct io_device_queues_t {
 
     /** @c polled_k when the disk has poll queues and the medium reads direct. */
     linux_uring_reaping_t reaping = linux_uring_reaping_t::interrupted_k;
+
+    /** The most KiB one request carries before the disk splits it: the disk's
+     *  @c queue/max_sectors_kb, or the controller's maximum transfer; zero when unknown. */
+    u16_t request_kibibytes = 0;
 };
 
 /** A file or block device open for direct reads, closed when it dies: @c O_DIRECT where the
@@ -601,6 +605,8 @@ inline io_block_queue_t io_block_queue_of_(int descriptor, struct stat const& de
         queue.queues.hardware_queues = static_cast<u16_t>(
             min_of<u32_t>(hardware_queues, std::numeric_limits<u16_t>::max()));
         queue.queues.reaping = polls ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
+        queue.queues.request_kibibytes = static_cast<u16_t>(
+            min_of<u64_t>(sysfs_number_(disk, "queue/max_sectors_kb"), std::numeric_limits<u16_t>::max()));
     }
     ::close(disk);
     return queue;
@@ -1003,6 +1009,8 @@ inline io_device_queues_t device_queues_of(spdk_medium_t const& medium) noexcept
     // Attach lowers `num_io_queues` to what Set Features - Number of Queues allocated.
     queues.hardware_queues = static_cast<u16_t>(options.num_io_queues);
     queues.reaping = linux_uring_reaping_t::polled_k;
+    queues.request_kibibytes = static_cast<u16_t>(
+        min_of<u32_t>(spdk_nvme_ns_get_max_io_xfer_size(medium.name_space) / 1024, std::numeric_limits<u16_t>::max()));
     return queues;
 }
 
@@ -1144,6 +1152,12 @@ concept io_engine = requires(engine_type_& engine, io_request_t request, std::sp
     { engine.submit(wait) } noexcept -> std::same_as<status_t>;
     { engine.poll_completions(completions) } noexcept -> std::same_as<std::size_t>;
     { engine.buffer(buffer) } noexcept -> std::same_as<std::byte*>;
+};
+
+/** How a staging region is cut: its buffers and the bytes of each. */
+struct io_buffers_cut_t {
+    std::size_t buffers = 0;
+    std::size_t buffer_bytes = 0;
 };
 
 /** The staging buffers an engine owns: one region, placed through its allocator, cut per call into
@@ -3027,9 +3041,27 @@ class nvme_executor {
      */
     status_t reserve(std::size_t scratch_bytes_per_thread, std::size_t buffers, std::size_t buffer_bytes) noexcept {
         if (status_t const reserved = threads_.reserve(scratch_bytes_per_thread); failed(reserved)) return reserved;
-        return on_every_thread_(
-            [&](std::size_t thread) noexcept { return engines_[thread].reserve(buffers, buffer_bytes); });
+        return reserve_buffers(buffers, buffer_bytes);
     }
+
+    /**
+     *  @brief Cuts every engine's staging region into @p buffers buffers of @p buffer_bytes each,
+     *      as @ref reserve does, with nothing in flight, while the arenas keep what a call carved.
+     *
+     *  @par Statuses:
+     *  - @c contended_k The pool is running another dispatch.
+     *  - @c overflow_k A staging region's byte count overflows, or passes what Windows registers.
+     */
+    status_t reserve_buffers(std::size_t buffers, std::size_t buffer_bytes) noexcept {
+        status_t const cut = on_every_thread_(
+            [&](std::size_t thread) noexcept { return engines_[thread].reserve(buffers, buffer_bytes); });
+        cut_ = succeeded(cut) ? io_buffers_cut_t {buffers, buffer_bytes} : io_buffers_cut_t {};
+        return cut;
+    }
+
+    /** The buffers every engine's staging region was last cut into, and their bytes; zeros after a
+     *  refused cut. */
+    io_buffers_cut_t buffers_cut() const noexcept { return cut_; }
 
     /**
      *  Attaches @p media to every engine, so request medium IDs index them until the attachment
@@ -3133,6 +3165,9 @@ class nvme_executor {
 
     /** The depth the spawn pinned, zero when calls derive theirs. */
     std::size_t pinned_depth_ = 0;
+
+    /** What @ref reserve_buffers last cut every engine's staging region into. */
+    io_buffers_cut_t cut_ {};
 
     /** One engine per thread, built and driven only on its thread; declared last, so engines die
      *  first. */

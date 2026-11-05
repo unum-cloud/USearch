@@ -10,10 +10,11 @@
  *  hundredth of jitter, so neighbors cluster by template while point counts vary per entry; the
  *  alignment metrics, which iterate over every pair of points, take fewer and smaller clouds. Each
  *  cell checks the verbs a caller reaches: the shapes land under their keys across the shards and
- *  each counts once, a walk keeps most of the exact scan's top ten, a RAM index refines, through a
- *  handle too, and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors
- *  walk every entry and a sample draws distinct ones, the index saves into memory and back and into
- *  every residency and as a view, an NVMe view answers, audits, walks and samples and refuses every
+ *  each counts once, a walk keeps most of the exact scan's top ten, one RAM search's matches hint
+ *  the next while other residencies refuse hints, a RAM index refines, through a handle too, and
+ *  absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
+ *  entry and a sample draws distinct ones, the index saves into memory and back and into every
+ *  residency and as a view, an NVMe view answers, audits, walks and samples and refuses every
  *  write, a RAM index splits into two with every key in one part, a cleared index holds nothing and
  *  ends a cursor opened before it, and every metric's name reads back. Stored poses round twice,
  *  packed at insert and unpacked at save, so a RAM index's poses come back within that band of each
@@ -174,6 +175,10 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     std::size_t failures = expect_built(cell, index, shapes.view(), sizes.shapes);
     if (failures) return failures;
     failures += expect_walk_recall(index, queries, sizes.queries, shapes_expansion_k, 0.8);
+    // An NVMe cell builds in RAM and views its checkpoint only once saved, so it walks hinted.
+    failures += expect_hints(
+        index, queries, sizes.queries, shapes_expansion_k,
+        index.residency == usearch_residency_ram_k ? usearch_status_success_k : usearch_status_unsupported_k);
     failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_unsupported_k);
     failures += expect_health(index, sizes.shapes);
     failures += expect_cursor(index, sizes.shapes);

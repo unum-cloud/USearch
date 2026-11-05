@@ -1728,6 +1728,8 @@ internal struct NativeRamOptions
     public nuint ShardCapacity;
     /// <summary>The CPU class to dispatch as; zero derives the CPU's own.</summary>
     public int CpuClass;
+    /// <summary>Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling.</summary>
+    public nuint MemoryLimit;
 }
 
 /// <summary>The devices a VRAM-resident index places its shards in, sharded and never replicated.</summary>

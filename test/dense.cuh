@@ -344,9 +344,9 @@ concept ram_collection = std::is_same_v<typename indexes_type_::executor_t, fork
 template <typename indexes_type_>
 struct dense_indexes_executor;
 
-/** The RAM form: two threads over a topology of its own, both released with it, and one
- *  traversal context per thread over an arena of its own, built once and handed to every batched
- *  verb, so the executor's own rewinds never reach them. */
+/** The RAM form: two threads, or @p threads_count, over a topology of its own, both released with
+ *  it, and one traversal context per thread over an arena of its own, built once and handed to
+ *  every batched verb, so the executor's own rewinds never reach them. */
 template <ram_collection indexes_type_>
 struct dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
@@ -358,9 +358,9 @@ struct dense_indexes_executor<indexes_type_> {
     growing_buffer<typename executor_t::arena_t, forkunion_allocator_t> arenas {forkunion_allocator_t {}};
     growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {forkunion_allocator_t {}};
 
-    dense_indexes_executor() noexcept {
+    explicit dense_indexes_executor(std::size_t threads_count = 2) noexcept {
         if (fu_topology_new(&topology) != fu_success_k) return;
-        auto [spawn_executor, spawn_status] = executor_t::spawn(topology, 2);
+        auto [spawn_executor, spawn_status] = executor_t::spawn(topology, threads_count);
         status = spawn_status;
         this->executor = std::move(spawn_executor);
         if (failed(status)) return;

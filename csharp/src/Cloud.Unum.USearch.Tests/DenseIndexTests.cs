@@ -52,13 +52,13 @@ public sealed class DenseIndexTests : IDisposable
         int word = IntPtr.Size;
         Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.ShardCapacity)));
         Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeRamOptions>(nameof(NativeRamOptions.CpuClass)));
-        Assert.Equal(4 * word, Unsafe.SizeOf<NativeRamOptions>());
+        Assert.Equal(5 * word, Unsafe.SizeOf<NativeRamOptions>());
         Assert.Equal(3 * word, (int)Marshal.OffsetOf<NativeVramOptions>(nameof(NativeVramOptions.GpuClass)));
         Assert.Equal(4 * word, Unsafe.SizeOf<NativeVramOptions>());
         Assert.Equal(2 * word, (int)Marshal.OffsetOf<NativeNvmeOptions>(nameof(NativeNvmeOptions.CpuClass)));
         Assert.Equal(3 * word, Unsafe.SizeOf<NativeNvmeOptions>());
         Assert.Equal(7 * word, (int)Marshal.OffsetOf<NativeExecutorForNvme>(nameof(NativeExecutorForNvme.NvmeClass)));
-        Assert.Equal(3 * word, Unsafe.SizeOf<NativeDenseTraversalStats>());
+        Assert.Equal(4 * word, Unsafe.SizeOf<NativeDenseTraversalStats>());
         int cpuClass = (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.CpuClass));
         Assert.Equal(Unsafe.SizeOf<NativeDenseMetadata>() + 3 * word, cpuClass);
         Assert.Equal(cpuClass + 4, (int)Marshal.OffsetOf<NativeDenseDescription>(nameof(NativeDenseDescription.GpuClass)));

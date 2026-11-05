@@ -136,13 +136,15 @@ final class Library {
                     POINTER.withName("keys"), POINTER.withName("scores"), POINTER.withName("offsets"))
             .withName("usearch_matches_tape_view_t");
 
-    /** @c usearch_ram_options_t - the memory domains shards go to, their capacity, and the CPU class pinned. */
+    /** @c usearch_ram_options_t - the memory domains shards go to, their capacity, the CPU class pinned,
+     *  and the bytes a view's key tables may take on each domain. */
     static final StructLayout RAM_OPTIONS = MemoryLayout.structLayout(
                     POINTER.withName("data"),
                     SIZE.withName("count"),
                     SIZE.withName("shard_capacity"),
                     ENUM.withName("cpu_class"),
-                    padding())
+                    padding(),
+                    SIZE.withName("memory_limit"))
             .withName("usearch_ram_options_t");
 
     /** @c usearch_vram_options_t - the devices shards go to, their capacity, and the GPU class pinned. */
@@ -177,7 +179,10 @@ final class Library {
 
     /** @c usearch_traversal_stats_t - a pure output, fully overwritten by its call. */
     static final StructLayout TRAVERSAL_STATS = MemoryLayout.structLayout(
-                    SIZE.withName("visited_members"), SIZE.withName("computed_distances"), SIZE.withName("restarts"))
+                    SIZE.withName("visited_members"),
+                    SIZE.withName("computed_distances"),
+                    SIZE.withName("restarts"),
+                    SIZE.withName("missing_hints"))
             .withName("usearch_traversal_stats_t");
 
     /**

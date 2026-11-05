@@ -193,6 +193,9 @@ type DenseTraversalStats struct {
 	// Restarts counts starvation re-seedings - a graph-connectivity health signal rather than
 	// a cost counter.
 	Restarts uint
+	// MissingHints counts hint keys no shard held an entry under; zero unless a search was
+	// handed hints.
+	MissingHints uint
 }
 
 // Accumulate folds another call's telemetry into this one. Binding-only.
@@ -200,6 +203,7 @@ func (stats *DenseTraversalStats) Accumulate(other DenseTraversalStats) {
 	stats.VisitedMembers += other.VisitedMembers
 	stats.ComputedDistances += other.ComputedDistances
 	stats.Restarts += other.Restarts
+	stats.MissingHints += other.MissingHints
 }
 
 // DenseReachability is one reachability audit: the population it judged, and how much of it a

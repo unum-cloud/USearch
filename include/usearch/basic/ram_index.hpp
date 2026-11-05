@@ -446,6 +446,12 @@ struct traversal_context {
      *  first, while @c results keeps routing through every node the walk scored. */
     results_array_t admitted;
 
+    /** The nodes one walk takes as landmarks ahead of its random draws, in the order handed in. */
+    scratch_buffer<node_id_type_> hinted_ids;
+
+    /** One byte per hint key of the query in flight, set once any shard staged a node under it. */
+    scratch_buffer<u8_t> hinted_held;
+
     /** Running per-walk counters; calls report their share as snapshot deltas. */
     traversal_stats_t telemetry;
 
@@ -459,7 +465,8 @@ struct traversal_context {
         : results(scored_allocator_t(allocator)), frontier(scored_allocator_t(allocator)),
           visited(visits_allocator_t(allocator)), random_generator {seed}, staged_ids(allocator),
           staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator),
-          admitted(scored_allocator_t(allocator)), allocator(allocator) {}
+          admitted(scored_allocator_t(allocator)), hinted_ids(allocator), hinted_held(allocator), allocator(allocator) {
+    }
 };
 
 /** Node & element counts of the five columns a snapshot needs - what a container sizes. */
@@ -1022,6 +1029,9 @@ struct ram_index {
             return sized;
         if (status_t const sized = context.selected_neighbors.reserve(connectivity + 1); failed(sized)) return sized;
         if (status_t const sized = context.admitted.reserve(candidates_capacity); failed(sized)) return sized;
+        // A walk draws a list's worth of landmarks, which bounds the hints a query stages.
+        if (status_t const sized = context.hinted_ids.reserve(connectivity); failed(sized)) return sized;
+        if (status_t const sized = context.hinted_held.reserve(connectivity); failed(sized)) return sized;
         return context.reverse_ids.reserve(connectivity);
     }
 
@@ -2493,6 +2503,22 @@ struct ram_index {
         key_map_.find_each(key, static_cast<node_id_t>(size()), callback);
     }
 
+    /** Every published node below @p first_invisible_id stored under each of @p hints, in hint
+     *  order, staged into @c context.hinted_ids for a walk's seeds as far as its reservation
+     *  holds, marking in @c context.hinted_held, one byte per hint, each key holding one. */
+    template <typename context_type_>
+    std::span<node_id_t const> stage_hints_(std::span<key_t const> hints, node_id_t first_invisible_id,
+                                            context_type_& context) const noexcept {
+        context.hinted_ids.clear();
+        for (std::size_t hint = 0; hint != hints.size(); ++hint)
+            key_map_.find_each(hints[hint], first_invisible_id, [&](node_id_t node_id) noexcept {
+                context.hinted_held[hint] = 1;
+                if (context.hinted_ids.size() != context.hinted_ids.capacity())
+                    context.hinted_ids.push_back_reserved(node_id);
+            });
+        return to_span(context.hinted_ids);
+    }
+
     /** Whether at least one published node exists under @p key, stopping at the first. */
     bool contains(key_t const& key) const noexcept { return key_map_.contains(key, static_cast<node_id_t>(size())); }
 
@@ -3597,8 +3623,8 @@ struct ram_index {
               typename fold_type_>
     expected<walk_step_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
                                             admission_type_ const& admission, std::size_t wanted,
-                                            std::size_t expansion_factor, context_type_& context,
-                                            fold_type_&& fold) const noexcept {
+                                            std::size_t expansion_factor, context_type_& context, fold_type_&& fold,
+                                            std::span<node_id_t const>& seeds) const noexcept {
         if (status_t const seen = context.visited.reserve(context.visited.size() + wanted); failed(seen)) {
             ++context.telemetry.saturated_walks;
             return {walk_step_t::exhausted_k, seen};
@@ -3610,12 +3636,21 @@ struct ram_index {
         context.staged_ids.clear();
         while (context.staged_ids.size() != wanted &&
                context.visited.size() < static_cast<std::size_t>(sampling_bound - sampling_first)) {
-            node_id_t draw = sampling_first +
-                             uniform_below<node_id_t> {sampling_bound - sampling_first}(context.random_generator);
-            while (context.visited.contains(draw)) draw = draw + 1 == sampling_bound ? sampling_first : draw + 1;
-            if (!admission.admits(draw)) {
-                if (++unwired_draws == sampling_bound - admission.first_invisible_id) break;
-                continue;
+            node_id_t draw;
+            // Caller-staged seeds go first, each taken once and skipped when unadmitted or visited.
+            if (!seeds.empty()) {
+                draw = seeds.front();
+                seeds = seeds.subspan(1);
+                if (!admission.admits(draw) || context.visited.contains(draw)) continue;
+            }
+            else {
+                draw = sampling_first +
+                       uniform_below<node_id_t> {sampling_bound - sampling_first}(context.random_generator);
+                while (context.visited.contains(draw)) draw = draw + 1 == sampling_bound ? sampling_first : draw + 1;
+                if (!admission.admits(draw)) {
+                    if (++unwired_draws == sampling_bound - admission.first_invisible_id) break;
+                    continue;
+                }
             }
             [[maybe_unused]] membership_t const marked = context.visited.insert(draw);
             context.staged_ids.push_back_reserved(draw);
@@ -3794,14 +3829,15 @@ struct ram_index {
     }
 
     /** The walk behind every search below the watermark @p first_invisible_id the caller took: the
-     *  index's own, or one consistent across shards. A certified @p synchronization_ compiles the
-     *  node locks out, and its caller proves the certification. */
+     *  index's own, or one consistent across shards, seeded by @p hinted ahead of its random draws.
+     *  A certified @p synchronization_ compiles the node locks out, its caller proving it. */
     template <synchronization_t synchronization_, typename metric_type_, typename fold_type_, typename stopping_type_,
               typename context_allocator_type_, typename query_type_>
     expected<search_result_t> fold_walk_below_(query_type_ const& query, metric_type_& metric, fold_type_&& fold,
                                                stopping_type_ const& stopping,
                                                traversal_context_over<context_allocator_type_>& context,
-                                               search_config_t config, node_id_t first_invisible_id) noexcept {
+                                               search_config_t config, node_id_t first_invisible_id,
+                                               std::span<node_id_t const> hinted = {}) noexcept {
         std::size_t const widest_list = connectivity();
         insert_config_t const walk = resolved_config_({config.expansion_factor}, widest_list);
         if (status_t const sized = reserve_traversal(context, widest_list, walk); failed(sized)) return {{}, sized};
@@ -3813,7 +3849,7 @@ struct ram_index {
 
         traversal_stats_t const telemetry_before = context.telemetry;
         search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                         widest_list, stopping, context, fold);
+                                         widest_list, stopping, context, fold, hinted);
 
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
@@ -3835,13 +3871,13 @@ struct ram_index {
      *  thinner neighbor list regardless, and a search reports the count so the caller can widen the
      *  scratch. Frontier starvation with unfilled candidates re-seeds and counts a restart. The
      *  frontier-admission rule: a candidate enters the frontier iff it improved the results, or the
-     *  frontier would otherwise be empty - the seedings.
+     *  frontier would otherwise be empty - the seedings, which take @p seeds ahead of random draws.
      */
     template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
               typename stopping_type_, typename context_type_, typename fold_type_>
     void search_around_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
                         std::size_t expansion_factor, std::size_t connectivity, stopping_type_ const& stopping,
-                        context_type_& context, fold_type_&& fold) noexcept {
+                        context_type_& context, fold_type_&& fold, std::span<node_id_t const> seeds = {}) noexcept {
         // A round expands the nodes whose neighbors fill a walk's candidates, as `round_capacity`
         // sized.
         std::size_t const filling_nodes = divide_round_up(expansion_factor, connectivity);
@@ -3853,7 +3889,7 @@ struct ram_index {
                 if (stopping.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
                 expected<walk_step_t> const seeded = sample_landmarks_(query, metric, admission, connectivity,
-                                                                       expansion_factor, context, fold);
+                                                                       expansion_factor, context, fold, seeds);
                 if (failed(seeded.status) || seeded.value != walk_step_t::advanced_k) return;
                 context.telemetry.restarts += restarting;
                 continue;

@@ -9,13 +9,14 @@
  *  Each cell builds one index the way a binding does, through a session of its residency, and
  *  checks what a caller observes. The vectors land under their keys across the shards; every key
  *  counts once and reads back; nine in ten vectors find themselves first, and a walk keeps nine in
- *  ten of the exact scan's top ten; a predicate admits only what it admits; refinements settle, an
- *  audit reaches every entry, cursors walk every entry and a sample draws distinct ones; the index
- *  saves into memory and back, and into every residency and as a view, and an NVMe view serves the
- *  same searches, audits, walks and samples and refuses every write; a refinement handle holds the
- *  index closed while its cancelled pulls carry their totals on; a donor absorbs whole; a RAM index
- *  compacts into one shard; the index splits into two with every key in one part; a cleared index
- *  holds nothing and ends a cursor opened before it; every metric's name reads back.
+ *  ten of the exact scan's top ten; a predicate admits only what it admits; one search's matches
+ *  hint the next, counting the keys no entry holds; refinements settle, an audit reaches every
+ *  entry, cursors walk every entry and a sample draws distinct ones; the index saves into memory
+ *  and back, and into every residency and as a view, and an NVMe view serves the same searches,
+ *  audits, walks and samples and refuses every write; a refinement handle holds the index closed
+ *  while its cancelled pulls carry their totals on; a donor absorbs whole; a RAM index compacts
+ *  into one shard; the index splits into two with every key in one part; a cleared index holds
+ *  nothing and ends a cursor opened before it; every metric's name reads back.
  */
 #include <cstring> // `std::memcmp` - the keys' order
 
@@ -145,7 +146,11 @@ static std::size_t expect_compact(handle<dense_verbs_t>& index, std::size_t coun
 /** One cell of the dense diagonal, named @p name, as the file's docblock describes. */
 static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t const& settings,
                                          std::string const& name) {
-    session_t session = open_session(settings_of(settings, cell), cell.cpu_class);
+    // A view holds a key table, so its key verbs and hints probe it rather than scan.
+    settings_t cell_settings = settings_of(settings, cell);
+    if (cell.residency == usearch_residency_nvme_k)
+        cell_settings.nvme_ram.value = std::numeric_limits<std::size_t>::max();
+    session_t session = open_session(cell_settings, cell.cpu_class);
     if (!session) return 1;
     u64_t const seed = stream_key(settings.seed, name);
     bool const binary = cell.scalar == usearch_scalar_u1x8_k;
@@ -162,6 +167,9 @@ static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t co
     failures += expect_self_recall(index, rows, dense_rows_k);
     failures += expect_walk_recall(index, rows, dense_queries_k, dense_expansion_k, 0.9);
     failures += expect_predicate(index, rows, dense_rows_k);
+    failures += expect_hints(
+        index, rows, dense_queries_k, dense_expansion_k,
+        cell.residency == usearch_residency_vram_k ? usearch_status_unsupported_k : usearch_status_success_k);
     failures += expect_refined(index, rows, dense_queries_k, dense_expansion_k, usearch_status_success_k);
     failures += expect_health(index, dense_rows_k);
     failures += expect_cursor(index, dense_rows_k);

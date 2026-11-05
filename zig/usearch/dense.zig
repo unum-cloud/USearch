@@ -192,6 +192,8 @@ pub const DenseTraversalStats = extern struct {
     computed_distances: usize = 0,
     /// Starvation restarts - a graph-connectivity health signal rather than a cost counter.
     restarts: usize = 0,
+    /// Hint keys no shard held an entry under; zero unless a search was handed hints.
+    missing_hints: usize = 0,
 };
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.
@@ -546,6 +548,7 @@ const usearch_dense_view_nvme_t = extern struct {
     completion: Completion,
     path: BytesView,
     nvme: usearch_nvme_options_t,
+    ram: ?*const usearch_ram_options_t = null,
 };
 
 const usearch_dense_reserve_t = extern struct {
@@ -608,6 +611,7 @@ const usearch_dense_search_t = extern struct {
     expansion_factor: usize,
     traversal: Traversal,
     predicate: Predicate,
+    hints: ?*const usearch_matches_view_t = null,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
@@ -834,6 +838,7 @@ const usearch_dense_maxsim_t = extern struct {
     expansion_factor: usize,
     traversal: Traversal = .walk,
     predicate: Predicate = .{},
+    hints: ?*const usearch_matches_view_t = null,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };

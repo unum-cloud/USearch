@@ -706,6 +706,8 @@ struct ram_indexes {
      *      nodes through their records, or @c dummy_predicate_t for an unpredicated walk.
      *  @param[in,out] metric This thread's scoring instance.
      *  @param[in,out] context The calling thread's scratch & telemetry over any allocator.
+     *  @param[in] hints Optional keys whose nodes every shard's walk takes as landmarks ahead of
+     *      its random draws, in hint order; a key no shard holds counts as a missing hint.
      *  @return The matches merged.
      *
      *  @par Statuses:
@@ -716,16 +718,22 @@ struct ram_indexes {
     expected<std::size_t> search_if(query_type_ const& query, std::span<node_id_t const> watermarks,
                                     std::span<key_t> keys, std::span<distance_t> distances, search_config_t config,
                                     relate_type_ const& relate, predicate_type_& predicate, metric_type_& metric,
-                                    traversal_context_over<context_allocator_type_>& context) noexcept {
+                                    traversal_context_over<context_allocator_type_>& context,
+                                    std::span<key_t const> hints = {}) noexcept {
         using relation_t = std::invoke_result_t<relate_type_ const&, index_t const&>;
-        return merge_shards_(
+        // A query takes a landmark list's worth of keys, as the context reserved; every shard's
+        // staging marks the keys it held, and the keys none marked are missing.
+        std::span<key_t const> const taken = hints.first(min_of(hints.size(), context.hinted_held.capacity()));
+        if (failed(context.hinted_held.resize(taken.size()))) return {0, status_t::bad_alloc_k};
+        expected<std::size_t> const merged = merge_shards_(
             watermarks, keys, distances,
             [&](index_t& one, node_id_t watermark, std::size_t) noexcept -> expected<std::span<scored_node_t const>> {
+                std::span<node_id_t const> const hinted = one.stage_hints_(taken, watermark, context);
                 if constexpr (std::is_same_v<relation_t, dummy_predicate_t> &&
                               std::is_same_v<predicate_type_, dummy_predicate_t>) {
                     status_t const walked = one.template fold_walk_below_<synchronization_t::concurrent_k>(
                                                    query, metric, dummy_fold_t {}, context.results, context, config,
-                                                   watermark)
+                                                   watermark, hinted)
                                                 .status;
                     return {ranking_of_(context.results), walked};
                 }
@@ -735,11 +743,14 @@ struct ram_indexes {
                     context.admitted.clear();
                     predicate_fold fold {relation, admits, context.admitted, one.non_zero_expansion_factor(config)};
                     status_t const walked = one.template fold_walk_below_<synchronization_t::concurrent_k>(
-                                                   query, metric, fold, context.admitted, context, config, watermark)
+                                                   query, metric, fold, context.admitted, context, config, watermark,
+                                                   hinted)
                                                 .status;
                     return {ranking_of_(context.admitted), walked};
                 }
             });
+        for (u8_t const held : context.hinted_held) context.telemetry.missing_hints += !held;
+        return merged;
     }
 
     /**
@@ -753,8 +764,9 @@ struct ram_indexes {
     expected<std::size_t> search_if(query_type_ const& query, std::span<node_id_t const> watermarks,
                                     std::span<key_t> keys, std::span<distance_t> distances, search_config_t config,
                                     predicate_type_& predicate, metric_type_& metric,
-                                    traversal_context_over<context_allocator_type_>& context) noexcept {
-        return search_if(query, watermarks, keys, distances, config, unrelated_t {}, predicate, metric, context);
+                                    traversal_context_over<context_allocator_type_>& context,
+                                    std::span<key_t const> hints = {}) noexcept {
+        return search_if(query, watermarks, keys, distances, config, unrelated_t {}, predicate, metric, context, hints);
     }
 
     /** The exact sibling of @c search_if: every entry below each shard's watermark scored as

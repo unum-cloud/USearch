@@ -247,6 +247,39 @@ struct ranked_matches_span {
     std::span<std::size_t> counts;
 };
 
+/** The keys each query's walk starts from ahead of its random landmarks: up to as many per query
+ *  as the matrix is wide, and how many each query holds. It is the read-only half of a ranking, so
+ *  one search's matches hint the next. Empty counts hint nothing. */
+template <typename key_type_>
+struct ranked_hints_view {
+    nk::matrix_view<key_type_> keys;
+    std::span<std::size_t const> counts;
+};
+
+/** The hints of query @p query: the first @c counts[query] keys of its row, or none when @p hints
+ *  is empty. */
+template <typename key_type_>
+std::span<key_type_ const> hints_of(ranked_hints_view<key_type_> const& hints, std::size_t query) noexcept {
+    if (hints.counts.empty()) return {};
+    return to_span(hints.keys.row(query).as_vector()).first(hints.counts[query]);
+}
+
+/**
+ *  @brief Why @p hints cannot seed @p queries queries.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k Non-empty @p hints hold other than one row per query.
+ *  - @c shape_mismatch_k A query counts more keys than the hints are wide.
+ */
+template <typename key_type_>
+status_t hints_refusal(ranked_hints_view<key_type_> const& hints, std::size_t queries) noexcept {
+    if (hints.counts.empty()) return status_t::success_k;
+    if (hints.counts.size() != queries || hints.keys.extent(0) != queries) return status_t::config_mismatch_k;
+    for (std::size_t const count : hints.counts)
+        if (count > hints.keys.extent(1)) return status_t::shape_mismatch_k;
+    return status_t::success_k;
+}
+
 /**
  *  @brief Where a product or MaxSim writes, in host or device memory: each query's keys and
  *      scores back to back from its offset, one more offset than queries, the first offset

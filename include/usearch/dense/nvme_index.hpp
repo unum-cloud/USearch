@@ -199,6 +199,9 @@ struct nvme_index {
         /** Walks a scratch refusal ended early, their rankings short. */
         std::size_t saturated_walks = 0;
 
+        /** Hint keys no shard held a row under. */
+        std::size_t missing_hints = 0;
+
         /** Neighbors rows read to expand frontiers. */
         nvme_reads_t neighbor_reads;
 
@@ -351,7 +354,8 @@ struct nvme_index {
         case nvme_purpose_t::score_k: return part.values_begin + u64_t(flight.node) * part.value_row_bytes;
         case nvme_purpose_t::expand_k:
             return part.neighbors_begin + u64_t(flight.node) * part.connectivity * sizeof(node_id_t);
-        case nvme_purpose_t::key_k: return part.keys_begin + u64_t(flight.node) * part.key_row_bytes;
+        case nvme_purpose_t::key_k:
+        case nvme_purpose_t::confirm_k: return part.keys_begin + u64_t(flight.node) * part.key_row_bytes;
         }
         return 0;
     }
@@ -361,7 +365,8 @@ struct nvme_index {
         switch (purpose) {
         case nvme_purpose_t::score_k: return part.value_row_bytes;
         case nvme_purpose_t::expand_k: return part.connectivity * sizeof(node_id_t);
-        case nvme_purpose_t::key_k: return part.key_row_bytes;
+        case nvme_purpose_t::key_k:
+        case nvme_purpose_t::confirm_k: return part.key_row_bytes;
         }
         return 0;
     }
@@ -480,6 +485,14 @@ struct nvme_index {
 
         /** Draws this walk's landmarks. */
         splitmix64_t random_generator;
+
+        /** One landmark slot per seed it may take, carved with the walk: as many as it draws
+         *  landmarks. */
+        std::span<nvme_seed<node_id_t>> seed_slots;
+
+        /** The seeds still to take ahead of its draws, front first: its hints' candidates while
+         *  they confirm, then the confirmed ones. */
+        std::span<nvme_seed<node_id_t>> seeds;
 
         /** The shard walked, positional among the call's shards. */
         u32_t shard = 0;
@@ -601,6 +614,8 @@ struct nvme_index {
                                          frontier_queue_t::memory_usage(shape.queue_sizes.frontier)) +
                                      slice_t::reserved_bytes(visited_set_t::memory_usage(shape.queue_sizes.visited));
         shape.scratch_bytes = walks * per_walk + slice_t::reserved_bytes(walks * sizeof(walk_t)) +
+                              walks *
+                                  slice_t::reserved_bytes(nvme_landmarks(connectivity) * sizeof(nvme_seed<node_id_t>)) +
                               slice_t::reserved_bytes(queries * sizeof(query_type_)) +
                               queries * slice_t::reserved_bytes(staged_bytes) +
                               slice_t::reserved_bytes(queries * sizeof(nvme_query_slot_t)) +

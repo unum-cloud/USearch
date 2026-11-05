@@ -133,6 +133,7 @@ inline void accumulate_stats(usearch_traversal_stats_t* stats, result_type_ cons
         stats->visited_members += result.visited_members;
         stats->computed_distances += result.computed_distances;
         stats->restarts += result.restarts;
+        if constexpr (requires { result.missing_hints; }) stats->missing_hints += result.missing_hints;
     }
 }
 
@@ -147,6 +148,7 @@ inline traversal_stats_t traversal_stats_of(result_type_ const& result) noexcept
         stats.computed_distances = result.computed_distances;
         stats.visited_members = result.visited_members;
         stats.restarts = result.restarts;
+        if constexpr (requires { result.missing_hints; }) stats.missing_hints = result.missing_hints;
         return stats;
     }
 }
@@ -1170,17 +1172,21 @@ constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
 /** Residency discrimination off the alternative's own executor type - no second tag exists to
  *  disagree with the variant. */
 template <typename multi_type_>
-inline constexpr bool is_ram_index = std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
+inline constexpr bool is_ram_index = requires {
+    requires std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
+};
 
 /** Whether an executor drives GPUs: every vendor's names the vendor it drives. */
 template <typename executor_type_>
 inline constexpr bool is_gpu_executor = requires { executor_type_::vendor_k; };
 
 template <typename multi_type_>
-inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::executor_t>;
+inline constexpr bool is_vram_index = requires { requires is_gpu_executor<typename multi_type_::executor_t>; };
 
 template <typename multi_type_>
-inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
+inline constexpr bool is_nvme_index = requires {
+    requires std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
+};
 
 /** Where a variant runs and which executor it takes, the dense and basic modalities alike. */
 enum class vendored_residency_t : u32_t {
@@ -1831,6 +1837,18 @@ class call_outcome_t {
     usearch_arena_t arena_;
     usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
 };
+
+/** Whether the C hints @p given of @p count queries refuse to parse, once @p outcome records why;
+ *  @c NULL hints parse as none. */
+inline bool rejects_hints(usearch_matches_view_t const* given, std::size_t count, usearch_outcome_t* outcome) noexcept {
+    if (!given || !count) return false;
+    if (!given->counts || (given->columns && !given->keys))
+        return !propagate_error(usearch_status_invalid_argument_k, outcome, "The hints must name keys and counts");
+    for (std::size_t query = 0; query != count; ++query)
+        if (given->counts[query] > given->columns)
+            return !propagate_error(usearch_status_shape_mismatch_k, outcome, "A query counts more hints than columns");
+    return false;
+}
 
 /** Where a ranked run is written inside a claimed arena: @c wanted keys and scores per query, and a
  *  count per query. */

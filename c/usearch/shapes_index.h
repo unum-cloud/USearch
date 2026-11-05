@@ -805,6 +805,13 @@ typedef struct usearch_shapes_search_t {
     /** The @b optional predicate, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
 
+    /** The @b optional keys each query's walk starts from ahead of its random landmarks, one row of
+     *  @c counts[query] keys per query, as a search writes its matches, at most one per landmark a
+     *  walk draws, a neighbor list's worth; scores are not read, a scan ignores them, and keys no
+     *  entry holds are skipped and counted in @c stats. RAM walks alone take them, and other
+     *  residencies answer @c usearch_status_unsupported_k. */
+    usearch_matches_view_t const* hints;
+
     /** The @b optional handler, called with queries resolved and their count. */
     usearch_progress_t progress;
 
@@ -822,13 +829,17 @@ typedef struct usearch_shapes_search_t {
  *  @ref shapes_index_concurrency
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
- *  the traversal, so recall does not collapse at low selectivity.
+ *  the traversal, so recall does not collapse at low selectivity. @c hints hand each query's walk
+ *  landmarks the caller already trusts, such as the matches of the same keys in a cheaper index.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  *
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  - @c usearch_status_unsupported_k A scan of a VRAM handle, or a @c predicate on one.
+ *  - @c usearch_status_unsupported_k A scan of a VRAM handle, a @c predicate on one, or @c hints
+ *    on any handle but a RAM one.
+ *  - @c usearch_status_invalid_argument_k @c hints naming no counts, or columns but no keys.
+ *  - @c usearch_status_shape_mismatch_k A hinted query counts more keys than the hints' columns.
  */
 USEARCH_EXPORT void usearch_shapes_search(usearch_shapes_search_t* arguments);
 

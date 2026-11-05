@@ -2606,6 +2606,8 @@ internal struct NativeDenseTraversalStats
     public nuint ComputedDistances;
     /// <summary>Starvation restarts after the frontier drained prematurely.</summary>
     public nuint Restarts;
+    /// <summary>Hint keys no shard held an entry under; zero unless a search was handed hints.</summary>
+    public nuint MissingHints;
 }
 
 /// <summary>One reachability audit, laid out as <c>usearch_reachability_t</c>.</summary>
@@ -2734,6 +2736,7 @@ internal unsafe struct NativeDenseViewNvme
     public Completion Completion;
     public NativeBytesView Path;
     public NativeNvmeOptions Nvme;
+    public NativeRamOptions* Ram;
 }
 
 /// <summary>The arguments of <c>usearch_dense_reserve</c>.</summary>
@@ -2814,6 +2817,7 @@ internal unsafe struct NativeDenseSearch
     public nuint ExpansionFactor;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeMatchesView* Hints;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
@@ -3081,6 +3085,7 @@ internal unsafe struct NativeDenseMaxsim
     public nuint ExpansionFactor;
     public Traversal Traversal;
     public NativePredicate Predicate;
+    public NativeMatchesView* Hints;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }

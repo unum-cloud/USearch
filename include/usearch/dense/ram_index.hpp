@@ -695,6 +695,14 @@ struct traversal_context {
     /** Neighbor IDs of one staged node - the input of a re-selection, never its output. */
     ids_tensor_t staged_ids;
 
+    /** The nodes one walk takes as landmarks ahead of its random draws, in the order handed in:
+     *  one per landmark a walk draws, reserved with the context. */
+    ids_tensor_t hinted_ids;
+
+    /** One byte per hint key of the query in flight, set once any shard staged a node under it: a
+     *  query takes at most one key per landmark, reserved with the context. */
+    bytes_tensor_t hinted_held;
+
     /** The staging surface: the staged rows during scoring, then the kept prefix of the running
      *  selection - scoring drains the rows before any selection writes. */
     views_tensor_t staged_vectors;
@@ -736,6 +744,9 @@ struct traversal_context {
     /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
     std::size_t saturated_walks = 0;
 
+    /** Hint keys no shard held a node under. */
+    std::size_t missing_hints = 0;
+
     /** Rows a walk keeps popped ahead of its merges, from @ref walk_width; one walks the plain
      *  greedy order. */
     std::size_t walk_width = 1;
@@ -749,7 +760,8 @@ struct traversal_context {
                 restarts,
                 saturated_walks,
                 computed_distances_in_refines,
-                computed_distances_in_reverse_refines};
+                computed_distances_in_reverse_refines,
+                missing_hints};
     }
     traversal_context(traversal_context const&) noexcept = delete;
     traversal_context& operator=(traversal_context const&) noexcept = delete;
@@ -759,7 +771,8 @@ struct traversal_context {
     traversal_context(allocator_t alloc) noexcept
         : results(candidates_allocator_t(alloc)), refining_candidates(candidates_allocator_t(alloc)),
           frontier(candidates_allocator_t(alloc)), ahead(candidates_allocator_t(alloc)),
-          visited(visits_allocator_t(alloc)), random_generator(), allocator_(alloc) {}
+          visited(visits_allocator_t(alloc)), random_generator(), hinted_ids(ids_allocator_t(alloc)),
+          hinted_held(visits_allocator_t(alloc)), allocator_(alloc) {}
     traversal_context(traversal_context&&) = default;
     traversal_context& operator=(traversal_context&&) = default;
 
@@ -1057,6 +1070,28 @@ struct ram_index {
         keyed_.find_each(key, static_cast<node_id_t>(size()), callback);
     }
 
+    /** Landmarks one walk draws before it expands: a row's worth, in whole quads of the scoring
+     *  kernels, which also bounds the hint keys a query takes and the nodes they seed. */
+    std::size_t landmarks_count() const noexcept {
+        return divide_round_up<std::size_t>(connectivity(), quad_lanes_k) * quad_lanes_k;
+    }
+
+    /**
+     *  @brief Stages into @p slots the published nodes below @p first_invisible_id stored under
+     *      each of @p hints, in hint order, as many as fit, marking in @p held each hint held.
+     *  @return The nodes staged.
+     */
+    std::size_t stage_hints_(std::span<key_t const> hints, node_id_t first_invisible_id, std::span<node_id_t> slots,
+                             bytes_span_t held) const noexcept {
+        std::size_t staged_count = 0;
+        for (std::size_t hint = 0; hint != hints.size(); ++hint)
+            keyed_.find_each(hints[hint], first_invisible_id, [&](node_id_t node) noexcept {
+                held[hint] = std::byte {1};
+                if (staged_count != slots.size()) slots[staged_count++] = node;
+            });
+        return staged_count;
+    }
+
     /** Published nodes stored under @p key, as of one acquire of the watermark. */
     std::size_t count(key_t const& key) const noexcept { return keyed_.count(key, static_cast<node_id_t>(size())); }
 
@@ -1253,14 +1288,15 @@ struct ram_index {
         using context_t = traversal_context_t;
         using arena_t = arena_allocator<std::byte>;
         queue_sizes_t const sizes = queue_sizes_(expansion_factor, node_connectivity);
-        std::size_t bytes = arena_t::reserved_bytes(context_t::results_array_t::memory_usage(sizes.results)) +
-                            arena_t::reserved_bytes(
-                                context_t::results_array_t::memory_usage(sizes.refining_candidates)) +
-                            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.frontier)) +
-                            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.ahead)) +
-                            arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
-                            context_t::neighbors_memory_usage(node_connectivity) +
-                            staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions);
+        std::size_t bytes =
+            arena_t::reserved_bytes(context_t::results_array_t::memory_usage(sizes.results)) +
+            arena_t::reserved_bytes(context_t::results_array_t::memory_usage(sizes.refining_candidates)) +
+            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.frontier)) +
+            arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.ahead)) +
+            arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
+            context_t::neighbors_memory_usage(node_connectivity) +
+            arena_t::reserved_bytes(landmarks_count() * sizeof(node_id_t)) +
+            arena_t::reserved_bytes(landmarks_count()) + staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions);
         return bytes;
     }
 
@@ -1286,6 +1322,11 @@ struct ram_index {
             failed(sized))
             return sized;
         if (status_t const sized = context.reserve_neighbors(node_connectivity); failed(sized)) return sized;
+        // Hints stage into these without growing them.
+        std::size_t const landmarks = landmarks_count();
+        if (nk::failed(context.hinted_ids.reserve(landmarks)) || nk::failed(context.hinted_held.reserve(landmarks)) ||
+            nk::failed(context.hinted_ids.resize({landmarks})))
+            return status_t::bad_alloc_k;
         return context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, geometry_.dimensions));
     }
 
@@ -2625,6 +2666,9 @@ struct ram_index {
 
         /** One when a scratch refusal ended the walk early, leaving the ranking short. */
         std::size_t saturated_walks = 0;
+
+        /** Hint keys no shard held a node under. */
+        std::size_t missing_hints = 0;
     };
 
     /**
@@ -4308,11 +4352,13 @@ struct ram_index {
 #pragma region Search
 
     /** The body of @c search_typed below the watermark snapshot @p first_invisible_id the caller took:
-     *  the index's own, or one consistent across shards. */
+     *  the index's own, or one consistent across shards. The @p hinted nodes take landmark slots
+     *  ahead of the random draws. */
     template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
     expected<search_result_t> search_below_(vector_view_t query_vector, traversal_context_t& context,
                                             search_config_t config, fold_type_&& fold, results_array_t const& bound,
-                                            rescoring_type_ const& rescoring, node_id_t first_invisible_id) noexcept {
+                                            rescoring_type_ const& rescoring, node_id_t first_invisible_id,
+                                            std::span<node_id_t const> hinted) noexcept {
         if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
         if (query_vector.size() != geometry_.dimensions) return {{}, status_t::config_mismatch_k};
@@ -4336,9 +4382,9 @@ struct ram_index {
         std::size_t const saturated_walks_before = context.saturated_walks;
 
         vector_norms_t const query_norms = norms(query_vector);
-        status_t const walked = search_around<synchronization_>(query_vector, query_norms,
-                                                                snapshot_admission_t {first_invisible_id},
-                                                                expansion_factor, context, bound, fold, {}, rescoring);
+        status_t const walked = search_around<synchronization_>(
+            query_vector, query_norms, snapshot_admission_t {first_invisible_id}, expansion_factor, context, bound,
+            fold, hinted, rescoring);
 
         // A refused walk still ranked what it reached; the counter says the ranking is short
         // because scratch ran out, not because the graph had nothing better.
@@ -4352,24 +4398,26 @@ struct ram_index {
         return {result, status_t::success_k};
     }
 
-    /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_below_, by the contract @p config
-     *  names, below the watermark snapshot @p first_invisible_id and bounded by @c context.results. */
+    /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_below_, by the
+     *  contract @p config names, below the watermark snapshot @p first_invisible_id, bounded by
+     *  @c context.results and seeded by @p hinted ahead of its random draws. */
     template <typename fold_type_, typename rescoring_type_>
     expected<search_result_t> walk_(vector_view_t query_vector, fold_type_&& fold, rescoring_type_ const& rescoring,
-                                    traversal_context_t& context, search_config_t config,
-                                    node_id_t first_invisible_id) noexcept {
+                                    traversal_context_t& context, search_config_t config, node_id_t first_invisible_id,
+                                    std::span<node_id_t const> hinted = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
             return search_below_<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
-                                                                 rescoring, first_invisible_id);
+                                                                 rescoring, first_invisible_id, hinted);
         return search_below_<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
-                                                              rescoring, first_invisible_id);
+                                                              rescoring, first_invisible_id, hinted);
     }
 
-    /** The filtered walk behind @c search_if, below the watermark snapshot @p first_invisible_id. */
+    /** The filtered walk behind @c search_if, below the watermark snapshot @p first_invisible_id,
+     *  seeded by @p hinted. */
     template <typename predicate_type_>
     expected<search_result_t> walk_if_(vector_view_t query_vector, predicate_type_& predicate,
                                        traversal_context_t& context, search_config_t config,
-                                       node_id_t first_invisible_id) noexcept {
+                                       node_id_t first_invisible_id, std::span<node_id_t const> hinted = {}) noexcept {
         // Matches admit into the re-selection buffer, idle during any search and reserved beside the
         // the walk's candidates; it stops the walk, then swaps into `context.results`.
         context.refining_candidates.clear();
@@ -4379,10 +4427,10 @@ struct ram_index {
             config.synchronization != synchronization_t::concurrent_k
                 ? search_below_<synchronization_t::immutable_k>(query_vector, context, config, fold,
                                                                 context.refining_candidates, dummy_rescoring_t {},
-                                                                first_invisible_id)
+                                                                first_invisible_id, hinted)
                 : search_below_<synchronization_t::concurrent_k>(query_vector, context, config, fold,
                                                                  context.refining_candidates, dummy_rescoring_t {},
-                                                                 first_invisible_id);
+                                                                 first_invisible_id, hinted);
         std::swap(context.results, context.refining_candidates);
         return result;
     }

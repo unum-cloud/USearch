@@ -687,6 +687,9 @@ typedef struct usearch_traversal_stats_t {
     /** Starvation restarts - re-seedings after the frontier drained prematurely,
      *  and a graph-connectivity health signal rather than a cost counter. */
     size_t restarts;
+
+    /** Hint keys no shard held an entry under; zero unless a search was handed hints. */
+    size_t missing_hints;
 } usearch_traversal_stats_t;
 
 /** One reachability audit: the population it judged, and how much of it a search reaches. */
@@ -764,6 +767,9 @@ typedef struct usearch_ram_options_t {
     /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
      *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
     usearch_cpu_class_t cpu_class;
+
+    /** Bytes an NVMe view's key tables may hold on each named domain; zero sets no ceiling. */
+    size_t memory_limit;
 } usearch_ram_options_t;
 
 /**

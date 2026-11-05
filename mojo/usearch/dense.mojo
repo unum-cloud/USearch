@@ -166,12 +166,15 @@ struct DenseTraversalStats(ImplicitlyCopyable):
     """Distances computed while resolving the batch, diversity re-selections included."""
     var restarts: c_size_t
     """Re-seedings after the frontier drained prematurely - a connectivity health signal."""
+    var missing_hints: c_size_t
+    """Hint keys no shard held an entry under; zero unless a search was handed hints."""
 
     def __init__(out self):
         """Zeroes every counter, so an unwritten slot reads as an untaken walk."""
         self.visited_members = c_size_t(0)
         self.computed_distances = c_size_t(0)
         self.restarts = c_size_t(0)
+        self.missing_hints = c_size_t(0)
 
 
 @fieldwise_init
@@ -962,6 +965,7 @@ struct DenseViewNvmeArguments(ImplicitlyCopyable):
     var completion: Completion
     var path: BytesView[ImmUntrackedOrigin]
     var nvme: NvmeOptions[ImmUntrackedOrigin]
+    var ram: Address
 
 
 @fieldwise_init
@@ -1112,6 +1116,7 @@ struct DenseSearchArguments(ImplicitlyCopyable):
     var expansion_factor: c_size_t
     var traversal: Traversal
     var predicate: PredicateArguments
+    var hints: Address
     var progress: ProgressArguments
     var stats: Address
 
@@ -1299,6 +1304,7 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var expansion_factor: c_size_t
     var traversal: Traversal
     var predicate: PredicateArguments
+    var hints: Address
     var progress: ProgressArguments
     var stats: Address
 
@@ -1908,6 +1914,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 c_size_t(self.expansion_factor),
                 self.traversal,
                 PredicateArguments(self.predicate, self.predicate_state, PredicateCost.CHEAP),
+                NULL_ADDRESS,
                 ProgressArguments(),
                 self.stats,
             ),
@@ -1966,6 +1973,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 c_size_t(self.expansion_factor),
                 Traversal.WALK,
                 PredicateArguments(NULL_ADDRESS, NULL_ADDRESS, PredicateCost.CHEAP),
+                NULL_ADDRESS,
                 ProgressArguments(),
                 self.stats,
             ),
@@ -2642,6 +2650,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 Completion.BLOCKING,
                 BytesView.of(path).untracked(),
                 nvme.untracked(),
+                NULL_ADDRESS,
             ),
             executor.library.symbols().dense_view_nvme,
         )

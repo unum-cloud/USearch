@@ -1314,6 +1314,9 @@ struct ram_indexes {
      *  @param[in,out] executor The threads; one query occupies one at a time.
      *  @param[in,out] traversals One context per executor thread, carved by the caller; the call
      *      reseeds and sizes each, and reports only what it spent.
+     *  @param[in] hints Optional keys per query whose nodes every shard's walk takes as landmarks
+     *      ahead of its random draws, in hint order; a key no shard holds is skipped and counted in
+     *      @c missing_hints, and a scan ignores them.
      *
      *  A thread that fails stops its own query and leaves the rest to finish; the first failure is
      *  what the merged result reports, and every other query's outputs stand.
@@ -1332,8 +1335,9 @@ struct ram_indexes {
     template <typename score_type_>
     expected<search_result_t> search(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                      search_config_t config, executor_t& executor,
-                                     std::span<traversal_context_t> traversals) noexcept {
-        return search_if(queries, matches, config, dummy_predicate_t {}, executor, traversals);
+                                     std::span<traversal_context_t> traversals,
+                                     ranked_hints_view<key_t> hints = {}) noexcept {
+        return search_if(queries, matches, config, dummy_predicate_t {}, executor, traversals, hints);
     }
 
     /**
@@ -1357,7 +1361,7 @@ struct ram_indexes {
     {
         if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return search_rows_(queries, heads, executor, traversals, config, matches.keys, matches.scores, matches.counts,
-                            dummy_predicate_t {});
+                            dummy_predicate_t {}, {});
     }
 
     /**
@@ -1370,6 +1374,7 @@ struct ram_indexes {
      *      and compiles the predicated machinery out.
      *  @param[in,out] executor The threads, as the batched @ref search takes them.
      *  @param[in,out] traversals One context per executor thread, as the batched @ref search takes.
+     *  @param[in] hints Optional keys per query seeding every walk, as in the batched @ref search.
      *
      *  Shards test node IDs, so each one's keys column translates before the predicate sees a
      *  candidate. A scan asks it only about rows closer than the worst match their query already
@@ -1388,7 +1393,8 @@ struct ram_indexes {
     template <typename score_type_, typename predicate_type_>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<traversal_context_t> traversals) noexcept {
+                                        std::span<traversal_context_t> traversals,
+                                        ranked_hints_view<key_t> hints = {}) noexcept {
         static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
@@ -1397,19 +1403,22 @@ struct ram_indexes {
             return scan_ranked_(queries, executor, traversals, config, matches.keys, matches.scores, matches.counts,
                                 predicate);
         return search_rows_(queries, dummy_heads_t {}, executor, traversals, config, matches.keys, matches.scores,
-                            matches.counts, predicate);
+                            matches.counts, predicate, hints);
     }
 
-    /** The filtered sibling for one aggregating predicate per thread, each gathering a walk's
-     *  @c walk_payload_t, so it serves walks alone and a scan answers @c config_mismatch_k.
+    /**
+     *  @brief The filtered sibling for one aggregating predicate per thread, each gathering a
+     *      walk's @c walk_payload_t, so it serves walks alone and a scan refuses.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p config names a scan.
      *  - @c uninitialized_k No shard is placed, or @p executor holds no pool
      *    or no workers.
      *  - @c config_mismatch_k The counts or rankings disagree with the batch, @p traversals holds
-     *    other than one context per thread, or the queries' width differs from the dimensions.
+     *    other than one context per thread, the queries' width differs from the dimensions, or
+     *    non-empty @p hints count other than one row per query.
      *  - @c unsupported_layout_k A ranking row is not contiguous.
+     *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
      *  - @c unsupported_k @p config names neither a walk nor a scan.
      *  - @c contended_k Another call holds @p executor, its pool runs another dispatch, or two
      *    destructive windows overlapped a query.
@@ -1420,10 +1429,11 @@ struct ram_indexes {
                                        walk_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<traversal_context_t> traversals) noexcept {
+                                        std::span<traversal_context_t> traversals,
+                                        ranked_hints_view<key_t> hints = {}) noexcept {
         if (config.traversal == traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
         return search_rows_(queries, dummy_heads_t {}, executor, traversals, config, matches.keys, matches.scores,
-                            matches.counts, predicate);
+                            matches.counts, predicate, hints);
     }
 
     /** The filtered sibling for one aggregating predicate per thread, each gathering a scan's
@@ -1444,7 +1454,8 @@ struct ram_indexes {
                                        scan_payload_t>
     expected<search_result_t> search_if(rows_view_t queries, ranked_matches_span<key_t, score_type_> matches,
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
-                                        std::span<traversal_context_t> traversals) noexcept {
+                                        std::span<traversal_context_t> traversals,
+                                        ranked_hints_view<key_t> = {}) noexcept {
         if (config.traversal != traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
         return scan_ranked_(queries, executor, traversals, config, matches.keys, matches.scores, matches.counts,
                             predicate);
@@ -1573,6 +1584,8 @@ struct ram_indexes {
      *  @param[in,out] executor The threads; one query occupies one at a time, end to end.
      *  @param[in,out] traversals One context per executor thread, as the batched @ref search takes;
      *      a query keeps its rows, maxima, ranking and candidates in its thread's staged queries.
+     *  @param[in] hints Optional keys per query whose nodes every row's walk takes as landmarks
+     *      ahead of its random draws, as the batched @ref search takes them; a scan ignores them.
      *
      *  Refused with @c shape_mismatch_k for a query without rows, and with @c config_mismatch_k
      *  for offsets past the rows, a @p scored or tape of another length, a ranking wider than the
@@ -1595,8 +1608,10 @@ struct ram_indexes {
     expected<search_result_t> maxsim(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                      std::span<std::size_t> scored, products_tape<key_t, score_type_> matches,
                                      maxsim_config_t config, executor_t& executor,
-                                     std::span<traversal_context_t> traversals) noexcept {
-        return maxsim_if(queries, query_offsets, scored, matches, config, dummy_predicate_t {}, executor, traversals);
+                                     std::span<traversal_context_t> traversals,
+                                     ranked_hints_view<key_t> hints = {}) noexcept {
+        return maxsim_if(queries, query_offsets, scored, matches, config, dummy_predicate_t {}, executor, traversals,
+                         hints);
     }
 
     /**
@@ -1614,25 +1629,28 @@ struct ram_indexes {
      *      @ref search_if asks it, a scan once per key and block of queries.
      *  @param[in,out] executor The threads, as @ref maxsim takes them.
      *  @param[in,out] traversals One context per executor thread, as the batched @ref search takes.
+     *  @param[in] hints Optional keys per query seeding every row's walk, as in @ref maxsim.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed, or @p executor holds no pool
      *    or no workers.
      *  - @c config_mismatch_k The shards do not walk by dot, @p query_offsets is empty or passes
-     *    the rows, @p scored or the tape differs in length from the queries, or a query keeps more
-     *    than the tape's stride.
+     *    the rows, @p scored, the tape or non-empty @p hints differ in length from the queries, or
+     *    a query keeps more than the tape's stride.
      *  - @c shape_mismatch_k A query holds no rows.
      *  - @c config_mismatch_k @p traversals holds other than one context per thread, or the rows'
      *    width differs from the dimensions.
      *  - @c contended_k Another call holds @p executor, its pool runs another dispatch, or a
      *    destructive window overlapped a block.
+     *  - @c shape_mismatch_k A query counts more @p hints than they are wide.
      *  - @c overflow_k A queue capacity wraps when rounded.
      */
     template <typename score_type_, typename predicate_type_>
     expected<search_result_t> maxsim_if(rows_view_t queries, std::span<std::size_t const> query_offsets,
                                         std::span<std::size_t> scored, products_tape<key_t, score_type_> matches,
                                         maxsim_config_t maxsim_config, predicate_type_&& predicate,
-                                        executor_t& executor, std::span<traversal_context_t> traversals) noexcept {
+                                        executor_t& executor, std::span<traversal_context_t> traversals,
+                                        ranked_hints_view<key_t> hints = {}) noexcept {
         static_assert((!aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, walk_payload_t> &&
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
@@ -1644,6 +1662,7 @@ struct ram_indexes {
             if (query_offsets[query + 1] <= query_offsets[query]) return {{}, status_t::shape_mismatch_k};
         if (query_offsets.back() > queries.rows) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = matches.refusal(queries_count, scored); failed(refusal)) return {{}, refusal};
+        if (status_t const refusal = hints_refusal(hints, queries_count); failed(refusal)) return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
 
         search_config_t config = maxsim_config.search;
@@ -1663,21 +1682,30 @@ struct ram_indexes {
         std::size_t const block_queries = index_t::has_tiles_k && nominating == traversal_t::scan_k
                                               ? divide_round_up(queries_count, threads)
                                               : 1;
+        // A walking query resolves its hints once, a landmark row of them per shard its rows walk.
+        std::size_t const hint_slots = hints.counts.empty() || nominating != traversal_t::walk_k
+                                           ? 0
+                                           : shards_[0].index->landmarks_count() * shards_count();
         std::size_t staged_bytes = 0;
         for (std::size_t first = 0; first < queries_count; first += block_queries) {
             std::size_t const taking = min_of(block_queries, queries_count - first);
             std::size_t const rows = query_offsets[first + taking] - query_offsets[first];
             if (capacity_of(rows) > stride) return {{}, status_t::config_mismatch_k};
             staged_bytes = max_of(staged_bytes, maxsim_staged_bytes_(queries.columns, rows, taking, nominating, config,
-                                                                     capacity_of(rows)));
+                                                                     capacity_of(rows), hint_slots));
         }
         auto maxsim_block = [&](std::size_t block, std::size_t thread, traversal_context_t& traversal,
                                 std::span<node_id_t const> watermarks, u64_t epoch) noexcept {
             std::size_t const first = block * block_queries, taking = min_of(block_queries, queries_count - first);
             std::size_t const rows = query_offsets[first + taking] - query_offsets[first];
+            ranked_hints_view<key_t> const block_hints =
+                hints.counts.empty()
+                    ? ranked_hints_view<key_t> {}
+                    : ranked_hints_view<key_t> {hints.keys(nk::range(first, first + taking), nk::slice),
+                                                hints.counts.subspan(first, taking)};
             return maxsim_block_(queries, query_offsets.subspan(first, taking + 1), first, nominating, config,
                                  capacity_of(rows), scored.subspan(first, taking), traversal, watermarks, epoch,
-                                 thread_predicate(predicate, thread), matches);
+                                 thread_predicate(predicate, thread), matches, block_hints, hint_slots);
         };
         std::size_t const candidates = max_of(index_t::round_capacity(connectivity()),
                                               index_t::chunk_schedule_t::nodes_in(0));
@@ -2587,11 +2615,12 @@ struct ram_indexes {
     }
 
     /** Bytes a MaxSim block of @p queries_count queries over @p rows rows of @p columns stages,
-     *  each ranking up to @p capacity keys, laid out as @c maxsim_block_ carves them, and from a
-     *  tile's columns of rows on, the @c tiled_fold_t past them. */
+     *  each ranking up to @p capacity keys, with @p hint_slots nodes its query's hints resolve to
+     *  and as many counts, laid out as @c maxsim_block_ carves them, and from a tile's columns of
+     *  rows on, the @c tiled_fold_t past them. */
     std::size_t maxsim_staged_bytes_(std::size_t columns, std::size_t rows, std::size_t queries_count,
-                                     traversal_t nominating, search_config_t config,
-                                     std::size_t capacity) const noexcept {
+                                     traversal_t nominating, search_config_t config, std::size_t capacity,
+                                     std::size_t hint_slots) const noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const width = nominating == traversal_t::walk_k ? config.expansion_factor : 0;
         std::size_t const bytes = staged_rows_bytes(vector_dtype_k, rows, columns) +
@@ -2605,7 +2634,9 @@ struct ram_indexes {
                                   slice_t::reserved_bytes(width * sizeof(distance_t)) +
                                   slice_t::reserved_bytes(rows * width * sizeof(maxsim_hit_t)) +
                                   slice_t::reserved_bytes(rows * width * sizeof(maxsim_ranked<total_t>)) +
-                                  slice_t::reserved_bytes(rows * sizeof(distance_t));
+                                  slice_t::reserved_bytes(rows * sizeof(distance_t)) +
+                                  slice_t::reserved_bytes(hint_slots * sizeof(node_id_t)) +
+                                  slice_t::reserved_bytes(hint_slots * sizeof(std::size_t));
         if constexpr (index_t::has_tiles_k)
             if (rows >= tiles_kit_t::tile_columns_k) {
                 std::size_t const block_rows = block_rows_(config.cache_bytes);
@@ -2642,7 +2673,8 @@ struct ram_indexes {
                            traversal_t nominating, search_config_t config, std::size_t capacity,
                            std::span<std::size_t> scored, traversal_context_t& traversal,
                            std::span<node_id_t const> watermarks, u64_t epoch, predicate_type_& predicate,
-                           products_tape<key_t, score_type_> const& matches) noexcept {
+                           products_tape<key_t, score_type_> const& matches, ranked_hints_view<key_t> hints,
+                           std::size_t hint_slots) noexcept {
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
         std::size_t const queries_count = query_offsets.size() - 1, first_row = query_offsets.front();
         std::size_t const rows = query_offsets.back() - first_row;
@@ -2661,6 +2693,9 @@ struct ram_indexes {
         std::span<maxsim_hit_t> const hits = carve_<maxsim_hit_t>(staged, rows * width);
         std::span<maxsim_ranked<total_t>> const bounds = carve_<maxsim_ranked<total_t>>(staged, rows * width);
         std::span<distance_t> const row_gains = carve_<distance_t>(staged, rows);
+        std::size_t const landmarks = shards_[0].index->landmarks_count();
+        std::span<node_id_t> const hinted_nodes = carve_<node_id_t>(staged, hint_slots);
+        std::span<std::size_t> const hinted_counts = carve_<std::size_t>(staged, hint_slots / landmarks);
         for (std::size_t row = 0; row != rows; ++row)
             norms[row] = shards_[0].index->norms(query_rows.row(row).as_vector());
         std::memset(kept.data(), 0, kept.size_bytes());
@@ -2726,24 +2761,40 @@ struct ram_indexes {
             std::size_t nominated = 0;
             total_t floors {};
             bool bounded = true;
-            for (std::size_t row = 0; row != rows; ++row) {
+            for (std::size_t row = 0, row_query = 0; row != rows; ++row) {
                 vector_view_t const query = query_rows.row(row).as_vector();
+                while (row >= query_offsets[row_query + 1] - first_row) ++row_query;
+                // A query's first row resolves its hints for every row, the shards opened since
+                // sizing walking unhinted, and its last row counts the keys none held.
+                if (row == query_offsets[row_query] - first_row) {
+                    std::span<key_t const> const query_hints = take_hints_(hints, row_query, traversal);
+                    for (std::size_t shard = 0; shard != min_of(hinted_counts.size(), watermarks.size()); ++shard)
+                        hinted_counts[shard] = shards_[shard].index->stage_hints_(
+                            query_hints, watermarks[shard], hinted_nodes.subspan(shard * landmarks, landmarks),
+                            to_writable_span(traversal.hinted_held));
+                }
                 std::size_t found = 0;
                 for (std::size_t shard = 0; shard != watermarks.size(); ++shard) {
                     shard_t const& slot = shards_[shard];
+                    std::span<node_id_t const> const hinted = shard < hinted_counts.size()
+                                                                  ? std::span<node_id_t const> {hinted_nodes.subspan(
+                                                                        shard * landmarks, hinted_counts[shard])}
+                                                                  : std::span<node_id_t const> {};
                     expected<search_result_t> walked {};
                     if constexpr (!filtered_k)
                         walked = slot.index->walk_(query, dummy_fold_t {}, dummy_rescoring_t {}, traversal, config,
-                                                   watermarks[shard]);
+                                                   watermarks[shard], hinted);
                     else {
                         keyed_t const& keys = slot.index->keys();
                         auto const key_of = [&keys](node_id_t node) noexcept { return keys[node]; };
                         node_predicate admits {predicate, key_of};
-                        walked = slot.index->walk_if_(query, admits, traversal, config, watermarks[shard]);
+                        walked = slot.index->walk_if_(query, admits, traversal, config, watermarks[shard], hinted);
                     }
                     if (!walked) return walked.status;
                     found = merge_search_results(to_span(traversal.results), slot.index->keys(), ranked, merged, found);
                 }
+                if (row + 1 == query_offsets[row_query + 1] - first_row)
+                    traversal.missing_hints += missing_hints_(traversal);
                 if (!found) {
                     bounded = false;
                     continue;
@@ -2912,7 +2963,7 @@ struct ram_indexes {
             traversal.random_generator.state = shards_.routed() + thread;
             traversal.computed_distances = traversal.computed_distances_in_refines = 0;
             traversal.computed_distances_in_reverse_refines = traversal.visited_members = 0;
-            traversal.restarts = traversal.saturated_walks = 0;
+            traversal.restarts = traversal.saturated_walks = traversal.missing_hints = 0;
             if (status_t const sized = shards_[0].index->reserve_traversal(traversal, config); failed(sized))
                 return sized;
             if (failed(traversal.reserve_queries(staged_bytes))) return status_t::bad_alloc_k;
@@ -3420,15 +3471,39 @@ struct ram_indexes {
                              scan_round_capacity<typename index_t::tiles_kit_t>());
     }
 
-    /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
+    /** The hint keys a query takes, at most one per landmark a walk draws, with one cleared byte
+     *  each in @c traversal.hinted_held, which every shard's @c stage_hints_ then marks; both
+     *  were reserved with the context, so nothing grows. */
+    std::span<key_t const> take_hints_(ranked_hints_view<key_t> hints, std::size_t query,
+                                       traversal_context_t& traversal) const noexcept {
+        std::span<key_t const> const all_hints = hints_of(hints, query);
+        std::span<key_t const> const taken = all_hints.first(
+            min_of(all_hints.size(), shards_[0].index->landmarks_count()));
+        [[maybe_unused]] nk::status_t const sized = traversal.hinted_held.resize({taken.size()});
+        std::memset(traversal.hinted_held.data(), 0, taken.size());
+        return taken;
+    }
+
+    /** The hint keys no shard marked in @c traversal.hinted_held since it was cleared. */
+    static std::size_t missing_hints_(traversal_context_t const& traversal) noexcept {
+        std::size_t missing = 0;
+        for (std::size_t hint = 0; hint != traversal.hinted_held.size(); ++hint)
+            missing += traversal.hinted_held[hint] == std::byte {0};
+        return missing;
+    }
+
+    /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies,
+     *  each shard's walk seeded by the nodes it holds under the query's @p hints. */
     template <typename score_type_, typename heads_type_, typename predicate_type_>
     expected<search_result_t> search_rows_(rows_view_t queries, heads_type_ const& heads, executor_t& executor,
                                            std::span<traversal_context_t> traversals, search_config_t config,
                                            nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
-                                           std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
+                                           std::span<std::size_t> counts, predicate_type_&& predicate,
+                                           ranked_hints_view<key_t> hints) noexcept {
         std::size_t const queries_count = queries.rows;
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = hints_refusal(hints, queries_count); failed(refusal)) return {{}, refusal};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
@@ -3441,21 +3516,25 @@ struct ram_indexes {
                 shards_[0].index->import_rows_(queries, query, 1, traversal).row(0).as_vector();
             std::size_t found_count = 0;
             status_t refusal = status_t::success_k;
+            std::span<key_t const> const query_hints = take_hints_(hints, query, traversal);
             for (std::size_t shard = 0; shard != watermarks.size(); ++shard) {
                 shard_t const& slot = shards_[shard];
+                std::span<node_id_t> const slots = to_writable_span(traversal.hinted_ids);
+                std::span<node_id_t const> const hinted = slots.first(slot.index->stage_hints_(
+                    query_hints, watermarks[shard], slots, to_writable_span(traversal.hinted_held)));
                 expected<search_result_t> found {};
                 if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
                     found = slot.index->walk_(query_vector, dummy_fold_t {},
                                               indexer_rescoring<quads_kit_t> {heads.row(query)}, traversal, config,
-                                              watermarks[shard]);
+                                              watermarks[shard], hinted);
                 else if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
                     found = slot.index->walk_(query_vector, dummy_fold_t {}, dummy_rescoring_t {}, traversal, config,
-                                              watermarks[shard]);
+                                              watermarks[shard], hinted);
                 else {
                     keyed_t const& shard_keys = slot.index->keys();
                     auto const key_of = [&shard_keys](node_id_t node) noexcept { return shard_keys[node]; };
                     node_predicate admits {thread_predicate(predicate, thread), key_of};
-                    found = slot.index->walk_if_(query_vector, admits, traversal, config, watermarks[shard]);
+                    found = slot.index->walk_if_(query_vector, admits, traversal, config, watermarks[shard], hinted);
                 }
                 if (!found) {
                     refusal = found.status;
@@ -3465,6 +3544,7 @@ struct ram_indexes {
                                                    distances_row, //
                                                    found_count);
             }
+            if (succeeded(refusal)) traversal.missing_hints += missing_hints_(traversal);
             counts[query] = found_count;
             return refusal;
         };
@@ -3535,6 +3615,7 @@ struct ram_indexes {
             merged.computed_distances += traversal.computed_distances;
             merged.restarts += traversal.restarts;
             merged.saturated_walks += traversal.saturated_walks;
+            merged.missing_hints += traversal.missing_hints;
         }
         return {merged, first_refusal};
     }

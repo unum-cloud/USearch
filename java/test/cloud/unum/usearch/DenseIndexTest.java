@@ -109,13 +109,14 @@ public class DenseIndexTest {
         long word = ValueLayout.ADDRESS.byteSize();
         assertEquals(2 * word, Library.offset(Library.RAM_OPTIONS, "shard_capacity"));
         assertEquals(3 * word, Library.offset(Library.RAM_OPTIONS, "cpu_class"));
-        assertEquals(4 * word, Library.RAM_OPTIONS.byteSize());
+        assertEquals(4 * word, Library.offset(Library.RAM_OPTIONS, "memory_limit"));
+        assertEquals(5 * word, Library.RAM_OPTIONS.byteSize());
         assertEquals(3 * word, Library.offset(Library.VRAM_OPTIONS, "gpu_class"));
         assertEquals(4 * word, Library.VRAM_OPTIONS.byteSize());
         assertEquals(2 * word, Library.offset(Library.NVME_OPTIONS, "cpu_class"));
         assertEquals(3 * word, Library.NVME_OPTIONS.byteSize());
         assertEquals(2 * word, Library.offset(Library.TRAVERSAL_STATS, "restarts"));
-        assertEquals(3 * word, Library.TRAVERSAL_STATS.byteSize());
+        assertEquals(4 * word, Library.TRAVERSAL_STATS.byteSize());
         long cpuClass = Library.offset(DenseIndex.DESCRIPTION, "cpu_class");
         assertEquals(DenseIndex.METADATA.byteSize() + 3 * word, cpuClass);
         assertEquals(cpuClass + 4, Library.offset(DenseIndex.DESCRIPTION, "gpu_class"));

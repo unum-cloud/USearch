@@ -92,9 +92,9 @@ struct shapes_ram_variant {
 
     expected<traversal_stats_t> insert(usearch_keys_view_t keys, counted_tape_t shapes, insert_config_t config,
                                        executor_t& executor, progress_ticks_t& ticks) noexcept;
-    expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
-                                       predicate_t const& predicate, executor_t& executor,
-                                       progress_ticks_t& ticks) noexcept;
+    expected<traversal_stats_t> search(counted_tape_t queries, usearch_matches_view_t const* hints,
+                                       matches_outputs_t& outputs, search_config_t config, predicate_t const& predicate,
+                                       executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Opens a refinement that first moves every shard of each of @p donors into this index, then
      *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
@@ -214,8 +214,8 @@ expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::insert
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
 expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::search(
-    counted_tape_t queries, matches_outputs_t& outputs, search_config_t config, predicate_t const& predicate,
-    executor_t& executor, progress_ticks_t& ticks) noexcept {
+    counted_tape_t queries, usearch_matches_view_t const* hints, matches_outputs_t& outputs, search_config_t config,
+    predicate_t const& predicate, executor_t& executor, progress_ticks_t& ticks) noexcept {
     using query_t = nk::shapes_packed<scalar_type_,
                                       typename std::allocator_traits<thread_allocator_t>::template rebind_alloc<char>>;
     auto query_of = [&](std::size_t query_index, std::size_t thread, auto&& answer) noexcept {
@@ -228,7 +228,7 @@ expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::search
         return answer(query);
     };
     return search_entries(index, queries.count, geometry.connectivity, shapes_metric_factory<metric_t>(geometry.metric),
-                          query_of, outputs, config, predicate, executor, ticks);
+                          query_of, outputs, config, predicate, executor, ticks, hints);
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>

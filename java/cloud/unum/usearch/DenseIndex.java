@@ -2004,7 +2004,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     static final Verb VIEW_NVME = new Verb(
             "usearch_dense_view_nvme",
-            Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), Library.placement("nvme")));
+            Library.opening(
+                    Library.padding(),
+                    Library.BYTES_VIEW.withName("path"),
+                    Library.placement("nvme"),
+                    Library.POINTER.withName("ram")));
 
     static final Verb RESERVE =
             new Verb("usearch_dense_reserve", Library.opening(Library.padding(), Library.SIZE.withName("capacity")));
@@ -2050,6 +2054,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
                     PREDICATE,
+                    Library.POINTER.withName("hints"),
                     PROGRESS,
                     STATS));
 
@@ -2222,6 +2227,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
                     PREDICATE,
+                    Library.POINTER.withName("hints"),
                     PROGRESS,
                     STATS));
 

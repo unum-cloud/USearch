@@ -997,7 +997,8 @@ public final class Executor: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    memory_limit: 0
                 ),
                 threads: threads,
                 deferred_limit: deferredLimit
@@ -1026,7 +1027,8 @@ public final class Executor: @unchecked Sendable {
                     memory_domains: domains,
                     memory_domains_count: memoryDomains.count,
                     shard_capacity: 0,
-                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k
+                    cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
+                    memory_limit: 0
                 ),
                 pool: pool,
                 deferred_limit: deferredLimit

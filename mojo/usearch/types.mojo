@@ -978,6 +978,8 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """Entries one shard holds before the index opens another shard generation; zero derives."""
     var cpu_class: CpuClass
     """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
+    var memory_limit: c_size_t
+    """Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling."""
 
     def __init__(out self):
         """Derives every memory domain the process may allocate on."""
@@ -985,6 +987,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         self.memory_domains_count = c_size_t(0)
         self.shard_capacity = c_size_t(0)
         self.cpu_class = CpuClass.UNKNOWN
+        self.memory_limit = c_size_t(0)
 
     @staticmethod
     def on[domains_origin: ImmOrigin, //](memory_domains: Span[Int32, domains_origin]) -> RamOptions[domains_origin]:
@@ -1000,7 +1003,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
             Options naming exactly those nodes, one shard apiece.
         """
         return RamOptions[domains_origin](
-            Int(memory_domains.unsafe_ptr()), c_size_t(len(memory_domains)), c_size_t(0), CpuClass.UNKNOWN
+            Int(memory_domains.unsafe_ptr()), c_size_t(len(memory_domains)), c_size_t(0), CpuClass.UNKNOWN, c_size_t(0)
         )
 
     def untracked(self) -> RamOptions[ImmUntrackedOrigin]:
@@ -1010,7 +1013,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
             Options naming the same array, whose type no longer keeps it alive.
         """
         return RamOptions[ImmUntrackedOrigin](
-            self.memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class
+            self.memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class, self.memory_limit
         )
 
 

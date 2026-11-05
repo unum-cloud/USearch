@@ -3379,7 +3379,11 @@ void test_nvme_view(size_t const dimensions) {
     usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 2});
     if (outcome.status == usearch_status_success_k)
         usearch_dense_view_nvme(
-            &(usearch_dense_view_nvme_t) {.index = &view, .executor = storage, .outcome = &outcome, .path = path_view});
+            &(usearch_dense_view_nvme_t) {.index = &view,
+                                          .executor = storage,
+                                          .outcome = &outcome,
+                                          .path = path_view,
+                                          .ram = &(usearch_ram_options_t) {.memory_limit = (size_t)1 << 20}});
     // An implementation without an NVMe residency says so, and has no view to hold to the contract.
     if (outcome.status == usearch_status_unsupported_k) {
         printf("Test: NVMe View - SKIPPED: %s\n", outcome.message);
@@ -3590,8 +3594,11 @@ void test_nvme_view_narrow_keys(void) {
     usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
     usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 2});
     if (outcome.status == usearch_status_success_k)
-        usearch_dense_view_nvme(
-            &(usearch_dense_view_nvme_t) {.index = &view, .executor = storage, .outcome = &outcome, .path = path_view});
+        usearch_dense_view_nvme(&(usearch_dense_view_nvme_t) {.index = &view,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .path = path_view,
+                                                              .ram = &(usearch_ram_options_t) {0}});
     if (outcome.status == usearch_status_unsupported_k) {
         printf("Test: NVMe View of u32 Keys - SKIPPED: %s\n", outcome.message);
         usearch_executor_free(storage);

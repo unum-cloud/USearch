@@ -5,6 +5,10 @@ plain structs. In Python they are types with protocols to honor, so they get one
 
 Run:
     python -m pytest test/dtypes.py -v
+
+File: test/dtypes.py
+Author: Ash Vardanian
+Date: October 1, 2026
 """
 
 import copy
@@ -222,6 +226,7 @@ class _RAMOptions(ctypes.Structure):
         ("memory_domains_count", ctypes.c_size_t),
         ("shard_capacity", ctypes.c_size_t),
         ("cpu_class", ctypes.c_int),
+        ("memory_limit", ctypes.c_size_t),
     ]
 
 
@@ -250,7 +255,9 @@ class _ExecutorForNVMe(ctypes.Structure):
 
 
 class _TraversalStats(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_size_t) for name in ("visited_members", "computed_distances", "restarts")]
+    _fields_ = [
+        (name, ctypes.c_size_t) for name in ("visited_members", "computed_distances", "restarts", "missing_hints")
+    ]
 
 
 class _DenseMetadata(ctypes.Structure):

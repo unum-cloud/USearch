@@ -379,14 +379,16 @@ status_t snapshot_shards(indexes_type_ const& indexes, watermarks_type_& waterma
  *  admitted ones fill its breadth, and a scan asks only about entries that would enter the ranking.
  *  Every query walks each shard of @p indexes below one snapshot taken for the whole call, so a
  *  batch counts in every query on all its shards or none, and writes the merged ranking. A handler
- *  answering cancel stops the queries no thread has taken yet.
+ *  answering cancel stops the queries no thread has taken yet. Each query's walks start from the
+ *  entries under its row of the optional @p hints, which a scan ignores.
  */
 template <typename indexes_type_, typename make_metric_type_, typename query_of_type_>
 expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t count, std::size_t connectivity,
                                            make_metric_type_&& make_metric, query_of_type_&& query_of,
                                            matches_outputs_t& outputs, search_config_t search,
                                            predicate_t const& predicate, forkunion_executor_t& executor,
-                                           progress_ticks_t& ticks) noexcept {
+                                           progress_ticks_t& ticks,
+                                           usearch_matches_view_t const* hints = nullptr) noexcept {
     using shard_t = typename indexes_type_::index_t;
     using key_t = typename indexes_type_::key_t;
     using node_id_t = typename indexes_type_::node_id_t;
@@ -424,12 +426,16 @@ expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t c
                     admits_t admits = admits_of(thread);
                     std::span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys) + query_index * wanted, wanted};
                     std::span<distance_t> const scores {distances.data() + thread * wanted, wanted};
+                    std::span<key_t const> const query_hints =
+                        hints ? std::span<key_t const> {reinterpret_cast<key_t const*>(hints->keys) +
+                                                            query_index * hints->columns,
+                                                        hints->counts[query_index]}
+                              : std::span<key_t const> {};
                     status_t const answered = query_of(query_index, thread, [&](auto const& query) noexcept {
-                        auto const [found, status] = scanning
-                                                         ? indexes.scan(query, to_span(watermarks), keys, scores,
-                                                                        admits, metric, context)
-                                                         : indexes.search_if(query, to_span(watermarks), keys, scores,
-                                                                             config, admits, metric, context);
+                        auto const [found, status] =
+                            scanning ? indexes.scan(query, to_span(watermarks), keys, scores, admits, metric, context)
+                                     : indexes.search_if(query, to_span(watermarks), keys, scores, config, admits,
+                                                         metric, context, query_hints);
                         if (failed(status)) return status;
                         for (std::size_t match = 0; match != found; ++match)
                             outputs.scores[query_index * wanted + match] =
@@ -1131,12 +1137,15 @@ struct specialized_variant {
             return bodies_t::serves_search(of(variant), queries);
         else return status_t::success_k;
     }
-    static expected<traversal_stats_t> search(void* variant, queries_t queries, matches_outputs_t& outputs,
-                                              search_config_t config, predicate_t predicate,
+    static expected<traversal_stats_t> search(void* variant, queries_t queries, usearch_matches_view_t const* hints,
+                                              matches_outputs_t& outputs, search_config_t config, predicate_t predicate,
                                               growing_arena<forkunion_allocator_t>& pages, executor_t& executor,
                                               progress_ticks_t& ticks) noexcept {
         variant_t& typed = of(variant);
-        if constexpr (requires { typed.search(queries, outputs, config, pages, executor, ticks); })
+        if constexpr (requires { typed.search(queries, hints, outputs, config, predicate, executor, ticks); })
+            return typed.search(queries, hints, outputs, config, predicate, executor, ticks);
+        else if (hints) return {{}, status_t::unsupported_k};
+        else if constexpr (requires { typed.search(queries, outputs, config, pages, executor, ticks); })
             return typed.search(queries, outputs, config, pages, executor, ticks);
         else if constexpr (is_vram_index<variant_t>) return typed.search(queries, outputs, config, executor, ticks);
         else return typed.search(queries, outputs, config, predicate, executor, ticks);

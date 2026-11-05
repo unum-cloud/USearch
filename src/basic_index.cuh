@@ -830,8 +830,11 @@ void basic_search(arguments_type_* arguments) noexcept {
         if (!executor) return;
         progress_ticks_t ticks {arguments->progress, count};
         search_config_t const config = search_config_of(arguments->expansion_factor, arguments->traversal);
-        if (!crossed(punned.verbs.search(punned.variant, queries, outputs, config, predicate_of(arguments->predicate),
-                                         arena->memory, *executor, ticks),
+        usearch_matches_view_t const* hints = nullptr;
+        if constexpr (requires { arguments->hints; }) hints = arguments->hints;
+        if (rejects_hints(hints, count, outcome)) return;
+        if (!crossed(punned.verbs.search(punned.variant, queries, hints, outputs, config,
+                                         predicate_of(arguments->predicate), arena->memory, *executor, ticks),
                      arguments->stats, outcome))
             return;
         auto const [matches, publish_status] = publish_matches(*arena, outputs, count);

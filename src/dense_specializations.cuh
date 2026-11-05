@@ -205,14 +205,14 @@ inline static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
  *  reserves it for the widest round it settles. */
 template <typename index_type_>
 inline static expected<typename index_type_::search_result_t> search_with_expensive_predicate(
-    index_type_& index, dense::rows_view_t queries, ranked_matches_span_t matches,
+    index_type_& index, dense::rows_view_t queries, ranked_hints_view_t hints, ranked_matches_span_t matches,
     typename index_type_::search_config_t config, usearch_predicate_t predicate,
     typename index_type_::executor_t& executor, dense_scratch<index_type_>& scratch) noexcept {
     auto const search_if = [&]<typename predicates_type_>(predicates_type_& predicates) noexcept {
         if constexpr (is_ram_index<index_type_>)
-            return index.search_if(queries, matches, config, predicates, executor,
-                                   to_writable_span(scratch.traversals));
-        else return index.search_if(queries, matches, config, predicates, executor);
+            return index.search_if(queries, matches, config, predicates, executor, to_writable_span(scratch.traversals),
+                                   hints);
+        else return index.search_if(queries, matches, config, predicates, executor, {}, hints);
     };
     if (config.traversal == traversal_t::scan_k) {
         expensive_predicates<typename index_type_::scan_payload_t> scanned {predicate};
@@ -329,8 +329,18 @@ struct specialized_index {
             return failed(status) ? status : of(index).emplace(executor.stream(0));
         }
     }
-    static status_t view(void* index, std::string_view path, std::span<std::string_view const> paths) noexcept {
-        if constexpr (viewed_k) return of(index).view(path, paths);
+    static status_t view(void* index, std::string_view path, std::span<std::string_view const> paths,
+                         usearch_ram_options_t const* ram, usearch_executor_t executor) noexcept {
+        if constexpr (viewed_k) {
+            executor_t* const engines = executor ? std::get_if<executor_t>(&executor->executor) : nullptr;
+            if (ram && !engines) return status_t::invalid_argument_k;
+            if (status_t const viewed = of(index).view(path, paths); failed(viewed) || !ram) return viewed;
+            // The key table takes the first named domain, or the process's own without one.
+            fu_memory_domain_id_t const domain = ram->memory_domains_count && ram->memory_domains
+                                                     ? static_cast<fu_memory_domain_id_t>(ram->memory_domains[0])
+                                                     : no_memory_domain_k;
+            return of(index).hold_keys(forkunion_allocator_t {domain}, ram->memory_limit, *engines);
+        }
         else return status_t::unsupported_k;
     }
 
@@ -540,11 +550,14 @@ struct specialized_index {
         return of(index).get(keys, outputs, entries, wanted, executor);
     }
 
-    /** Ranks each query's nearest entries; a cheap predicate is asked a quad at a time, an
-     *  expensive one once per round each thread settles. */
-    static expected<traversal_stats_t> search(void* index, rows_view_t queries, ranked_matches_span_t matches,
-                                              ::search_config_t search, predicate_t predicate,
-                                              executor_t& executor) noexcept {
+    /** Ranks each query's nearest entries, every walk seeded by its query's @p hints; a cheap
+     *  predicate is asked a quad at a time, an expensive one once per round each thread settles. A
+     *  device walk answers @c unsupported_k for hints, as for a predicate. */
+    static expected<traversal_stats_t> search(void* index, rows_view_t queries, ranked_hints_view_t hints,
+                                              ranked_matches_span_t matches, ::search_config_t search,
+                                              predicate_t predicate, executor_t& executor) noexcept {
+        if constexpr (is_vram_index<index_type_>)
+            if (!hints.counts.empty()) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
         search_config_t const config = search_config_of(search, executor);
@@ -552,18 +565,18 @@ struct specialized_index {
             if constexpr (is_vram_index<index_type_>)
                 return stats_of(of(index).search(queries, matches, config, executor));
             else if constexpr (std::is_same_v<narrowing_type_, expensive_predicate_t>)
-                return stats_of(search_with_expensive_predicate(of(index), queries, matches, config,
+                return stats_of(search_with_expensive_predicate(of(index), queries, hints, matches, config,
                                                                 narrowing.predicate, executor, scratch));
             else if constexpr (std::is_same_v<narrowing_type_, cheap_predicate_t>) {
                 if constexpr (is_ram_index<index_type_>)
                     return stats_of(of(index).search_if(queries, matches, config, narrowing, executor,
-                                                        to_writable_span(scratch.traversals)));
-                else return stats_of(of(index).search_if(queries, matches, config, narrowing, executor));
+                                                        to_writable_span(scratch.traversals), hints));
+                else return stats_of(of(index).search_if(queries, matches, config, narrowing, executor, {}, hints));
             }
             else if constexpr (is_ram_index<index_type_>)
                 return stats_of(
-                    of(index).search(queries, matches, config, executor, to_writable_span(scratch.traversals)));
-            else return stats_of(of(index).search(queries, matches, config, executor));
+                    of(index).search(queries, matches, config, executor, to_writable_span(scratch.traversals), hints));
+            else return stats_of(of(index).search(queries, matches, config, executor, {}, hints));
         });
     }
 
@@ -594,33 +607,39 @@ struct specialized_index {
         });
     }
 
-    /** Late interaction of the queries the offsets cut, packed on the tape; a GPU index walks
-     *  uniform queries alone, answering @c unsupported_k for a scan or ragged offsets. */
+    /** Late interaction of the queries the offsets cut, packed on the tape, every row's walks
+     *  seeded by its query's hints; a GPU index walks uniform queries alone, answering
+     *  @c unsupported_k for a scan, ragged offsets or hints. */
     static expected<traversal_stats_t> maxsim(void* index, maxsim_queries_view_t queries, products_tape_t matches,
                                               std::span<std::size_t> scored, std::size_t wanted,
                                               ::search_config_t search, predicate_t predicate,
                                               executor_t& executor) noexcept {
+        if constexpr (is_vram_index<index_type_>)
+            if (!queries.hints.counts.empty()) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
         typename index_t::maxsim_config_t const config {search_config_of(search, executor), wanted};
         std::span<std::size_t const> const query_offsets = queries.offsets;
+        ranked_hints_view_t const hints = queries.hints;
         return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
             if constexpr (is_vram_index<index_type_>)
                 return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor));
             else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
                 if constexpr (is_ram_index<index_type_>)
                     return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor,
-                                                     to_writable_span(scratch.traversals)));
-                else return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor));
+                                                     to_writable_span(scratch.traversals), hints));
+                else
+                    return stats_of(
+                        of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor, {}, hints));
             }
             else {
                 cheap_predicate_t cheap {narrowing.predicate};
                 if constexpr (is_ram_index<index_type_>)
                     return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
-                                                        executor, to_writable_span(scratch.traversals)));
+                                                        executor, to_writable_span(scratch.traversals), hints));
                 else
-                    return stats_of(
-                        of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap, executor));
+                    return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
+                                                        executor, {}, hints));
             }
         });
     }

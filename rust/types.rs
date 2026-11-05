@@ -257,6 +257,7 @@ pub struct usearch_ram_options_t {
     pub memory_domains_count: usize,
     pub shard_capacity: usize,
     pub cpu_class: usearch_cpu_class_t,
+    pub memory_limit: usize,
 }
 
 #[repr(C)]
@@ -1190,6 +1191,7 @@ pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -
         memory_domains_count: memory_domains.len(),
         shard_capacity: 0,
         cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as usearch_cpu_class_t),
+        memory_limit: 0,
     }
 }
 
@@ -2244,7 +2246,7 @@ mod tests {
         let word = size_of::<usize>();
         assert_eq!(offset_of!(usearch_ram_options_t, shard_capacity), 2 * word);
         assert_eq!(offset_of!(usearch_ram_options_t, cpu_class), 3 * word);
-        assert_eq!(size_of::<usearch_ram_options_t>(), 4 * word);
+        assert_eq!(size_of::<usearch_ram_options_t>(), 5 * word);
         assert_eq!(offset_of!(usearch_vram_options_t, shard_capacity), 2 * word);
         assert_eq!(offset_of!(usearch_vram_options_t, gpu_class), 3 * word);
         assert_eq!(size_of::<usearch_vram_options_t>(), 4 * word);

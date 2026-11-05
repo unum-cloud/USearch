@@ -138,6 +138,7 @@ pub struct usearch_dense_view_nvme_t {
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
     pub nvme: usearch_nvme_options_t,
+    pub ram: *const usearch_ram_options_t,
 }
 
 #[repr(C)]
@@ -211,6 +212,7 @@ pub struct usearch_dense_search_t {
     pub expansion_factor: usize,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub hints: *const usearch_matches_view_t,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
 }
@@ -484,6 +486,7 @@ pub struct usearch_dense_maxsim_t {
     pub expansion_factor: usize,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
+    pub hints: *const usearch_matches_view_t,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
 }
@@ -711,6 +714,8 @@ pub struct DenseTraversalStats {
     pub computed_distances: usize,
     /// Starvation restarts - a graph-connectivity health signal, not a cost counter.
     pub restarts: usize,
+    /// Hint keys no shard held an entry under; zero unless a search was handed hints.
+    pub missing_hints: usize,
 }
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.
@@ -1767,6 +1772,7 @@ impl DenseIndex {
                 completion: usearch_completion_blocking_k,
                 path: path_view(config.path)?,
                 nvme: nvme_options(&views, config.cpu_class),
+                ram: ptr::null(),
             })
         };
         check(outcome).map(|()| index)
@@ -2598,6 +2604,7 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
             expansion_factor: self.config.expansion_factor,
             traversal: self.config.traversal as usearch_traversal_t,
             predicate,
+            hints: ptr::null(),
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
@@ -2667,6 +2674,7 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
             traversal: Traversal::Walk as usearch_traversal_t,
             predicate: lower_predicate(&None, callbacks),
+            hints: ptr::null(),
         })
     }
 
@@ -3391,7 +3399,7 @@ mod tests {
 
         let word = size_of::<usize>();
         assert_eq!(offset_of!(DenseTraversalStats, restarts), 2 * word);
-        assert_eq!(size_of::<DenseTraversalStats>(), 3 * word);
+        assert_eq!(size_of::<DenseTraversalStats>(), 4 * word);
         let cpu_class = offset_of!(usearch_dense_index_description_t, cpu_class);
         assert_eq!(offset_of!(usearch_dense_index_description_t, metadata), 0);
         assert_eq!(

@@ -43,14 +43,19 @@ inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcep
  *  many each kept. */
 using ranked_matches_span_t = dense::ranked_matches_span<us::utilities::uuid_t, f64_t>;
 
+/** The keys each query's walk starts from, as a ranking's keys and counts lay them out. */
+using ranked_hints_view_t = dense::ranked_hints_view<us::utilities::uuid_t>;
+
 /** Where a product or MaxSim writes, in the arena's memory for its residency: each query's keys
  *  and the ABI's scores from its offset, as the C tape reads them. */
 using products_tape_t = dense::products_tape<us::utilities::uuid_t, usearch_distance_t>;
 
-/** Queries of many rows each: the rows, and the offsets cutting them, one more than the queries. */
+/** Queries of many rows each: the rows, the offsets cutting them, one more than the queries, and
+ *  the keys every row's walks of a query start from, empty for none. */
 struct maxsim_queries_view_t {
     dense::rows_view_t rows;
     std::span<std::size_t const> offsets;
+    ranked_hints_view_t hints;
 };
 
 /** What an attention reads besides its queries and where it writes: the heads each token's rows
@@ -103,7 +108,10 @@ struct dense_verbs {
 
     /** Appends one shard on a host memory domain or a device. */
     status_t (*emplace)(void* index, arena_residency_t residency) noexcept;
-    status_t (*view)(void* index, std::string_view path, std::span<std::string_view const> paths) noexcept;
+
+    /** Opens a checkpoint in place, with @p ram a key table in its limit filled on @p executor. */
+    status_t (*view)(void* index, std::string_view path, std::span<std::string_view const> paths,
+                     usearch_ram_options_t const* ram, usearch_executor_t executor) noexcept;
 
     // Shape
     nk_kernel_kind_t (*kernel)(void const* index) noexcept;
@@ -167,9 +175,11 @@ struct dense_verbs {
 
     // Walks
 
-    /** Ranks the entries nearest each query, narrowed by @p predicate on the host. */
-    expected<traversal_stats_t> (*search)(void* index, rows_view_t queries, ranked_matches_span_t matches,
-                                          search_config_t config, predicate_t predicate, executor_t& executor) noexcept;
+    /** Ranks the entries nearest each query, narrowed by @p predicate and seeded by @p hints on the
+     *  host. */
+    expected<traversal_stats_t> (*search)(void* index, rows_view_t queries, ranked_hints_view_t hints,
+                                          ranked_matches_span_t matches, search_config_t config, predicate_t predicate,
+                                          executor_t& executor) noexcept;
 
     /** Keeps the largest dot products of each left row, up to the tape's stride, packed into @p
      *  products from its first offset, and on the host the pairs each row scored into @p scored. */

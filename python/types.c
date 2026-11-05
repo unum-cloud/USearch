@@ -2787,6 +2787,7 @@ PyObject* api_layouts(PyObject* self, PyObject* unused) {
         {"memory_domains_count", offsetof(usearch_ram_options_t, memory_domains_count)},
         {"shard_capacity", offsetof(usearch_ram_options_t, shard_capacity)},
         {"cpu_class", offsetof(usearch_ram_options_t, cpu_class)},
+        {"memory_limit", offsetof(usearch_ram_options_t, memory_limit)},
     };
     layout_field_t const vram[] = {
         {"devices", offsetof(usearch_vram_options_t, devices)},
@@ -2809,6 +2810,7 @@ PyObject* api_layouts(PyObject* self, PyObject* unused) {
         {"visited_members", offsetof(usearch_traversal_stats_t, visited_members)},
         {"computed_distances", offsetof(usearch_traversal_stats_t, computed_distances)},
         {"restarts", offsetof(usearch_traversal_stats_t, restarts)},
+        {"missing_hints", offsetof(usearch_traversal_stats_t, missing_hints)},
     };
     layout_field_t const description[] = {
         {"metadata", offsetof(usearch_dense_index_description_t, metadata)},

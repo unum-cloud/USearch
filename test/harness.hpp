@@ -661,6 +661,47 @@ std::size_t expect_walk_recall(handle<verbs_type_>& index, typename verbs_type_:
     return check(recall >= floor);
 }
 
+/** The first @p count queries' first matches hint a second search of them, which answers
+ *  @p accepted: on success a key no entry holds is counted once per query, and each query ranks at
+ *  least as near as its hint. */
+template <typename verbs_type_>
+std::size_t expect_hints(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
+                         std::size_t expansion, usearch_status_t accepted) {
+    copied_matches_t found;
+    usearch_traversal_stats_t stats {};
+    std::size_t failures = check(search_queries(index, queries, count, cell_batch_k, cell_wanted_k, expansion,
+                                                usearch_traversal_walk_k, stats, found));
+    if (failures) return failures;
+    std::vector<std::size_t> const offsets = match_offsets(found);
+    std::vector<usearch_key_t> keys(2 * count);
+    std::vector<std::size_t> const counts(count, 2);
+    for (std::size_t query = 0; query != count; ++query) {
+        keys[2 * query] = std::bit_cast<usearch_key_t>(found.keys[offsets[query]]);
+        keys[2 * query + 1] = key_of_offset(index.session->seed, std::numeric_limits<u64_t>::max() - query);
+    }
+    usearch_matches_view_t const hints {keys.data(), nullptr, counts.data(), 2};
+    copied_matches_t hinted;
+    usearch_traversal_stats_t hinted_stats {};
+    // Several batches, so each takes its own rows of the hints.
+    usearch_outcome_t const outcome = search_queries(index, queries, count, divide_round_up<std::size_t>(count, 4),
+                                                     cell_wanted_k, expansion, usearch_traversal_walk_k, hinted_stats,
+                                                     hinted, &hints);
+    if (accepted != usearch_status_success_k) return check(outcome.status == accepted);
+    failures += check(outcome);
+    if (failures) return failures;
+    std::vector<std::size_t> const hinted_offsets = match_offsets(hinted);
+    std::size_t farther = 0;
+    for (std::size_t query = 0; query != count; ++query)
+        farther += !hinted.counts[query] || !within(hinted.scores[hinted_offsets[query]], found.scores[offsets[query]]);
+    // A warm second call, its scratch already sized, ranks alike.
+    copied_matches_t warm;
+    usearch_traversal_stats_t warm_stats {};
+    failures += check(search_queries(index, queries, count, divide_round_up<std::size_t>(count, 4), cell_wanted_k,
+                                     expansion, usearch_traversal_walk_k, warm_stats, warm, &hints));
+    failures += check(warm.counts == hinted.counts && warm_stats.missing_hints == count);
+    return failures + check(hinted_stats.missing_hints == count) + check(farther == 0);
+}
+
 /** An audit reaches every one of @p count entries. */
 template <typename verbs_type_>
 std::size_t expect_health(handle<verbs_type_>& index, std::size_t count) {

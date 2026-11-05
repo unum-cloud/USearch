@@ -625,17 +625,29 @@ typedef struct usearch_dense_view_nvme_t {
 
     /** The devices the parts are served from; naming none serves each where its manifest points. */
     usearch_nvme_options_t nvme;
+
+    /** The @b optional RAM the view may hold beyond its headers, borrowed for the call: a key
+     *  table on the first of @c ram->memory_domains within @c ram->memory_limit; @c NULL holds
+     *  nothing per entry, so key lookups and hints refuse. */
+    usearch_ram_options_t const* ram;
 } usearch_dense_view_nvme_t;
 
 /**
  *  @brief Serves a checkpoint in place from NVMe drives as a read-only index, every later call
  *      reading it through its executor's engines. @ref dense_index_nvme_walks
  *
- *  Opening reads the headers alone. Every mutating verb on the handle reports
+ *  Opening reads the headers, and with @c ram every part's key column once, on @c executor's
+ *  engines, into a key table of about 11 bytes per entry: an 8-byte fingerprint and node per
+ *  slot, a third more slots than entries. Every mutating verb on the handle reports
  *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
+ *
+ *  Without a key table, @c usearch_dense_count, @c usearch_dense_get, @c usearch_dense_sample, a
+ *  MaxSim and hinted walks refuse with @c usearch_status_unsupported_k rather than scan every key.
  *
  *  @par Statuses:
  *  - @c usearch_status_device_k @c executor is not an NVMe executor.
+ *  - @c usearch_status_invalid_argument_k @c ram without an @c executor to scan the keys on.
+ *  - @c usearch_status_out_of_memory_k The key table passes @c ram->memory_limit.
  *  - @c usearch_status_invalid_argument_k An empty @c path, @c NULL paths for a nonzero count,
  *    or a path that does not parse or names a base off its medium's block.
  *  - @c usearch_status_config_mismatch_k Parts disagreeing with each other, with the scalar or
@@ -940,6 +952,12 @@ typedef struct usearch_dense_search_t {
     /** The @b optional predicate, asked about a scored quad of candidates at a time. */
     usearch_predicate_t predicate;
 
+    /** The @b optional keys each query's walk starts from ahead of its random landmarks, one row
+     *  of @c counts[query] keys per query, as a search writes its matches, at most one per
+     *  landmark; scores are not read, a scan ignores them, and keys no entry holds are skipped
+     *  and counted in the stats. */
+    usearch_matches_view_t const* hints;
+
     /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
 
@@ -973,6 +991,13 @@ typedef struct usearch_dense_search_t {
  *  them at a time, so it belongs on the caller's fast path - and it is invoked concurrently from
  *  the executor's threads, so it must tolerate that.
  *
+ *  @c hints hand each query's walk landmarks the caller already trusts, such as the matches of the
+ *  same queries over another index of the same keys. A query takes as many keys as a walk draws
+ *  landmarks, the connectivity rounded up to a multiple of four, and ignores the rest; the entries
+ *  stored under them take the landmark slots ahead of the random draws, in hint order, as many as
+ *  fit. They are advisory, so a key no entry holds is skipped and counted in @c missing_hints. An
+ *  NVMe view resolves them through its key table, confirming each entry with one key read.
+ *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
  *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted,
  *  or an index holding no entries, succeeds without walking and writes only the counts, every one
@@ -998,8 +1023,10 @@ typedef struct usearch_dense_search_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
- *  - @c usearch_status_unsupported_k A scan of an AMD or Apple VRAM handle, or a @c predicate on
- *    any VRAM handle.
+ *  - @c usearch_status_unsupported_k A scan of an AMD or Apple VRAM handle, a @c predicate or
+ *    @c hints on any VRAM handle, or @c hints on an NVMe view holding no key table.
+ *  - @c usearch_status_invalid_argument_k @c hints naming no counts, or columns but no keys.
+ *  - @c usearch_status_shape_mismatch_k A hinted query counts more keys than the hints' columns.
  */
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments);
 
@@ -2281,6 +2308,12 @@ typedef struct usearch_dense_maxsim_t {
     /** The @b optional predicate over keys, asked before any key's rows are reduced. */
     usearch_predicate_t predicate;
 
+    /** The @b optional keys every row's walk of a query starts from ahead of its random landmarks,
+     *  one row of @c counts[query] keys per query, as a search writes its matches and takes them,
+     *  resolved once per query; scores are not read, a scan ignores them, and keys no entry holds
+     *  are skipped and counted in @c stats once per query. */
+    usearch_matches_view_t const* hints;
+
     /* Observers */
 
     /** The @b optional handler, called with queries resolved. */
@@ -2323,8 +2356,11 @@ typedef struct usearch_dense_maxsim_t {
  *  @par Statuses:
  *  - @c usearch_status_unknown_kind_k A @c traversal other than a walk or a scan.
  *  - @c usearch_status_shape_mismatch_k A query without rows, or @c query_offsets decreasing.
- *  - @c usearch_status_unsupported_k A scan, a @c predicate, ragged @c query_offsets or a zero
- *    @c wanted on a VRAM handle.
+ *  - @c usearch_status_unsupported_k A scan, a @c predicate, @c hints, ragged @c query_offsets or a
+ *    zero @c wanted on a VRAM handle; on an NVMe view holding no key table, a walk with @c hints,
+ *    or any walk when the view allows no key scans either.
+ *  - @c usearch_status_invalid_argument_k @c hints naming no counts, or columns but no keys.
+ *  - @c usearch_status_shape_mismatch_k A hinted query counts more keys than the hints' columns.
  */
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments);
 
