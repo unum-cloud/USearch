@@ -193,13 +193,15 @@ status_t nvme_read_header(source_type_ const& source, growing_buffer<byte_t, all
  *  - @c unsupported_k A transport ID in a build without SPDK.
  *  - @c malformed_k No monolith starts there, or its header cannot be read.
  */
-template <typename allocator_type_>
+template <typename wait_type_, typename allocator_type_>
 status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocator_type_>& header_bytes) noexcept {
 #if USEARCH_WITH_LINUX_SPDK
     if (names_transport_id(path)) {
-        auto [name_space, open_status] = spdk_medium_t::open(path);
+        auto [name_space, open_status] = spdk_medium_t::open<wait_type_>(path);
         if (failed(open_status)) return open_status;
-        return nvme_read_header(name_space, header_bytes);
+        status_t const read = nvme_read_header(name_space, header_bytes);
+        name_space.template release<wait_type_>();
+        return read;
     }
 #endif
     if (names_transport_id(path)) return status_t::unsupported_k;
@@ -219,9 +221,10 @@ status_t nvme_read_header(std::string_view path, growing_buffer<byte_t, allocato
  *  - @c malformed_k A transport ID starting no monolith, or a manifest or header that does not
  *    parse.
  */
-inline expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
+template <typename wait_type_>
+expected<safegraphs_metadata_t> nvme_read_metadata(std::string_view path) noexcept {
     growing_buffer<byte_t, forkunion_allocator_t> header_bytes {global_allocator};
-    status_t const read = nvme_read_header(path, header_bytes);
+    status_t const read = nvme_read_header<wait_type_>(path, header_bytes);
     if (read == status_t::malformed_k && !names_transport_id(path)) return safegraphs_read_manifest(path);
     if (failed(read)) return {safegraphs_metadata_t {}, read};
     return safegraphs_read_metadata(to_span(header_bytes));

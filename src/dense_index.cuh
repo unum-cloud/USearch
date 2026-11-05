@@ -739,7 +739,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
 
     // The view's own header read, so a transport ID names a checkpoint as a file path does.
-    auto const [checkpoint, read_status] = nvme_read_metadata(as_text(arguments->path));
+    auto const [checkpoint, read_status] = nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
@@ -1685,7 +1685,7 @@ USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* a
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     // Through the medium a view reads, since a generic char node maps nothing and reports no size.
-    auto const [source, status] = nvme_read_metadata(as_text(arguments->path));
+    auto const [source, status] = nvme_read_metadata<fu::standard_yield_t>(as_text(arguments->path));
     if (failed(status)) return propagate_error(status, outcome), void();
     adopt_metadata(source, arguments->metadata);
     propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1855,13 +1855,11 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
 #if USEARCH_WITH_LINUX_SPDK
         // Fabrics copy every byte through a socket, so only PCIe controllers need hugepages to DMA
         // into.
-        linux_spdk_driver_t::config_t environment;
+        linux_spdk_process_t::config_t environment;
         environment.memory = pcie_ids ? linux_spdk_memory_t::hugepages_k : linux_spdk_memory_t::plain_pages_k;
-        auto [driver, open_status] = linux_spdk_driver_t::open(environment);
-        if (failed(open_status))
-            return propagate_error(open_status, outcome, "The SPDK environment did not start"), void();
+        if (status_t const started = linux_spdk_process_t::start<fu::standard_yield_t>(environment); failed(started))
+            return propagate_error(started, outcome, "The SPDK environment did not start"), void();
         config.transport = io_transport_t::linux_spdk_k;
-        config.spdk_driver = std::move(driver);
 #else
         (void)pcie_ids;
         return propagate_error(usearch_status_unsupported_k, outcome, "Transport identifiers need an SPDK build"),
@@ -1904,6 +1902,7 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
     if (!executor) return;
     finish_calls_using(executor);
     delist_executor(*executor);
+    if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor->executor)) nvme->release();
     delete executor;
 }
 

@@ -2076,7 +2076,17 @@ std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span
     dense_indexes_executor<spdk_t> spdk_driver;
     failures += expect_eq(files_driver.status, status_t::success_k);
     failures += expect_eq(spdk_driver.status, status_t::success_k);
-    if (failures) return report(name, failures);
+    auto const released = [&]() noexcept {
+        direct.release();
+        relocated.release();
+        return report(name, failures);
+    };
+    if (failures) return released();
+    // Key lookups need the key tables, which neither view holds until asked.
+    failures += expect_eq(files.hold_keys(forkunion_allocator_t {no_memory_domain_k}, 0, files_driver.executor),
+                          status_t::success_k);
+    failures += expect_eq(direct.hold_keys(forkunion_allocator_t {no_memory_domain_k}, 0, spdk_driver.executor),
+                          status_t::success_k);
 
     // Under a walk as wide as the part both rank every entry, so only ties may swap keys.
     auto const queries = make_vectors<scalar_t>(queries_count, dimensions, stream_key(seed, "nvme_spdk_queries"));
@@ -2127,7 +2137,7 @@ std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span
     auto const [spdk_health, spdk_status] = direct.health(spdk_driver.executor);
     failures += expect_eq(spdk_status, files_status);
     failures += expect_eq(spdk_health.reachable_nodes, files_health.reachable_nodes);
-    return report(name, failures);
+    return released();
 }
 
 #endif
@@ -2158,9 +2168,11 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 #if USEARCH_WITH_LINUX_SPDK
         // The SPDK engine shares the environment the views opened, over plain pages for fabrics.
         if constexpr (std::is_same_v<typename executor_t::medium_t, us::utilities::spdk_medium_t>) {
-            us::utilities::linux_spdk_driver_t::config_t environment;
+            us::utilities::linux_spdk_process_t::config_t environment;
             environment.memory = us::utilities::linux_spdk_memory_t::plain_pages_k;
-            config.spdk_driver = us::utilities::linux_spdk_driver_t::open(environment).value;
+            // A refused start leaves the engines to answer why at spawn.
+            [[maybe_unused]] us::utilities::status_t const started =
+                us::utilities::linux_spdk_process_t::start<fu::standard_yield_t>(environment);
         }
 #endif
         auto [spawn_executor, spawn_status] = executor_t::spawn(topology, 2, config);
@@ -2168,6 +2180,7 @@ struct us::test::dense_indexes_executor<indexes_type_> {
         executor = std::move(spawn_executor);
     }
     ~dense_indexes_executor() noexcept {
+        executor.release();
         executor = executor_t {};
         if (topology) fu_topology_delete(topology);
     }

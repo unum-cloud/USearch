@@ -99,7 +99,9 @@ class nvme_indexes {
      *  - @c malformed_k A transport ID starting no monolith, or a manifest or header that does not
      *    parse.
      */
-    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept { return nvme_read_metadata(path); }
+    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
+        return nvme_read_metadata<wait_type_>(path);
+    }
 
     /**
      *  @brief Opens a manifest or a monolith, whichever its content names, with every part's

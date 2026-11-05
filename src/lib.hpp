@@ -1572,8 +1572,9 @@ inline std::size_t nvme_fewest_queues(std::span<usearch_bytes_view_t const> path
         io_device_queues_t queues;
 #if USEARCH_WITH_LINUX_SPDK
         if (names_transport_id(named)) {
-            auto const [name_space, open_status] = spdk_medium_t::open(named);
+            auto [name_space, open_status] = spdk_medium_t::open<fu::standard_yield_t>(named);
             if (succeeded(open_status)) queues = device_queues_of(name_space);
+            name_space.release<fu::standard_yield_t>();
         }
 #endif
         if (!names_transport_id(named)) queues = device_queues_of(file_medium_t::open(named).value);

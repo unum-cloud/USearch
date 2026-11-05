@@ -188,14 +188,8 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
         "[--depth <reads>] [--filter <engines>]",
         flags);
     if (monolith.empty()) return fmt::println(stderr, "--monolith is required"), 1;
-#if USEARCH_WITH_LINUX_SPDK
-    // SPDK starts once per process, so this share keeps its environment alive past the header read.
-    spdk_medium_t const environment_share = names_transport_id(monolith) ? spdk_medium_t::open(monolith).value
-                                                                         : spdk_medium_t {};
-#endif
-
     growing_buffer<byte_t> header_bytes {global_allocator};
-    status_t const header_read = nvme_read_header(monolith, header_bytes);
+    status_t const header_read = nvme_read_header<fu::standard_yield_t>(monolith, header_bytes);
     auto const [header, header_status] = safegraphs_read_header(to_span(header_bytes));
     if (failed(header_read) || failed(header_status))
         return fmt::println(stderr, "--monolith=\"{}\" starts no SafeGraphs monolith: {}", monolith,
@@ -227,13 +221,22 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
             continue;
         }
         std::array<nvme_executor_t::medium_t, 1> media;
+        nvme_executor_t executor;
+        // SPDK holds go back explicitly, so every way out of this engine's row releases them.
+        struct holds_t {
+            std::array<nvme_executor_t::medium_t, 1>& media;
+            nvme_executor_t& executor;
+            ~holds_t() noexcept {
+                executor.release();
+                release_medium<fu::standard_yield_t>(media[0]);
+            }
+        } const holds {media, executor};
         io_engine_config_t config;
         config.transport = engine.transport;
         status_t open_status = status_t::success_k;
 #if USEARCH_WITH_LINUX_SPDK
         if (engine.transport == io_transport_t::linux_spdk_k) {
-            auto [name_space, spdk_status] = spdk_medium_t::open(engine.address);
-            config.spdk_driver = name_space.driver;
+            auto [name_space, spdk_status] = spdk_medium_t::open<fu::standard_yield_t>(engine.address);
             media[0] = nvme_executor_t::medium_t {std::move(name_space)}, open_status = spdk_status;
         }
         else
@@ -247,11 +250,12 @@ int bench_nvme_device_reads(int argc, char const* const* argv) {
                          status_to_string(open_status));
             continue;
         }
-        auto [executor, spawn_status] = nvme_executor_t::spawn(topology, settings.threads.value, config);
+        auto [spawned, spawn_status] = nvme_executor_t::spawn(topology, settings.threads.value, config);
         if (failed(spawn_status)) {
             fmt::println("- {}: skipped, the engine does not open: {}", engine.name, status_to_string(spawn_status));
             continue;
         }
+        executor = std::move(spawned);
         std::size_t const threads = executor.size();
         std::string_view const engine_location = parse_file_address(engine.address).value.location;
         // A pinned total splits evenly over the threads, as fio's iodepth times numjobs does.

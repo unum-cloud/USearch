@@ -255,10 +255,17 @@ struct nvme_index {
      *    row.
      */
     status_t view(std::string_view path) noexcept {
-        medium_ = medium_t {};
-        part_ = {};
+        release();
         if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
         return open_part_(path, dtype_t::unknown_k, kernel_, forkunion_allocator_t {}, medium_, part_);
+    }
+
+    /** Empties the view, giving back the controller an SPDK namespace holds, which must precede
+     *  its death. */
+    void release() noexcept {
+        release_medium<wait_t>(medium_);
+        medium_ = medium_t {};
+        part_ = {};
     }
 
     /** Rows the part holds. */
@@ -395,10 +402,10 @@ struct nvme_index {
 #if USEARCH_WITH_LINUX_SPDK
         if constexpr (std::is_constructible_v<medium_t, spdk_medium_t&&>)
             if (names_transport_id(path)) {
-                auto [name_space, open_status] = spdk_medium_t::open(path);
+                auto [name_space, open_status] = spdk_medium_t::open<wait_t>(path);
                 if (failed(open_status)) return open_status;
                 if (status_t const read = read_part_(name_space, key_dtype, kernel, allocator, part); failed(read))
-                    return read;
+                    return name_space.template release<wait_t>(), read;
                 medium = medium_t {std::move(name_space)};
                 return status_t::success_k;
             }

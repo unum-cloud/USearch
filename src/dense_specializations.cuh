@@ -312,7 +312,10 @@ struct specialized_index {
             return new (std::nothrow) index_t(kernel, geometry, tables, machine_cache_line_bytes());
         else return new (std::nothrow) index_t(kernel, geometry, tables);
     }
-    static void destroy(void* index) noexcept { delete static_cast<index_t*>(index); }
+    static void destroy(void* index) noexcept {
+        if constexpr (viewed_k) of(index).release();
+        delete static_cast<index_t*>(index);
+    }
     static void bound_shards(void* index, std::size_t nodes) noexcept {
         if constexpr (!viewed_k) of(index).bound_shards(nodes);
     }

@@ -164,13 +164,20 @@ struct nvme_indexes {
      *  - @c unknown_kind_k A kernel the dtype's kits cannot finalize.
      */
     status_t view(std::string_view path, std::span<std::string_view const> paths = {}) noexcept {
+        release();
+        status_t const viewed = view_(path, paths);
+        if (failed(viewed)) release();
+        return viewed;
+    }
+
+    /** Empties the view, giving back the controllers its SPDK namespaces hold, which must precede
+     *  its death. */
+    void release() noexcept {
+        for (medium_t& medium : media_) release_medium<wait_t>(medium);
         media_.clear();
         parts_.clear();
         resident_keys_.reset();
         kernel_ = nk_kernel_unknown_k;
-        status_t const viewed = view_(path, paths);
-        if (failed(viewed)) media_.clear(), parts_.clear(), kernel_ = nk_kernel_unknown_k;
-        return viewed;
     }
 
     /**
@@ -221,7 +228,9 @@ struct nvme_indexes {
      *  - @c malformed_k A transport ID starting no monolith, or a manifest or header that does not
      *    parse.
      */
-    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept { return nvme_read_metadata(path); }
+    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
+        return nvme_read_metadata<wait_t>(path);
+    }
 
     /** Shards in the view, one per part of the checkpoint, so a monolith views as one shard. */
     std::size_t shards_count() const noexcept { return parts_.size(); }
@@ -2575,7 +2584,7 @@ struct nvme_indexes {
                 return vetted;
             if (part && (opened.dimensions != parts_[0].dimensions || opened.connectivity != parts_[0].connectivity ||
                          opened.value_row_bytes != parts_[0].value_row_bytes))
-                return status_t::config_mismatch_k;
+                return release_medium<wait_t>(medium), status_t::config_mismatch_k;
             media_.push_back_reserved(std::move(medium));
             parts_.push_back_reserved(opened);
         }

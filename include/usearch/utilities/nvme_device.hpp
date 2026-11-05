@@ -107,7 +107,7 @@
 #include <variant>     // `std::variant`, `std::visit`, `std::get_if`, `std::in_place_index`
 
 #include <forkunion/forkunion.h> // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
-#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the holder counts
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the SPDK claim word
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
 
 #include "usearch/utilities/blocking_files.hpp" // `NOMINMAX` ahead of `<windows.h>`
@@ -731,15 +731,19 @@ enum class linux_spdk_memory_t : u32_t {
 };
 
 /**
- *  @brief The SPDK environment and the controllers a process attaches, shared by every view and
- *      engine that reads through them, and torn down by the last copy.
+ *  @brief The SPDK environment and the controllers this process attached, shared by every view and
+ *      engine that reads through them.
  *
- *  SPDK is process-wide by nature: the environment initializes once per process and keeps its state
- *  until the process exits, so a second @c open while one lives shares it, config and all, and one
- *  after the last share died is refused. Views take namespaces from it and engines take DMA buffers
- *  and queue pairs, so a view outlives any executor and an executor serves any view.
+ *  The environment starts once per process and never finishes, since DPDK cannot start twice, so
+ *  every later @c start shares it, config and all. A controller counts its holders, each namespace
+ *  a view reads and each engine's queue pair on it, and the last @c release detaches it. SPDK
+ *  answers a transport ID with the controller still attached to it, failed or not, so a failed
+ *  controller refuses new holders until its last one releases, and the next @c connect attaches
+ *  whichever drive answers then. Every change waits on one claim word through the @p wait_type_
+ *  its caller names, and none happens in a destructor. DPDK is not fork-safe, so a child process
+ *  never touches the environment, and its multi-process mode is out of scope.
  */
-class linux_spdk_driver_t {
+class linux_spdk_process_t {
   public:
 
     /** How the environment starts. */
@@ -752,38 +756,93 @@ class linux_spdk_driver_t {
         std::size_t plain_megabytes = 256;
     };
 
-    linux_spdk_driver_t() noexcept = default;
-    linux_spdk_driver_t(linux_spdk_driver_t const& other) noexcept : shared_(other.shared_) {
-        if (shared_) fu::standard_atomic_ref<std::size_t>(shared_->holders).add(1, std::memory_order_relaxed);
-    }
-    linux_spdk_driver_t& operator=(linux_spdk_driver_t const& other) noexcept {
-        if (shared_ == other.shared_) return *this;
-        forget_();
-        shared_ = other.shared_;
-        if (shared_) fu::standard_atomic_ref<std::size_t>(shared_->holders).add(1, std::memory_order_relaxed);
-        return *this;
-    }
-    linux_spdk_driver_t(linux_spdk_driver_t&& other) noexcept : shared_(std::exchange(other.shared_, nullptr)) {}
-    linux_spdk_driver_t& operator=(linux_spdk_driver_t&& other) noexcept {
-        std::swap(shared_, other.shared_);
-        return *this;
-    }
-    ~linux_spdk_driver_t() noexcept { forget_(); }
+    /** One controller this process attached, the transport ID it answered, and its holders. */
+    struct connected_t {
+        spdk_nvme_transport_id transport;
+        spdk_nvme_ctrlr* controller;
+        std::size_t holders;
+    };
 
-    /** Truthy exactly while this copy shares an initialized environment. */
-    explicit operator bool() const noexcept { return shared_ != nullptr; }
+    /** Whether the environment runs, so engines may take DMA buffers and queue pairs from it. */
+    static bool running() noexcept {
+        return fu::standard_atomic_ref<u32_t const>(running_).load(std::memory_order_acquire);
+    }
 
-    /** Shares the environment this process holds, or initializes it with @p config when none lives;
-     *  refused once the last share of an earlier one died. */
-    static expected<linux_spdk_driver_t> open(config_t const& config) noexcept {
-        linux_spdk_driver_t driver;
-        std::unique_lock<fu::spin_mutex_t> const opening {process_mutex_};
-        if (process_shared_) {
-            fu::standard_atomic_ref<std::size_t>(process_shared_->holders).add(1, std::memory_order_relaxed);
-            driver.shared_ = process_shared_;
-            return {std::move(driver), status_t::success_k};
+    /**
+     *  @brief Starts the environment with @p config, unless it already runs.
+     *
+     *  @par Statuses:
+     *  - @c config_mismatch_k SPDK cannot take DPDK's environment in this process.
+     *  - @c io_k The environment refused to start.
+     */
+    template <typename wait_type_>
+    static status_t start(config_t const& config) noexcept {
+        claim_<wait_type_>();
+        status_t const started = running() ? status_t::success_k : start_(config);
+        unclaim_();
+        return started;
+    }
+
+    /**
+     *  @brief A new holder of the controller @p transport_id names, attached on first use.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k @p transport_id does not parse.
+     *  - @c uninitialized_k The environment does not run.
+     *  - @c io_k The controller did not connect, or failed and is still held.
+     *  - @c bad_alloc_k The attachment could not be recorded.
+     */
+    template <typename wait_type_>
+    static expected<connected_t*> connect(char const* transport_id) noexcept {
+        spdk_nvme_transport_id transport {};
+        if (!transport_id || spdk_nvme_transport_id_parse(&transport, transport_id) != 0)
+            return {nullptr, status_t::invalid_argument_k};
+        claim_<wait_type_>();
+        expected<connected_t*> const connected = connect_(transport);
+        unclaim_();
+        return connected;
+    }
+
+    /** Adds a holder to @p connected, as an engine's queue pair on its controller does. */
+    template <typename wait_type_>
+    static void hold(connected_t& connected) noexcept {
+        claim_<wait_type_>();
+        ++connected.holders;
+        unclaim_();
+    }
+
+    /** Drops a holder of @p connected, detaching its controller after the last one. */
+    template <typename wait_type_>
+    static void release(connected_t& connected) noexcept {
+        claim_<wait_type_>();
+        if (!--connected.holders) {
+            for (std::size_t position = 0; position != connections_.size(); ++position)
+                if (connections_[position] == &connected) {
+                    connections_[position] = connections_[connections_.size() - 1];
+                    connections_.pop_back();
+                    break;
+                }
+            spdk_nvme_detach(connected.controller);
+            delete &connected;
         }
-        if (!spdk_env_dpdk_external_init()) return {std::move(driver), status_t::config_mismatch_k};
+        unclaim_();
+    }
+
+  private:
+    template <typename wait_type_>
+    static void claim_() noexcept {
+        u32_t free = 0;
+        while (!fu::standard_atomic_ref<u32_t>(claim_word_)
+                    .compare_exchange_weak(free, 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+            wait_type_ {}(&claim_word_, free, 0u);
+            free = 0;
+        }
+    }
+
+    static void unclaim_() noexcept { fu::standard_atomic_ref<u32_t>(claim_word_).store(0, std::memory_order_release); }
+
+    static status_t start_(config_t const& config) noexcept {
+        if (!spdk_env_dpdk_external_init()) return status_t::config_mismatch_k;
         spdk_env_opts options {};
         options.opts_size = sizeof(options);
         spdk_env_opts_init(&options);
@@ -799,25 +858,19 @@ class linux_spdk_driver_t {
         int const kept_affinity = ::sched_getaffinity(0, sizeof(inherited), &inherited);
         int const initialized = spdk_env_init(&options);
         if (kept_affinity == 0) ::sched_setaffinity(0, sizeof(inherited), &inherited);
-        if (initialized != 0) return {std::move(driver), status_t::io_k};
-        driver.shared_ = new (std::nothrow) shared_t {};
-        if (!driver.shared_)
-            return spdk_env_fini(), expected<linux_spdk_driver_t> {std::move(driver), status_t::bad_alloc_k};
-        process_shared_ = driver.shared_;
-        return {std::move(driver), status_t::success_k};
+        if (initialized != 0) return status_t::io_k;
+        fu::standard_atomic_ref<u32_t>(running_).store(1, std::memory_order_release);
+        return status_t::success_k;
     }
 
-    /** Connects the controller @p transport_id names, or answers the one this driver already
-     *  connected. */
-    expected<spdk_nvme_ctrlr*> connect(char const* transport_id) noexcept {
-        if (!shared_) return {nullptr, status_t::uninitialized_k};
-        spdk_nvme_transport_id transport {};
-        if (!transport_id || spdk_nvme_transport_id_parse(&transport, transport_id) != 0)
-            return {nullptr, status_t::invalid_argument_k};
-        std::unique_lock<fu::spin_mutex_t> const connecting {shared_->connecting};
-        for (connected_t const& connected : shared_->controllers)
-            if (spdk_nvme_transport_id_compare(&connected.transport, &transport) == 0)
-                return {connected.controller, status_t::success_k};
+    static expected<connected_t*> connect_(spdk_nvme_transport_id const& transport) noexcept {
+        if (!running()) return {nullptr, status_t::uninitialized_k};
+        for (connected_t* const cached : connections_)
+            if (spdk_nvme_transport_id_compare(&cached->transport, &transport) == 0) {
+                if (spdk_nvme_ctrlr_is_failed(cached->controller)) return {nullptr, status_t::io_k};
+                ++cached->holders;
+                return {cached, status_t::success_k};
+            }
         spdk_nvme_ctrlr_opts options;
         spdk_nvme_ctrlr_get_default_ctrlr_opts(&options, sizeof(options));
         // Nothing polls the admin queue on a timer, so a fabric's keep-alive would drop the
@@ -825,67 +878,29 @@ class linux_spdk_driver_t {
         options.keep_alive_timeout_ms = 0;
         spdk_nvme_ctrlr* const controller = spdk_nvme_connect(&transport, &options, sizeof(options));
         if (!controller) return {nullptr, status_t::io_k};
-        if (status_t const kept = shared_->controllers.push_back(connected_t {transport, controller}); failed(kept))
-            return spdk_nvme_detach(controller), expected<spdk_nvme_ctrlr*> {nullptr, kept};
-        return {controller, status_t::success_k};
+        connected_t* const connected = new (std::nothrow) connected_t {transport, controller, 1};
+        if (!connected || failed(connections_.push_back(connected)))
+            return delete connected, spdk_nvme_detach(controller),
+                   expected<connected_t*> {nullptr, status_t::bad_alloc_k};
+        return {connected, status_t::success_k};
     }
 
-  private:
+    /** Held while the environment starts or a controller's holders change. */
+    inline static u32_t claim_word_ = 0;
 
-    /** One controller this driver connected, and the transport ID it answered. */
-    struct connected_t {
+    /** One once the environment runs. */
+    inline static u32_t running_ = 0;
 
-        /** The parsed transport ID, compared on every later @c connect. */
-        spdk_nvme_transport_id transport;
-
-        /** The attached controller, detached by the last copy. */
-        spdk_nvme_ctrlr* controller;
-    };
-
-    /** The block the copies share, allocated by the first and freed by the last. */
-    struct shared_t {
-
-        /** Copies still holding the environment. */
-        std::size_t holders {1};
-
-        /** Held while one view connects, so a controller is attached once. */
-        fu::spin_mutex_t connecting;
-
-        /** Every controller connected so far. */
-        growing_buffer<connected_t> controllers {global_allocator};
-    };
-
-    /** Drops this copy's share, detaching every controller and finishing the environment when it
-     *  was the last. */
-    void forget_() noexcept {
-        if (!shared_) return;
-        // Under the process lock, so an `open` never shares an environment its last holder is
-        // finishing.
-        std::unique_lock<fu::spin_mutex_t> const forgetting {process_mutex_};
-        if (fu::standard_atomic_ref<std::size_t>(shared_->holders).fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            for (connected_t const& connected : shared_->controllers) spdk_nvme_detach(connected.controller);
-            delete shared_;
-            process_shared_ = nullptr;
-            spdk_env_fini();
-        }
-        shared_ = nullptr;
-    }
-
-    /** The shared block, null in a copy holding no environment. */
-    shared_t* shared_ = nullptr;
-
-    /** The environment this process holds, null while none lives. */
-    inline static shared_t* process_shared_ = nullptr;
-
-    /** Held while a share opens or drops, so the process holds one environment at a time. */
-    inline static fu::spin_mutex_t process_mutex_ {};
+    /** Every controller attached, found by transport ID. */
+    inline static growing_buffer<connected_t*> connections_ {global_allocator};
 };
 
-/** One namespace on an SPDK controller, holding its driver share until it dies. */
+/** One namespace on an SPDK controller, a holder of it until @c release, which must precede its
+ *  death. */
 struct spdk_medium_t {
 
-    /** The share that keeps the namespace's controller attached. */
-    linux_spdk_driver_t driver;
+    /** The controller the namespace sits on, null once released. */
+    linux_spdk_process_t::connected_t* connection = nullptr;
 
     /** The namespace reads target. */
     spdk_nvme_ns* name_space = nullptr;
@@ -898,32 +913,43 @@ struct spdk_medium_t {
 
     spdk_medium_t() noexcept = default;
     spdk_medium_t(spdk_medium_t&& other) noexcept
-        : driver(std::move(other.driver)), name_space(std::exchange(other.name_space, nullptr)),
+        : connection(std::exchange(other.connection, nullptr)), name_space(std::exchange(other.name_space, nullptr)),
           byte_base(std::exchange(other.byte_base, 0u)), block_bytes(std::exchange(other.block_bytes, 0u)) {}
     spdk_medium_t& operator=(spdk_medium_t&& other) noexcept {
-        std::swap(driver, other.driver);
-        std::swap(name_space, other.name_space);
-        std::swap(byte_base, other.byte_base);
-        std::swap(block_bytes, other.block_bytes);
+        assert(!connection && "A held namespace is released before another takes its place");
+        connection = std::exchange(other.connection, nullptr);
+        name_space = std::exchange(other.name_space, nullptr);
+        byte_base = std::exchange(other.byte_base, 0u);
+        block_bytes = std::exchange(other.block_bytes, 0u);
         return *this;
     }
     spdk_medium_t(spdk_medium_t const&) = delete;
     spdk_medium_t& operator=(spdk_medium_t const&) = delete;
+    ~spdk_medium_t() noexcept { assert(!connection && "A namespace is released before it dies"); }
+
+    /** Gives back its hold on the controller, which detaches once no view or engine holds it. */
+    template <typename wait_type_>
+    void release() noexcept {
+        if (connection) linux_spdk_process_t::release<wait_type_>(*std::exchange(connection, nullptr));
+        name_space = nullptr;
+    }
 
     /** Opens namespace @p namespace_id of the controller @p transport_id names, the first active
      *  one when zero, with the part starting @p byte_base bytes in, a multiple of its sector. */
-    static expected<spdk_medium_t> open(linux_spdk_driver_t driver, char const* transport_id, u32_t namespace_id,
-                                        u64_t byte_base) noexcept {
+    template <typename wait_type_>
+    static expected<spdk_medium_t> open(char const* transport_id, u32_t namespace_id, u64_t byte_base) noexcept {
         spdk_medium_t medium;
-        auto const [controller, status] = driver.connect(transport_id);
+        auto const [connection, status] = linux_spdk_process_t::connect<wait_type_>(transport_id);
         if (failed(status)) return {std::move(medium), status};
+        medium.connection = connection;
+        spdk_nvme_ctrlr* const controller = connection->controller;
         u32_t const identifier = namespace_id ? namespace_id : spdk_nvme_ctrlr_get_first_active_ns(controller);
         spdk_nvme_ns* const name_space = identifier ? spdk_nvme_ctrlr_get_ns(controller, identifier) : nullptr;
-        if (!name_space || !spdk_nvme_ns_is_active(name_space))
-            return {std::move(medium), status_t::invalid_argument_k};
-        u32_t const sector_bytes = spdk_nvme_ns_get_sector_size(name_space);
-        if (!sector_bytes || byte_base % sector_bytes) return {std::move(medium), status_t::invalid_argument_k};
-        medium.driver = std::move(driver);
+        u32_t const sector_bytes = name_space && spdk_nvme_ns_is_active(name_space)
+                                       ? spdk_nvme_ns_get_sector_size(name_space)
+                                       : 0;
+        if (!sector_bytes || byte_base % sector_bytes)
+            return medium.release<wait_type_>(), expected {std::move(medium), status_t::invalid_argument_k};
         medium.name_space = name_space;
         medium.byte_base = byte_base;
         medium.block_bytes = sector_bytes;
@@ -931,8 +957,9 @@ struct spdk_medium_t {
     }
 
     /** Opens the namespace @p path names, an @c spdk:// address or a transport ID in any form
-     *  @ref file_address_t lists, through the process's environment, over hugepages only for PCIe
+     *  @ref file_address_t lists, starting the process's environment over hugepages only for PCIe
      *  controllers. */
+    template <typename wait_type_>
     static expected<spdk_medium_t> open(std::string_view path) noexcept {
         auto const [parsed, parse_status] = parse_file_address(path);
         if (failed(parse_status)) return {spdk_medium_t {}, parse_status};
@@ -944,12 +971,12 @@ struct spdk_medium_t {
         if (failed(transport_id.resize_uninitialized(length + 1))) return {spdk_medium_t {}, status_t::bad_alloc_k};
         parsed.location.copy(transport_id.data() + pcie_keys.copy(transport_id.data(), pcie_keys.size()), length);
         transport_id[length] = '\0';
-        linux_spdk_driver_t::config_t environment;
+        linux_spdk_process_t::config_t environment;
         if (pcie_keys.empty() && parsed.location.find("trtype:PCIe") == std::string_view::npos)
             environment.memory = linux_spdk_memory_t::plain_pages_k;
-        auto [driver, driver_status] = linux_spdk_driver_t::open(environment);
-        if (failed(driver_status)) return {spdk_medium_t {}, driver_status};
-        return open(std::move(driver), transport_id.data(), parsed.namespace_id, parsed.byte_base);
+        if (status_t const started = linux_spdk_process_t::start<wait_type_>(environment); failed(started))
+            return {spdk_medium_t {}, started};
+        return open<wait_type_>(transport_id.data(), parsed.namespace_id, parsed.byte_base);
     }
 
     /** Fills @p bytes from @p offset bytes past the part's start, one sector-aligned read on a
@@ -1046,6 +1073,20 @@ wanted_type_ const* medium_as(std::variant<media_types_...> const& medium) noexc
     return std::get_if<wanted_type_>(&medium);
 }
 
+/** Gives back the controller an SPDK namespace @p medium holds, which must precede its death;
+ *  files and devices hold nothing shared. */
+template <typename wait_type_, typename medium_type_>
+void release_medium([[maybe_unused]] medium_type_& medium) noexcept {
+#if USEARCH_WITH_LINUX_SPDK
+    if constexpr (std::is_same_v<medium_type_, spdk_medium_t>) medium.template release<wait_type_>();
+#endif
+}
+
+template <typename wait_type_, typename... media_types_>
+void release_medium(std::variant<media_types_...>& medium) noexcept {
+    std::visit([](auto& alternative) noexcept { release_medium<wait_type_>(alternative); }, medium);
+}
+
 /** What the block queue under the medium @p medium holds admits. */
 template <typename... media_types_>
 io_device_queues_t device_queues_of(std::variant<media_types_...> const& medium) noexcept {
@@ -1099,11 +1140,6 @@ struct io_engine_config_t {
     /** Whether io_uring learns of completions by interrupt or by polling the device's queues; an
      *  executor's calls derive it from their media through @c nvme_reaping. */
     linux_uring_reaping_t reaping = linux_uring_reaping_t::interrupted_k;
-#if USEARCH_WITH_LINUX_SPDK
-
-    /** The environment the SPDK engine takes DMA buffers and queue pairs from. */
-    linux_spdk_driver_t spdk_driver;
-#endif
 };
 
 /** What an engine driving @p transport answers @p config before setting anything up:
@@ -2515,8 +2551,8 @@ struct linux_spdk_dma_allocator {
 };
 
 /**
- *  @brief The SPDK user-space driver: one queue pair per controller this thread reads, allocated on
- *      first attach and kept, DMA buffers from the environment, and polled completions.
+ *  @brief The SPDK user-space driver: one queue pair per controller this thread reads, kept from
+ *      first attach to @c release, DMA buffers from the environment, and polled completions.
  *
  *  Nothing here blocks, because the driver offers no interrupt at all:
  *  @c spdk_nvme_qpair_process_completions is the only way a command is ever seen to finish, so a
@@ -2540,14 +2576,13 @@ class linux_spdk_engine {
           commands_(allocator), request_contexts_(allocator), completions_(allocator) {}
     linux_spdk_engine(linux_spdk_engine&&) noexcept = default;
     linux_spdk_engine& operator=(linux_spdk_engine&&) noexcept = default;
-    ~linux_spdk_engine() noexcept { release_queue_pairs_(); }
+    ~linux_spdk_engine() noexcept { assert(queue_pairs_.empty() && "An engine is released before it dies"); }
 
-    /** Takes a share of @p config's driver and sizes the completion queue for its depth. */
+    /** Sizes the completion queue for @p config's depth, once the environment runs. */
     status_t open(config_t const& config) noexcept {
         if (status_t const vetted = io_engine_vet_(config, transport()); failed(vetted)) return vetted;
-        if (!config.spdk_driver) return status_t::uninitialized_k;
+        if (!linux_spdk_process_t::running()) return status_t::uninitialized_k;
         if (failed(completions_.reserve_exactly(config.queue_depth))) return status_t::bad_alloc_k;
-        driver_ = config.spdk_driver;
         queue_depth_ = config.queue_depth;
         return status_t::success_k;
     }
@@ -2571,7 +2606,7 @@ class linux_spdk_engine {
         for (media_type_ const& medium : media) {
             spdk_medium_t const* const name_space = medium_as<spdk_medium_t>(medium);
             if (!name_space) return namespaces_.clear(), status_t::config_mismatch_k;
-            auto const [queue_pair, status] = queue_pair_of_(spdk_nvme_ns_get_ctrlr(name_space->name_space));
+            auto const [queue_pair, status] = queue_pair_of_(*name_space->connection);
             if (failed(status)) return namespaces_.clear(), status;
             namespaces_.push_back_reserved(
                 attached_namespace_t {name_space->name_space, queue_pair, name_space->block_bytes});
@@ -2580,6 +2615,9 @@ class linux_spdk_engine {
     }
 
     void detach() noexcept { namespaces_.clear(); }
+
+    /** Frees every queue pair and its hold on the controller, on the engine's own thread. */
+    void release() noexcept { release_queue_pairs_(); }
 
     status_t enqueue_read(io_request_t request) noexcept {
         if (outstanding_ == queue_depth_) return status_t::overflow_k;
@@ -2628,10 +2666,10 @@ class linux_spdk_engine {
     /** This thread's queue pair on one controller. */
     struct queue_pair_t {
 
-        /** The controller the queue pair belongs to. */
-        spdk_nvme_ctrlr* controller;
+        /** The controller the queue pair belongs to and holds. */
+        linux_spdk_process_t::connected_t* connection;
 
-        /** The queue pair, freed with the engine. */
+        /** The queue pair, freed on @c release. */
         spdk_nvme_qpair* queue_pair;
     };
 
@@ -2673,10 +2711,11 @@ class linux_spdk_engine {
         command.engine->complete_(command.buffer, result);
     }
 
-    /** This thread's queue pair on @p controller, allocated with delayed doorbells on first use. */
-    expected<spdk_nvme_qpair*> queue_pair_of_(spdk_nvme_ctrlr* controller) noexcept {
+    /** This thread's queue pair on @p connected, allocated with delayed doorbells on first use. */
+    expected<spdk_nvme_qpair*> queue_pair_of_(linux_spdk_process_t::connected_t& connected) noexcept {
         for (queue_pair_t const& queue_pair : queue_pairs_)
-            if (queue_pair.controller == controller) return {queue_pair.queue_pair, status_t::success_k};
+            if (queue_pair.connection == &connected) return {queue_pair.queue_pair, status_t::success_k};
+        spdk_nvme_ctrlr* const controller = connected.controller;
         spdk_nvme_io_qpair_opts options;
         spdk_nvme_ctrlr_get_default_io_qpair_opts(controller, &options, sizeof(options));
         options.io_queue_size = max_of<u32_t>(options.io_queue_size, static_cast<u32_t>(queue_depth_ + 1));
@@ -2685,14 +2724,18 @@ class linux_spdk_engine {
         options.delay_cmd_submit = true;
         spdk_nvme_qpair* const allocated = spdk_nvme_ctrlr_alloc_io_qpair(controller, &options, sizeof(options));
         if (!allocated) return {nullptr, status_t::io_k};
-        if (status_t const kept = queue_pairs_.push_back(queue_pair_t {controller, allocated}); failed(kept))
+        if (status_t const kept = queue_pairs_.push_back(queue_pair_t {&connected, allocated}); failed(kept))
             return spdk_nvme_ctrlr_free_io_qpair(allocated), expected<spdk_nvme_qpair*> {nullptr, kept};
+        linux_spdk_process_t::hold<wait_t>(connected);
         return {allocated, status_t::success_k};
     }
 
     /** Frees every queue pair; the driver completes what they held through @c completed_. */
     void release_queue_pairs_() noexcept {
-        for (queue_pair_t const& queue_pair : queue_pairs_) spdk_nvme_ctrlr_free_io_qpair(queue_pair.queue_pair);
+        for (queue_pair_t const& queue_pair : queue_pairs_) {
+            spdk_nvme_ctrlr_free_io_qpair(queue_pair.queue_pair);
+            linux_spdk_process_t::release<wait_t>(*queue_pair.connection);
+        }
         queue_pairs_.clear();
         namespaces_.clear();
     }
@@ -2704,10 +2747,6 @@ class linux_spdk_engine {
         outstanding_ = 0;
         return status_t::io_k;
     }
-
-    /** The share that keeps the environment and its controllers alive, declared first so it dies
-     *  last. */
-    linux_spdk_driver_t driver_;
 
     /** The DMA staging buffers reads arrive in. */
     io_buffers<linux_spdk_dma_allocator<>> buffers_;
@@ -2791,7 +2830,7 @@ class io_engine_variant {
      *  - @c unsupported_k The set has no engine for the named transport, or none set up.
      *  - @c io_k The named engine's setup was refused.
      *  - @c invalid_argument_k A zero queue depth.
-     *  - @c uninitialized_k SPDK named without a driver in @p config.
+     *  - @c uninitialized_k SPDK named before its environment started.
      */
     status_t open(config_t const& config) noexcept { return open_<0>(config); }
 
@@ -2822,6 +2861,15 @@ class io_engine_variant {
 
     void detach() noexcept {
         std::visit([](auto& engine) noexcept { engine.detach(); }, engines_);
+    }
+
+    /** Gives back what the engine holds on devices other engines share, as SPDK queue pairs do. */
+    void release() noexcept {
+        std::visit(
+            [](auto& engine) noexcept {
+                if constexpr (requires { engine.release(); }) engine.release();
+            },
+            engines_);
     }
 
     /**
@@ -2954,6 +3002,17 @@ class nvme_executor {
     nvme_executor& operator=(nvme_executor&&) noexcept = default;
 
     ~nvme_executor() noexcept { close_engines_(); }
+
+    /** Releases every engine on its own thread, which must precede the executor's death once an
+     *  engine holds devices other engines share. */
+    void release() noexcept {
+        if constexpr (requires(engine_t& engine) { engine.release(); }) {
+            [[maybe_unused]] status_t const released = threads_.for_threads(
+                [&](std::size_t thread, std::size_t) noexcept {
+                    if (thread < engines_.size()) engines_[thread].release();
+                });
+        }
+    }
 
     /**
      *  @brief Spawns @p threads over @p topology under the ForkUnion facilities @p allowed names,
