@@ -3385,11 +3385,18 @@ class exact_search_t {
             return {};
 
         // §2. Transpose in a single thread to avoid contention writing into the same memory buffers
-        for (std::size_t query_idx = 0; query_idx != queries_count; ++query_idx) {
-            for (std::size_t dataset_idx = 0; dataset_idx != dataset_count; ++dataset_idx) {
-                std::size_t from_idx = queries_count * dataset_idx + query_idx;
-                std::size_t to_idx = dataset_count * query_idx + dataset_idx;
-                keys_and_distances_per_query[to_idx] = keys_and_distances_per_dataset[from_idx];
+        constexpr std::size_t transpose_tile_k = 32;
+        for (std::size_t query_tile = 0; query_tile < queries_count; query_tile += transpose_tile_k) {
+            std::size_t query_tile_end = (std::min)(queries_count, query_tile + transpose_tile_k);
+            for (std::size_t dataset_tile = 0; dataset_tile < dataset_count; dataset_tile += transpose_tile_k) {
+                std::size_t dataset_tile_end = (std::min)(dataset_count, dataset_tile + transpose_tile_k);
+                for (std::size_t query_idx = query_tile; query_idx != query_tile_end; ++query_idx) {
+                    for (std::size_t dataset_idx = dataset_tile; dataset_idx != dataset_tile_end; ++dataset_idx) {
+                        std::size_t from_idx = queries_count * dataset_idx + query_idx;
+                        std::size_t to_idx = dataset_count * query_idx + dataset_idx;
+                        keys_and_distances_per_query[to_idx] = keys_and_distances_per_dataset[from_idx];
+                    }
+                }
             }
         }
 
