@@ -195,6 +195,7 @@ struct [[nodiscard]] ram_compact_plan {
         if (status_t const closed = target.close_gated_(); failed(closed)) return {{}, closed};
         refining.owner_ = &target;
         refining.config_.expansion_factor = config.expansion_factor;
+        refining.config_.memory_limit = config.memory_limit;
         for (std::size_t closing = 0; closing != sources.size(); ++closing) {
             if (sources[closing] == &target) continue;
             if (status_t const closed = sources[closing]->close_gated_(); failed(closed)) {
@@ -216,7 +217,8 @@ struct [[nodiscard]] ram_compact_plan {
         if (status_t const packed = target.plan_moves_(sources, capacity, rank_first_fit, refining); failed(packed))
             return {{}, packed};
         std::size_t const shards = refining.part_offsets_.size() - 1;
-        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)))
+        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)) ||
+            failed(refining.stitched_parts_.resize(shards)))
             return {{}, status_t::bad_alloc_k};
         // Every source row moves but those of the target's own shards that stay where they are.
         for (std::size_t shard = 0; shard != resident_shards; ++shard)

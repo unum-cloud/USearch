@@ -997,6 +997,12 @@ struct [[nodiscard]] refine_report_t {
      *  audits. */
     std::size_t islands_reconnected = 0;
 
+    /** Tiles of target rows the sweeps collected links into. */
+    std::size_t swept_tiles = 0;
+
+    /** Links the sweeps collected from the walked rows into their targets' merges. */
+    std::size_t swept_links = 0;
+
     /** The audit closing the heal, as a fresh health audit right after would take it. */
     reachability_t reachability;
 
@@ -1010,6 +1016,8 @@ struct [[nodiscard]] refine_report_t {
         changed_nodes += other.changed_nodes;
         islands_found += other.islands_found;
         islands_reconnected += other.islands_reconnected;
+        swept_tiles += other.swept_tiles;
+        swept_links += other.swept_links;
         reachability += other.reachability;
         traversal_stats += other.traversal_stats;
         return *this;

@@ -1392,7 +1392,7 @@ struct checkpoint_source_t {
 
 /**
  *  @brief The metadata of the checkpoint @p source holds, every part's header read through the
- *      source's @ref checkpoint_source_t::read_header, so a device's columns never cross into the
+ *      source's @c checkpoint_source_t::read_header, so a device's columns never cross into the
  *      memory of the host.
  *
  *  @par Statuses:

@@ -2049,6 +2049,145 @@ std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t se
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
+/** Each row's live neighbors in a saved @p neighbors column, a self-loop in slot zero meaning
+ *  none. */
+template <typename node_id_type_>
+std::vector<std::size_t> dense_row_degrees(nk::matrix<node_id_type_> const& neighbors) {
+    std::vector<std::size_t> degrees(neighbors.extent(0));
+    for (std::size_t node = 0; node != neighbors.extent(0); ++node) {
+        auto const row = neighbors.row(node).as_vector();
+        std::size_t degree = 0;
+        while (degree != row.size() && row[degree] != node_id_unknown_k) ++degree;
+        degrees[node] = degree == 1 && row[0] == node ? 0 : degree;
+    }
+    return degrees;
+}
+
+/**
+ *  @brief The shadow merge's contract on a graph every row of which is reached both ways.
+ *
+ *  A pass writes each live row old to better, from its old members and more, so no step of any
+ *  phase leaves a row thinner than before, and its levels keep every row reached, so the verifying
+ *  audit finds no island and the heal has nothing to do; the same under a budget of about a
+ *  quarter of the rows per tile, whose sweep collects the links across tiles. Row zero sits at the
+ *  center of the value range, a hub most rows pick, and the plan never grows past what it
+ *  reserved, under either budget.
+ *
+ *  One pass first heals whatever the build left, which a dot graph's hubs can stall short of
+ *  every row; the contract is then judged on the graph that pass left.
+ */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_shadow_merge(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using node_id_t = typename index_type_::node_id_t;
+    using refine_config_t = typename index_type_::refine_config_t;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dimensions, stream_key(seed, "shadow"));
+        auto hub = vectors.row(0).as_vector();
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension) hub[dimension] = make_scalar<scalar_t>(4);
+        failures += expect(succeeded(index.reserve({dense_growth_nodes_k}).status));
+        typename index_type_::insert_config_t cheap;
+        cheap.expansion_factor = 4;
+        std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(dense_growth_nodes_k);
+        failures += expect(succeeded(index.insert(to_span(keys), vectors.view(), {}, context, cheap).status));
+        node_id_t const published = static_cast<node_id_t>(index.size());
+        failures += expect(succeeded(index.refine({0, published}, {}, context).status));
+        auto const [health, health_status] = dense_audit_health(index, context);
+        failures += expect(succeeded(health_status));
+        bool const whole = health.reachable_nodes == published;
+        if constexpr (kernel_ != nk_kernel_dot_k) failures += expect(whole);
+
+        auto const shape = index.saved_shape();
+        auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
+        auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+        auto degrees = [&] {
+            failures += expect_eq(
+                dense_save(index, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
+                           synchronization_t::exclusive_k),
+                status_t::success_k);
+            return dense_row_degrees(saved_neighbors);
+        };
+        std::size_t const quarter_limit = index_type_::audit_memory_usage(published) +
+                                          index_type_::refine_carried_bytes(published) +
+                                          index_type_::refine_tile_bytes(published / 4, shape.connectivity);
+        for (std::size_t const memory_limit : {std::size_t {0}, quarter_limit}) {
+            std::vector<std::size_t> const before = degrees();
+            refine_config_t config;
+            config.memory_limit = memory_limit;
+            failures += expect_eq(index.reserve_traversal(context, {}), status_t::success_k);
+            auto [plan, plan_status] = index.plan_refine({0, published}, {}, {}, config);
+            failures += expect_eq(plan_status, status_t::success_k);
+            std::ptrdiff_t const planned_bytes = ledger.live_bytes;
+            std::size_t thinned = 0, checks = 0, tiles = 0;
+            auto check = [&] {
+                std::vector<std::size_t> const now = degrees();
+                for (std::size_t node = 0; node != before.size(); ++node) thinned += now[node] < before[node];
+                failures += expect(ledger.live_bytes <= planned_bytes);
+                ++checks;
+            };
+            do {
+                tiles += plan.reselecting();
+                for (auto const step : plan.steps()) {
+                    failures += expect_eq(plan.run(step, context), status_t::success_k);
+                    check();
+                }
+                check();
+            } while (plan.advance());
+            auto const [refined, finish_status] = plan.finish();
+            failures += expect_eq(finish_status, status_t::success_k);
+            failures += expect(checks > published && refined.reselected_nodes >= published);
+            failures += expect(memory_limit ? tiles >= 4 && refined.swept_tiles >= 4 : tiles == 1);
+            failures += expect(refined.swept_links != 0);
+            if (!whole) continue;
+            failures += expect_eq(thinned, 0u);
+            failures += expect_eq(refined.islands_found, 0u);
+            failures += expect_eq(refined.reachability.reachable_nodes, published);
+        }
+
+        // Islands planted into the last tile walk to rows reached both ways behind it, whose sweep
+        // merges link them back, and an orphan linked from one far row alone keeps that last
+        // parent through its merges: the verifying audit finds none for the heal.
+        constexpr std::size_t islands_count = 32;
+        static_cast<void>(degrees());
+        dense_make_islands(saved_neighbors.span(), static_cast<node_id_t>(published - islands_count));
+        node_id_t const orphan = published / 2 + 1, parent = published / 6;
+        for (std::size_t node = 0; node != published; ++node) {
+            auto row = saved_neighbors.row(node).as_vector();
+            for (std::size_t slot = 0; slot != row.size(); ++slot)
+                if (row[slot] == orphan) row[slot] = node_id_unknown_k;
+        }
+        auto parent_row = saved_neighbors.row(parent).as_vector();
+        std::size_t parent_slot = 0;
+        while (parent_slot + 1 != parent_row.size() && parent_row[parent_slot] != node_id_unknown_k) ++parent_slot;
+        parent_row[parent_slot] = orphan;
+        std::unique_ptr<index_type_> const islanded_ptr = make_index(ledger);
+        index_type_& islanded = *islanded_ptr;
+        failures += expect(succeeded(islanded.reserve({dense_growth_nodes_k}).status));
+        failures += expect_eq(
+            dense_load(islanded, make_index,
+                       {dense_matrix_bytes(saved_vectors.view()), dense_matrix_bytes(saved_neighbors.view())},
+                       to_span(keys), published, {0, published}),
+            status_t::success_k);
+        auto const [planted_health, planted_status] = dense_audit_health(islanded, context);
+        failures += expect(succeeded(planted_status) && planted_health.reachable_nodes < published);
+        refine_config_t quarters;
+        quarters.memory_limit = quarter_limit;
+        auto const [joined, joined_status] = islanded.refine({0, published}, quarters, context);
+        failures += expect(succeeded(joined_status));
+        if (whole) {
+            failures += expect_eq(joined.islands_found, 0u);
+            failures += expect_eq(joined.reachability.reachable_nodes, published);
+        }
+    }
+    return failures + expect_eq(ledger.live_bytes, 0);
+}
+
 /** Of the ten nearest entries by @p index 's own exact scan, how many its walks return, summed over
  *  the rows of @p queries; a match within the tenth's distance counts, so ties never punish one. */
 template <typename index_type_, typename make_index_type_, typename vectors_view_type_>
@@ -3425,10 +3564,11 @@ std::size_t test_dense_indexes_absorb(u64_t seed, placement_types_&... placement
 
 /** Four indexes over the quarters of one dataset merge into an empty recipient through one plan: a
  *  group naming a null donor refuses before any moves, leaving every donor whole; a plan whose
- *  first run is cancelled mid re-selection has consumed every donor and refuses insertions, and on
- *  a GPU saves, while it lives; the next run continues it, and it finishes having stepped over
- *  exactly as many nodes as an uncancelled absorb of the same quarters, re-selecting every appended
- *  node and no more than it stepped over, its entries spread evenly over the recipient's shards and
+ *  first run is cancelled mid re-selection has consumed the donors moved in so far, the first on
+ *  the host and every one on a GPU, leaves the rest whole, and refuses insertions, and on a GPU
+ *  saves, while it lives; the next run continues it, and it finishes having stepped over exactly
+ *  as many nodes as an uncancelled absorb of the same quarters, re-selecting every appended node
+ *  and no more than it stepped over, its entries spread evenly over the recipient's shards and
  *  every key resolving to its own entry. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_, typename... placement_types_>
 std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... placement) {
@@ -3478,8 +3618,11 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     build_quarters(baseline_quarters, baseline_donors);
     failures += expect_eq(baseline.absorb(std::span<indexes_type_*> {baseline_donors}, {}, executor, proceed).status,
                           status_t::success_k);
+    // Each recipient shard keeps the first donor shard packed into it as its resident part, which
+    // no pass walks: at most a donor's share, rounded up per shard.
     std::size_t const baseline_visited = reported.exchange(0);
-    failures += expect(baseline_visited >= rows);
+    std::size_t const resident = quarter + baseline.shards_count();
+    failures += expect(baseline_visited >= rows - resident);
 
     indexes_type_ recipient {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(recipient, placement...)));
@@ -3498,8 +3641,12 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         auto [plan, plan_status] = recipient.plan_absorb(std::span<indexes_type_*> {consumed}, {}, executor);
         failures += expect_eq(plan_status, status_t::success_k);
         failures += expect_eq(drive_run(plan, driver, cancel), status_t::cancelled_k);
+        // A RAM absorb stitches each donor before the next moves in, so a cancel in the first
+        // donor's pass leaves the rest whole; a device moves every donor in first.
+        std::size_t const moved = ram_collection<indexes_type_> ? 1 : donors.size();
         for (std::size_t which = 0; which != donors.size(); ++which)
-            failures += expect(!consumed[which] && donors[which]->size() == 0);
+            failures += expect(which < moved ? !consumed[which] && donors[which]->size() == 0
+                                             : consumed[which] == donors[which] && donors[which]->size() == quarter);
         failures += expect(reported.load() > 0 && reported.load() < baseline_visited);
 
         // The plan holds the index closed between its calls, never the executor.
@@ -3522,8 +3669,8 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
         failures += expect_eq(reported.load(), baseline_visited);
         // The first quarter stays as each shard's resident part, so only the remaining rows get
         // re-selected once more.
-        failures += expect(absorbed.reselected_nodes >= rows - quarter);
-        failures += expect(absorbed.reselected_nodes <= baseline_visited);
+        failures += expect(absorbed.reselected_nodes >= rows - resident);
+        failures += expect(absorbed.reselected_nodes <= baseline_visited + absorbed.islands_found);
     }
     failures += expect_eq(recipient.size(), rows);
     // Donor shards differ by an entry at most, and each moves to the recipient shard with the

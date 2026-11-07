@@ -9,18 +9,18 @@
  *  A draw names an entry: its key and its ordinal among that key's entries, as @c get orders them.
  *  The plan never scans the index, and never reads how many draws are wanted except to stop, so a
  *  smaller call draws a prefix of a larger one. It draws in passes of a doubling quota. Its roots
- *  are the focus keys' entries, or with none the next entries through @ref seeded_bijection. Greedy
+ *  are the focus keys' entries, or with none the next entries through @c seeded_bijection. Greedy
  *  walks attach each new root to its nearest earlier one and run from it toward its nearest shown
  *  point. A region over links around each root, bounded by the distance to its nearest tree
- *  neighbor, draws what ranks lowest by @ref splitmix64_at of the seed and the key, so a narrower
+ *  neighbor, draws what ranks lowest by @c splitmix64_at of the seed and the key, so a narrower
  *  region keeps the draws a wider one made.
  *
  *  The coordinates keep the shown points where the caller drew them. Every draw sits where its
- *  distances to its nearest shown points best match, by @ref sample_gauss_newton. Without shown
- *  points, a dense source projects each entry's values through @ref sample_projection, a source
- *  with fixed coordinates answers its own, and any other source scales its first draws classically
- *  and solves the rest among them. Both helpers are plain loops with contractions off, so a
- *  stand-in copying them verbatim reaches the same bits, even under a build's fast-math flags.
+ *  distances to its nearest shown points best match, by @c sample_gauss_newton. Without shown
+ *  points, a dense source projects each entry's values through @c sample_projection, a source with
+ *  fixed coordinates answers its own, and any other source scales its first draws classically and
+ *  solves the rest among them. Both helpers are plain loops with contractions off, so a stand-in
+ *  copying them verbatim reaches the same bits, even under a build's fast-math flags.
  */
 #pragma once
 
@@ -136,8 +136,8 @@ constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t
  *      stores: coordinates[c] = Σ_d values[d] · G[d][c] / sqrt(dimensions).
  *
  *  G[d][c], with n = 3d + c, is the Box-Muller cosine sqrt(−2 ln u₁) · cos(2π u₂) in f64. Its u₁ is
- *  @ref uniform_unit_f64 of @ref splitmix64_at (seed, 2n) and u₂ the same at 2n + 1. The sums run
- *  in f64, d ascending then c, each adding (value · sqrt(−2 ln u₁)) · cos(2π u₂); each divides by
+ *  @c uniform_unit_f64 of @c splitmix64_at (seed, 2n) and u₂ the same at 2n + 1. The sums run in
+ *  f64, d ascending then c, each adding (value · sqrt(−2 ln u₁)) · cos(2π u₂); each divides by
  *  sqrt(dimensions) in f64 and rounds to f32 once. Values of no dimensions project to the origin.
  */
 inline void sample_projection(f32_t const* values, std::size_t dimensions, u64_t seed, f32_t* coordinates) noexcept {
@@ -161,7 +161,7 @@ inline void sample_projection(f32_t const* values, std::size_t dimensions, u64_t
 /**
  *  @brief Solves one entry's coordinates where its distances to @p references_count reference
  *      points best match the @p distances in relative error, Σ_l (‖p − y_l‖ − d_l)² / d_l², by
- *      @ref sample_gauss_newton_steps_k damped steps of Gauss-Newton.
+ *      @c sample_gauss_newton_steps_k damped steps of Gauss-Newton.
  *
  *  @param[in] references @b [references_count,3] the reference points' coordinates.
  *  @param[in] distances @b [references_count] the entry's distances to them, in coordinate scale.
@@ -172,7 +172,7 @@ inline void sample_projection(f32_t const* values, std::size_t dimensions, u64_t
  *  A distance that is not positive puts the entry on the first such reference point. Otherwise it
  *  runs in f32, reference points ascending:
  *  1. p starts at the mean of the reference points weighted by 1 / d_l.
- *  2. p moves by 0.01 · min_l d_l · (2u_c − 1), u_c = @ref uniform_unit_f64 of @ref splitmix64_at
+ *  2. p moves by 0.01 · min_l d_l · (2u_c − 1), u_c = @c uniform_unit_f64 of @c splitmix64_at
  *     over @p key_seed and c, rounded to f32.
  *  3. Each step sums H = Σ J_lᵀJ_l and g = Σ J_lᵀ e_l over the reference points p is off, with J_l
  *     = (p − y_l) / (‖p − y_l‖ · d_l) and e_l = (‖p − y_l‖ − d_l) / d_l.
@@ -348,7 +348,8 @@ struct sample_plan {
     using sample_outputs_t = sample_outputs<key_t>;
 
     /** Whether the source solves coordinates by classical scaling when nothing is shown: it fixes
-     *  no coordinates and projects no values. */
+     *  no coordinates and projects no values.
+     *  @hideinitializer */
     static constexpr bool scales_classically_k = !requires(source_t const& source, std::span<f32_t, 3> coordinates) {
         source.coordinates_of(shard_node_t {}, coordinates);
     } && !requires(source_t const& source) { source.values_of(shard_node_t {}); };
@@ -372,8 +373,8 @@ struct sample_plan {
      *
      *  A pass of quota q, one at first and doubling after, but never past one more than the draws
      *  so far:
-     *  1. files roots, drawing each: every focus entry in the first pass, a shown focus key once at
-     *     its first entry, or without focus the next entries through @ref seeded_bijection that
+     *  1. files roots, drawing each: every focus entry in the first pass, a shown focus key once
+     *     at its first entry, or without focus the next entries through @c seeded_bijection that
      *     draw, until q are filed;
      *  2. walks to each new root from its nearest earlier one, then from each new root toward its
      *     nearest shown point, each step drawing and hanging from the step before;

@@ -994,17 +994,22 @@ struct ram_indexes {
             for (shard_refine_plan_t& shard_plan : shard_plans_) follows += shard_plan.advance();
             if (moving_before) for_each_receiving_([](shards_t& shards) noexcept { shards.end_commit(); });
             if (moving_before && !moving_()) {
-                end_windows_();
+                if (!receivers_.empty()) owner_->shards_.end_window();
                 release_consumed_donors_();
             }
             return follows != 0;
         }
 
-        /** Stops every shard plan's re-selection where its steps ran, so the next @ref advance
-         *  turns to the heal; a no-op for a plan still moving. */
+        /** Ends every shard plan's re-selection with its open tile, so once those merge the plans
+         *  verify and heal: a plan about to walk its next tile skips it, and every other phase runs
+         *  whole, since a driver stops only between phases; a no-op for a plan still moving. */
         void stop() noexcept {
-            for (shard_refine_plan_t& shard_plan : shard_plans_) shard_plan.stop();
-            taken = steps().size();
+            for (shard_refine_plan_t& shard_plan : shard_plans_) {
+                bool const reselecting = shard_plan.reselecting();
+                shard_plan.stop();
+                if (reselecting) static_cast<void>(shard_plan.advance());
+            }
+            taken = 0;
         }
 
         /** The published nodes every shard plan's audit judges. */
@@ -1036,6 +1041,15 @@ struct ram_indexes {
             for (shard_refine_plan_t const& shard_plan : shard_plans_)
                 widest.expansion_factor = max_of(widest.expansion_factor, shard_plan.walk().expansion_factor);
             return widest;
+        }
+
+        /** Nodes the open tiles of the shard plans re-selecting now span: what a phase of them
+         *  walks, once per tile in a caller's progress. */
+        std::size_t tile_nodes() const noexcept {
+            std::size_t total = 0;
+            for (shard_refine_plan_t const& shard_plan : shard_plans_)
+                total += shard_plan.reselecting() ? shard_plan.tile().size() : 0;
+            return total;
         }
 
         /** Whether any shard plan re-selects its planned range, which a caller's progress
@@ -1122,20 +1136,17 @@ struct ram_indexes {
             if (!receivers_.empty()) owner_->shards_.begin_window();
         }
 
-        void end_windows_() noexcept {
-            for (std::size_t donor = 0; donor != donor_holds_.size(); ++donor) donors_[donor]->shards_.end_window();
-            if (!receivers_.empty()) owner_->shards_.end_window();
-        }
-
-        /** Closes any copy window, drops the shard plans, which reopen their shards and release
-         *  the donor and receiver shards, reopens every donor not consumed, every receiver closed,
-         *  then this index, and drops every hold; a consumed donor stays closed and sealed. */
+        /** Closes the window of every donor still held and a split's own, drops the shard plans,
+         *  which reopen their shards and release the donor and receiver shards, reopens every donor
+         *  not consumed, every receiver closed, then this index, and drops every hold; a consumed
+         *  donor stays closed and sealed. */
         void release_() noexcept {
-            if (moving_()) end_windows_();
-            shard_plans_.clear();
-            std::size_t const donor_shards_count = donor_shards_count_();
             for (std::size_t held = 0; held != donor_holds_.size(); ++held)
-                if (donors_[held] && !consumed_(*donors_[held], donor_shards_count)) donors_[held]->shards_.reopen();
+                if (donors_[held]) donors_[held]->shards_.end_window();
+            if (!receivers_.empty() && moving_()) owner_->shards_.end_window();
+            shard_plans_.clear();
+            for (std::size_t held = 0; held != donor_holds_.size(); ++held)
+                if (donors_[held] && !consumed_(*donors_[held])) donors_[held]->shards_.reopen();
             donor_holds_.clear();
             for (std::size_t held = 0; held != receiver_holds_.size(); ++held) receivers_[held]->shards_.reopen();
             receiver_holds_.clear();
@@ -1143,32 +1154,24 @@ struct ram_indexes {
             owner_hold_ = {};
         }
 
-        /** Once the copy phases end, drops the hold of every donor whose shards all moved in and
-         *  nulls its slot; consumption is judged for every donor before any slot nulls. */
+        /** Once a round of copy phases ends, closes the window and drops the hold of every donor
+         *  whose shards all moved in and nulls its slot; consumption is judged for every donor
+         *  before any slot nulls. A donor still to move keeps its window open for a later round. */
         void release_consumed_donors_() noexcept {
-            std::size_t const donor_shards_count = donor_shards_count_();
             for (std::size_t held = 0; held != donor_holds_.size(); ++held)
-                if (consumed_(*donors_[held], donor_shards_count)) {
+                if (donors_[held] && consumed_(*donors_[held])) {
+                    donors_[held]->shards_.end_window();
                     donor_holds_[held].unlock();
                     donors_[held] = nullptr;
                 }
         }
 
-        /** The live shards of the donors the plan still holds. */
-        std::size_t donor_shards_count_() const noexcept {
-            std::size_t donor_shards_count = 0;
-            for (std::size_t held = 0; held != donor_holds_.size(); ++held)
-                if (donors_[held])
-                    donor_shards_count += donors_[held]->shards_.size() - donors_[held]->shards_.retired_shards();
-            return donor_shards_count;
-        }
-
-        /** Whether every live shard of @p donor moved in: planning slotted every one of the
-         *  @p donor_shards_count donor shards, and each of this donor's slots nulled as its shard
-         *  moved in. A planning refused midway slotted only some, and moved none, and a donor never
+        /** Whether every live shard of @p donor moved in: planning slotted every donor shard,
+         *  filling the slots it reserved, and each of this donor's slots nulled as its shard moved
+         *  in. A planning refused midway slotted only some, and moved none, and a donor never
          *  placed has nothing to move. */
-        bool consumed_(ram_indexes const& donor, std::size_t donor_shards_count) const noexcept {
-            if (donor.shards_.empty() || donor_slots_.size() != donor_shards_count) return false;
+        bool consumed_(ram_indexes const& donor) const noexcept {
+            if (donor.shards_.empty() || donor_slots_.size() != donor_slots_.capacity()) return false;
             for (shard_t const& one : donor.shards_)
                 for (index_t const* slot : donor_slots_)
                     if (slot == one.index.get()) return false;

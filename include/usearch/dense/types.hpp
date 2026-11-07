@@ -183,6 +183,9 @@ struct compact_config_t {
 
     /** Breadth of every re-selection walk and block build; zero means twice the connectivity. */
     u32_t expansion_factor = 0;
+
+    /** Bytes a closing refine may hold beyond the index, as @c refine_config_t takes them. */
+    std::size_t memory_limit = 0;
 };
 
 /** Outcome of a compaction, whatever its residencies. */
@@ -215,6 +218,12 @@ struct refine_config_t {
     /** How many candidates a re-selection keeps; defaults to twice the connectivity, like every
      *  walk. */
     candidates_count_t expansion_factor = 0;
+
+    /** Bytes the whole pass may hold beyond the index: the audit and a bit per row carried across
+     *  tiles, then tiles of contiguous rows at 8 B per neighbor slot plus 4 B each, as many rows as
+     *  fit, or on VRAM at 4 B per slot past the walks' arena too. Zero walks one storage chunk per
+     *  tile, or on VRAM as many rows as half the device's free bytes hold. */
+    std::size_t memory_limit = 0;
 };
 
 /** Optional tuning knobs for every ranking walk; zeros mean "derive from connectivity". */
@@ -288,7 +297,7 @@ status_t hints_refusal(ranked_hints_view<key_type_> const& hints, std::size_t qu
  *  The offsets index the keys and scores, so a window of a batch keeps the whole keys and scores
  *  and cuts its own offsets, the first holding where the window before it ended. A host tower
  *  stages every query's run at @ref staging_of, each thread owning whole queries, and
- *  @ref publish_runs lays the window out once the threads are done; a device tower appends on the
+ *  @c publish_runs lays the window out once the threads are done; a device tower appends on the
  *  device from the first offset.
  */
 template <typename key_type_, typename score_type_>
@@ -303,7 +312,7 @@ struct products_tape {
     /** The queries the window cuts. */
     std::size_t count() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
 
-    /** Where query @p query 's run stages on a host tape before @ref publish_runs: its stride past
+    /** Where query @p query 's run stages on a host tape before @c publish_runs: its stride past
      *  the window's first offset, which the runs of a window published fit under. */
     std::size_t staging_of(std::size_t query) const noexcept { return offsets.front() + query * stride; }
 

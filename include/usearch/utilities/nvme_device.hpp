@@ -776,11 +776,11 @@ class linux_spdk_process_t {
      *  - @c io_k The environment refused to start.
      */
     template <typename wait_type_>
-    static status_t start(config_t const& config) noexcept {
+    static status_t acquire(config_t const& config) noexcept {
         claim_<wait_type_>();
-        status_t const started = running() ? status_t::success_k : start_(config);
+        status_t const acquired = running() ? status_t::success_k : start_(config);
         unclaim_();
-        return started;
+        return acquired;
     }
 
     /**
@@ -974,8 +974,8 @@ struct spdk_medium_t {
         linux_spdk_process_t::config_t environment;
         if (pcie_keys.empty() && parsed.location.find("trtype:PCIe") == std::string_view::npos)
             environment.memory = linux_spdk_memory_t::plain_pages_k;
-        if (status_t const started = linux_spdk_process_t::start<wait_type_>(environment); failed(started))
-            return {spdk_medium_t {}, started};
+        if (status_t const acquired = linux_spdk_process_t::acquire<wait_type_>(environment); failed(acquired))
+            return {spdk_medium_t {}, acquired};
         return open<wait_type_>(transport_id.data(), parsed.namespace_id, parsed.byte_base);
     }
 

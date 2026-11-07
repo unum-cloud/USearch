@@ -1332,7 +1332,7 @@ struct nvme_scan_slot {
     std::size_t reads_left = 0;
 };
 
-/** Arena bytes one @ref nvme_scan_reads carves on every thread of an engine @p depth reads deep. */
+/** Arena bytes one @c nvme_scan_reads carves on every thread of an engine @p depth reads deep. */
 template <std::size_t reads_per_task_>
 constexpr std::size_t nvme_scan_bytes(std::size_t depth) noexcept {
     using slice_t = arena_allocator<byte_t>;
@@ -1356,7 +1356,7 @@ expected<nvme_call<executor_type_>> nvme_begin_scans(executor_type_& executor,
 }
 
 /**
- *  @brief One thread's share of @ref nvme_scan_reads: its engine and slots, the task it claimed and
+ *  @brief One thread's share of @c nvme_scan_reads: its engine and slots, the task it claimed and
  *      describes, the slot whose reads it enqueues, and the reads it issued.
  *
  *  A thread claims a task whole and describes it slot by slot until an empty first extent ends it.
@@ -1499,13 +1499,14 @@ struct nvme_scan_lane {
  *      many reads it issued.
  *
  *  A thread claims a task whole and asks @p describe for its reads in turn, as
- *  <tt>describe(task, progress)</tt> with @p progress zero at the claim and kept between the calls;
- *  each call answers @p reads_per_task_ extents on @p media, every one non-empty, or an empty first
- *  one, which ends the task. The reads of one call share a slot, read r of slot s arriving in
- *  buffer s + r · depth, and @p consume takes them once all arrived, as <tt>consume(thread, task,
- *  progress, extents, bytes)</tt> on the thread that read them, @c progress as the describe that
- *  answered them found it, both arrays in read order. Runs inside a call @ref nvme_begin_scans
- *  began for as many reads per task; a failed read stops every thread, which drains its engine.
+ *  <tt>describe(task, progress)</tt> with @p progress zero at the claim and kept between the calls; each
+ *  call answers @p reads_per_task_ extents on @p media, every one non-empty, or an empty first one,
+ *  which ends the task. The reads of one call share a slot, read r of slot s arriving in buffer s +
+ *  r · depth, and @p consume takes them once all arrived, as
+ *  <tt>consume(thread, task, progress, extents, bytes)</tt> on the thread that read them, @c progress as
+ *  the describe that answered them found it, both arrays in read order. Runs inside a call
+ *  @c nvme_begin_scans began for as many reads per task; a failed read stops every thread, which
+ *  drains its engine.
  */
 template <std::size_t reads_per_task_, template <typename> class atomic_ref_template_, typename executor_type_,
           typename describe_type_, typename consume_type_>
@@ -1563,7 +1564,7 @@ bool nvme_extends_read(medium_type_ const& medium, nvme_extent_t const& read, nv
  *
  *  The entries sort by locator in thread zero's arena, and extents whose blocks touch merge into
  *  one read while it fits a staging buffer of @p buffer_bytes, the reads taken as the tasks of
- *  @ref nvme_scan_reads, inside a call @ref nvme_begin_scans began.
+ *  @c nvme_scan_reads, inside a call @c nvme_begin_scans began.
  *
  *  @par Statuses:
  *  - @c bad_alloc_k Thread zero's arena could not hold the order.
@@ -1646,7 +1647,7 @@ status_t nvme_find_first(std::span<key_type_ const> keys, std::span<shard_node<n
 
 /**
  *  @brief Lists every entry of every key of @p keys in one @p scan_keys of the key columns, as
- *      @ref nvme_find_first scans them: each key's entries in @p nodes from @p starts, zeroed by
+ *      @c nvme_find_first scans them: each key's entries in @p nodes from @p starts, zeroed by
  *      the caller, in part then node order.
  *
  *  Every thread keeps its hits on its own arena, so the scan takes no lock; thread zero then
@@ -1795,12 +1796,12 @@ struct reachability_levels {
  *      level over @p this_level and @p next_level, each a bit per node at least, and answers how
  *      many nodes the sweep reached and in how many levels.
  *
- *  A level scans tasks of @p run_nodes nodes each through @ref nvme_scan_reads, every engine's
- *  queue kept full: a task reads its nodes' neighbors in ID order, nodes whose blocks touch merged
- *  into one read that fits a staging buffer of @p buffer_bytes, so a full level reads
- *  near-sequentially and every reachable node is read once, by the level expanding it.
- *  @p neighbors_extent answers the @ref nvme_extent_t on @p media holding a node's neighbor IDs.
- *  Runs inside a call @ref nvme_begin_scans began. The sweep runs forward only, so it reports no
+ *  A level scans tasks of @p run_nodes nodes each through @c nvme_scan_reads, every engine's queue
+ *  kept full: a task reads its nodes' neighbors in ID order, nodes whose blocks touch merged into
+ *  one read that fits a staging buffer of @p buffer_bytes, so a full level reads near-sequentially
+ *  and every reachable node is read once, by the level expanding it.
+ *  @p neighbors_extent answers the @c nvme_extent_t on @p media holding a node's neighbor IDs.
+ *  Runs inside a call @c nvme_begin_scans began. The sweep runs forward only, so it reports no
  *  @c back_sweeps at all.
  *
  *  @par Statuses:
@@ -2171,7 +2172,7 @@ struct nvme_sample_rows {
  *  row, then a row and a key per node of a neighbors row @p width wide, each into a staging buffer
  *  of @p buffer_bytes. Thread zero's arena holds the listed keys and their entries, the keys cached
  *  for as many visits as @p draws make under @p config, and one round's extents. @p scan_keys runs
- *  as <tt>scan_keys(keys, on_hit) noexcept → status_t</tt>, as @ref nvme_list_entries scans, and
+ *  as <tt>scan_keys(keys, on_hit) noexcept → status_t</tt>, just as @c nvme_list_entries scans, and
  *  @p draw as <tt>draw(rows) noexcept → expected<sample_result_t></tt> while the media stay held.
  *
  *  @par Statuses:

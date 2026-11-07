@@ -1322,7 +1322,7 @@ struct ram_index {
             failed(sized))
             return sized;
         if (status_t const sized = context.reserve_neighbors(node_connectivity); failed(sized)) return sized;
-        // Hints stage into these without growing them.
+        // Hints and stitch seeds stage into these without growing them.
         std::size_t const landmarks = landmarks_count();
         if (nk::failed(context.hinted_ids.reserve(landmarks)) || nk::failed(context.hinted_held.reserve(landmarks)) ||
             nk::failed(context.hinted_ids.resize({landmarks})))
@@ -1601,6 +1601,14 @@ struct ram_index {
         using bitset_allocator_t =
             typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u1x64_t>;
         using growing_bitset_t = growing_buffer<u1x64_t, bitset_allocator_t>;
+        using levels_allocator_t = typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u8_t>;
+        using growing_levels_t = growing_buffer<u8_t, levels_allocator_t>;
+
+        /** The level of a node no sweep reached, 255; the deepest a reached node records is 254,
+         *  at which the levels saturate: every node reached from there on reads 254, the sweep
+         *  stops ordering its expansions and counts no parents, so no merge drops a link for a
+         *  level it cannot tell. */
+        inline static constexpr u8_t unknown_level_k = std::numeric_limits<u8_t>::max();
 
         /** The audit's bitsets, one run of words each in @c bits_, in this order. */
         enum bitset_t : std::size_t {
@@ -1646,26 +1654,34 @@ struct ram_index {
         std::size_t seed_count = 0;
 
         /** An unbound plan - a refused audit's answer; it owns bitsets, so it names an allocator. */
-        explicit health_plan_t(bitset_allocator_t const& allocator) noexcept : bits_(allocator) {}
-        health_plan_t(ram_index const& index, node_id_t visible, std::size_t seed_count,
-                      growing_bitset_t&& bits) noexcept
-            : visible(visible), seed_count(seed_count), index_(&index), bits_(std::move(bits)) {
+        explicit health_plan_t(bitset_allocator_t const& allocator) noexcept
+            : bits_(allocator), levels_(levels_allocator_t {allocator}), back_levels_(levels_allocator_t {allocator}),
+              parents_(levels_allocator_t {allocator}) {}
+        health_plan_t(ram_index const& index, node_id_t visible, std::size_t seed_count, growing_bitset_t&& bits,
+                      growing_levels_t&& levels, growing_levels_t&& back_levels, growing_levels_t&& parents) noexcept
+            : visible(visible), seed_count(seed_count), index_(&index), bits_(std::move(bits)),
+              levels_(std::move(levels)), back_levels_(std::move(back_levels)), parents_(std::move(parents)) {
             restart_sweep();
         }
         health_plan_t(health_plan_t&& other) noexcept
             : visible(other.visible), seed_count(other.seed_count), index_(std::exchange(other.index_, nullptr)),
-              bits_(std::move(other.bits_)), expanded_in_level_(other.expanded_in_level_),
-              reached_back_in_level_(other.reached_back_in_level_), sweeps_(other.sweeps_),
-              back_sweeps_(other.back_sweeps_) {}
+              bits_(std::move(other.bits_)), levels_(std::move(other.levels_)),
+              back_levels_(std::move(other.back_levels_)), parents_(std::move(other.parents_)),
+              expanded_in_level_(other.expanded_in_level_), reached_back_in_level_(other.reached_back_in_level_),
+              sweeps_(other.sweeps_), back_sweeps_(other.back_sweeps_), level_(other.level_) {}
         health_plan_t& operator=(health_plan_t&& other) noexcept {
             visible = other.visible;
             seed_count = other.seed_count;
             index_ = std::exchange(other.index_, nullptr);
             bits_ = std::move(other.bits_);
+            levels_ = std::move(other.levels_);
+            back_levels_ = std::move(other.back_levels_);
+            parents_ = std::move(other.parents_);
             expanded_in_level_ = other.expanded_in_level_;
             reached_back_in_level_ = other.reached_back_in_level_;
             sweeps_ = other.sweeps_;
             back_sweeps_ = other.back_sweeps_;
+            level_ = other.level_;
             return *this;
         }
         health_plan_t(health_plan_t const&) = delete;
@@ -1695,38 +1711,82 @@ struct ram_index {
             restart_sweep();
         }
 
-        /** Clears the bitsets and marks the seeds both ways: the next @ref sweep starts level
-         *  one. */
+        /**
+         *  @brief Takes the IDs up to @p visible in without a sweep: the rows appended since read
+         *      unreached both ways, at no level, with no parents, the bitsets regrown to span them.
+         *
+         *  @par Statuses:
+         *  - @c bad_alloc_k The bitsets or the levels cannot grow; the audit stays as it was.
+         */
+        status_t widen(node_id_t visible) noexcept {
+            if (visible <= this->visible) return status_t::success_k;
+            std::size_t const words = words_(), wider = words_for(visible);
+            if (failed(bits_.reserve_exactly(bitsets_k * wider)) || failed(levels_.reserve_exactly(visible)) ||
+                failed(back_levels_.reserve_exactly(visible)) || failed(parents_.reserve_exactly(visible)))
+                return status_t::bad_alloc_k;
+            bits_.extend_uninitialized(bitsets_k * wider);
+            // Back to front, each run moves up past where the next one lower still reads.
+            for (std::size_t bitset = bitsets_k; bitset-- != 0;) {
+                std::memmove(bits_.data() + bitset * wider, bits_.data() + bitset * words, words * sizeof(u1x64_t));
+                std::memset(bits_.data() + bitset * wider + words, 0, (wider - words) * sizeof(u1x64_t));
+            }
+            std::size_t const added = visible - this->visible;
+            for (growing_levels_t* column : {&levels_, &back_levels_, &parents_})
+                column->extend_uninitialized(max_of<std::size_t>(column->size(), visible));
+            std::memset(levels_.data() + this->visible, unknown_level_k, added);
+            std::memset(back_levels_.data() + this->visible, unknown_level_k, added);
+            std::memset(parents_.data() + this->visible, 0, added);
+            this->visible = visible;
+            return status_t::success_k;
+        }
+
+        /** Clears the bitsets and the levels and marks the seeds both ways at level zero: the next
+         *  @ref sweep starts level one. */
         void restart_sweep() noexcept {
             for (u1x64_t& lanes : bits_) lanes = 0;
+            if (visible) {
+                std::memset(levels_.data(), unknown_level_k, visible);
+                std::memset(back_levels_.data(), unknown_level_k, visible);
+                std::memset(parents_.data(), 0, visible);
+            }
             for (std::size_t seed = 0; seed != seed_count; ++seed) {
                 node_id_t const landmark = static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) /
                                                                   seed_count);
                 insert_(reached_k, landmark);
                 insert_(reaches_back_k, landmark);
+                levels_[landmark] = 0;
+                back_levels_[landmark] = 0;
             }
             expanded_in_level_ = 0;
             reached_back_in_level_ = 0;
             sweeps_ = 0;
             back_sweeps_ = 0;
+            level_ = 0;
             snapshot_back_();
         }
 
         /**
-         *  @brief Expands every reached, not yet expanded node of @p step, its neighbors below the
-         *      watermark turning reached, and marks every node of it a neighbor of which reached
-         *      back before this level.
+         *  @brief Expands every reached, not yet expanded node of @p step, its neighbors below
+         *      the watermark turning reached one level past it, and marks every node of it a
+         *      neighbor of which reached back before this level.
          *
          *  Safe on any thread for disjoint steps - the expanded bits are the step's own, the
-         *  reached bits are set through relaxed atomics, and the back-settled bits stay fixed for
-         *  the level.
+         *  reached bits and the levels are set through relaxed atomics, and the back-settled bits
+         *  stay fixed for the level. A node reached earlier in the same level expands at once, so
+         *  every reached node's level is one past that of the node linking to it first, and its
+         *  parents are the nodes one level before it linking to it, which the merge keeps one of.
          *
          *  @return The nodes this call expanded or found reaching back.
          */
         std::size_t sweep(step_t const& step) noexcept {
             std::size_t expanded_count = 0, reached_back_count = 0;
+            u8_t const next_level = static_cast<u8_t>(min_of<std::size_t>(level_ + 1, unknown_level_k - 1));
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                bool const expanding = contains_(reached_k, node_id) && !contains_(expanded_k, node_id);
+                // A level stored after its reached bit reads unknown for a moment; the next
+                // level expands it.
+                u8_t const own_level = level_of_(levels_, node_id);
+                bool const expanding = contains_(reached_k, node_id) && own_level != unknown_level_k &&
+                                       !contains_(expanded_k, node_id);
                 bool const pulling = !contains_(reaches_back_k, node_id);
                 if (!expanding && !pulling) continue;
                 if (expanding) {
@@ -1744,6 +1804,7 @@ struct ram_index {
                 // A forgotten row stays the sentinel; the caller's epoch voids this sweep.
                 if (first_value == node_id_unknown_k) continue;
                 if (first_value == node_id) continue; // Published with no neighbors.
+                u8_t const child_level = static_cast<u8_t>(min_of<unsigned>(own_level + 1u, unknown_level_k - 1));
                 std::size_t settled_neighbors = 0;
                 for (std::size_t slot = 0; slot != row.size(); ++slot) {
                     node_id_t const target =
@@ -1755,11 +1816,19 @@ struct ram_index {
                     // The first reached in-link reaches the target and a second may give one up to
                     // a reconnection; a seed is reached before anything links to it, so links count
                     // apart.
-                    if (!insert_(linked_once_k, target)) insert_(reached_k, target);
+                    if (!insert_(linked_once_k, target)) {
+                        if (!insert_(reached_k, target))
+                            atomic_ref<u8_t>(levels_[target]).store(child_level, std::memory_order_relaxed);
+                    }
                     else if (!contains_(linked_twice_k, target)) insert_(linked_twice_k, target);
+                    // A level stored after this read counts no parent, nor does the saturated
+                    // level: an undercount keeps a link, never drops one.
+                    if (level_of_(levels_, target) == child_level && child_level != unknown_level_k - 1)
+                        count_parent_(target);
                 }
                 if (settled_neighbors) {
                     insert_(reaches_back_k, node_id);
+                    back_levels_[node_id] = next_level;
                     ++reached_back_count;
                     if (settled_neighbors > 1) insert_exclusive_(back_linked_twice_k, node_id);
                 }
@@ -1778,7 +1847,29 @@ struct ram_index {
             sweeps_ += expanded != 0;
             back_sweeps_ += reached_back != 0;
             if (reached_back) snapshot_back_();
+            ++level_;
             return expanded + reached_back;
+        }
+
+        /** The level the sweep reached @p node_id at, @c unknown_level_k for none, which any thread
+         *  may read between levels. */
+        u8_t level(node_id_t node_id) const noexcept { return levels_[node_id]; }
+
+        /** The level @p node_id reached a landmark back at, @c unknown_level_k for none, which any
+         *  thread may read between levels. */
+        u8_t back_level(node_id_t node_id) const noexcept { return back_levels_[node_id]; }
+
+        /** Takes one of @p node_id 's links from the level before it for a merge that drops
+         *  it, answering whether another remains; a refusal leaves it untouched, so no row
+         *  loses the last parent it is reached through. A count saturated at 255 refuses
+         *  early, never late. */
+        bool release_parent(node_id_t node_id) noexcept {
+            atomic_ref<u8_t> const parents {parents_[node_id]};
+            u8_t observed = parents.load(std::memory_order_relaxed);
+            while (observed > 1 &&
+                   !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed - 1), std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {}
+            return observed > 1;
         }
 
         /** The nodes of @p step the sweep did not reach both ways, written into @p scratch in ID
@@ -1864,6 +1955,19 @@ struct ram_index {
                 .fetch_test_and_reset_bit(static_cast<unsigned>(node_id % lanes_k), std::memory_order_relaxed);
         }
 
+        static u8_t level_of_(growing_levels_t const& levels, node_id_t node_id) noexcept {
+            return atomic_ref<u8_t const>(levels[node_id]).load(std::memory_order_relaxed);
+        }
+
+        /** Counts one more link into @p node_id from the level before it, saturating. */
+        void count_parent_(node_id_t node_id) noexcept {
+            atomic_ref<u8_t> const parents {parents_[node_id]};
+            u8_t observed = parents.load(std::memory_order_relaxed);
+            while (observed != std::numeric_limits<u8_t>::max() &&
+                   !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1), std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {}
+        }
+
         /** What the next level reaches back through: the nodes that reached back so far. */
         void snapshot_back_() noexcept {
             std::size_t const words = words_();
@@ -1879,6 +1983,15 @@ struct ram_index {
         /** Every bitset, one bit per published node each, laid out as @ref bitset_t orders them. */
         growing_bitset_t bits_;
 
+        /** Per published node, the level the sweep reached it at. */
+        growing_levels_t levels_;
+
+        /** Per published node, the level it reached a landmark back at. */
+        growing_levels_t back_levels_;
+
+        /** Per published node, its links from the level before it, saturating. */
+        growing_levels_t parents_;
+
         /** Nodes the current level expanded so far, summed through @c atomic_ref. */
         std::size_t expanded_in_level_ = 0;
 
@@ -1890,6 +2003,9 @@ struct ram_index {
 
         /** Levels since the last @ref restart_sweep that found a node reaching back. */
         std::size_t back_sweeps_ = 0;
+
+        /** The level the next sweep runs. */
+        std::size_t level_ = 0;
     };
 
     /** Opens a reachability audit over the published nodes both ways, seeded from as many
@@ -1901,29 +2017,77 @@ struct ram_index {
     }
 
     /** Bytes an audit over @p rows nodes takes from the index's allocator, every bitset in one
-     *  slice padded to the default alignment: what a caller sizing that allocator sets aside for
-     *  @ref plan_health. */
+     *  slice and the three level bytes per row in one each, padded to the default alignment: what
+     *  a caller sizing that allocator sets aside for @ref plan_health. */
     static std::size_t audit_memory_usage(std::size_t rows) noexcept {
-        return health_plan_t::bitsets_k * health_plan_t::words_for(rows) * sizeof(u1x64_t) + default_alignment_k;
+        return health_plan_t::bitsets_k * health_plan_t::words_for(rows) * sizeof(u1x64_t) + 3 * rows +
+               4 * default_alignment_k;
+    }
+
+    /** Rows the widest storage chunk below @p rows holds: the tile of a pass over them under a zero
+     *  limit. */
+    static std::size_t widest_window_below(std::size_t rows) noexcept {
+        return rows ? min_of(rows, chunk_schedule_t::nodes_in(chunk_schedule_t::locate(rows - 1).chunk)) : 0;
+    }
+
+    /** Bytes a pass over @p rows nodes carries across its tiles past its audit: a changed bit per
+     *  row. */
+    static std::size_t refine_carried_bytes(std::size_t rows) noexcept {
+        return health_plan_t::words_for(rows) * sizeof(u1x64_t) + default_alignment_k;
+    }
+
+    /** Bytes one sweep tile of @p tile_rows rows takes under @p connectivity: its tape of the links
+     *  into it, 8 B per neighbor slot, and an offset per row. */
+    static std::size_t refine_tile_bytes(std::size_t tile_rows, std::size_t connectivity) noexcept {
+        return tile_rows * (connectivity * sizeof(scored_node_t) + sizeof(node_id_t)) + 2 * default_alignment_k;
+    }
+
+    /** Rows one tile of a pass over @p rows nodes re-selecting @p forward_rows of them takes under
+     *  @p connectivity: as many as @p memory_limit holds past the audit and the carried state, or
+     *  at zero the widest storage chunk, and never more than the tape's offsets count; zero when
+     *  the limit holds not one. */
+    static std::size_t refine_tile_rows(std::size_t rows, std::size_t forward_rows, std::size_t connectivity,
+                                        std::size_t memory_limit) noexcept {
+        std::size_t const capped = min_of<std::size_t>(forward_rows,
+                                                       node_id_unknown_k / max_of<std::size_t>(connectivity, 1));
+        if (!memory_limit) return min_of(widest_window_below(forward_rows), capped);
+        std::size_t const carried = audit_memory_usage(rows) + refine_carried_bytes(rows);
+        std::size_t const row_bytes = refine_tile_bytes(health_plan_t::lanes_k, connectivity) / health_plan_t::lanes_k;
+        return memory_limit > carried ? min_of((memory_limit - carried) / row_bytes, capped) : 0;
+    }
+
+    /** Bytes a pass over @p rows nodes re-selecting @p forward_rows of them under @p connectivity
+     *  takes from the index's allocator past its audit, its peak: the carried state and one tile,
+     *  each slice padded to the default alignment. */
+    static std::size_t refine_memory_usage(std::size_t rows, std::size_t forward_rows, std::size_t connectivity,
+                                           std::size_t memory_limit) noexcept {
+        return refine_carried_bytes(rows) +
+               refine_tile_bytes(refine_tile_rows(rows, forward_rows, connectivity, memory_limit), connectivity);
     }
 
     /**
-     *  @brief One refinement pass in flight: the planned range is re-selected, once per round of
-     *      walks across while the index holds several parts, reachability swept level by level, and
-     *      the islands re-selected and reconnected round by round while their count shrinks.
+     *  @brief One refinement pass in flight, from the first audit to the verifying one.
+     *
+     *  An audit records every row's levels both ways, then the planned range walks one tile of
+     *  contiguous rows at a time, each row merging its picks into its live row at once, and a
+     *  sweep collects every link the walked rows hold into one tile of target rows at a time, by
+     *  two scans of their rows, merging each target with the rows linking to it; the levels keep
+     *  every merged row reached. A second audit verifies, and the islands left are re-selected
+     *  and reconnected round by round while their count shrinks.
      *
      *  An empty range heals.
      *
-     *  Round @c r walks every node across the neighboring group of <tt>2^r</tt> parts, as @ref part_across
-     *  names it, so @c k parts merge in <tt>bit_width(k - 1)</tt> rounds, and a plain round follows. The
-     *  first round re-selects the planned range and the extra nodes; every later one only the
-     *  residents the previous round's back-links edited from another part.
+     *  With several parts, every planned node first walks across everything absorbed before its
+     *  part, the resident rows and the parts moved in ahead of it, seeded beside the picks of its
+     *  members that walked already, then walks from its own neighbors as a plain pass does. The
+     *  re-selection takes the planned range and the extra nodes.
      *
      *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run
      *  them at once; @ref advance is the single-caller barrier between phases and answers whether
-     *  another phase follows. Re-selection and reconnection edit under the per-node locks like an
-     *  insertion, so searches run throughout and a pass stopped between steps leaves the graph
-     *  correct. Insertions may not overlap.
+     *  another phase follows. A live row only ever moves from old to better under its lock, by its
+     *  walk's merge and by the sweep's, never thinner, and every row the first audit reached both
+     *  ways stays reached both ways throughout, so searches run throughout and a pass stopped
+     *  between steps leaves the graph correct. Insertions may not overlap.
      *
      *  A split runs it in reverse: the donor's rows partition into one graph-local part per
      *  receiver, scatter into the receivers with their keys and the links inside each part rebased
@@ -1936,35 +2100,42 @@ struct ram_index {
         using part_bases_allocator_t =
             typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<node_id_t>;
         using part_bases_t = growing_buffer<node_id_t, part_bases_allocator_t>;
+        using picks_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<scored_node_t>;
+        using picks_t = growing_buffer<scored_node_t, picks_allocator_t>;
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
         using growing_bitset_t = typename health_plan_t::growing_bitset_t;
 
-        /** The audit the heal phases sweep. */
+        /** The audit the merge reads its levels from and the heal phases sweep. */
         health_plan_t audit;
 
         /** An unbound pass over @p audit, its buffers placed by @p allocator - what a refused plan
          *  answers with, and what planning fills. */
         refine_plan_t(health_plan_t&& audit, part_bases_allocator_t const& allocator) noexcept
-            : audit(std::move(audit)), picked_this_round_ {bitset_allocator_t {allocator}},
-              picked_next_round_ {bitset_allocator_t {allocator}}, receiver_claims_(allocator), part_slots_(allocator),
+            : audit(std::move(audit)), extra_nodes_ {bitset_allocator_t {allocator}},
+              back_links_ {picks_allocator_t {allocator}}, incoming_offsets_(allocator),
+              changed_ {bitset_allocator_t {allocator}}, receiver_claims_(allocator), part_slots_(allocator),
               part_members_(allocator), part_extents_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
-              first_round_nodes_(other.first_round_nodes_), picked_this_round_(std::move(other.picked_this_round_)),
-              picked_next_round_(std::move(other.picked_next_round_)), part_bases_(other.part_bases_),
+              walked_nodes_(other.walked_nodes_), extra_nodes_(std::move(other.extra_nodes_)),
+              part_bases_(other.part_bases_), back_links_(std::move(other.back_links_)),
+              incoming_offsets_(std::move(other.incoming_offsets_)), tile_(other.tile_), sweep_(other.sweep_),
+              sources_first_(other.sources_first_), tile_rows_(other.tile_rows_), changed_(std::move(other.changed_)),
+              after_tiles_(other.after_tiles_), memory_limit_(other.memory_limit_),
               split_donor_(std::exchange(other.split_donor_, nullptr)), receivers_(other.receivers_),
               receiver_claims_(std::move(other.receiver_claims_)), part_slots_(std::move(other.part_slots_)),
               part_members_(std::move(other.part_members_)), part_extents_(std::move(other.part_extents_)),
               seed_(other.seed_), refined_receivers_(other.refined_receivers_),
               receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
-              rounds_(other.rounds_), round_(other.round_), expansion_factor_(other.expansion_factor_),
-              phase_(other.phase_), swept_after_(other.swept_after_), islands_before_(other.islands_before_),
-              tally_(other.tally_) {}
+              expansion_factor_(other.expansion_factor_), phase_(other.phase_), swept_after_(other.swept_after_),
+              islands_before_(other.islands_before_), audited_rows_(other.audited_rows_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        /** Step @p position of the current phase: one row, a sweep's bitset word, a receiver's
-         *  keys, or the whole partition; an empty step past the end. */
+        /** Step @p position of the current phase: one row, a sweep's bitset word, a word of rows
+         *  whose links are counted or scattered, a receiver's keys, or the whole partition; an
+         *  empty step past the end. */
         step_t operator[](std::size_t position) const noexcept {
             if (phase_ == phase_t::audit_k) return audit[position];
             step_t step;
@@ -1976,7 +2147,7 @@ struct ram_index {
                 return step;
             }
             iota_view<node_id_t> const range = phase_nodes_();
-            std::size_t const width = phase_ == phase_t::partition_k ? max_of<std::size_t>(range.size(), 1) : 1;
+            std::size_t const width = phase_width_();
             std::size_t const first = range.first + (position * width);
             std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
@@ -1985,11 +2156,11 @@ struct ram_index {
 
         /** The current phase's steps, positionally; none once the pass is over. */
         indexed_range<refine_plan_t> steps() const noexcept {
-            if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
+            if (!index_ || phase_ == phase_t::done_k || phase_ == phase_t::paused_k) return {this, 0u};
             if (phase_ == phase_t::partition_k) return {this, 1u};
             if (phase_ == phase_t::keys_k) return {this, receivers_.size()};
             if (phase_ == phase_t::audit_k) return {this, audit.steps().size()};
-            return {this, phase_nodes_().size()};
+            return {this, divide_round_up<std::size_t>(phase_nodes_().size(), phase_width_())};
         }
 
         /**
@@ -1999,7 +2170,9 @@ struct ram_index {
          *
          *  The one partition step grows a split's parts, a scatter step copies donor nodes and
          *  their keys into their receivers, and a keys step files one receiver's keys, its map's
-         *  one writer.
+         *  one writer. A re-selection step walks one row and merges its picks into it, a count or
+         *  scatter step reads the links of a word of walked rows into the sweep's tile, and a merge
+         *  step writes one row of the tile.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
@@ -2013,6 +2186,9 @@ struct ram_index {
             case phase_t::reselect_k:
             case phase_t::reselect_islands_k: reselect_(step, context); break;
             case phase_t::audit_k: audit.sweep(step); break;
+            case phase_t::count_back_links_k: count_back_links_(step, context); break;
+            case phase_t::scatter_back_links_k: scatter_back_links_(step, context); break;
+            case phase_t::merge_back_links_k: merge_back_links_(step, context); break;
             case phase_t::heal_k: reconnect_(step, context); break;
             default: break;
             }
@@ -2020,9 +2196,10 @@ struct ram_index {
         }
 
         /** The barrier between phases, one caller after every step of the current one ran:
-         *  publishes a split's parts, or picks the next phase, and answers whether one follows. */
+         *  publishes a split's parts, opens the next walking or sweeping tile, or picks the next
+         *  phase, and answers whether one follows. */
         bool advance() noexcept {
-            if (!index_) return false;
+            if (!index_ || phase_ == phase_t::paused_k) return false;
             if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) {
                 phase_ = phase_ == phase_t::partition_k ? phase_t::scatter_k : phase_t::keys_k;
                 return true;
@@ -2035,23 +2212,35 @@ struct ram_index {
             if (phase_ == phase_t::audit_k) {
                 if (!audit.advance_level()) converge_();
             }
-            else if (phase_ != phase_t::done_k) {
-                if (phase_ == phase_t::reselect_k && round_ + 1 < rounds_) {
-                    advance_round_();
-                    return true;
-                }
-                audit.restart_sweep();
-                swept_after_ = phase_;
-                phase_ = phase_t::audit_k;
+            // The walking tiles merge their rows' picks as they go; then the sweep's tiles, over
+            // every row, collect the links the walked rows hold into each and merge them.
+            else if (phase_ == phase_t::reselect_k && tile_.bound < walked_nodes_.bound) open_tile_(tile_.bound);
+            else if (phase_ == phase_t::reselect_k) open_sweep_(0);
+            else if (phase_ == phase_t::count_back_links_k) {
+                offset_back_links_();
+                phase_ = phase_t::scatter_back_links_k;
             }
+            else if (phase_ == phase_t::scatter_back_links_k) phase_ = phase_t::merge_back_links_k;
+            else if (phase_ == phase_t::merge_back_links_k && sweep_.bound < audit.visible) open_sweep_(sweep_.bound);
+            else if (phase_ == phase_t::merge_back_links_k && after_tiles_ == phase_t::paused_k)
+                phase_ = phase_t::paused_k;
+            else if (phase_ != phase_t::done_k) verify_(phase_);
             if (phase_ == phase_t::done_k && refined_receivers_ != receivers_.size()) settle_receiver_();
             return phase_ != phase_t::done_k;
         }
 
-        /** Stops the re-selection where its steps ran, so the next @ref advance turns to the heal;
-         *  a no-op in any other phase, a split's partition, scatter and keys included. */
+        /** Ends the planned range with the open walking tile, so the sweep follows it and the
+         *  pass then verifies, and the receivers of a split still to bind walk nothing; a sweep
+         *  under way finishes. A no-op outside the walking tiles, a split's partition, scatter
+         *  and keys included. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) rounds_ = 0;
+            after_tiles_ = phase_t::audit_k;
+            if (phase_ == phase_t::paused_k) return verify_(phase_t::merge_back_links_k);
+            if (phase_ != phase_t::reselect_k) return;
+            nodes_.bound = min_of(nodes_.bound, tile_.bound);
+            walked_nodes_.bound = tile_.bound;
+            for (std::size_t receiver = refined_receivers_ + 1; receiver < receivers_.size(); ++receiver)
+                part_extents_[receiver].picked = 0;
         }
 
         /** Whether the current phase moves a split's rows or keys - the phases no stop skips. */
@@ -2062,10 +2251,56 @@ struct ram_index {
         /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
         bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
 
-        /** Nodes the re-selection rounds step over, the total a caller's progress counts against:
-         *  the first round's range, then every published node in each later round. */
-        std::size_t planned_nodes() const noexcept {
-            return first_round_nodes_.size() + (rounds_ ? rounds_ - 1 : 0) * audit.visible;
+        /** Nodes the re-selection steps over, the total a caller's progress counts against. */
+        std::size_t planned_nodes() const noexcept { return walked_nodes_.size(); }
+
+        /** The rows the open tile spans - what a re-selection phase steps over. */
+        iota_view<node_id_t> tile() const noexcept { return tile_; }
+
+        /** Pauses the pass once its tiles walked, its audit carried for the rows a later move
+         *  appends, instead of verifying; @ref resume takes them in. */
+        void hold() noexcept { after_tiles_ = phase_t::paused_k; }
+
+        /** Lets the pass verify and heal once its tiles walked, at once if it paused. */
+        void release() noexcept {
+            after_tiles_ = phase_t::audit_k;
+            if (phase_ == phase_t::paused_k) verify_(phase_t::merge_back_links_k);
+        }
+
+        /** Whether the pass paused for rows a later move appends. */
+        bool paused() const noexcept { return phase_ == phase_t::paused_k; }
+
+        /**
+         *  @brief Takes the rows appended since the pass paused into it: the audit widens to them
+         *      unreached at no level, they walk tile by tile across the parts below them in
+         *      @p part_bases, and the sweep collects their links alone, in as many tile rows as
+         *      the limit holds.
+         *
+         *  @par Statuses:
+         *  - @c bad_alloc_k The audit, the changed bits or a tile cannot grow; the
+         *    pass stays paused.
+         */
+        status_t resume(std::span<node_id_t const> part_bases) noexcept {
+            node_id_t const from = audit.visible, visible = static_cast<node_id_t>(index_->size());
+            if (phase_ != phase_t::paused_k || visible <= from) return status_t::success_k;
+            node_id_t const first = walked_nodes_.empty() ? from : walked_nodes_.first;
+            std::size_t const forward_rows = visible - first, connectivity = index_->connectivity();
+            std::size_t const tile_rows = max_of(tile_rows_,
+                                                 refine_tile_rows(visible, forward_rows, connectivity, memory_limit_));
+            std::size_t const counted = changed_.size();
+            if (failed(reserve_merge_(visible, tile_rows, connectivity)) || failed(audit.widen(visible)))
+                return status_t::bad_alloc_k;
+            incoming_offsets_.extend_uninitialized(tile_rows_);
+            changed_.extend_uninitialized(health_plan_t::words_for(visible));
+            std::memset(changed_.data() + counted, 0, (changed_.size() - counted) * sizeof(u1x64_t));
+            nodes_ = walked_nodes_ = {first, visible};
+            sources_first_ = from;
+            std::size_t parts = 0;
+            while (parts != part_bases.size() && part_bases[parts] < visible) ++parts;
+            part_bases_ = parts > 1 ? part_bases.first(parts) : std::span<node_id_t const> {};
+            open_tile_(from);
+            phase_ = phase_t::reselect_k;
+            return status_t::success_k;
         }
 
         /**
@@ -2089,21 +2324,62 @@ struct ram_index {
             keys_k,
             reselect_k,
             audit_k,
+            count_back_links_k,
+            scatter_back_links_k,
+            merge_back_links_k,
             reselect_islands_k,
             heal_k,
+            paused_k,
             done_k
         };
+
+        /** Opens the audit following @p phase: the verifying one after the merge, over every row
+         *  published since, a stopped absorb's unwalked ones too. */
+        void verify_(phase_t phase) noexcept {
+            // A refused widening verifies the rows it held, and the heal re-links those alone.
+            static_cast<void>(audit.widen(static_cast<node_id_t>(index_->size())));
+            audit.restart_sweep();
+            swept_after_ = phase;
+            phase_ = phase_t::audit_k;
+        }
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
             atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
         }
 
-        /** The rows the current phase steps over: a split donor's, every audited one in the heal,
-         *  or the round's. */
+        /** The rows the current phase steps over: a split donor's, every audited one in the
+         *  heal, the rows this round walked whose links the sweep reads, its tile's, or the
+         *  open walking tile's. */
         iota_view<node_id_t> phase_nodes_() const noexcept {
             if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, split_nodes_()};
             if (phase_ == phase_t::reselect_islands_k || phase_ == phase_t::heal_k) return {0, audit.visible};
-            return round_nodes_();
+            if (phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k)
+                return {sources_first_, walked_nodes_.bound};
+            if (phase_ == phase_t::merge_back_links_k) return sweep_;
+            return tile_;
+        }
+
+        /** Rows one step of the current phase spans: the whole partition, a word of rows whose
+         *  links are read, or one row walked or written. */
+        std::size_t phase_width_() const noexcept {
+            if (phase_ == phase_t::partition_k) return max_of<std::size_t>(split_nodes_(), 1);
+            if (phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k)
+                return health_plan_t::lanes_k;
+            return 1;
+        }
+
+        /** Opens the walking tile from @p first: up to @c tile_rows_ rows of the planned range. */
+        void open_tile_(node_id_t first) noexcept {
+            tile_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, walked_nodes_.bound))};
+        }
+
+        /** Opens the sweep's tile of target rows from @p first, up to @c tile_rows_ of them, none
+         *  linked yet. */
+        void open_sweep_(node_id_t first) noexcept {
+            sweep_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, audit.visible))};
+            std::memset(incoming_offsets_.data(), 0, sweep_.size() * sizeof(node_id_t));
+            ++tally_.swept_tiles;
+            phase_ = phase_t::count_back_links_k;
         }
 
         /** Rows the split's donor published at planning: one slot each. */
@@ -2114,25 +2390,115 @@ struct ram_index {
             return divide_round_up<std::size_t>(part_slots_.size(), receivers_.size());
         }
 
-        /** The nodes the current round of re-selection steps over: the planned range widened to
-         *  the extras in the first round, every published node in a later one. */
-        iota_view<node_id_t> round_nodes_() const noexcept {
-            return round_ ? iota_view<node_id_t> {0, audit.visible} : first_round_nodes_;
-        }
-
-        /** Whether the current round re-selects @p node_id: a planned node in the first round, or
-         *  one this round's picks hold. */
+        /** Whether the re-selection walks @p node_id: a planned node, or an extra one. */
         bool picked_(node_id_t node_id) const noexcept {
-            return (!round_ && node_id >= nodes_.first && node_id < nodes_.bound) ||
-                   bitset_contains(to_span(picked_this_round_), node_id);
+            return (node_id >= nodes_.first && node_id < nodes_.bound) ||
+                   bitset_contains(to_span(extra_nodes_), node_id);
         }
 
-        /** The barrier between the planned rounds: the picks the round's back-links made become the
-         *  next round's, and their run empties for the one after. */
-        void advance_round_() noexcept {
-            std::swap(picked_this_round_, picked_next_round_);
-            std::memset(picked_next_round_.data(), 0, picked_next_round_.size() * sizeof(u1x64_t));
-            ++round_;
+        /** Reserves one tile of @p tile_rows rows under @p connectivity and the changed bits of
+         *  @p rows rows. */
+        status_t reserve_merge_(std::size_t rows, std::size_t tile_rows, std::size_t connectivity) noexcept {
+            if (failed(back_links_.reserve_exactly(tile_rows * connectivity)) ||
+                failed(incoming_offsets_.reserve_exactly(tile_rows)) ||
+                failed(changed_.reserve_exactly(health_plan_t::words_for(rows))))
+                return status_t::bad_alloc_k;
+            tile_rows_ = tile_rows;
+            return status_t::success_k;
+        }
+
+        /** Sizes the tile within what @ref reserve_merge_ placed and leaves
+         *  @p rows rows unchanged. */
+        void open_merge_(std::size_t rows) noexcept {
+            std::size_t const words = health_plan_t::words_for(rows);
+            [[maybe_unused]] status_t const offset = incoming_offsets_.resize(tile_rows_);
+            [[maybe_unused]] status_t const uncounted = changed_.resize(words);
+            if (words) std::memset(changed_.data(), 0, words * sizeof(u1x64_t));
+        }
+
+        /** Marks row @p node_id counted as changed, answering whether it was already. */
+        bool count_changed_(node_id_t node_id) noexcept {
+            return atomic_ref<u1x64_t>(changed_[node_id / health_plan_t::lanes_k])
+                .fetch_test_and_set_bit(static_cast<unsigned>(node_id % health_plan_t::lanes_k),
+                                        std::memory_order_relaxed);
+        }
+
+        /** Turns the sweep tile's counts into each row's first link's offset, which the scatter
+         *  advances to its end, and sizes the tape to them: the tile ends before the first row
+         *  whose links pass the tape, and a lone row past it keeps the tape's worth of them. */
+        void offset_back_links_() noexcept {
+            std::size_t const capacity = back_links_.capacity();
+            std::size_t offset = 0, rows = 0;
+            for (; rows != sweep_.size(); ++rows) {
+                std::size_t count = incoming_offsets_[rows];
+                if (offset + count > capacity) {
+                    if (rows) break;
+                    count = capacity;
+                }
+                incoming_offsets_[rows] = static_cast<node_id_t>(offset);
+                offset += count;
+            }
+            sweep_.bound = static_cast<node_id_t>(sweep_.first + max_of<std::size_t>(rows, 1));
+            back_links_.clear();
+            back_links_.extend_uninitialized(offset);
+        }
+
+        /** Counts every live link of the walked rows of @p step into the sweep's tile. No row is
+         *  written meanwhile, so the scatter reads the same links. */
+        void count_back_links_(step_t const& step, traversal_context_t&) noexcept {
+            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
+                if (!picked_(node_id)) continue;
+                index_->for_each_member_(node_id, [&](node_id_t target) noexcept {
+                    if (target >= sweep_.first && target < sweep_.bound)
+                        atomic_ref<node_id_t>(incoming_offsets_[target - sweep_.first])
+                            .fetch_add(1u, std::memory_order_relaxed);
+                });
+            }
+        }
+
+        /** Scatters every live link of the walked rows of @p step into the sweep's tile onto its
+         *  target's run, the linking row unscored; a link the tape has no room for is left out. */
+        void scatter_back_links_(step_t const& step, traversal_context_t&) noexcept {
+            std::size_t scattered = 0;
+            std::size_t const tape = back_links_.size();
+            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
+                if (!picked_(node_id)) continue;
+                index_->for_each_member_(node_id, [&](node_id_t target) noexcept {
+                    if (target < sweep_.first || target >= sweep_.bound) return;
+                    std::size_t const position = atomic_ref<node_id_t>(incoming_offsets_[target - sweep_.first])
+                                                     .fetch_add(1u, std::memory_order_relaxed);
+                    if (position < tape) back_links_[position] = scored_node_t {node_id, distance_t {}}, ++scattered;
+                });
+            }
+            add_(tally_.swept_links, scattered);
+        }
+
+        /** Merges every row of @p step in the sweep's tile with the rows linking to it, scored
+         *  against it first; a row counts as changed once, whichever of its merges first gains
+         *  it a member. */
+        void merge_back_links_(step_t const& step, traversal_context_t& context) noexcept {
+            traversal_stats_t const before = context.telemetry();
+            std::size_t changed = 0;
+            auto nearer = [](scored_node_t const& left, scored_node_t const& right) noexcept {
+                return left.distance < right.distance ||
+                       (left.distance == right.distance && left.node_id < right.node_id);
+            };
+            std::size_t const tape = back_links_.size();
+            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
+                std::size_t const row = node_id - sweep_.first;
+                std::size_t const first = row ? min_of<std::size_t>(incoming_offsets_[row - 1], tape) : 0;
+                std::size_t const bound = min_of<std::size_t>(incoming_offsets_[row], tape);
+                std::span<scored_node_t> const incoming {back_links_.data() + first, bound - first};
+                if (incoming.empty()) continue;
+                index_->score_run_(node_id, incoming, context);
+                // The scatter filled each run in arrival order; sorted, its fold is reproducible.
+                partial_sort(incoming, incoming.size(), nearer);
+                bool const gained = index_->merge_back_links_(node_id, audit.visible, {}, incoming, audit, context);
+                // An absorb's links also reach rows it never walked, which the report leaves out.
+                changed += gained && picked_(node_id) && !count_changed_(node_id);
+            }
+            add_(tally_.changed_nodes, changed);
+            add_spent_(context.telemetry() - before);
         }
 
         /** Calls @p callback with every live link of donor row @p row, skipping the self-loop of
@@ -2268,18 +2634,21 @@ struct ram_index {
             split_donor_ = nullptr;
         }
 
-        /** Turns the pass to the next receiver: its audit, its picked nodes as the range, and the
-         *  re-selection, or straight the sweep when none are picked or a stop cut the pass. */
+        /** Turns the pass to the next receiver: its audit, its picked nodes as the range, and
+         *  the re-selection, or straight the verifying sweep when none are picked or a stop
+         *  cut the pass. */
         void bind_receiver_() noexcept {
             std::size_t const receiver = refined_receivers_;
             index_ = receivers_[receiver];
             audit.rebind(*index_, part_extents_[receiver].nodes);
             nodes_ = {0, part_extents_[receiver].picked};
-            first_round_nodes_ = nodes_;
-            round_ = 0;
-            swept_after_ = phase_t::reselect_k;
+            walked_nodes_ = nodes_;
+            sources_first_ = 0;
+            open_merge_(part_extents_[receiver].nodes);
             islands_before_ = 0;
-            phase_ = !rounds_ || nodes_.empty() ? phase_t::audit_k : phase_t::reselect_k;
+            // The opening audit steers the merges; a pass walking nothing verifies alone.
+            swept_after_ = !nodes_.empty() ? phase_t::done_k : phase_t::merge_back_links_k;
+            phase_ = phase_t::audit_k;
         }
 
         /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
@@ -2292,12 +2661,25 @@ struct ram_index {
             tally_.islands_found = receivers_islands_;
         }
 
-        /** Picks what follows a converged audit, from the phase the audit followed. */
+        /** Picks what follows a converged audit, from the phase the audit followed: the merge
+         *  after the re-selection, whose levels it now holds, and the heal after the merge. */
         void converge_() noexcept {
+            audited_rows_ = audit.visible;
             auto const [health, status] = audit.finish();
             std::size_t const left = succeeded(status) ? audit.visible - health.reachable_nodes : 0;
             tally_.reachability = health;
-            if (swept_after_ == phase_t::reselect_k) {
+            // The opening audit, whose levels steer every merge, leads to the first tile.
+            if (swept_after_ == phase_t::done_k) {
+                open_tile_(walked_nodes_.first);
+                phase_ = phase_t::reselect_k;
+                return;
+            }
+            // A held pass walking nothing yet keeps this audit's levels for the rows still to come.
+            if (swept_after_ == phase_t::merge_back_links_k && after_tiles_ == phase_t::paused_k) {
+                phase_ = phase_t::paused_k;
+                return;
+            }
+            if (swept_after_ == phase_t::merge_back_links_k) {
                 tally_.islands_found = left;
                 phase_ = left ? phase_t::reselect_islands_k : phase_t::done_k;
             }
@@ -2307,27 +2689,75 @@ struct ram_index {
             if (swept_after_ != phase_t::reselect_islands_k) islands_before_ = left;
         }
 
-        /** Re-selects every node of @p step, or only its islands once the heal rounds began. */
+        /** Re-selects every planned node of @p step and merges its picks into its row, or, once the
+         *  heal rounds began, only its islands, each written and back-linked as an insertion is. */
         void reselect_(step_t const& step, traversal_context_t& context) noexcept {
             traversal_stats_t const before = context.telemetry();
             std::size_t reselected = 0, changed = 0;
-            // Only the planned rounds walk across; the heal rounds re-select as a plain pass does.
+            // Only the planned pass walks across; the heal rounds re-select as a plain pass does.
             bool const planned = phase_ == phase_t::reselect_k;
             bool const across = planned && part_bases_.size() > 1;
-            // The last round is plain, so no round reads what it would pick.
-            bool const picking = across && round_ + 1 < rounds_;
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (planned ? !picked_(node_id) : audit.reached(node_id) && audit.reaches_back(node_id)) continue;
-                iota_view<node_id_t> const other = across ? part_across(part_bases_.data(), part_bases_.size(), round_,
-                                                                        audit.visible, node_id)
-                                                          : iota_view<node_id_t> {};
-                changed += index_->refine_one_(node_id, audit.visible, other, expansion_factor_, context, part_bases_,
-                                               picking ? to_writable_span(picked_next_round_) : std::span<u1x64_t> {});
+            selection_t const& selected = context.selected_neighbors;
+            auto walk = [&](node_id_t node_id) noexcept {
+                // Everything absorbed before the node's part: the resident rows, and the parts
+                // moved in ahead of its own.
+                iota_view<node_id_t> const other =
+                    across ? iota_view<node_id_t> {part_bases_[0], part_bases_[part_of(part_bases_, node_id)]}
+                           : iota_view<node_id_t> {};
+                std::span<node_id_t const> const across_seeds = other.empty()
+                                                                    ? std::span<node_id_t const> {}
+                                                                    : stage_across_seeds_(node_id, other, context);
+                index_->refine_one_(node_id, audit.visible, other, across_seeds, expansion_factor_, context);
                 ++reselected;
+            };
+            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
+                if (!planned) {
+                    if (audit.reached(node_id) && audit.reaches_back(node_id)) continue;
+                    walk(node_id);
+                    std::span<node_id_t const> const live = to_span(context.staged_ids);
+                    changed += index_->rewrite_row_(node_id, selected, live);
+                    index_->back_link_neighbors(node_id, selected, context);
+                    continue;
+                }
+                if (!picked_(node_id)) continue;
+                walk(node_id);
+                // The merge writes the selection's slots, so the picks compete from a copy.
+                results_array_t& picks = context.refining_candidates;
+                picks.clear();
+                for (std::size_t position = 0; position != selected.size(); ++position)
+                    picks.insert(scored_node_t {selected[position]}, picks.capacity());
+                bool const gained = index_->merge_back_links_(node_id, audit.visible, to_span(picks), {}, audit,
+                                                              context);
+                changed += gained && !count_changed_(node_id);
             }
-            traversal_stats_t const spent = context.telemetry() - before;
             add_(tally_.reselected_nodes, reselected);
             add_(tally_.changed_nodes, changed);
+            add_spent_(context.telemetry() - before);
+        }
+
+        /** Stages into @c context.hinted_ids the members of @p node_id 's members inside @p other,
+         *  which a member that walked already merged in: where its stitched neighbors landed, so
+         *  its own walk across starts beside them. One row of seeds, as many as a walk draws
+         *  landmarks, taken member by member. */
+        std::span<node_id_t const> stage_across_seeds_(node_id_t node_id, iota_view<node_id_t> other,
+                                                       traversal_context_t& context) noexcept {
+            neighbors_ref_t const own_neighbors = index_->neighbors_for(chunk_schedule_t::locate(node_id));
+            candidates_count_t const members_count = index_->stage_neighbors_(own_neighbors, node_id, context);
+            std::size_t const connectivity = index_->connectivity();
+            ids_tensor_t& hinted_ids = context.hinted_ids;
+            hinted_ids.clear();
+            if (nk::failed(hinted_ids.resize({connectivity}))) return {};
+            std::size_t staged_count = 0;
+            for (candidates_count_t member = 0; member != members_count && staged_count != connectivity; ++member)
+                index_->for_each_member_(context.staged_ids[member], [&](node_id_t pick) noexcept {
+                    if (pick >= other.first && pick < other.bound && staged_count != connectivity)
+                        hinted_ids[staged_count++] = pick;
+                });
+            return {hinted_ids.data(), staged_count};
+        }
+
+        /** Folds one step's walk and merge spend into the tally. */
+        void add_spent_(traversal_stats_t const& spent) noexcept {
             add_(tally_.traversal_stats.computed_distances, spent.computed_distances);
             add_(tally_.traversal_stats.visited_members, spent.visited_members);
             add_(tally_.traversal_stats.restarts, spent.restarts);
@@ -2411,20 +2841,45 @@ struct ram_index {
         /** The IDs the first round re-selects, clamped to the audit's watermark. */
         iota_view<node_id_t> nodes_;
 
-        /** The IDs the first round steps over: @c nodes_ widened to the extras. */
-        iota_view<node_id_t> first_round_nodes_;
+        /** The IDs the re-selection steps over: @c nodes_ widened to the extras. */
+        iota_view<node_id_t> walked_nodes_;
 
-        /** Nodes this round re-selects past @c nodes_: what the last round's back-links edited
-         *  across a part, and the extras in the first round. */
-        growing_bitset_t picked_this_round_;
+        /** The extras the re-selection walks past @c nodes_. */
+        growing_bitset_t extra_nodes_;
 
-        /** Nodes the next round will re-select: what this round's back-links are editing across a
-         *  part. */
-        growing_bitset_t picked_next_round_;
-
-        /** The caller's ascending first rows of the parts the rounds walk across, below the audit's
-         *  watermark; empty for none. */
+        /** The caller's ascending first rows of the parts the re-selection walks across, below the
+         *  audit's watermark; empty for none. */
         std::span<node_id_t const> part_bases_;
+
+        /** The sweep tile's tape: every link into its rows from the walked rows, each a linking row
+         *  and, once its merge scored it, their distance, the links of one row back to back. */
+        picks_t back_links_;
+
+        /** Per row of the sweep's tile: the links it drew, then where they start on the tape, and
+         *  once scattered where they end. */
+        part_bases_t incoming_offsets_;
+
+        /** The rows walking now, or the last that walked. */
+        iota_view<node_id_t> tile_;
+
+        /** The target rows the sweep collects links into now. */
+        iota_view<node_id_t> sweep_;
+
+        /** The first row this round walked, whose links on the sweep reads up
+         *  to the walked bound. */
+        node_id_t sources_first_ = 0;
+
+        /** Rows one walking or sweeping tile takes at most. */
+        std::size_t tile_rows_ = 0;
+
+        /** Per row, whether a merge counted it changed already. */
+        growing_bitset_t changed_;
+
+        /** What follows the last tile: the verifying audit, or a pause for rows still to come. */
+        phase_t after_tiles_ = phase_t::audit_k;
+
+        /** The limit the tiles were sized from, which sizes them again as rows come in. */
+        std::size_t memory_limit_ = 0;
 
         /** The index a split empties once its rows publish in the receivers; null otherwise. */
         ram_index* split_donor_ = nullptr;
@@ -2463,13 +2918,6 @@ struct ram_index {
         /** The islands the receivers healed so far found, summed. */
         std::size_t receivers_islands_ = 0;
 
-        /** Rounds of re-selection: one with a single part, a plain one past the merges otherwise,
-         *  and none once @ref stop cut it. */
-        std::size_t rounds_ = 1;
-
-        /** The round the re-selection runs, or, once it left, the rounds it finished. */
-        std::size_t round_ = 0;
-
         /** Breadth of every re-selection walk. */
         candidates_count_t expansion_factor_ = 0;
 
@@ -2481,6 +2929,10 @@ struct ram_index {
 
         /** Islands the last round started from - the shrinking the rounds require. */
         std::size_t islands_before_ = 0;
+
+        /** Rows the last converged sweep covered; those appended since are neither reached nor
+         *  islands yet. */
+        node_id_t audited_rows_ = 0;
 
         /** Counts summed through @c atomic_ref by the steps, and set by @ref advance. */
         refine_report_t tally_;
@@ -2494,15 +2946,14 @@ struct ram_index {
      *
      *  Two or more @p part_bases below the published IDs split the rows into parts, the resident
      *  part from the first base and each appended part from its own: every re-selected node first
-     *  walks across into the neighboring group of parts alone, round after round as
-     *  @ref refine_plan_t merges them, then re-selects as a plain pass does from that walk's
-     *  candidates and its own. A part whose neighbors all stay inside it is then visible from the
-     *  others, which a walk seeded by those neighbors never reaches. The first round re-selects
-     *  @p nodes and @p extra_nodes, and every later one only the residents the previous round's
-     *  back-links edited from another part. The plan borrows the bases, which must outlive it.
+     *  walks across into everything before its part alone, then re-selects as a plain pass does
+     *  from that walk's candidates and its own. A part whose neighbors all stay inside it is then
+     *  visible from the others, which a walk seeded by those neighbors never reaches. The pass
+     *  re-selects @p nodes and @p extra_nodes. The plan borrows the bases, which must outlive it.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The audit's bitsets or the rounds' runs cannot be placed.
+     *  - @c bad_alloc_k The audit's bitsets and levels, the extras' run or one tile cannot
+     *    be placed, or the limit holds not even one tile row past the carried state.
      */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, std::span<node_id_t const> extra_nodes,
                                         std::span<node_id_t const> part_bases = {},
@@ -2517,22 +2968,30 @@ struct ram_index {
         while (parts != part_bases.size() && part_bases[parts] < plan.audit.visible) ++parts;
         if (parts > 1) plan.part_bases_ = part_bases.first(parts);
         plan.nodes_ = {min_of(nodes.first, bound), bound};
-        plan.first_round_nodes_ = plan.nodes_;
+        plan.walked_nodes_ = plan.nodes_;
         std::size_t const words = health_plan_t::words_for(plan.audit.visible);
-        if ((parts > 1 || !extra_nodes.empty()) && failed(plan.picked_this_round_.resize(words)))
+        if (!extra_nodes.empty() && failed(plan.extra_nodes_.resize(words)))
             return {std::move(plan), status_t::bad_alloc_k};
-        if (parts > 1 && failed(plan.picked_next_round_.resize(words))) return {std::move(plan), status_t::bad_alloc_k};
         for (node_id_t const extra : extra_nodes) {
             if (extra >= plan.audit.visible) continue;
-            plan.picked_this_round_[extra / health_plan_t::lanes_k] |= u1x64_t {1} << (extra % health_plan_t::lanes_k);
-            if (plan.first_round_nodes_.empty()) plan.first_round_nodes_ = {extra, extra};
-            plan.first_round_nodes_.first = min_of(plan.first_round_nodes_.first, extra);
-            plan.first_round_nodes_.bound = max_of(plan.first_round_nodes_.bound, static_cast<node_id_t>(extra + 1));
+            plan.extra_nodes_[extra / health_plan_t::lanes_k] |= u1x64_t {1} << (extra % health_plan_t::lanes_k);
+            if (plan.walked_nodes_.empty()) plan.walked_nodes_ = {extra, extra};
+            plan.walked_nodes_.first = min_of(plan.walked_nodes_.first, extra);
+            plan.walked_nodes_.bound = max_of(plan.walked_nodes_.bound, static_cast<node_id_t>(extra + 1));
         }
         plan.index_ = this;
-        plan.rounds_ = parts > 1 ? static_cast<std::size_t>(std::bit_width(parts - 1)) + 1 : 1u;
+        std::size_t const forward_rows = plan.walked_nodes_.size();
+        std::size_t const tile_rows = refine_tile_rows(plan.audit.visible, forward_rows, connectivity(),
+                                                       config.memory_limit);
+        if ((forward_rows && !tile_rows) || failed(plan.reserve_merge_(plan.audit.visible, tile_rows, connectivity())))
+            return {std::move(plan), status_t::bad_alloc_k};
+        plan.open_merge_(plan.audit.visible);
+        plan.sources_first_ = plan.walked_nodes_.first;
+        plan.memory_limit_ = config.memory_limit;
         plan.expansion_factor_ = expansion_factor;
-        plan.phase_ = plan.first_round_nodes_.empty() && plan.rounds_ == 1 ? phase_t::audit_k : phase_t::reselect_k;
+        // The opening audit steers the merges; a pass walking nothing verifies alone.
+        plan.swept_after_ = forward_rows ? phase_t::done_k : phase_t::merge_back_links_k;
+        plan.phase_ = phase_t::audit_k;
         return {std::move(plan), status_t::success_k};
     }
 
@@ -2547,6 +3006,8 @@ struct ram_index {
      *
      *  @par Statuses:
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
+     *  - @c bad_alloc_k The plan's levels or tile cannot be placed, or the limit holds not
+     *    even one tile row past the carried state.
      */
     expected<refine_report_t> refine(iota_view<node_id_t> nodes, refine_config_t config,
                                      traversal_context_t& context) noexcept {
@@ -2619,10 +3080,14 @@ struct ram_index {
         if (failed(plan.receiver_claims_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
             failed(plan.part_slots_.resize(rows)) || failed(plan.part_members_.resize(parts * capacity)))
             return {std::move(plan), status_t::bad_alloc_k};
-        // One audit over a full part sweeps every receiver in turn, rebound as its turn comes.
+        // One audit over a full part sweeps every receiver in turn, rebound as its turn comes, and
+        // one shadow over a full part serves every receiver's merge.
         auto [audit, audit_status] = plan_audit_(static_cast<node_id_t>(capacity));
         if (failed(audit_status)) return {std::move(plan), audit_status};
         plan.audit = std::move(audit);
+        std::size_t const tile_rows = refine_tile_rows(capacity, capacity, connectivity(), config.refine.memory_limit);
+        if ((capacity && !tile_rows) || failed(plan.reserve_merge_(capacity, tile_rows, connectivity())))
+            return {std::move(plan), status_t::bad_alloc_k};
         // A full part's rows in every receiver, claimed from its empty watermark, die with the plan
         // unless the scatter publishes them.
         for (ram_index* into : receivers) {
@@ -2890,7 +3355,7 @@ struct ram_index {
                                                             : std::memory_order_relaxed;
         node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(watermark_order_k);
         return search_below_<synchronization_>(query_vector, context, config, fold, bound, rescoring,
-                                               first_invisible_id);
+                                               first_invisible_id, {});
     }
 
 #pragma endregion Search
@@ -3914,18 +4379,9 @@ struct ram_index {
      *  @param[in] selected The node's chosen neighbors with their recorded query distances -
      *      those score the appended node for free, since the metrics are symmetric.
      *  @param[in,out] context Scratch for the re-selection, plus the telemetry counters.
-     *  @param[in] part_bases The ascending first IDs of the parts a refinement round walks across;
-     *      empty for an insertion.
-     *  @param[in] picked_next_round The run a refinement round fills with every neighbor of another
-     *      part whose slots now hold the node; empty when no round reads it.
      */
-    void back_link_neighbors(node_id_t new_node_id, selection_t const& selected, traversal_context_t& context,
-                             std::span<node_id_t const> part_bases = {},
-                             std::span<u1x64_t> picked_next_round = {}) noexcept {
-        auto pick = [&](node_id_t neighbor_id) noexcept {
-            if (!picked_next_round.empty() && part_of(part_bases, new_node_id) != part_of(part_bases, neighbor_id))
-                bitset_insert<atomic_ref_template_>(picked_next_round, neighbor_id);
-        };
+    void back_link_neighbors(node_id_t new_node_id, selection_t const& selected,
+                             traversal_context_t& context) noexcept {
         results_array_t& refining_candidates = context.refining_candidates;
         std::size_t const node_connectivity = connectivity();
 
@@ -3945,7 +4401,6 @@ struct ram_index {
             // No neighbors is encoded as a self-loop: the node becomes the only neighbor.
             if (first_slot_value == neighbor_id) {
                 neighbors.unlock(new_node_id);
-                pick(neighbor_id);
                 continue;
             }
 
@@ -3968,7 +4423,6 @@ struct ram_index {
             if (existing_count != slots_count) {
                 neighbors.store_slot(existing_count, new_node_id);
                 neighbors.unlock(first_slot_value);
-                pick(neighbor_id);
                 continue;
             }
 
@@ -4014,15 +4468,11 @@ struct ram_index {
             // Rewrite the tail slots, sentinel-terminate any shrink, and unlock with the new head.
             // A non-empty refined fill always holds: the heuristic never rejects the nearest candidate.
             candidates_count_t const refined_count = static_cast<candidates_count_t>(refined.size());
-            bool linked = refined[0].node_id == new_node_id;
-            for (candidates_count_t slot = 1; slot < refined_count; ++slot) {
+            for (candidates_count_t slot = 1; slot < refined_count; ++slot)
                 neighbors.store_slot(slot, refined[slot].node_id);
-                linked |= refined[slot].node_id == new_node_id;
-            }
             for (candidates_count_t slot = refined_count; slot < slots_count; ++slot)
                 neighbors.store_slot(slot, node_id_unknown_k);
             neighbors.unlock(refined[0].node_id);
-            if (linked) pick(neighbor_id);
         }
     }
 
@@ -4171,14 +4621,21 @@ struct ram_index {
     expected<health_plan_t> plan_audit_(node_id_t visible) const noexcept {
         using growing_bitset_t = typename health_plan_t::growing_bitset_t;
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
+        using growing_levels_t = typename health_plan_t::growing_levels_t;
+        using levels_allocator_t = typename health_plan_t::levels_allocator_t;
         // An empty graph is audited, not refused: no words to sweep, no steps, zero reached.
         bitset_allocator_t const allocator {vectors_allocator_};
         std::size_t const words = health_plan_t::words_for(visible);
         growing_bitset_t bits {allocator};
-        if (failed(bits.resize(words * health_plan_t::bitsets_k)))
+        growing_levels_t levels {levels_allocator_t {allocator}}, back_levels {levels_allocator_t {allocator}},
+            parents {levels_allocator_t {allocator}};
+        if (failed(bits.resize(words * health_plan_t::bitsets_k)) || failed(levels.resize(visible)) ||
+            failed(back_levels.resize(visible)) || failed(parents.resize(visible)))
             return {health_plan_t {allocator}, status_t::bad_alloc_k};
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), visible);
-        return {health_plan_t {*this, visible, seed_count, std::move(bits)}, status_t::success_k};
+        return {health_plan_t {*this, visible, seed_count, std::move(bits), std::move(levels), std::move(back_levels),
+                               std::move(parents)},
+                status_t::success_k};
     }
 
     /** Whether no insertion is in flight: every dispensed ID is published, or the dispenser is
@@ -4282,17 +4739,18 @@ struct ram_index {
     }
 
     /**
-     *  @brief One node's re-selection: its neighbors seed the walk, the insertion's own selection
-     *      picks the new ones, the rewrite runs under the node's lock, and every kept neighbor is
-     *      back-linked. No distance math runs under a lock.
+     *  @brief One node's re-selection: its neighbors seed the walk and the insertion's own
+     *      selection picks the new ones into @c context.selected_neighbors.
+     *
+     *  The members read stay in @c context.staged_ids; the caller keeps the picks in its shadow or
+     *  writes the row. No distance math runs under a lock.
      *
      *  A non-empty @p across fills the candidates first with a walk across into those rows alone,
-     *  and @p picked_next_round gains every back-linked neighbor in another part of @p part_bases.
-     *  @return Whether the new neighbors gained a member the ones read lacked.
+     *  seeded by @p across_seeds ahead of its random landmarks.
      */
-    bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, iota_view<node_id_t> across,
-                     std::size_t expansion_factor, traversal_context_t& context, std::span<node_id_t const> part_bases,
-                     std::span<u1x64_t> picked_next_round) noexcept {
+    void refine_one_(node_id_t node_id, node_id_t first_invisible_id, iota_view<node_id_t> across,
+                     std::span<node_id_t const> across_seeds, std::size_t expansion_factor,
+                     traversal_context_t& context) noexcept {
         std::size_t const node_connectivity = connectivity();
         location_t const location = chunk_schedule_t::locate(node_id);
         vector_view_t const own_vector = vector_for(location);
@@ -4306,13 +4764,16 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
-        // The pass rewires every part in place meanwhile, so only the admission keeps this walk
-        // inside the others.
+        // The heal rounds rewire every part in place meanwhile, so only the admission keeps this
+        // walk inside the others.
         part_admission_t const other {across.first, min_of(across.bound, first_invisible_id)};
         if (other.first_id < other.first_invisible_id &&
             failed(search_around(own_vector, own_norms, other, expansion_factor, context, context.results,
-                                 dummy_fold_t {}, {}, single_zero_rescoring_t {})))
+                                 dummy_fold_t {}, across_seeds, single_zero_rescoring_t {})))
             ++context.saturated_walks;
+        // What the walk across left in the frontier lies past its radius; the walk over everything
+        // starts afresh, from its own seeds.
+        context.frontier.clear();
         candidates_count_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
         if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
@@ -4321,19 +4782,27 @@ struct ram_index {
         context.computed_distances += add_neighbor_candidates_(own_vector, own_norms, seeds, first_invisible_id,
                                                                context);
 
-        selection_t& selected = context.selected_neighbors;
-        std::size_t const refine_distances = select_diverse(context.results, node_id, node_connectivity, selected,
-                                                            context);
+        std::size_t const refine_distances = select_diverse(context.results, node_id, node_connectivity,
+                                                            context.selected_neighbors, context);
         context.computed_distances += refine_distances;
         context.computed_distances_in_refines += refine_distances;
-        candidates_count_t const selected_count = static_cast<candidates_count_t>(selected.size());
+    }
 
-        // Neighbors are distinct, so a kept neighbor matching none read is a member the row gained,
-        // the one change a pass counts. The slots are then rewritten, sentinel-terminated and
-        // republished through slot 0.
+    /**
+     *  @brief Writes @p selected into @p node_id 's row under its lock, sentinel terminated and
+     *      republished through slot 0.
+     *
+     *  Neighbors are distinct, so a kept neighbor matching none of the @p live members read is a
+     *  member the row gained, the one change a pass counts.
+     *
+     *  @return Whether the row gained a member.
+     */
+    bool rewrite_row_(node_id_t node_id, selection_t const& selected, std::span<node_id_t const> live) noexcept {
+        neighbors_ref_t const own_neighbors = neighbors_for(chunk_schedule_t::locate(node_id));
+        candidates_count_t const selected_count = static_cast<candidates_count_t>(selected.size());
         candidates_count_t matches = 0;
         for (candidates_count_t selected_index = 0; selected_index != selected_count; ++selected_index)
-            for (node_id_t const staged_id : seeds) matches += staged_id == selected[selected_index].node_id;
+            for (node_id_t const live_id : live) matches += live_id == selected[selected_index].node_id;
         bool const changed = matches != selected_count;
         candidates_count_t const slots_count = own_neighbors.capacity();
         [[maybe_unused]] node_id_t const displaced = own_neighbors.lock();
@@ -4342,9 +4811,184 @@ struct ram_index {
         for (candidates_count_t slot = max_of<candidates_count_t>(selected_count, 1); slot < slots_count; ++slot)
             own_neighbors.store_slot(slot, node_id_unknown_k);
         own_neighbors.unlock(selected_count ? selected[0].node_id : node_id);
-
-        back_link_neighbors(node_id, selected, context, part_bases, picked_next_round);
         return changed;
+    }
+
+    /** Scores every proposal of @p run against @p node_id in place, a quad at a time. */
+    void score_run_(node_id_t node_id, std::span<scored_node_t> run, traversal_context_t& context) const noexcept {
+        location_t const location = chunk_schedule_t::locate(node_id);
+        vector_view_t const own_vector = vector_for(location);
+        vector_norms_t const own_norms = norm_for(location);
+        quad<vector_view_t> lane_vectors;
+        quad<vector_norms_t> lane_norms;
+        std::size_t const lanes = lane_vectors.size();
+        for (std::size_t first = 0; first < run.size(); first += lanes) {
+            std::size_t const gathered = min_of(lanes, run.size() - first);
+            // The tail lanes repeat the last proposal; their outputs are never read.
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                location_t const source = chunk_schedule_t::locate(run[first + min_of(lane, gathered - 1)].node_id);
+                lane_vectors[lane] = vector_for(source);
+                lane_norms[lane] = norm_for(source);
+            }
+            quad<distance_t> const scored = distances(own_vector, own_norms, lane_vectors, lane_norms);
+            for (std::size_t lane = 0; lane != gathered; ++lane) run[first + lane].distance = scored[lane];
+        }
+        context.computed_distances += run.size();
+    }
+
+    /** Calls @p callback with every published member of @p node_id 's row, read without its lock,
+     *  for the phases no row is written in; a published-empty row has none. */
+    template <typename callback_type_>
+    void for_each_member_(node_id_t node_id, callback_type_&& callback) noexcept {
+        neighbors_ref_t const row = neighbors_for(chunk_schedule_t::locate(node_id));
+        node_id_t const first = row.peek_first();
+        if (first == node_id || first == node_id_unknown_k) return;
+        callback(first);
+        for (candidates_count_t slot = 1; slot != row.capacity(); ++slot) {
+            node_id_t const member = row.load_slot(slot);
+            if (member == node_id_unknown_k) return;
+            callback(member);
+        }
+    }
+
+    /** Adds the scored candidates of @p scored the results lack, in order, until the
+     *  results' reservation is full. @return How many of them were consumed, the ones
+     *  listed already included. */
+    static std::size_t add_scored_candidates_(std::span<scored_node_t const> scored,
+                                              results_array_t& results) noexcept {
+        std::size_t consumed = 0;
+        for (; consumed != scored.size() && results.size() != results.capacity(); ++consumed) {
+            scored_node_t const candidate = scored[consumed];
+            bool listed = false;
+            for (std::size_t position = 0; position != results.size() && !listed; ++position)
+                listed = results[position].node_id == candidate.node_id;
+            if (!listed) results.insert(scored_node_t {candidate}, results.size() + 1);
+        }
+        return consumed;
+    }
+
+    /**
+     *  @brief One row's merge: its live members, its walk's @p picks and the @p incoming
+     *      proposals compete, the insertion's selection fills the row, the audit's levels keep
+     *      its reachability, and it is written once.
+     *
+     *  The picks and the proposals carry their distances, so only the live members are scored.
+     *  The sources fold in rounds within the candidates' reservation, each round's selection
+     *  carrying into the next, so no proposal is dropped however many a hub draws.
+     *
+     *  @return Whether the row gained a member.
+     */
+    bool merge_back_links_(node_id_t node_id, node_id_t first_invisible_id, std::span<scored_node_t const> picks,
+                           std::span<scored_node_t const> incoming, health_plan_t& audit,
+                           traversal_context_t& context) noexcept {
+        std::size_t const node_connectivity = connectivity();
+        location_t const location = chunk_schedule_t::locate(node_id);
+        vector_view_t const own_vector = vector_for(location);
+        vector_norms_t const own_norms = norm_for(location);
+        results_array_t& results = context.results;
+        selection_t& selected = context.selected_neighbors;
+        selection_t& live = context.refined_neighbors;
+
+        // The live members scored first and kept apart, with their distances, for the levels.
+        results.clear();
+        candidates_count_t const live_count = stage_neighbors_(neighbors_for(location), node_id, context);
+        std::span<node_id_t const> const live_ids {context.staged_ids.data(), live_count};
+        context.computed_distances += add_neighbor_candidates_(own_vector, own_norms, live_ids, first_invisible_id,
+                                                               context);
+        [[maybe_unused]] nk::status_t const sized = live.resize({results.size()});
+        for (std::size_t position = 0; position != results.size(); ++position) live[position] = results[position];
+        results.clear();
+
+        std::span<scored_node_t const> members = to_span(live);
+        std::size_t refine_distances = 0;
+        for (bool folding = true; folding;) {
+            members = members.subspan(add_scored_candidates_(members, results));
+            picks = picks.subspan(add_scored_candidates_(picks, results));
+            incoming = incoming.subspan(add_scored_candidates_(incoming, results));
+            refine_distances += select_diverse_via_quads(results, node_id, node_connectivity, selected, context);
+            fill_selection(to_span(results), selected, node_connectivity);
+            folding = !members.empty() || !picks.empty() || !incoming.empty();
+            if (!folding) break;
+            results.clear();
+            for (std::size_t position = 0; position != selected.size(); ++position)
+                results.insert(scored_node_t {selected[position]}, results.size() + 1);
+        }
+        context.computed_distances += refine_distances;
+        context.computed_distances_in_reverse_refines += refine_distances;
+        keep_levels_(node_id, live, selected, audit);
+        return rewrite_row_(node_id, selected, live_ids);
+    }
+
+    /**
+     *  @brief Puts back what @p selected dropped of the @p live members that reachability needs.
+     *
+     *  That is a member whose last parent @p node_id is, and, when no pick stands one reverse level
+     *  closer to a landmark, the row's nearest live member that does. A short row grows by each; a
+     *  full one gives up its farthest pick that is kept by neither, a live member only once another
+     *  parent keeps it.
+     *
+     *  By induction over the levels every row reached both ways stays so throughout the merge: a
+     *  row at a level keeps one in-link from the level before, and one out-link to a lower reverse
+     *  level, and the landmarks at level zero never move.
+     */
+    void keep_levels_(node_id_t node_id, selection_t const& live, selection_t& selected,
+                      health_plan_t& audit) noexcept {
+        constexpr u8_t unknown_level_k = health_plan_t::unknown_level_k;
+        u8_t const level = audit.level(node_id), back_level = audit.back_level(node_id);
+        // The saturated level counts no parents, so its children are never released.
+        u8_t const child_level = level < unknown_level_k - 1 ? static_cast<u8_t>(level + 1) : unknown_level_k;
+        auto position_in = [&](selection_t const& among, node_id_t member) noexcept {
+            std::size_t position = 0;
+            while (position != among.size() && among[position].node_id != member) ++position;
+            return position;
+        };
+        auto releasable = [&](node_id_t member) noexcept {
+            return child_level == unknown_level_k || audit.level(member) != child_level ||
+                   position_in(live, member) == live.size() || audit.release_parent(member);
+        };
+        // The kept members gather at the tail, ahead of which the farthest releasable
+        // pick gives way.
+        std::size_t kept = 0;
+        auto keep = [&](scored_node_t member) noexcept {
+            // A member the selection holds stays where it ranks; moving it would unsort the picks
+            // the farthest of which give way.
+            if (position_in(selected, member.node_id) != selected.size()) return;
+            if (selected.size() < connectivity()) {
+                [[maybe_unused]] nk::status_t const grown = selected.resize({selected.size() + 1});
+                selected[selected.size() - 1] = member;
+                ++kept;
+                return;
+            }
+            std::size_t const tail = selected.size() - kept;
+            std::size_t position = tail;
+            while (position && !releasable(selected[position - 1].node_id)) --position;
+            if (!position--) return;
+            selected[position] = member;
+            std::swap(selected[position], selected[tail - 1]);
+            ++kept;
+        };
+        if (child_level != unknown_level_k)
+            for (std::size_t position = 0; position != live.size(); ++position) {
+                scored_node_t const member = live[position];
+                if (audit.level(member.node_id) != child_level ||
+                    position_in(selected, member.node_id) != selected.size())
+                    continue;
+                if (!audit.release_parent(member.node_id)) keep(member);
+            }
+        if (back_level != unknown_level_k && back_level != 0) {
+            std::size_t standing = 0;
+            while (standing != selected.size() && audit.back_level(selected[standing].node_id) >= back_level)
+                ++standing;
+            scored_node_t way_back = standing != selected.size()
+                                         ? selected[standing]
+                                         : scored_node_t {node_id_unknown_k,
+                                                          std::numeric_limits<distance_t>::infinity()};
+            for (std::size_t position = 0; position != live.size() && standing == selected.size(); ++position)
+                if (audit.back_level(live[position].node_id) < back_level &&
+                    live[position].distance < way_back.distance)
+                    way_back = live[position];
+            if (way_back.node_id != node_id_unknown_k) keep(way_back);
+        }
     }
 
 #pragma endregion Refinement
@@ -4474,14 +5118,17 @@ struct ram_index {
     }
 
     /** Queries one exact-scan block takes: a whole number of tiles when a matrix engine multiplies
-     *  the scalar and @p queries_count fills one, an even share across @p threads that may span
-     *  several of the kit's packs; else one query. */
+     *  the scalar and @p queries_count fills one, as many blocks per thread as there are
+     *  @p threads, so a thread the box slows gives its share away, and never narrower than one
+     *  tile; else one query. */
     static constexpr std::size_t scan_width(std::size_t queries_count, std::size_t threads) noexcept {
         if constexpr (!has_tiles_k) return 1;
         else {
             if (queries_count < tiles_kit_t::tile_columns_k) return 1;
-            std::size_t const share = divide_round_up(queries_count, max_of<std::size_t>(threads, 1));
-            return round_up_to_multiple(share, tiles_kit_t::tile_columns_k);
+            std::size_t const lanes = max_of<std::size_t>(threads, 1);
+            std::size_t const share = divide_round_up(queries_count, lanes * lanes);
+            return round_up_to_multiple(max_of<std::size_t>(share, tiles_kit_t::tile_columns_k),
+                                        tiles_kit_t::tile_columns_k);
         }
     }
 

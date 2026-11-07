@@ -10,9 +10,10 @@
  *  manifest. A rewrite never edits its sources. It lays its target out as spec-standard parts,
  *  keys, values, neighbors and the producer's norms, whose headers arrive last and the manifest
  *  after them, so a stopped rewrite reads as absent. Its RAM is the workspace the caller lends, the
- *  executor's arenas and its staging buffers: every step carves its blocks, buckets and batches off
- *  an arena over the workspace, sized from it, and nothing grows with the rows. Reads go through
- *  the executor's engines, the target's included, and writes are blocking positional runs.
+ *  executor's arenas and its staging buffers: the workspace keeps a changed bit per target row at
+ *  its front, every step carves its blocks and batches off an arena over the rest, sized from it,
+ *  and a sweep tile's links stay at the front of that across the tile's steps. Reads go through the
+ *  executor's engines, the target's included, and writes are blocking positional runs.
  *
  *  A compaction packs the source parts largest first into target parts of at most a shard capacity
  *  of rows, so one verb packs small parts together and, under a capacity below a part's rows, cuts
@@ -24,11 +25,16 @@
  *    target keeps.
  *  - @b Build builds contiguous blocks of rows in a RAM index inside the workspace and writes their
  *    rows.
- *  - @b Re-select re-selects target rows by walks of the target itself, or in RAM when a whole part
- *    fits.
- *  - @b Back-link merges the back-links the re-selections spilled into bucket files on disk.
- *  - @b Heal sweeps reachability from the landmarks every audit seeds from, and links islands back
- *    in.
+ *  - @b Re-select re-selects a tile of target rows by walks of the target itself, each row's picks
+ *    competing with its neighbors, and writes the tile, or runs in RAM when a whole part fits.
+ *
+ *  @b Sweep collects the walked rows' links into tiles of target rows sized from the workspace, so
+ *  no reverse link is lost between walk tiles. One sequential scan of the walked rows' neighbors
+ *  counts the links into a tile, cut at the last row whose links fit its tape, and the rest opens
+ *  the next tile. A second scan scatters them onto the tape, and each row of the tile scores its
+ *  run, merges it with its members, and is written a second time.
+ *
+ *  @b Heal sweeps reachability from the landmarks each audit seeds from, and links islands back in.
  */
 #pragma once
 
@@ -51,8 +57,8 @@
 namespace unum::usearch::dense {
 
 /** What the current phase's steps do, declared in the order every rewrite runs them, which
- *  @c nvme_compact_plan::advance steps through one at a time, skipping phases with no
- *  steps; @c finish_k once it answered false. */
+ *  @c nvme_compact_plan::advance steps through one at a time, skipping phases with no steps, the
+ *  three back-link phases once per sweep tile; @c finish_k once it answered false. */
 enum class nvme_compact_phase_t : u8_t {
 
     /** Moves keys and values into the target in target order, with their norms and the neighbors it
@@ -65,8 +71,14 @@ enum class nvme_compact_phase_t : u8_t {
     /** Re-selects target rows: the appended part, repaired rows, or the refined range. */
     reselect_k,
 
-    /** Applies one bucket of spilled back-links. */
-    back_link_k,
+    /** Counts the links of the walked rows into the open sweep tile of target rows. */
+    count_back_links_k,
+
+    /** Scatters those links onto the tile's tape, into each target's run. */
+    scatter_back_links_k,
+
+    /** Scores each target's run, merges it into the target's row, and writes the row. */
+    merge_back_links_k,
 
     /** Counts every row's in-links, then links the rows nothing links to back in. */
     heal_k,
@@ -92,11 +104,10 @@ struct [[nodiscard]] nvme_compact_result_t {
     /** Value rows the walks, the selections and the back-links read. */
     nvme_reads_t value_reads;
 
-    /** Runs of whole rows the copies, the batches and the heal scanned, and the spills read
-     *  back. */
+    /** Runs of whole rows the copies, the batches, the sweeps and the heal scanned. */
     nvme_reads_t scan_reads;
 
-    /** Bytes the target parts and the spills received. */
+    /** Bytes the target parts received. */
     std::size_t written_bytes = 0;
 };
 
@@ -108,12 +119,12 @@ struct nvme_compact_plan;
  *      @p config.shard_capacity rows.
  *
  *  Parts pack largest first, each bin's largest part keeps its IDs, every other part arrives after
- *  it with its edges rebased, its rows walk the target and link in, their back-links are spilled
- *  and merged, then each target part heals; one manifest commits them all. A part past the capacity
- *  is cut into ranges of it, the edges the cut crosses dropped and counted, and every row of their
- *  target parts re-selects. @p save names the target parts' alignment and provenance, and the
- *  target is a manifest beside its parts whatever its layout. The sources are borrowed until the
- *  plan dies and never edited.
+ *  it with its edges rebased, its rows walk the target and link in, a sweep merges their back-links
+ *  into the rows they name, then each target part heals; one manifest commits them all. A part past
+ *  the capacity is cut into ranges of it, the edges the cut crosses dropped and counted, and every
+ *  row of their target parts re-selects. @p save names the target parts' alignment and provenance,
+ *  and the target is a manifest beside its parts whatever its layout. The sources are borrowed
+ *  until the plan dies and never edited.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source, a @c NULL first source, a first source viewing nothing, or
@@ -187,9 +198,10 @@ expected<nvme_compact_plan<indexes_type_>> plan_build(std::span<std::string_view
  *  @brief One rewrite in flight: phases of steps, each step run across every thread of an executor.
  *
  *  Steps of a phase may run in any order, but one at a time, since each claims the executor while
- *  it runs, so searches on the same executor run between steps; a failed step may run again.
- *  @ref advance is the single-caller barrier between phases. A dying plan removes its spills and
- *  every target part no manifest committed, so a stopped rewrite reads as absent.
+ *  it runs, so searches on the same executor run between steps; a failed step may run again. The
+ *  back-link phases repeat once per sweep tile, each tile's links living across its steps.
+ *  @ref advance is the single-caller barrier between phases. A dying plan removes every target part
+ *  no manifest committed, so a stopped rewrite reads as absent.
  */
 template <typename indexes_type_>
 struct [[nodiscard]] nvme_compact_plan {
@@ -217,9 +229,8 @@ struct [[nodiscard]] nvme_compact_plan {
     nvme_compact_plan(nvme_compact_plan const&) = delete;
     nvme_compact_plan& operator=(nvme_compact_plan const&) = delete;
 
-    /** Removes the spills, and the target parts unless @ref finish committed them. */
+    /** Removes the target parts unless @ref finish committed them. */
     ~nvme_compact_plan() noexcept {
-        drop_spills_();
         for (target_t& target : targets_) {
             [[maybe_unused]] status_t const closed = target.file.close();
             target.view = indexes_t {allocator_};
@@ -271,7 +282,9 @@ struct [[nodiscard]] nvme_compact_plan {
         case nvme_compact_phase_t::copy_k: return copy_(step, executor);
         case nvme_compact_phase_t::build_k: return build_(step, executor);
         case nvme_compact_phase_t::reselect_k: return reselect_(step, executor);
-        case nvme_compact_phase_t::back_link_k: return back_link_(step, executor);
+        case nvme_compact_phase_t::count_back_links_k: return count_back_links_(step, executor);
+        case nvme_compact_phase_t::scatter_back_links_k: return scatter_back_links_(step, executor);
+        case nvme_compact_phase_t::merge_back_links_k: return merge_back_links_(step, executor);
         case nvme_compact_phase_t::heal_k: return heal_(step, executor);
         default: return status_t::uninitialized_k;
         }
@@ -281,7 +294,18 @@ struct [[nodiscard]] nvme_compact_plan {
      *  steps and answers whether one follows. */
     bool advance() noexcept {
         while (phase_ != nvme_compact_phase_t::finish_k) {
-            phase_ = static_cast<nvme_compact_phase_t>(static_cast<u8_t>(phase_) + 1);
+            switch (phase_) {
+            case nvme_compact_phase_t::reselect_k: open_sweep_(0, 0); break;
+            case nvme_compact_phase_t::count_back_links_k:
+                offset_back_links_();
+                phase_ = nvme_compact_phase_t::scatter_back_links_k;
+                break;
+            case nvme_compact_phase_t::merge_back_links_k:
+                if (sweep_.bound < targets_[sweep_part_].view.size()) open_sweep_(sweep_part_, sweep_.bound);
+                else open_sweep_(sweep_part_ + 1, 0);
+                break;
+            default: phase_ = static_cast<nvme_compact_phase_t>(static_cast<u8_t>(phase_) + 1);
+            }
             if (!steps().empty()) return true;
         }
         return false;
@@ -320,7 +344,6 @@ struct [[nodiscard]] nvme_compact_plan {
             return {result_, committed};
         result_.compaction.source_shards = sources_.size();
         result_.compaction.target_shards = targets_.size();
-        drop_spills_();
         // Committed parts outlive the plan, so its destructor finds none to remove.
         targets_.clear();
         return {result_, status_t::success_k};
@@ -425,21 +448,10 @@ struct [[nodiscard]] nvme_compact_plan {
         /** The first row of the appended nodes of a compaction or a build, every row below it
          *  linking to no appended row yet; zero for none. */
         std::size_t resident = 0;
-    };
 
-    /** One bucket of spilled back-links: the target rows it covers are fixed by its index. */
-    struct bucket_t {
-        seekable_file_t file;
-        std::size_t bytes = 0;
+        /** Where the part's rows start among the changed bits. */
+        std::size_t changed_first = 0;
     };
-
-    /** One back-link a selection spilled: @c source picked @c target at @c distance. */
-    struct proposal_t {
-        node_id_t target = sentinel_k;
-        node_id_t source = sentinel_k;
-        f32_t distance = 0;
-    };
-    static_assert(sizeof(proposal_t) == 12, "Spills are read back as packed records");
 
     /** Every row's candidates of one batch: the best rows by exact distance, with their bytes
      *  when the batch keeps them, so a selection reads nothing again. */
@@ -585,9 +597,9 @@ struct [[nodiscard]] nvme_compact_plan {
         node_id_t* staging = nullptr;
     };
 
-    /** A re-select batch: the queries, the neighbors in and out and as they were, the candidates
-     *  with their rows, the selection scratch, the back-links and the reads of the current
-     *  neighbors. */
+    /** A re-select or merge batch: the rows' own values, their neighbors in and out and as they
+     *  were, the candidates with their rows, the reads and then the selections, and for a merge
+     *  what each row's last round carried over and where it stands in its run. */
     struct reselect_slices_t {
         byte_t* queries = nullptr;
         node_id_t* neighbors = nullptr;
@@ -598,28 +610,15 @@ struct [[nodiscard]] nvme_compact_plan {
         u32_t* orders = nullptr;
         u32_t* kept_slots = nullptr;
         vector_norms_t* kept_norms = nullptr;
-        proposal_t* proposals = nullptr;
-        u32_t* points = nullptr;
+        u32_t* carried = nullptr;
+        u32_t* cursors = nullptr;
     };
 
-    /** The closest distinct proposals every row of a bucket keeps while its spill reads back. */
-    struct back_link_slices_t {
-        u32_t* counts = nullptr;
-        scored_node_t* proposed = nullptr;
-    };
-
-    /** A back-link batch: the rows in and out, their own value rows, the candidates with their
-     *  rows, the selection scratch and the reads. */
-    struct back_link_batch_slices_t {
-        node_id_t* neighbors = nullptr;
-        byte_t* owns = nullptr;
-        u32_t* counts = nullptr;
-        scored_node_t* entries = nullptr;
-        byte_t* vectors = nullptr;
-        u32_t* orders = nullptr;
-        u32_t* kept_slots = nullptr;
-        vector_norms_t* kept_norms = nullptr;
-        u32_t* points = nullptr;
+    /** A sweep tile's links: each row's count, then the offset of its run in the tape, then that
+     *  run's end, and the tape of rows linking to each. */
+    struct sweep_slices_t {
+        std::size_t* incoming_offsets = nullptr;
+        node_id_t* back_links = nullptr;
     };
 
     /** A heal's in-link counts, the target row it rewrites and its island links. */
@@ -689,9 +688,10 @@ struct [[nodiscard]] nvme_compact_plan {
     }
 
     /** Creates one target part per entry of @p rows, with its header framed, its file sized and its
-     *  one-part view open, and the buckets its back-links spill into. */
+     *  one-part view open, and keeps a changed bit per row of them at the workspace's front. */
     status_t open_targets_(std::span<std::size_t const> rows) noexcept {
         if (failed(targets_.reserve_exactly(rows.size()))) return status_t::bad_alloc_k;
+        std::size_t total = 0;
         for (std::size_t part = 0; part != rows.size(); ++part) {
             if (!rows[part] || rows[part] >= node_id_unknown_k) return status_t::overflow_k;
             monolith_layout_t const layout {rows[part],
@@ -704,6 +704,8 @@ struct [[nodiscard]] nvme_compact_plan {
             targets_.push_back_reserved(
                 target_t {paths_t {allocator_}, seekable_file_t {}, safegraphs_header_t {}, indexes_t {allocator_}});
             target_t& target = targets_.back();
+            target.changed_first = total;
+            total += rows[part];
             auto const [header, frame_status] = monolith_header(layout, save_.alignment, to_span(fields_),
                                                                 target.norms);
             if (failed(frame_status)) return frame_status;
@@ -730,11 +732,16 @@ struct [[nodiscard]] nvme_compact_plan {
                 failed(target.view.parts_.push_back(viewed)))
                 return status_t::bad_alloc_k;
         }
-        if (failed(buckets_.resize(bucket_base_(targets_.size())))) return status_t::bad_alloc_k;
+        std::size_t const changed_words = divide_round_up<std::size_t>(total, 64);
+        std::size_t const changed_bytes = workspace_allocator_t::reserved_bytes(changed_words * sizeof(u64_t));
+        if (changed_bytes > workspace_.size()) return status_t::bad_alloc_k;
+        changed_ = {reinterpret_cast<u64_t*>(workspace_.data()), changed_words};
+        std::memset(changed_.data(), 0, changed_.size_bytes());
+        workspace_ = workspace_.subspan(changed_bytes);
         std::size_t widest = 0;
         for (std::size_t const part_rows : rows) widest = max_of(widest, part_rows);
         if (heal_bytes_(widest) > workspace_.size()) return status_t::bad_alloc_k;
-        return status_t::success_k;
+        return size_steps_();
     }
 
     /** Packs the source parts largest first into target parts of at most @p capacity rows, each
@@ -768,11 +775,7 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** Refuses a workspace too small for a single row of any phase the plan runs. */
     status_t size_steps_() const noexcept {
-        // A back-link step's proposals take at most half the workspace, its batches the rest.
-        carver_t back_links;
-        back_link_slices_(bucket_rows_(), back_links);
-        back_link_batch_slices_(1, back_links);
-        if (!copy_rows_() || !reselect_rows_() || !bucket_rows_() || back_links.bytes > workspace_.size())
+        if (!copy_rows_() || !reselect_rows_() || !sweep_rows_() || !sweep_scan_rows_() || !merge_rows_())
             return status_t::bad_alloc_k;
         return status_t::success_k;
     }
@@ -807,9 +810,18 @@ struct [[nodiscard]] nvme_compact_plan {
         }
     };
 
+    /** Whether the re-select phase walks rows of target part @p part, whose links a sweep collects;
+     *  a part refined whole in RAM sweeps there. */
+    bool walked_(std::size_t part) const noexcept {
+        iota_view<std::size_t> const rows = targets_[part].selected;
+        std::size_t const nodes = targets_[part].view.size();
+        return !rows.empty() && !(rows.size() == nodes && refines_in_ram_(nodes));
+    }
+
     /** How the current phase cuts unit @p unit: a copy step stays inside one target range of its
      *  source part, a build step is a block, a re-select step a batch or a whole part refined in
-     *  RAM, a back-link step a bucket, and a heal step a whole part. */
+     *  RAM, a count or scatter step a run of the walked rows, a merge step a batch of the sweep's
+     *  tile, and a heal step a whole part. */
     cut_t cut_(std::size_t unit) const noexcept {
         switch (phase_) {
         case nvme_compact_phase_t::copy_k: {
@@ -827,24 +839,19 @@ struct [[nodiscard]] nvme_compact_plan {
             bool const in_ram = rows.size() == nodes && refines_in_ram_(nodes);
             return {rows.first, rows.size(), max_of<std::size_t>(rows.size(), 1), in_ram ? nodes : reselect_rows_()};
         }
-        case nvme_compact_phase_t::back_link_k: {
-            std::size_t const nodes = targets_[unit].view.size();
-            return {0, nodes, nodes, bucket_rows_()};
+        case nvme_compact_phase_t::count_back_links_k:
+        case nvme_compact_phase_t::scatter_back_links_k: {
+            iota_view<std::size_t> const rows = targets_[unit].selected;
+            return unit == sweep_part_ ? cut_t {rows.first, rows.size(), rows.size(), sweep_scan_rows_()} : cut_t {};
         }
+        case nvme_compact_phase_t::merge_back_links_k:
+            return unit == sweep_part_ ? cut_t {sweep_.first, sweep_.size(), sweep_.size(), merge_rows_()} : cut_t {};
         case nvme_compact_phase_t::heal_k: {
             std::size_t const nodes = targets_[unit].view.size();
             return {0, nodes, nodes, nodes};
         }
         default: return {};
         }
-    }
-
-    /** The first spill bucket of target part @p part, past every bucket of the parts before it. */
-    std::size_t bucket_base_(std::size_t part) const noexcept {
-        std::size_t base = 0;
-        for (std::size_t earlier = 0; earlier != part; ++earlier)
-            base += divide_round_up(targets_[earlier].view.size(), bucket_rows_());
-        return base;
     }
 
 #pragma endregion Opening
@@ -880,9 +887,27 @@ struct [[nodiscard]] nvme_compact_plan {
                              workspace_.size());
     }
 
-    /** Rows one spill bucket covers: as many as half the workspace holds proposals for. */
-    std::size_t bucket_rows_() const noexcept {
-        return workspace_.size() / 2 / (sizeof(u32_t) + connectivity_() * sizeof(scored_node_t));
+    /** Rows one sweep tile opens with: its counts and tape take at most half the workspace, and the
+     *  rest stages its scans and merges, whose batches a wider tile would narrow to single rows. */
+    std::size_t sweep_rows_() const noexcept {
+        return fitting_rows_(&nvme_compact_plan::sweep_slices_, workspace_.size() / neighbors_row_bytes_(),
+                             workspace_.size() / 2);
+    }
+
+    /** The workspace past a sweep tile's links, staging the tile's scans and merges. */
+    bytes_span_t sweep_spare_() const noexcept {
+        carver_t counter;
+        sweep_slices_(sweep_rows_(), counter);
+        return workspace_.subspan(counter.bytes);
+    }
+
+    /** Rows of the walked ones that one count or scatter step scans. */
+    std::size_t sweep_scan_rows_() const noexcept { return sweep_spare_().size() / neighbors_row_bytes_(); }
+
+    /** Rows of a sweep tile that one merge step covers. */
+    std::size_t merge_rows_() const noexcept {
+        std::size_t const spare = sweep_spare_().size();
+        return fitting_rows_(&nvme_compact_plan::reselect_slices_, spare / value_row_bytes_(), spare);
     }
 
     /** Rows one build step covers, the largest block the workspace fits; none unless the plan
@@ -896,9 +921,6 @@ struct [[nodiscard]] nvme_compact_plan {
 
     std::size_t neighbors_row_bytes_() const noexcept { return connectivity_() * sizeof(node_id_t); }
     std::size_t candidate_slots_() const noexcept { return expansion_factor_() + connectivity_(); }
-
-    /** Candidates a back-link batch keeps per row: its current neighbors and as many proposals. */
-    std::size_t back_link_slots_() const noexcept { return connectivity_() * 2; }
 
     /** Bytes a heal of a part of @p rows rows takes at least, with room for one island link; the
      *  rest of the workspace holds more island links. */
@@ -917,13 +939,15 @@ struct [[nodiscard]] nvme_compact_plan {
 
     /** Bytes the columns of a RAM index of @p rows rows take off the arena it is built on: a slice
      *  per column of every chunk the rows reach, the key map's control bytes and slots over them,
-     *  and the audit its heal runs on the same allocator. */
+     *  and the audit and the pass its refine and heal run on the same allocator. */
     std::size_t ram_bytes_(std::size_t rows) const noexcept {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
         using slots_schedule_t = typename ram_index_t::keyed_t::nodes_map_t::slots_schedule_t;
         typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
         std::size_t const values_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t);
-        std::size_t bytes = workspace_allocator_t::reserved_bytes(ram_index_t::audit_memory_usage(rows));
+        std::size_t bytes = workspace_allocator_t::reserved_bytes(ram_index_t::audit_memory_usage(rows)) +
+                            workspace_allocator_t::reserved_bytes(
+                                ram_index_t::refine_memory_usage(rows, rows, connectivity_(), 0));
         std::size_t const chunks = schedule_t::chunks_for(rows);
         for (std::size_t chunk = 0; chunk != chunks; ++chunk) {
             std::size_t const chunk_rows = schedule_t::nodes_in(chunk);
@@ -1012,25 +1036,12 @@ struct [[nodiscard]] nvme_compact_plan {
                 carve_<u32_t>(carver, rows * slots),
                 carve_<u32_t>(carver, rows * connectivity),
                 carve_<vector_norms_t>(carver, rows * connectivity),
-                carve_<proposal_t>(carver, rows * connectivity),
-                carve_<u32_t>(carver, rows * connectivity)};
-    }
-
-    back_link_slices_t back_link_slices_(std::size_t rows, carver_t& carver) const noexcept {
-        return {carve_<u32_t>(carver, rows), carve_<scored_node_t>(carver, rows * connectivity_())};
-    }
-
-    back_link_batch_slices_t back_link_batch_slices_(std::size_t rows, carver_t& carver) const noexcept {
-        std::size_t const slots = back_link_slots_(), connectivity = connectivity_();
-        return {carve_<node_id_t>(carver, rows * connectivity),
-                carve_<byte_t>(carver, rows * value_row_bytes_()),
                 carve_<u32_t>(carver, rows),
-                carve_<scored_node_t>(carver, rows * slots),
-                carve_<byte_t>(carver, rows * slots * value_row_bytes_()),
-                carve_<u32_t>(carver, rows * slots),
-                carve_<u32_t>(carver, rows * connectivity),
-                carve_<vector_norms_t>(carver, rows * connectivity),
-                carve_<u32_t>(carver, rows * (slots + 1))};
+                carve_<u32_t>(carver, rows)};
+    }
+
+    sweep_slices_t sweep_slices_(std::size_t rows, carver_t& carver) const noexcept {
+        return {carve_<std::size_t>(carver, rows), carve_<node_id_t>(carver, rows * connectivity_())};
     }
 
     /** Two bits per row, the first in-link setting the low one and the second the high one, and
@@ -1219,61 +1230,19 @@ struct [[nodiscard]] nvme_compact_plan {
         return false;
     }
 
-    /** Appends the back-links in @p proposals to the buckets of target part @p part, one positional
-     *  write per bucket; sentinel records are skipped. */
-    status_t spill_(std::size_t part, std::span<proposal_t> proposals) noexcept {
-        // A full ascending order, so the sentinel records gather at the end, where the loop stops.
-        partial_sort(proposals, proposals.size(), [](proposal_t const& first, proposal_t const& second) noexcept {
-            return first.target < second.target;
-        });
-        paths_t name {allocator_};
-        std::size_t const base = bucket_base_(part);
-        for (std::size_t first = 0; first != proposals.size();) {
-            if (proposals[first].target == sentinel_k) break;
-            std::size_t const bucket = proposals[first].target / bucket_rows_();
-            std::size_t bound = first + 1;
-            while (bound != proposals.size() && proposals[bound].target != sentinel_k &&
-                   proposals[bound].target / bucket_rows_() == bucket)
-                ++bound;
-            bucket_t& spill = buckets_[base + bucket];
-            if (!spill.file) {
-                if (status_t const named = spill_path_(name, base + bucket); failed(named)) return named;
-                auto [file, open_status] = seekable_file_t::open(path_of_(name), file_mode_t::write_k, allocator_);
-                if (failed(open_status)) return open_status;
-                spill.file = std::move(file);
-            }
-            bytes_view_t const records = bytes_of(proposals.data() + first, bound - first);
-            if (status_t const wrote = spill.file.write_at(spill.bytes, records); failed(wrote)) return wrote;
-            spill.bytes += records.size();
-            result_.written_bytes += records.size();
-            first = bound;
-        }
-        return status_t::success_k;
+    /** Whether the sentinel-padded row @p row holds a member @p before lacks; a set gains a member
+     *  only through a pick it lacked, and dropping one alone changes nothing. */
+    static bool gained_(std::span<node_id_t const> row, std::span<node_id_t const> before) noexcept {
+        for (node_id_t const neighbor : row)
+            if (neighbor != sentinel_k && !holds_(before, neighbor)) return true;
+        return false;
     }
 
-    /** The path of spill bucket @p bucket beside the target. */
-    status_t spill_path_(paths_t& name, std::size_t bucket) const noexcept {
-        std::string_view const stem = path_of_(stem_);
-        auto print = [&](char* sink, std::size_t capacity) noexcept {
-            return std::snprintf(sink, capacity, "%.*s-spill-%05zu.bin", static_cast<int>(stem.size()), stem.data(),
-                                 bucket);
-        };
-        int const length = print(nullptr, 0);
-        if (length < 0) return status_t::io_k;
-        if (failed(name.resize_uninitialized(static_cast<std::size_t>(length) + 1))) return status_t::bad_alloc_k;
-        print(name.data(), name.size());
-        return status_t::success_k;
-    }
-
-    /** Closes and removes every spill bucket. */
-    void drop_spills_() noexcept {
-        paths_t name {allocator_};
-        for (std::size_t bucket = 0; bucket != buckets_.size(); ++bucket) {
-            if (!buckets_[bucket].file) continue;
-            [[maybe_unused]] status_t const closed = buckets_[bucket].file.close();
-            if (succeeded(spill_path_(name, bucket))) std::remove(name.data());
-        }
-        buckets_.clear();
+    /** Marks row @p row of @p target counted as changed, answering whether it was already. */
+    bool count_changed_(target_t const& target, std::size_t row) noexcept {
+        std::size_t const bit = target.changed_first + row;
+        u64_t const mask = u64_t {1} << (bit % 64);
+        return atomic_ref<u64_t>(changed_[bit / 64]).fetch_or(mask, std::memory_order_relaxed) & mask;
     }
 
     /** Folds the telemetry of one batch of walks into the result. */
@@ -1563,11 +1532,31 @@ struct [[nodiscard]] nvme_compact_plan {
 
 #pragma region Reselection and Back Links
 
-    /** Re-selects target rows @p step.nodes: each walks the target part from random landmarks, the
-     *  appended nodes of a compaction or a build walking across into the resident rows alone first,
-     *  its candidates keeping the best rows it scored and its current neighbors, then a diverse
-     *  pick arrives as its row and spills its back-links. A whole part the workspace holds is
-     *  refined in RAM instead. */
+    /** Reads the value rows of the candidates at @p points, each a position into @p candidates, and
+     *  scores each against its own row of @p queries. */
+    status_t score_points_(target_t const& target, candidates_t const& candidates, byte_t const* queries,
+                           std::span<u32_t const> points, executor_t& executor) noexcept {
+        std::size_t const row_bytes = candidates.row_bytes;
+        if (status_t const read = read_points_(
+                target.view, part_of_(target).values_begin, row_bytes, points.size(),
+                [&](std::size_t task) noexcept { return candidates.entries[points[task]].node_id; },
+                [&](std::size_t task) noexcept { return candidates.vectors + std::size_t(points[task]) * row_bytes; },
+                executor, result_.value_reads);
+            failed(read))
+            return read;
+        return fan_out_(executor, points.size(), [&](std::size_t point, std::size_t, std::size_t) noexcept {
+            std::size_t const position = points[point];
+            byte_t const* const query = queries + position / candidates.slots * row_bytes;
+            byte_t const* const candidate = candidates.vectors + position * row_bytes;
+            candidates.entries[position].distance = distance_(query, norms_of_(query), candidate, norms_of_(candidate));
+        });
+    }
+
+    /** Re-selects the tile of target rows @p step.nodes: each walks the target part from random
+     *  landmarks, the appended nodes of a compaction or a build walking across into the resident
+     *  rows alone first, its candidates keeping the best rows it scored and its current neighbors,
+     *  then a diverse pick, and the tile is written. A whole part the workspace holds is refined
+     *  in RAM instead. */
     status_t reselect_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
@@ -1577,7 +1566,7 @@ struct [[nodiscard]] nvme_compact_plan {
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
         auto const [queries, neighbors, previous_neighbors, counts, entries, vectors, orders, kept_slots, kept_norms,
-                    proposals, points] = reselect_slices_(count, carver);
+                    carried, cursors] = reselect_slices_(count, carver);
         if (carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
         std::array<staged_column_t, 2> const columns {
             {{part.values_begin, value_row_bytes_(), queries},
@@ -1618,176 +1607,222 @@ struct [[nodiscard]] nvme_compact_plan {
                 node_id_t const neighbor = neighbors[row * connectivity + slot];
                 if (neighbor >= nodes || neighbor == first + row) continue;
                 std::size_t const taken = candidates.offer(row, {neighbor, 0}, slots);
-                if (taken != slots) points[current++] = static_cast<u32_t>(row * slots + taken);
+                if (taken != slots) orders[current++] = static_cast<u32_t>(row * slots + taken);
             }
-        if (status_t const read = read_points_(
-                target.view, part.values_begin, value_row_bytes_(), current,
-                [&](std::size_t task) noexcept { return entries[points[task]].node_id; },
-                [&](std::size_t task) noexcept { return vectors + std::size_t(points[task]) * value_row_bytes_(); },
-                executor, result_.value_reads);
-            failed(read))
-            return read;
-
-        status_t const scored = fan_out_(executor, current, [&](std::size_t point, std::size_t, std::size_t) noexcept {
-            std::size_t const position = points[point];
-            byte_t const* const query = queries + position / slots * value_row_bytes_();
-            byte_t const* const candidate = vectors + position * value_row_bytes_();
-            entries[position].distance = distance_(query, norms_of_(query), candidate, norms_of_(candidate));
-        });
-        if (failed(scored)) return scored;
+        if (status_t const scored = score_points_(target, candidates, queries, {orders, current}, executor);
+            failed(scored))
+            return scored;
 
         std::size_t computed = current, changed = 0;
         status_t const selected = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            std::size_t local_computed = 0;
             std::span<node_id_t> const out {neighbors + row * connectivity, connectivity};
             std::span<node_id_t> const before {previous_neighbors + row * connectivity, connectivity};
-            std::memcpy(before.data(), out.data(), connectivity * sizeof(node_id_t));
-            std::size_t const picks = select_diverse_(
-                candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out, local_computed);
-            std::size_t matched = 0;
-            for (std::size_t slot = 0; slot != connectivity; ++slot)
-                matched += out[slot] != sentinel_k && holds_(before, out[slot]);
-            proposal_t* const spilled = proposals + row * connectivity;
-            for (std::size_t pick = 0; pick != connectivity; ++pick) {
-                spilled[pick] = proposal_t {};
-                if (pick >= picks) continue;
-                scored_node_t const* const row_entries = candidates.entries_of(row);
-                std::size_t slot = 0;
-                while (row_entries[slot].node_id != out[pick]) ++slot;
-                spilled[pick] = proposal_t {out[pick], static_cast<node_id_t>(first + row), row_entries[slot].distance};
-            }
-            atomic_ref<std::size_t>(computed).add(local_computed, std::memory_order_relaxed);
-            // A set gains a member only through a pick it lacked;
-            // dropping one alone changes nothing.
-            atomic_ref<std::size_t>(changed).add(matched != picks, std::memory_order_relaxed);
+            std::memcpy(before.data(), out.data(), neighbors_row_bytes_());
+            std::size_t local_computed = 0;
+            select_diverse_(candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
+                            local_computed);
+            atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
+            if (gained_(out, before) && !count_changed_(target, first + row))
+                atomic_ref<std::size_t>(changed).fetch_add(1, std::memory_order_relaxed);
         });
         if (failed(selected)) return selected;
         result_.compaction.graph.traversal_stats.computed_distances += computed;
         result_.compaction.graph.traversal_stats.computed_distances_in_refines += computed;
         result_.compaction.graph.reselected_nodes += count;
         result_.compaction.graph.changed_nodes += changed;
-        if (status_t const wrote = write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
-                                               reinterpret_cast<byte_t const*>(neighbors));
-            failed(wrote))
-            return wrote;
-        return spill_(step.part, {proposals, count * connectivity});
+        return write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
+                           reinterpret_cast<byte_t const*>(neighbors));
     }
 
-    /** Applies one bucket of back-links to target rows @p step.nodes: every row keeps its closest
-     *  distinct proposals, then in batches the workspace holds, a touched row re-selects among its
-     *  current neighbors and those proposals, every candidate's value row read, and the batch's
-     *  rows write back in one run. A bucket nothing spilled into has nothing to apply. */
-    status_t back_link_(step_t const& step, executor_t& executor) noexcept {
-        target_t& target = targets_[step.part];
-        nvme_part_t const& part = part_of_(target);
-        std::size_t const nodes = target.view.size(), connectivity = connectivity_(), rows = step.nodes.size();
-        std::size_t const lowest = step.nodes.first, slots = back_link_slots_();
-        bucket_t& bucket = buckets_[bucket_base_(step.part) + lowest / bucket_rows_()];
-        if (!bucket.bytes) return status_t::success_k;
+    /** Opens the sweep's tile of target rows from @p first in target part @p part, up to
+     *  @c sweep_rows_ of them, none linked yet, or from row zero of the next part walked; past the
+     *  last one, enters the heal. */
+    void open_sweep_(std::size_t part, std::size_t first) noexcept {
+        for (; part != targets_.size() && !walked_(part); ++part) first = 0;
+        if (part == targets_.size()) {
+            phase_ = nvme_compact_phase_t::heal_k;
+            return;
+        }
+        std::size_t const tile_rows = sweep_rows_();
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
-        back_link_slices_t const kept = back_link_slices_(rows, carver);
+        sweep_slices_t const slices = sweep_slices_(tile_rows, carver);
+        sweep_part_ = part;
+        sweep_ = {first, min_of(first + tile_rows, targets_[part].view.size())};
+        incoming_offsets_ = {slices.incoming_offsets, sweep_.size()};
+        back_links_ = {slices.back_links, tile_rows * connectivity_()};
+        std::memset(slices.incoming_offsets, 0, incoming_offsets_.size_bytes());
+        ++result_.compaction.graph.swept_tiles;
+        phase_ = nvme_compact_phase_t::count_back_links_k;
+    }
 
-        // The spill reads back in runs as wide as all that is left, whose bytes the batches reuse
-        // once it is read, and every target keeps its closest sources.
-        bytes_span_t const batch_space = workspace_.subspan(min_of(carver.bytes, workspace_.size()));
-        std::size_t const run_records = batch_space.size() / sizeof(proposal_t);
-        std::size_t const run_bytes = run_records * sizeof(proposal_t);
-        proposal_t* const run = carve_<proposal_t>(carver, run_records);
-        if (!run_records || carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
-        std::memset(kept.counts, 0, rows * sizeof(u32_t));
-        candidates_t const proposals {kept.proposed, nullptr, kept.counts, connectivity, 0};
-        for (std::size_t offset = 0; offset < bucket.bytes; offset += run_bytes) {
-            std::size_t const length = min_of(run_bytes, bucket.bytes - offset);
-            if (status_t const read = bucket.file.read_at(offset, {reinterpret_cast<byte_t*>(run), length});
-                failed(read))
-                return read;
-            result_.scan_reads += nvme_reads_t {1, length};
-            for (std::size_t record = 0; record != length / sizeof(proposal_t); ++record) {
-                proposal_t const& back_link = run[record];
-                if (back_link.target < lowest || back_link.target >= lowest + rows ||
-                    back_link.source == back_link.target)
-                    continue;
-                proposals.offer(back_link.target - lowest, {back_link.source, back_link.distance}, connectivity);
+    /** Turns the sweep tile's counts into each row's first link's offset, which the scatter
+     *  advances to its end: the tile ends before the first row whose links pass the tape, and a
+     *  lone row past it keeps the tape's worth of them. */
+    void offset_back_links_() noexcept {
+        std::size_t offset = 0, rows = 0;
+        for (; rows != sweep_.size(); ++rows) {
+            std::size_t count = incoming_offsets_[rows];
+            if (offset + count > back_links_.size()) {
+                if (rows) break;
+                count = back_links_.size();
             }
+            incoming_offsets_[rows] = offset;
+            offset += count;
         }
+        sweep_.bound = sweep_.first + max_of<std::size_t>(rows, 1);
+        result_.compaction.graph.swept_links += offset;
+    }
 
-        std::size_t const batch_rows = fitting_rows_(&nvme_compact_plan::back_link_batch_slices_, rows,
-                                                     batch_space.size());
-        if (!batch_rows) return status_t::bad_alloc_k;
-        for (std::size_t batch_first = 0; batch_first < rows; batch_first += batch_rows) {
-            std::size_t const count = min_of(batch_rows, rows - batch_first), first = lowest + batch_first;
-            workspace_arena_t batch_arena = arena_over_(batch_space);
-            carver_t batch_carver {&batch_arena};
-            auto const [neighbors, owns, counts, entries, vectors, orders, kept_slots, kept_norms,
-                        points] = back_link_batch_slices_(count, batch_carver);
-            if (batch_carver.bytes > batch_space.size()) return status_t::bad_alloc_k;
-            std::array<staged_column_t, 1> const columns {
-                {{part.neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(neighbors)}}};
-            if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
-                return read;
+    /** Scans the walked rows of @p step and calls @p per_link with every link into the sweep's
+     *  tile: the target's row in the tile and the linking row. A failed scan calls it for none, so
+     *  the step may run again, and no row is written between the count and the scatter, so both
+     *  read the same links. */
+    template <typename per_link_type_>
+    status_t scan_back_links_(step_t const& step, executor_t& executor, per_link_type_&& per_link) noexcept {
+        target_t& target = targets_[step.part];
+        std::size_t const count = step.nodes.size(), first = step.nodes.first, connectivity = connectivity_();
+        bytes_span_t const spare = sweep_spare_();
+        workspace_arena_t arena = arena_over_(spare);
+        carver_t carver {&arena};
+        node_id_t* const links = carve_<node_id_t>(carver, count * connectivity);
+        if (carver.bytes > spare.size()) return status_t::bad_alloc_k;
+        std::array<staged_column_t, 1> const columns {
+            {{part_of_(target).neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(links)}}};
+        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
+            return read;
+        return fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
+            node_id_t const source = static_cast<node_id_t>(first + row);
+            for (std::size_t slot = 0; slot != connectivity; ++slot) {
+                std::size_t const linked = links[row * connectivity + slot];
+                if (linked >= sweep_.first && linked < sweep_.bound && linked != source)
+                    per_link(linked - sweep_.first, source);
+            }
+        });
+    }
 
-            // Point `p` below `count` reads the batch row itself, every later one a candidate slot
-            // of some row.
-            candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_()};
-            std::size_t reads = 0;
-            for (std::size_t row = 0; row != count; ++row) {
-                counts[row] = 0;
-                std::size_t const local = batch_first + row;
-                if (!proposals.counts[local]) continue;
-                points[reads++] = static_cast<u32_t>(row);
-                node_id_t const self = static_cast<node_id_t>(first + row);
-                for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                    node_id_t const neighbor = neighbors[row * connectivity + slot];
-                    if (neighbor < nodes && neighbor != self) candidates.offer(row, {neighbor, 0}, slots);
+    /** Counts every link of the walked rows of @p step into the sweep's tile. */
+    status_t count_back_links_(step_t const& step, executor_t& executor) noexcept {
+        return scan_back_links_(step, executor, [&](std::size_t row, node_id_t) noexcept {
+            atomic_ref<std::size_t>(incoming_offsets_[row]).fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+
+    /** Scatters every link of the walked rows of @p step into the sweep's tile onto its target's
+     *  run; a link the tape has no room for is left out. */
+    status_t scatter_back_links_(step_t const& step, executor_t& executor) noexcept {
+        return scan_back_links_(step, executor, [&](std::size_t row, node_id_t source) noexcept {
+            std::size_t const position =
+                atomic_ref<std::size_t>(incoming_offsets_[row]).fetch_add(1, std::memory_order_relaxed);
+            if (position < back_links_.size()) back_links_[position] = source;
+        });
+    }
+
+    /** Merges the rows @p step.nodes of the sweep's tile with the rows linking to them. A row
+     *  holding all of those stays as it is; any other reads its members' value rows and its run's,
+     *  and they compete over rounds within its candidates, each round's picks carrying into the
+     *  next, so no link on the tape is dropped however many a hub draws and the row is never
+     *  thinner. The batch goes back in one write. */
+    status_t merge_back_links_(step_t const& step, executor_t& executor) noexcept {
+        target_t& target = targets_[step.part];
+        nvme_part_t const& part = part_of_(target);
+        std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
+        std::size_t const slots = candidate_slots_(), connectivity = connectivity_(), row_bytes = value_row_bytes_();
+        bytes_span_t const spare = sweep_spare_();
+        workspace_arena_t arena = arena_over_(spare);
+        carver_t carver {&arena};
+        auto const [queries, neighbors, previous_neighbors, counts, entries, vectors, orders, kept_slots, kept_norms,
+                    carried, cursors] = reselect_slices_(count, carver);
+        if (carver.bytes > spare.size()) return status_t::bad_alloc_k;
+        std::array<staged_column_t, 2> const columns {
+            {{part.values_begin, row_bytes, queries},
+             {part.neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(neighbors)}}};
+        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
+            return read;
+        std::memcpy(previous_neighbors, neighbors, count * neighbors_row_bytes_());
+        candidates_t const candidates {entries, vectors, counts, slots, row_bytes};
+
+        auto run_of = [&](std::size_t row) noexcept -> std::span<node_id_t> {
+            std::size_t const tile_row = first - sweep_.first + row, tape = back_links_.size();
+            std::size_t const begin = tile_row ? min_of(incoming_offsets_[tile_row - 1], tape) : 0;
+            return back_links_.subspan(begin, min_of(incoming_offsets_[tile_row], tape) - begin);
+        };
+        auto members_of = [&](std::size_t row) noexcept -> std::span<node_id_t const> {
+            return {previous_neighbors + row * connectivity, connectivity};
+        };
+        // Row `row`'s next links take the slots its last selection left; its members are no news.
+        auto take_links = [&](std::size_t row) noexcept {
+            std::span<node_id_t const> const run = run_of(row);
+            std::size_t cursor = cursors[row];
+            for (; cursor != run.size() && counts[row] != slots; ++cursor)
+                if (!holds_(members_of(row), run[cursor])) entries[row * slots + counts[row]++] = {run[cursor], 0};
+            cursors[row] = static_cast<u32_t>(cursor);
+        };
+        status_t const opened = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
+            std::span<node_id_t> const run = run_of(row);
+            // Filled in arrival order by the scatter; sorted, a hub's rounds are reproducible.
+            partial_sort(run, run.size());
+            std::size_t cursor = 0;
+            while (cursor != run.size() && holds_(members_of(row), run[cursor])) ++cursor;
+            carried[row] = counts[row] = 0;
+            cursors[row] = static_cast<u32_t>(cursor);
+            if (cursor == run.size()) return;
+            for (node_id_t const member : members_of(row))
+                if (member < nodes && member != first + row) entries[row * slots + counts[row]++] = {member, 0};
+            take_links(row);
+        });
+        if (failed(opened)) return opened;
+
+        std::size_t reads = 0;
+        auto queue_reads = [&]() noexcept {
+            reads = 0;
+            for (std::size_t row = 0; row != count; ++row)
+                for (std::size_t slot = carried[row]; slot != counts[row]; ++slot)
+                    orders[reads++] = static_cast<u32_t>(row * slots + slot);
+            return reads != 0;
+        };
+        if (!queue_reads()) return status_t::success_k;
+        std::size_t computed = 0, changed = 0;
+        do {
+            if (status_t const scored = score_points_(target, candidates, queries, {orders, reads}, executor);
+                failed(scored))
+                return scored;
+            computed += reads;
+            status_t const merged = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
+                if (carried[row] == counts[row]) return;
+                selection_t const scratch = selection_of_(orders, kept_slots, kept_norms, row, slots);
+                std::size_t local_computed = 0;
+                std::size_t const picks = select_diverse_(
+                    candidates, row, scratch, {neighbors + row * connectivity, connectivity}, local_computed);
+                atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
+                // In ascending order, so no pick lands on one not yet moved.
+                partial_sort(std::span<u32_t>(scratch.kept, picks), picks);
+                for (std::size_t pick = 0; pick != picks; ++pick) {
+                    std::size_t const slot = scratch.kept[pick];
+                    if (slot == pick) continue;
+                    entries[row * slots + pick] = entries[row * slots + slot];
+                    std::memcpy(candidates.vector_of(row, pick), candidates.vector_of(row, slot), row_bytes);
                 }
-                scored_node_t const* const proposed_row = proposals.entries_of(local);
-                for (std::size_t slot = 0; slot != proposals.counts[local]; ++slot)
-                    candidates.offer(row, {proposed_row[slot].node_id, 0}, slots);
-                for (std::size_t slot = 0; slot != counts[row]; ++slot)
-                    points[reads++] = static_cast<u32_t>(count + row * slots + slot);
-            }
-            if (status_t const read = read_points_(
-                    target.view, part.values_begin, value_row_bytes_(), reads,
-                    [&](std::size_t task) noexcept {
-                        std::size_t const point = points[task];
-                        return point < count ? static_cast<node_id_t>(first + point) : entries[point - count].node_id;
-                    },
-                    [&](std::size_t task) noexcept {
-                        std::size_t const point = points[task];
-                        return point < count ? owns + point * value_row_bytes_()
-                                             : vectors + (point - count) * value_row_bytes_();
-                    },
-                    executor, result_.value_reads);
-                failed(read))
-                return read;
-
-            std::size_t computed = 0;
-            status_t const selected = fan_out_(
-                executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-                    if (!counts[row]) return;
-                    byte_t const* const own = owns + row * value_row_bytes_();
-                    vector_norms_t const own_norms = norms_of_(own);
-                    for (std::size_t slot = 0; slot != counts[row]; ++slot) {
-                        byte_t const* const candidate = candidates.vector_of(row, slot);
-                        entries[row * slots + slot].distance = distance_(own, own_norms, candidate,
-                                                                         norms_of_(candidate));
-                    }
-                    std::size_t local_computed = counts[row];
-                    std::span<node_id_t> const out {neighbors + row * connectivity, connectivity};
-                    select_diverse_(candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
-                                    local_computed);
-                    atomic_ref<std::size_t>(computed).add(local_computed, std::memory_order_relaxed);
-                });
-            if (failed(selected)) return selected;
-            result_.compaction.graph.traversal_stats.computed_distances += computed;
-            result_.compaction.graph.traversal_stats.computed_distances_in_reverse_refines += computed;
-            if (status_t const wrote = write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
-                                                   reinterpret_cast<byte_t const*>(neighbors));
-                failed(wrote))
-                return wrote;
-        }
-        return status_t::success_k;
+                carried[row] = counts[row] = static_cast<u32_t>(picks);
+                take_links(row);
+            });
+            if (failed(merged)) return merged;
+        } while (queue_reads());
+        // A row the pass never walked stays out of the report, whatever it gained.
+        iota_view<std::size_t> const walked = target.selected;
+        status_t const compared = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
+            std::size_t const node = first + row;
+            if (node < walked.first || node >= walked.bound) return;
+            std::span<node_id_t const> const out {neighbors + row * connectivity, connectivity};
+            if (gained_(out, members_of(row)) && !count_changed_(target, node))
+                atomic_ref<std::size_t>(changed).fetch_add(1, std::memory_order_relaxed);
+        });
+        if (failed(compared)) return compared;
+        result_.compaction.graph.traversal_stats.computed_distances += computed;
+        result_.compaction.graph.traversal_stats.computed_distances_in_reverse_refines += computed;
+        result_.compaction.graph.changed_nodes += changed;
+        return write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
+                           reinterpret_cast<byte_t const*>(neighbors));
     }
 
 #pragma endregion Reselection and Back Links
@@ -1930,7 +1965,7 @@ struct [[nodiscard]] nvme_compact_plan {
     /** The custom fields every target header carries. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_ {allocator_};
 
-    /** The manifest's path, and the stem its parts and spills are named after. */
+    /** The manifest's path, and the stem its parts are named after. */
     paths_t manifest_ {allocator_};
     paths_t stem_ {allocator_};
 
@@ -1943,8 +1978,18 @@ struct [[nodiscard]] nvme_compact_plan {
     /** Every target part, in manifest order. */
     growing_buffer<target_t, forkunion_allocator_t> targets_ {allocator_};
 
-    /** Every spill bucket, those of each target part after every earlier part's. */
-    growing_buffer<bucket_t, forkunion_allocator_t> buckets_ {allocator_};
+    /** One bit per target row, each target part's after every earlier part's, set once the row
+     *  counts as changed, at the front of the workspace the caller lent. */
+    std::span<u64_t> changed_;
+
+    /** The target part the sweep is in, and its open tile of target rows. */
+    std::size_t sweep_part_ = 0;
+    iota_view<std::size_t> sweep_;
+
+    /** The open tile's counts, then offsets, one per row of it, and its tape, both at the
+     *  workspace's front. */
+    std::span<std::size_t> incoming_offsets_;
+    std::span<node_id_t> back_links_;
 
     nvme_compact_phase_t phase_ = nvme_compact_phase_t::finish_k;
 

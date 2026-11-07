@@ -948,10 +948,12 @@ struct nvme_indexes {
      *  @brief The neighbors rows of the entries @p entries locates, each its part's connectivity
      *      wide, read as @ref read_keys reads keys.
      *
+     *  @param[in] entries The entries whose neighbors rows to read, in any order, repeats allowed.
      *  @param[out] offsets The prefix sums of the rows' widths, one more than @p entries: where
      *      each entry's run starts in @p neighbors, then the end of the last.
      *  @param[out] neighbors Every entry's neighbor IDs end to end, resized to the last offset;
      *      an ID at or past its part's @ref part_size is a sentinel.
+     *  @param[in] executor The pool that runs the scans.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k @p offsets is not one longer than @p entries, or a medium the engines
@@ -1217,7 +1219,7 @@ struct nvme_indexes {
             return candidates;
         }
 
-        /** Whether the seeds @ref find_hinted answers still need a key read each: only probed
+        /** Whether the seeds @c find_hinted answers still need a key read each: only probed
          *  ones, never those a MaxSim resolved. */
         bool confirms_hints() const noexcept { return inputs.resolved_hints.empty(); }
 

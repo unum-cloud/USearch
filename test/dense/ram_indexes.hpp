@@ -607,8 +607,9 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
         for (std::size_t row = 0; row != rows_count; ++row) keys[row] = dense_key<key_t>(row / tokens_per_document);
         failures += expect(
             succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
-        auto const admit_even = quad_predicate(
-            [](key_t key) noexcept { return key % 2 ? admission_t::reject_k : admission_t::admit_k; });
+        auto const admit_even = quad_predicate([](key_t key) noexcept {
+            return dense_key_number(key) % 2 ? admission_t::reject_k : admission_t::admit_k;
+        });
         search_config_t const exhaustive {static_cast<typename index_t::candidates_count_t>(rows_count)};
         search_config_t scan;
         scan.traversal = traversal_t::scan_k;
@@ -631,7 +632,7 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
                 failures += expect(scored[query] > 0 && scored[query] <= rows_count / 2);
                 failures += expect_eq(kept, min_of(scored[query], rows_count));
                 for (std::size_t pair = 0; pair != kept; ++pair)
-                    failures += expect(product_keys[first + pair] % 2 == 0);
+                    failures += expect(dense_key_number(product_keys[first + pair]) % 2 == 0);
             }
         }
 
@@ -667,7 +668,7 @@ static std::size_t test_ram_indexes_filtered_algebra(u64_t seed) {
                 std::size_t const first = offsets[query], kept = offsets[query + 1] - first;
                 failures += expect_eq(kept, wanted) + expect_eq(scored[query], (documents_count + 1) / 2);
                 for (std::size_t rank = 0; rank != kept; ++rank) {
-                    std::size_t const document = static_cast<std::size_t>(found_keys[first + rank]);
+                    std::size_t const document = dense_key_number(found_keys[first + rank]);
                     failures += expect(document < documents_count && document % 2 == 0);
                     if (document < documents_count)
                         score_errors.add(found_scores[first + rank], exact[query][document]);

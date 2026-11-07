@@ -5,10 +5,10 @@
  *  @brief The walks every sharded index's cursor shares: the breadth-first one, with the nodes it
  *      visited, one bit each, and the frontier it still has to expand, and the stored order.
  *
- *  A cursor owns one walk by value and drives it: @ref breadth_first_walk::open sizes the bits to
- *  the shards' watermarks as the cursor snapshotted them, @ref breadth_first_walk::visit admits a
- *  node once, and @ref breadth_first_walk::expand hands the frontier back in meeting order.
- *  @ref cursor_walk picks between that walk and the stored order. Neither names a shard type: the
+ *  A cursor owns one walk by value and drives it: @c breadth_first_walk::open sizes the bits to
+ *  the shards' watermarks as the cursor snapshotted them, @c breadth_first_walk::visit admits a
+ *  node once, and @c breadth_first_walk::expand hands the frontier back in meeting order.
+ *  @c cursor_walk picks between that walk and the stored order. Neither names a shard type: the
  *  cursor seeks its shard cursors and resolves keys itself.
  */
 #pragma once
@@ -140,7 +140,7 @@ struct cursor_walk {
      *  sized the visited bits' bases, which a stored walk never does. */
     bool breadth_first() const noexcept { return !breadth_first_.visited_bases_.empty(); }
 
-    /** Visits @p node of @p shard in a breadth-first walk; see @ref breadth_first_walk::visit. */
+    /** Visits @p node of @p shard in a breadth-first walk; see @c breadth_first_walk::visit. */
     status_t visit(u32_t shard, node_id_t node) noexcept { return breadth_first_.visit(shard, node); }
 
     /**

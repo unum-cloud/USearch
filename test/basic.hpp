@@ -1759,20 +1759,23 @@ std::size_t test_basic_absorb(u64_t seed) {
         std::array<index_t*, parts_k - 1> donors;
         for (std::size_t donor = 0; donor != donors.size(); ++donor) donors[donor] = indexes[donor + 1].get();
 
-        auto [plan, plan_status] = receiver.plan_absorb(donors, {}, selector, context);
-        failures += expect_eq(plan_status, status_t::success_k);
-        failures += expect(plan.moving() && receiver.size() == entries_k && donors[0] == indexes[1].get());
-        failures += basic_drive(plan, metric, context, selector);
-        auto const [absorbed, finish_status] = plan.finish();
-        failures += expect_eq(finish_status, status_t::success_k);
-        for (std::size_t donor = 0; donor != donors.size(); ++donor) {
-            failures += expect(donors[donor] == nullptr);
-            failures += expect_eq(indexes[donor + 1]->size(), 0u);
+        {
+            auto [plan, plan_status] = receiver.plan_absorb(donors, {}, selector, context);
+            failures += expect_eq(plan_status, status_t::success_k);
+            failures += expect(plan.moving() && receiver.size() == entries_k && donors[0] == indexes[1].get());
+            failures += basic_drive(plan, metric, context, selector);
+            auto const [absorbed, finish_status] = plan.finish();
+            failures += expect_eq(finish_status, status_t::success_k);
+            for (std::size_t donor = 0; donor != donors.size(); ++donor) {
+                failures += expect(donors[donor] == nullptr);
+                failures += expect_eq(indexes[donor + 1]->size(), 0u);
+            }
+            failures += expect_eq(receiver.size(), parts_k * entries_k);
+            failures += expect_eq(absorbed.reachability.audited_nodes, parts_k * entries_k);
+            failures += expect_eq(absorbed.reachability.reachable_nodes, parts_k * entries_k);
+            failures += expect(absorbed.reachability.back_sweeps != 0);
+            failures += expect(absorbed.changed_nodes <= absorbed.reselected_nodes);
         }
-        failures += expect_eq(receiver.size(), parts_k * entries_k);
-        failures += expect_eq(absorbed.reachability.audited_nodes, parts_k * entries_k);
-        failures += expect_eq(absorbed.reachability.reachable_nodes, parts_k * entries_k);
-        failures += expect(absorbed.reachability.back_sweeps != 0);
         for (std::size_t entry = 0; entry != parts_k * entries_k; ++entry) {
             auto const [node_id, find_status] = receiver.find(fixture_type_::make_key(entry));
             failures += expect_eq(find_status, status_t::success_k);
@@ -1782,6 +1785,9 @@ std::size_t test_basic_absorb(u64_t seed) {
 
         auto const queries = fixture_type_::make_values(basic_recall_samples_k, stream_key(seed, "absorb", parts_k),
                                                         counting_allocator_t {ledger});
+        // An absorb walks and sweeps only the donors' rows; a refine then re-selects every row.
+        failures += expect(succeeded(
+            receiver.refine({0, static_cast<node_id_t>(receiver.size())}, {}, selector, metric, context).status));
         std::size_t const found = basic_recall_count<fixture_type_>(
             receiver, metric, queries, stream_key(seed, "absorb", parts_k + 1), ledger, failures);
         failures += expect(found * 100 >= basic_relaxed_recall_percent_k * basic_recall_samples_k);
@@ -2014,6 +2020,9 @@ std::size_t test_basic_split(u64_t seed) {
                 failures += expect(
                     fixture_type_::value_equals(thirds[0]->published_value_of(node_id), originals[entry]));
         }
+        // An absorb walks and sweeps only the donors' rows; a refine then re-selects every row.
+        failures += expect(succeeded(
+            thirds[0]->refine({0, static_cast<node_id_t>(thirds[0]->size())}, {}, selector, metric, context).status));
         failures += report_recall(
             "the reunion", basic_recall_at_ten<fixture_type_>(*thirds[0], metric, queries, probes, ledger, failures),
             donor_recall);
