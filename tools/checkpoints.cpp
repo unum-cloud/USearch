@@ -3,32 +3,19 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief The verbs over checkpoints of every modality: their metadata, the slots of a raw drive
- *      holding them, and verified copies between files and slots.
+ *      holding them, verified copies between files and slots, Apache Arrow exports and imports, and
+ *      the recall of one search's matches against another's.
  *
- *  A raw drive is cut into slots of 1 GiB from byte 0, and every file or volume on it starts on a
- *  slot boundary and covers whole slots; slot 0 holds no label. Mapping reads the first 4 KiB of
- *  each slot, which is live when it opens a SafeGraphs monolith whose header parses and whose
- *  declared extent fits the drive, or a UStore volume whose magic and header checksum hold. A live
- *  file covers ⌈length ÷ 1 GiB⌉ slots, which mapping skips, and every other slot is free. Owners
- *  come from the headers: the SafeGraphs metadata, or the UStore database UUID. Deleting a file
- *  zeroes its first block.
+ *  How a drive is cut into slots, mapped and copied onto lives in @c slots.hpp, which the
+ *  benchmarks share; deleting a file zeroes its first block. How a checkpoint's columns become
+ *  Arrow fields and back lives in @c arrow_checkpoints.hpp, which the suites share.
  */
-#include <cstdint> // `std::uint64_t`, `std::uint32_t`
 #include <cstdio>  // `stderr`
 #include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`
-#include <cstring> // `std::memcmp`, `std::memcpy`, `std::memset`
 
-#include <fcntl.h>     // `open`, `O_RDONLY`, `O_RDWR`, `O_DIRECT`, `O_EXCL`
-#include <linux/fs.h>  // `BLKSSZGET`, `BLKGETSIZE64`
-#include <sys/ioctl.h> // `ioctl`
-#include <sys/stat.h>  // `fstat`, `stat`, `S_ISBLK`
-#include <unistd.h>    // `pread`, `pwrite`, `close`, `fsync`
-
-#include <algorithm>   // `std::min`, `std::max`
+#include <algorithm>   // `std::count_if`, `std::max_element`, `std::min`
 #include <array>       // `std::array`
-#include <chrono>      // `std::chrono::steady_clock`
 #include <iterator>    // `std::back_inserter`
-#include <memory>      // `std::align`, `std::allocator`
 #include <span>        // `std::span`
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
@@ -37,314 +24,14 @@
 #include <fmt/format.h>
 
 #include "usearch/usearch.h"
-#include "usearch/utilities/blocking_files.hpp"    // `parse_file_address`
-#include "usearch/utilities/nvme_device.hpp"       // `names_transport_id`
-#include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_header`, `safegraphs_read_metadata`
-#include "usearch/utilities/types.hpp"             // `divide_round_up`, `round_up_to_multiple`, `little_endian`
+#include "usearch/utilities/nvme_device.hpp" // `names_transport_id`
+#include "usearch/utilities/nvme_walks.hpp"  // `nvme_read_metadata`
 
-#include "world.hpp" // `world_t`, `parse_verb`
+#include "arrow_checkpoints.hpp" // `arrow_export`, `arrow_import`, `arrow_matches_read`
+#include "slots.hpp"             // `slot_drive_t`, `slot_map`, `slot_copy`
+#include "world.hpp"             // `world_t`, `parse_verb`
 
 namespace unum::usearch::tools {
-
-using checkpoints_clock_t = std::chrono::steady_clock;
-
-/** Bytes in one slot of a raw drive, where every file or volume starts and whose multiples it
- *  covers. */
-static constexpr std::uint64_t slot_bytes_k = 1ull << 30;
-
-/** Bytes mapping reads from the front of every slot. */
-static constexpr std::size_t slot_probe_bytes_k = 4096;
-
-/** Bytes one positional write or read of a copy moves. */
-static constexpr std::size_t copy_chunk_bytes_k = 16ull << 20;
-
-/** What a UStore volume opens with, packed: the magic "USTOREV1", the format version and the
- *  header's bytes as `u32`, the database UUID, the capacity, catalog, data, granularity and
- *  generation words as `u64`, then the CRC-32C of the header with that field zeroed. */
-static constexpr std::string_view ustore_magic_k = "USTOREV1";
-static constexpr std::uint32_t ustore_format_version_k = 1;
-static constexpr std::size_t ustore_header_bytes_k = 96;
-static constexpr std::size_t ustore_database_offset_k = 16;
-static constexpr std::size_t ustore_capacity_offset_k = 32;
-static constexpr std::size_t ustore_checksum_offset_k = 88;
-
-/** A medium holding slots, open for positional I/O and closed whichever way a verb ends. */
-struct slot_drive_t {
-    int descriptor = -1;
-
-    /** Bytes the medium spans. */
-    std::uint64_t bytes = 0;
-
-    /** The granularity of every transfer's offset and length: the logical block of a device opened
-     *  for direct I/O, one byte otherwise. */
-    std::uint64_t block_bytes = 1;
-
-    slot_drive_t() = default;
-    slot_drive_t(slot_drive_t const&) = delete;
-    slot_drive_t& operator=(slot_drive_t const&) = delete;
-    ~slot_drive_t() noexcept {
-        if (descriptor >= 0) close(descriptor);
-    }
-};
-
-/** A live file on a drive: its first slot, the bytes its header declares, and who owns it. */
-struct slot_file_t {
-    std::uint64_t first_slot = 0;
-    std::uint64_t bytes = 0;
-    std::string owner;
-};
-
-static usearch_bytes_view_t checkpoints_bytes(std::string_view text) noexcept {
-    return {reinterpret_cast<usearch_byte_t const*>(text.data()), text.size()};
-}
-
-static double checkpoints_seconds_since(checkpoints_clock_t::time_point started) noexcept {
-    return std::chrono::duration<double>(checkpoints_clock_t::now() - started).count();
-}
-
-/** Slots a live file of @p bytes covers, at least the one it starts in. */
-static std::uint64_t slots_covered(std::uint64_t bytes) noexcept {
-    return std::max<std::uint64_t>(1, utilities::divide_round_up(bytes, slot_bytes_k));
-}
-
-/** The noun a count of @p slots takes. */
-static std::string_view slots_noun(std::uint64_t slots) noexcept { return slots == 1 ? "slot" : "slots"; }
-
-/** A run of @p bytes inside @p storage, aligned for direct transfers. */
-static std::span<usearch_byte_t> slot_aligned(std::vector<usearch_byte_t>& storage, std::size_t bytes) {
-    storage.resize(bytes + slot_probe_bytes_k);
-    void* aligned = storage.data();
-    std::size_t space = storage.size();
-    std::align(slot_probe_bytes_k, bytes, aligned, space);
-    return {static_cast<usearch_byte_t*>(aligned), bytes};
-}
-
-/** Reads all of @p buffer at @p offset, retrying short reads; false on an error or at the end. */
-static bool slot_read_at(int descriptor, std::span<usearch_byte_t> buffer, std::uint64_t offset) noexcept {
-    while (!buffer.empty()) {
-        ssize_t const read_bytes = pread(descriptor, buffer.data(), buffer.size(), static_cast<off_t>(offset));
-        if (read_bytes <= 0) return false;
-        buffer = buffer.subspan(static_cast<std::size_t>(read_bytes)), offset += read_bytes;
-    }
-    return true;
-}
-
-/** Writes all of @p buffer at @p offset, retrying short writes; false on an error. */
-static bool slot_write_at(int descriptor, std::span<usearch_byte_t const> buffer, std::uint64_t offset) noexcept {
-    while (!buffer.empty()) {
-        ssize_t const written_bytes = pwrite(descriptor, buffer.data(), buffer.size(), static_cast<off_t>(offset));
-        if (written_bytes <= 0) return false;
-        buffer = buffer.subspan(static_cast<std::size_t>(written_bytes)), offset += written_bytes;
-    }
-    return true;
-}
-
-/** The little-endian integer at byte @p offset of @p bytes. */
-template <typename integer_type_>
-static integer_type_ slot_integer_at(std::span<usearch_byte_t const> bytes, std::size_t offset) noexcept {
-    integer_type_ value = 0;
-    std::memcpy(&value, bytes.data() + offset, sizeof(value));
-    return utilities::little_endian(value);
-}
-
-/** The CRC-32C of @p bytes, the checksum a UStore volume header carries. */
-static std::uint32_t slot_crc32c(std::span<usearch_byte_t const> bytes) noexcept {
-    std::uint32_t remainder = ~0u;
-    for (usearch_byte_t const byte : bytes) {
-        remainder ^= byte;
-        for (unsigned step = 0; step != 8; ++step)
-            remainder = (remainder >> 1) ^ (0x82F63B78u & (0u - (remainder & 1u)));
-    }
-    return ~remainder;
-}
-
-/** Opens the medium at @p location under @p flags, for direct I/O when it is a block device and
- *  @p flags ask for it; false after printing why. */
-static bool slot_open(std::string const& location, int flags, slot_drive_t& drive) {
-    drive.descriptor = open(location.c_str(), flags | O_CLOEXEC, 0644);
-    struct stat medium_stat;
-    if (drive.descriptor < 0 || fstat(drive.descriptor, &medium_stat) != 0) {
-        fmt::println(stderr, "cannot open {}", location);
-        return false;
-    }
-    if (!S_ISBLK(medium_stat.st_mode)) {
-        drive.bytes = static_cast<std::uint64_t>(medium_stat.st_size);
-        return true;
-    }
-    int block_bytes = 0;
-    if (ioctl(drive.descriptor, BLKGETSIZE64, &drive.bytes) != 0 || ioctl(drive.descriptor, BLKSSZGET, &block_bytes) ||
-        block_bytes <= 0) {
-        fmt::println(stderr, "cannot measure {}", location);
-        return false;
-    }
-    if (flags & O_DIRECT) drive.block_bytes = static_cast<std::uint64_t>(block_bytes);
-    return true;
-}
-
-/** Whether @p location names a block device. */
-static bool slot_names_device(std::string const& location) noexcept {
-    struct stat medium_stat;
-    return stat(location.c_str(), &medium_stat) == 0 && S_ISBLK(medium_stat.st_mode);
-}
-
-/** Reads the SafeGraphs monolith opening at byte @p offset of @p drive, whose first bytes are
- *  @p probe, into @p file; false unless its header parses and its extent fits the drive. */
-static bool slot_probe_safegraphs(slot_drive_t const& drive, std::uint64_t offset,
-                                  std::span<usearch_byte_t const> probe, slot_file_t& file) {
-    using prefix_t = utilities::safegraphs_prefix_t;
-    if (std::memcmp(probe.data(), prefix_t::magic_k.data(), prefix_t::magic_k.size()) != 0) return false;
-    std::uint64_t const header_length = slot_integer_at<std::uint64_t>(probe, prefix_t::magic_k.size());
-    if (header_length > drive.bytes - offset - sizeof(prefix_t)) return false;
-    std::size_t const header_bytes = static_cast<std::size_t>(sizeof(prefix_t) + header_length);
-    std::vector<usearch_byte_t> storage;
-    std::span<usearch_byte_t const> header = probe.first(std::min(header_bytes, probe.size()));
-    if (header_bytes > probe.size()) {
-        std::size_t const padded = utilities::round_up_to_multiple<std::size_t>(header_bytes, drive.block_bytes);
-        std::span<usearch_byte_t> const longer = slot_aligned(storage, padded);
-        if (padded > drive.bytes - offset || !slot_read_at(drive.descriptor, longer, offset)) return false;
-        header = longer.first(header_bytes);
-    }
-    std::string metric, producer;
-    auto per_custom_field = [&](utilities::safegraphs_custom_field_t field) noexcept {
-        if (field.key == "metric") metric = field.value;
-        else if (field.key == "created_by") producer = field.value;
-    };
-    // Producer columns such as the norms extend the monolith, so the header lists them too.
-    utilities::growing_buffer<utilities::safegraphs_named_column_t, std::allocator<utilities::byte_t>> extra_columns {
-        std::allocator<utilities::byte_t> {}};
-    auto const [parsed, status] = utilities::safegraphs_read_header(utilities::bytes_of(header.data(), header.size()),
-                                                                    std::allocator<utilities::byte_t> {},
-                                                                    per_custom_field, &extra_columns);
-    if (utilities::failed(status) || parsed.monolith_bytes() > drive.bytes - offset) return false;
-    file.first_slot = offset / slot_bytes_k;
-    file.bytes = parsed.monolith_bytes();
-    file.owner = fmt::format("SafeGraphs of {} nodes of {}, metric \"{}\"", parsed.nodes(),
-                             utilities::dtype_name(parsed.value.dtype), metric);
-    if (!producer.empty()) fmt::format_to(std::back_inserter(file.owner), ", created by \"{}\"", producer);
-    return true;
-}
-
-/** Reads the UStore volume opening at byte @p offset, whose first bytes are @p probe, into @p file;
- *  false unless its magic, version and header checksum hold. */
-static bool slot_probe_ustore(std::uint64_t offset, std::span<usearch_byte_t const> probe, slot_file_t& file) {
-    if (std::memcmp(probe.data(), ustore_magic_k.data(), ustore_magic_k.size()) != 0) return false;
-    if (slot_integer_at<std::uint32_t>(probe, ustore_magic_k.size()) != ustore_format_version_k ||
-        slot_integer_at<std::uint32_t>(probe, ustore_magic_k.size() + 4) != ustore_header_bytes_k)
-        return false;
-    std::array<usearch_byte_t, ustore_header_bytes_k> header;
-    std::memcpy(header.data(), probe.data(), header.size());
-    std::memset(header.data() + ustore_checksum_offset_k, 0, sizeof(std::uint32_t));
-    if (slot_crc32c(header) != slot_integer_at<std::uint32_t>(probe, ustore_checksum_offset_k)) return false;
-    std::string database;
-    for (std::size_t byte_index = 0; byte_index != 16; ++byte_index)
-        fmt::format_to(std::back_inserter(database), "{}{:02x}",
-                       byte_index == 4 || byte_index == 6 || byte_index == 8 || byte_index == 10 ? "-" : "",
-                       probe[ustore_database_offset_k + byte_index]);
-    file.first_slot = offset / slot_bytes_k;
-    file.bytes = slot_integer_at<std::uint64_t>(probe, ustore_capacity_offset_k);
-    file.owner = fmt::format("UStore volume of database {}", database);
-    return true;
-}
-
-/** Bytes a probe reads: the first 4 KiB, rounded up to the drive's block. */
-static std::size_t slot_probe_length(slot_drive_t const& drive) noexcept {
-    return utilities::round_up_to_multiple<std::size_t>(slot_probe_bytes_k, drive.block_bytes);
-}
-
-/** Reads the live file opening at byte @p offset of @p drive into @p file; false where none
- *  does. */
-static bool slot_probe(slot_drive_t const& drive, std::uint64_t offset, std::span<usearch_byte_t> probe,
-                       slot_file_t& file) {
-    if (probe.size() > drive.bytes - std::min(offset, drive.bytes) || !slot_read_at(drive.descriptor, probe, offset))
-        return false;
-    return slot_probe_safegraphs(drive, offset, probe, file) || slot_probe_ustore(offset, probe, file);
-}
-
-/** Maps every live file on @p drive into @p files in slot order; false after printing a failed
- *  read. */
-static bool slot_map(slot_drive_t const& drive, std::string_view location, std::vector<slot_file_t>& files) {
-    std::uint64_t const slots = drive.bytes / slot_bytes_k;
-    std::vector<usearch_byte_t> storage;
-    std::span<usearch_byte_t> const probe = slot_aligned(storage, slot_probe_length(drive));
-    for (std::uint64_t slot = 0; slot < slots;) {
-        if (!slot_read_at(drive.descriptor, probe, slot * slot_bytes_k)) {
-            fmt::println(stderr, "cannot read slot {} of {}", slot, location);
-            return false;
-        }
-        slot_file_t file;
-        if (!slot_probe_safegraphs(drive, slot * slot_bytes_k, probe, file) &&
-            !slot_probe_ustore(slot * slot_bytes_k, probe, file)) {
-            ++slot;
-            continue;
-        }
-        slot += slots_covered(file.bytes);
-        files.push_back(std::move(file));
-    }
-    return true;
-}
-
-/** The live file covering a slot of @p count from @p first, or null where they are all free. */
-static slot_file_t const* slot_overlap(std::span<slot_file_t const> files, std::uint64_t first,
-                                       std::uint64_t count) noexcept {
-    for (slot_file_t const& file : files)
-        if (file.first_slot < first + count && first < file.first_slot + slots_covered(file.bytes)) return &file;
-    return nullptr;
-}
-
-/** The first slot of the first free run of @p count among @p slots, or @p slots where none is long
- *  enough. */
-static std::uint64_t slot_free_run(std::span<slot_file_t const> files, std::uint64_t slots,
-                                   std::uint64_t count) noexcept {
-    std::uint64_t start = 0;
-    for (slot_file_t const& file : files) {
-        if (file.first_slot >= start + count) break;
-        start = std::max(start, file.first_slot + slots_covered(file.bytes));
-    }
-    return start + count <= slots ? start : slots;
-}
-
-/** Opens the drive @p location names and maps it, refusing an SPDK address or a byte base. */
-static bool slot_open_drive(std::string_view address, int flags, std::string& location, slot_drive_t& drive,
-                            std::vector<slot_file_t>& files) {
-    auto const [parsed, status] = utilities::parse_file_address(address);
-    if (utilities::failed(status)) {
-        fmt::println(stderr, "{} is no address", address);
-        return false;
-    }
-    location = parsed.location;
-    return slot_open(location, flags, drive) && slot_map(drive, location, files);
-}
-
-bool checkpoints_admit_save(std::string_view address) {
-    // A drive bound to SPDK is out of the kernel's reach, and only the library maps it.
-    if (utilities::names_transport_id(address)) return true;
-    auto const [parsed, status] = utilities::parse_file_address(address);
-    if (utilities::failed(status)) {
-        fmt::println(stderr, "{} is no address", address);
-        return false;
-    }
-    std::string const location {parsed.location};
-    if (!slot_names_device(location)) return true;
-    if (parsed.location.size() == address.size()) {
-        fmt::println(
-            stderr,
-            "{} names a drive without a byte base, and no call sizes a save before it writes; " "name a free " "slot " "that " "usearch " "slots " "lists, " "like {}@<slot>GiB",
-            address, location);
-        return false;
-    }
-    if (parsed.byte_base % slot_bytes_k) {
-        fmt::println(stderr, "{} starts off a slot boundary, a multiple of 1 GiB", address);
-        return false;
-    }
-    slot_drive_t drive;
-    std::vector<slot_file_t> files;
-    if (!slot_open(location, O_RDONLY, drive) || !slot_map(drive, location, files)) return false;
-    if (slot_file_t const* live = slot_overlap(files, parsed.byte_base / slot_bytes_k, 1)) {
-        fmt::println(stderr, "{} is inside the {} at {}@{}GiB", address, live->owner, location, live->first_slot);
-        return false;
-    }
-    return true;
-}
 
 int checkpoints_slots(world_t& world, int argc, char const* const* argv) {
     std::array<std::string_view, 1> positionals;
@@ -359,18 +46,22 @@ int checkpoints_slots(world_t& world, int argc, char const* const* argv) {
     std::string location;
     slot_drive_t drive;
     std::vector<slot_file_t> files;
-    if (!slot_open_drive(positionals[0], O_RDONLY, location, drive, files)) return EXIT_FAILURE;
+    if (!slot_open_drive(positionals[0], location, drive, files)) return EXIT_FAILURE;
 
-    std::uint64_t const slots = drive.bytes / slot_bytes_k;
-    fmt::println("{}: {} bytes in {} slots of 1 GiB, {} live", location, drive.bytes, slots, files.size());
-    std::uint64_t next = 0;
+    u64_t const slots = drive.bytes / slot_bytes_k;
+    u64_t live = 0;
+    for (slot_file_t const& file : files) live += file.owner != slot_foreign_k;
+    fmt::println("{}: {} bytes in {} slots of 1 GiB, {} live", location, drive.bytes, slots, live);
+    u64_t next = 0;
     for (slot_file_t const& file : files) {
         if (file.first_slot > next)
             fmt::println("{}@{}GiB: free, {} {}", location, next, file.first_slot - next,
                          slots_noun(file.first_slot - next));
-        std::uint64_t const covered = slots_covered(file.bytes);
-        fmt::println("{}@{}GiB: {}, {} bytes over {} {}", location, file.first_slot, file.owner, file.bytes, covered,
-                     slots_noun(covered));
+        u64_t const covered = slots_covered(file.bytes);
+        if (file.owner == slot_foreign_k) fmt::println("{}@{}GiB: foreign, skipped", location, file.first_slot);
+        else
+            fmt::println("{}@{}GiB: {}, {} bytes over {} {}", location, file.first_slot, file.owner, file.bytes,
+                         covered, slots_noun(covered));
         next = file.first_slot + covered;
     }
     if (next < slots) fmt::println("{}@{}GiB: free, {} {}", location, next, slots - next, slots_noun(slots - next));
@@ -399,29 +90,25 @@ int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
     // A drive holds files back to back, so its source is the live file its header bounds.
     std::string const source_location {source_address.location};
     slot_drive_t source;
-    if (!slot_open(source_location, O_RDONLY, source)) return EXIT_FAILURE;
-    std::uint64_t const source_base = source_address.byte_base;
-    std::uint64_t length = source.bytes - std::min(source_base, source.bytes);
+    if (!slot_open(source_location, source)) return EXIT_FAILURE;
+    u64_t const source_base = source_address.byte_base;
+    u64_t length = source.bytes - min_of(source_base, source.bytes);
     if (slot_names_device(source_location)) {
-        std::vector<usearch_byte_t> storage;
         slot_file_t file;
-        if (!slot_probe(source, source_base, slot_aligned(storage, slot_probe_length(source)), file)) {
-            fmt::println(stderr, "{} holds no SafeGraphs monolith or UStore volume", from);
+        if (!slot_probe(source, source_base, file) || file.owner == slot_foreign_k) {
+            fmt::println(stderr, "{} holds no SafeGraphs monolith", from);
             return EXIT_FAILURE;
         }
         length = file.bytes;
     }
 
     std::string const target_location {target_address.location};
-    slot_drive_t target;
-    std::uint64_t target_base = target_address.byte_base;
+    u64_t target_base = target_address.byte_base;
     if (slot_names_device(target_location)) {
-        // An exclusive open of a block device fails while anything holds it mounted.
+        slot_drive_t target;
         std::vector<slot_file_t> files;
-        if (!slot_open(target_location, O_RDWR | O_DIRECT | O_EXCL, target) ||
-            !slot_map(target, target_location, files))
-            return EXIT_FAILURE;
-        std::uint64_t const slots = target.bytes / slot_bytes_k, needed = slots_covered(length);
+        if (!slot_open(target_location, target) || !slot_map(target, target_location, files)) return EXIT_FAILURE;
+        u64_t const slots = target.bytes / slot_bytes_k, needed = slots_covered(length);
         if (target_address.location.size() == to.size())
             target_base = slot_free_run(files, slots, needed) * slot_bytes_k;
         if (target_base % slot_bytes_k || target_base / slot_bytes_k + needed > slots) {
@@ -435,91 +122,44 @@ int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
             return EXIT_FAILURE;
         }
     }
-    else if (!slot_open(target_location, O_RDWR | O_CREAT | (target_base ? 0 : O_TRUNC), target)) return EXIT_FAILURE;
-
-    // Direct transfers want block-aligned memory, so two chunks are carved from one aligned span.
-    std::vector<usearch_byte_t> storage;
-    std::span<usearch_byte_t> const chunks = slot_aligned(storage, 2 * copy_chunk_bytes_k);
-    std::span<usearch_byte_t> const staged = chunks.first(copy_chunk_bytes_k);
-    std::span<usearch_byte_t> const read_back = chunks.subspan(copy_chunk_bytes_k);
-    checkpoints_clock_t::time_point started = checkpoints_clock_t::now();
-    for (std::uint64_t offset = 0; offset < length; offset += copy_chunk_bytes_k) {
-        std::size_t const chunk = static_cast<std::size_t>(
-            std::min<std::uint64_t>(copy_chunk_bytes_k, length - offset));
-        std::size_t const padded = utilities::round_up_to_multiple<std::size_t>(chunk, target.block_bytes);
-        std::memset(staged.data() + chunk, 0, padded - chunk);
-        if (!slot_read_at(source.descriptor, staged.first(chunk), source_base + offset)) {
-            fmt::println(stderr, "cannot read {} bytes at {} of {}", chunk, source_base + offset, from);
-            return EXIT_FAILURE;
-        }
-        if (!slot_write_at(target.descriptor, staged.first(padded), target_base + offset)) {
-            fmt::println(stderr, "cannot write {} bytes at {} of {}", padded, target_base + offset, target_location);
-            return EXIT_FAILURE;
-        }
-    }
-    if (fsync(target.descriptor) != 0) {
-        fmt::println(stderr, "cannot flush {}", target_location);
-        return EXIT_FAILURE;
-    }
-    double const written_seconds = checkpoints_seconds_since(started);
-    fmt::println("copied {} to {} at byte {}: {} bytes in {:.1f} s, {:.2f} GB/s", from, target_location, target_base,
-                 length, written_seconds, length / written_seconds / 1e9);
-
-    started = checkpoints_clock_t::now();
-    for (std::uint64_t offset = 0; offset < length; offset += copy_chunk_bytes_k) {
-        std::size_t const chunk = static_cast<std::size_t>(
-            std::min<std::uint64_t>(copy_chunk_bytes_k, length - offset));
-        std::size_t const padded = utilities::round_up_to_multiple<std::size_t>(chunk, target.block_bytes);
-        if (!slot_read_at(source.descriptor, staged.first(chunk), source_base + offset) ||
-            !slot_read_at(target.descriptor, read_back.first(padded), target_base + offset)) {
-            fmt::println(stderr, "cannot read back {} bytes at {}", chunk, offset);
-            return EXIT_FAILURE;
-        }
-        if (std::memcmp(staged.data(), read_back.data(), chunk) != 0) {
-            fmt::println(stderr, "{} differs from {} within the {} bytes at {}", target_location, from, chunk, offset);
-            return EXIT_FAILURE;
-        }
-    }
-    fmt::println("verified {} bytes in {:.1f} s", length, checkpoints_seconds_since(started));
-    return EXIT_SUCCESS;
+    return slot_copy(from, target_location, target_base, length) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 /** The modalities a checkpoint's metric token tells apart. */
 enum class checkpoints_modality_t { dense_k, sequence_k, shapes_k, geospatial_k };
 
-/** The modality whose engine records @p metric, by the tokens its checkpoints carry; dense for the
- *  rest, whose tokens are NumKong's kernel names. */
+/** The modality whose engine records @p metric, as each modality reads its checkpoints' tokens;
+ *  dense for the rest, whose tokens are NumKong's kernel names. */
 static checkpoints_modality_t checkpoints_modality_of(std::string_view metric) noexcept {
-    if (metric == "levenshtein" || metric == "levenshtein-utf8" || metric == "overlap")
+    if (usearch_sequence_metric_from_name(bytes_view(metric)) != usearch_sequence_metric_unknown_k)
         return checkpoints_modality_t::sequence_k;
-    if (metric == "chamfer" || metric == "hausdorff" || metric == "gromov_wasserstein" ||
-        metric == "wasserstein_procrustes")
+    if (usearch_shapes_metric_from_name(bytes_view(metric)) != usearch_shapes_metric_unknown_k)
         return checkpoints_modality_t::shapes_k;
+    // Geospatial indexes measure the one chord distance, so the interface names no metric to parse.
     if (metric == "chord") return checkpoints_modality_t::geospatial_k;
     return checkpoints_modality_t::dense_k;
-}
-
-/** Prints a failed call's status and message; true when it failed. */
-static bool checkpoints_failed(usearch_outcome_t const& outcome, std::string_view address) {
-    if (outcome.status == usearch_status_success_k) return false;
-    fmt::println(stderr, "reading {} failed with {}: {}", address, usearch_status_name(outcome.status),
-                 outcome.message ? outcome.message : "no message");
-    return true;
 }
 
 int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch metadata <address>", {}, positionals,
+    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch metadata <address|->", {}, positionals,
                                                    given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
     std::string_view const address = positionals[0];
     if (given != 1 || utilities::names_transport_id(address)) {
-        fmt::println(stderr, "a monolith or manifest the kernel reaches is required");
+        fmt::println(stderr, "a monolith or manifest the kernel reaches, or - for standard input, is required");
         return EXIT_FAILURE;
     }
-    auto const [header, header_status] = utilities::safegraphs_read_metadata(address);
+    bool const piped = address == "-";
+    std::vector<byte_t> piped_bytes;
+    if (piped && !read_standard_input(piped_bytes)) {
+        fmt::println(stderr, "cannot read a checkpoint off standard input");
+        return EXIT_FAILURE;
+    }
+    auto const [header, header_status] = piped ? utilities::safegraphs_read_metadata(bytes_view_t {piped_bytes})
+                                               : utilities::nvme_read_metadata<fu::standard_yield_t>(address);
     if (utilities::failed(header_status)) {
         fmt::println(stderr, "{} holds no SafeGraphs header or manifest", address);
         return EXIT_FAILURE;
@@ -529,13 +169,16 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
                  utilities::dtype_name(header.key_dtype));
 
     usearch_outcome_t outcome {};
-    usearch_bytes_view_t const path = checkpoints_bytes(address);
+    usearch_bytes_view_t const path = bytes_view(address);
+    usearch_bytes_view_t const buffer {reinterpret_cast<usearch_byte_t const*>(piped_bytes.data()), piped_bytes.size()};
+    std::string const reading = fmt::format("reading {}", address);
     switch (checkpoints_modality_of(metric)) {
     case checkpoints_modality_t::dense_k: {
         usearch_dense_metadata_t metadata {};
         usearch_dense_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        usearch_dense_metadata_read(&read);
-        if (checkpoints_failed(outcome, address)) return EXIT_FAILURE;
+        if (piped) dense_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        else usearch_dense_metadata_read(&read);
+        if (report_failure(outcome, reading)) return EXIT_FAILURE;
         fmt::println("dense: {} metric, {} dimensions of {}, connectivity {}",
                      usearch_dense_metric_name(metadata.metric), metadata.dimensions,
                      usearch_scalar_name(metadata.quantization), metadata.connectivity);
@@ -544,16 +187,18 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     case checkpoints_modality_t::sequence_k: {
         usearch_sequence_metadata_t metadata {};
         usearch_sequence_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        usearch_sequence_metadata_read(&read);
-        if (checkpoints_failed(outcome, address)) return EXIT_FAILURE;
+        if (piped) sequence_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        else usearch_sequence_metadata_read(&read);
+        if (report_failure(outcome, reading)) return EXIT_FAILURE;
         fmt::println("sequence: connectivity {}", metadata.connectivity);
         return EXIT_SUCCESS;
     }
     case checkpoints_modality_t::shapes_k: {
         usearch_shapes_metadata_t metadata {};
         usearch_shapes_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        usearch_shapes_metadata_read(&read);
-        if (checkpoints_failed(outcome, address)) return EXIT_FAILURE;
+        if (piped) shapes_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        else usearch_shapes_metadata_read(&read);
+        if (report_failure(outcome, reading)) return EXIT_FAILURE;
         fmt::println("shapes: {} points of {}, connectivity {}", metadata.points,
                      usearch_scalar_name(metadata.quantization), metadata.connectivity);
         return EXIT_SUCCESS;
@@ -561,13 +206,185 @@ int checkpoints_metadata(world_t& world, int argc, char const* const* argv) {
     case checkpoints_modality_t::geospatial_k: {
         usearch_geospatial_metadata_t metadata {};
         usearch_geospatial_metadata_read_t read {.outcome = &outcome, .path = path, .metadata = &metadata};
-        usearch_geospatial_metadata_read(&read);
-        if (checkpoints_failed(outcome, address)) return EXIT_FAILURE;
+        if (piped) geospatial_verbs_t::metadata_read_buffer(nullptr, buffer, &metadata, &outcome);
+        else usearch_geospatial_metadata_read(&read);
+        if (report_failure(outcome, reading)) return EXIT_FAILURE;
         fmt::println("geospatial: connectivity {}", metadata.connectivity);
         return EXIT_SUCCESS;
     }
     }
     return EXIT_FAILURE;
+}
+
+int checkpoints_export(world_t& world, int argc, char const* const* argv) {
+    std::array<std::string_view, 2> positionals;
+    std::size_t given = 0;
+    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch export <address> <file.arrow>", {},
+                                                   positionals, given))
+        return *exit;
+    if (!runs_alone(world)) return EXIT_FAILURE;
+    std::string_view const address = positionals[0];
+    if (given != 2 || utilities::names_transport_id(address)) {
+        fmt::println(stderr, "a monolith or manifest the kernel reaches and an Arrow file are required");
+        return EXIT_FAILURE;
+    }
+    std::string const arrow_path {positionals[1]};
+    arrow_summary_t summary;
+    if (std::string const failure = arrow_export(address, arrow_path, summary); !failure.empty()) {
+        fmt::println(stderr, "{}", failure);
+        return EXIT_FAILURE;
+    }
+    fmt::println("exported {} to {}: {} nodes in {} record batches, metric \"{}\", {} bytes", address, arrow_path,
+                 summary.nodes, summary.parts, summary.metric, summary.bytes);
+    return EXIT_SUCCESS;
+}
+
+/** Copies the imported @p checkpoint into a RAM index through the verbs of its modality, then saves
+ *  it at @p address; true once both landed. */
+template <typename verbs_type_>
+static bool checkpoints_import_as(usearch_executor_t executor, std::string_view checkpoint,
+                                  std::string const& address) {
+    typename verbs_type_::index_t index = nullptr;
+    usearch_outcome_t outcome {};
+    verbs_type_::load_ram_buffer(&index, executor, bytes_view(checkpoint), {}, {}, &outcome);
+    if (report_failure(outcome, "loading the imported checkpoint")) return false;
+    verbs_type_::save(index, executor, bytes_view(address), &outcome);
+    verbs_type_::free(index);
+    return !report_failure(outcome, fmt::format("saving {}", address));
+}
+
+int checkpoints_import(world_t& world, int argc, char const* const* argv) {
+    std::string_view metric;
+    std::array<flag_t, 1> const flags {{
+        {"--metric", "name",
+         "defaults to the one the file records: refuses a file recording another, and names it for one recording none",
+         &metric},
+    }};
+    std::array<std::string_view, 2> positionals;
+    std::size_t given = 0;
+    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch import <file.arrow> <address> [flags]",
+                                                   flags, positionals, given))
+        return *exit;
+    if (!runs_alone(world)) return EXIT_FAILURE;
+    if (given != 2) {
+        fmt::println(stderr, "an Arrow file and the address to save its checkpoint at are required");
+        return EXIT_FAILURE;
+    }
+    std::optional<std::string> const admitted = checkpoints_admit_save(positionals[1]);
+    if (!admitted) return EXIT_FAILURE;
+    std::string checkpoint;
+    arrow_summary_t summary;
+    if (std::string const failure = arrow_import(std::string {positionals[0]}, metric, checkpoint, summary);
+        !failure.empty()) {
+        fmt::println(stderr, "{}", failure);
+        return EXIT_FAILURE;
+    }
+
+    usearch_executor_t executor = nullptr;
+    usearch_outcome_t outcome {};
+    usearch_executor_for_ram_t placement {.executor = &executor, .outcome = &outcome};
+    usearch_executor_for_ram(&placement);
+    if (report_failure(outcome, "creating the CPU executor")) return EXIT_FAILURE;
+    bool imported = false;
+    switch (checkpoints_modality_of(summary.metric)) {
+    case checkpoints_modality_t::dense_k:
+        imported = checkpoints_import_as<dense_verbs_t>(executor, checkpoint, *admitted);
+        break;
+    case checkpoints_modality_t::sequence_k:
+        imported = checkpoints_import_as<sequence_verbs_t>(executor, checkpoint, *admitted);
+        break;
+    case checkpoints_modality_t::shapes_k:
+        imported = checkpoints_import_as<shapes_verbs_t>(executor, checkpoint, *admitted);
+        break;
+    case checkpoints_modality_t::geospatial_k:
+        imported = checkpoints_import_as<geospatial_verbs_t>(executor, checkpoint, *admitted);
+        break;
+    }
+    usearch_executor_free(executor);
+    if (!imported) return EXIT_FAILURE;
+    fmt::println("imported {} into {}: {} nodes in {} parts, metric \"{}\"", positionals[0], *admitted, summary.nodes,
+                 summary.parts, summary.metric);
+    return EXIT_SUCCESS;
+}
+
+/** Copies the distances of a query's matches into @p kept, past the one holding the query's own key
+ *  at distance zero, which is the query finding itself; true when it dropped that one. */
+static bool recall_keep(uuid_t const& query, std::span<uuid_t const> keys,
+                        std::span<usearch_distance_t const> distances, std::vector<usearch_distance_t>& kept) {
+    kept.clear();
+    bool dropped = false;
+    for (std::size_t match = 0; match != keys.size(); ++match) {
+        if (!dropped && keys[match] == query && distances[match] == 0) dropped = true;
+        else kept.push_back(distances[match]);
+    }
+    return dropped;
+}
+
+int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
+    counts_t wanted {.values = {1, 10}, .size = 2};
+    std::array<flag_t, 1> const flags {{
+        {"--wanted", "counts", "defaults to 1,10: nearest true neighbors to find among as many matches as the largest",
+         &wanted},
+    }};
+    std::array<std::string_view, 2> positionals;
+    std::size_t given = 0;
+    if (std::optional<int> const exit = parse_verb(
+            world, argc, argv, "usearch recall <truth.arrow> <run.arrow> [flags]", flags, positionals, given))
+        return *exit;
+    if (!runs_alone(world)) return EXIT_FAILURE;
+    if (given != 2) {
+        fmt::println(stderr, "the truth and the run, each written by a search's --output, are required");
+        return EXIT_FAILURE;
+    }
+    arrow_matches_t truth, run;
+    for (std::string const& failure : {arrow_matches_read(std::string {positionals[0]}, truth),
+                                       arrow_matches_read(std::string {positionals[1]}, run)})
+        if (!failure.empty()) {
+            fmt::println(stderr, "{}", failure);
+            return EXIT_FAILURE;
+        }
+    if (truth.queries != run.queries) {
+        fmt::println(stderr, "{} and {} did not search the same queries", positionals[0], positionals[1]);
+        return EXIT_FAILURE;
+    }
+
+    std::span<std::size_t const> const depths = wanted.view();
+    std::size_t const pool = *std::max_element(depths.begin(), depths.end());
+    std::vector<std::size_t> const truth_offsets = match_offsets(truth.matches),
+                                   run_offsets = match_offsets(run.matches);
+    std::vector<usearch_distance_t> true_distances, run_distances;
+    std::vector<double> recalled(depths.size());
+    std::size_t own_keys = 0;
+    std::span<uuid_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
+    std::span<usearch_distance_t const> const truth_scores {truth.matches.scores}, run_scores {run.matches.scores};
+    for (std::size_t query = 0; query != truth.queries.size(); ++query) {
+        std::size_t const truth_first = truth_offsets[query], truth_count = truth.matches.counts[query];
+        std::size_t const run_first = run_offsets[query], run_count = run.matches.counts[query];
+        own_keys += recall_keep(truth.queries[query], truth_keys.subspan(truth_first, truth_count),
+                                truth_scores.subspan(truth_first, truth_count), true_distances);
+        recall_keep(run.queries[query], run_keys.subspan(run_first, run_count),
+                    run_scores.subspan(run_first, run_count), run_distances);
+        if (true_distances.size() < pool) {
+            fmt::println(stderr, "{} holds {} matches past query {}'s own key, fewer than the {} wanted",
+                         positionals[0], true_distances.size(), query, pool);
+            return EXIT_FAILURE;
+        }
+        run_distances.resize(std::min(pool, run_distances.size()));
+        // A match within the depth's true distance counts, so ties at the cut count either way.
+        for (std::size_t index = 0; index != depths.size(); ++index) {
+            usearch_distance_t const bound = true_distances[depths[index] - 1];
+            std::size_t const within_bound = std::count_if(run_distances.begin(), run_distances.end(),
+                                                           [&](usearch_distance_t found) { return found <= bound; });
+            recalled[index] += static_cast<double>(std::min(within_bound, depths[index])) /
+                               static_cast<double>(depths[index]);
+        }
+    }
+    std::string line;
+    for (std::size_t index = 0; index != depths.size(); ++index)
+        fmt::format_to(std::back_inserter(line), "{}recall@{} at {}: {:.4f}", index ? ", " : "", depths[index], pool,
+                       recalled[index] / static_cast<double>(truth.queries.size()));
+    fmt::println("{} over {} queries, ties counted, {} own keys dropped", line, truth.queries.size(), own_keys);
+    return EXIT_SUCCESS;
 }
 
 } // namespace unum::usearch::tools

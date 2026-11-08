@@ -58,19 +58,26 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     us::tools::world_t world {argc, argv};
     std::string_view const first = argc > 1 ? argv[1] : "";
-    std::string_view const second = argc > 2 ? argv[2] : "";
-    // Each verb parses the arguments after its name, reading the name where a program name stands.
-    if (first == "dense" && second == "insert") return us::tools::dense_insert(world, argc - 2, argv + 2);
-    if (first == "dense" && second == "absorb") return us::tools::dense_absorb(world, argc - 2, argv + 2);
-    if (first == "dense" && second == "refine") return us::tools::dense_refine(world, argc - 2, argv + 2);
-    if (first == "dense" && second == "split") return us::tools::dense_split(world, argc - 2, argv + 2);
-    if (first == "dense" && second == "health") return us::tools::dense_health(world, argc - 2, argv + 2);
+    if (std::optional<int> const exit = us::tools::run_modality_verb<us::tools::dense_verbs_t>(world, argc, argv))
+        return *exit;
+    if (std::optional<int> const exit = us::tools::run_modality_verb<us::tools::sequence_verbs_t>(world, argc, argv))
+        return *exit;
+    if (std::optional<int> const exit = us::tools::run_modality_verb<us::tools::shapes_verbs_t>(world, argc, argv))
+        return *exit;
+    if (std::optional<int> const exit = us::tools::run_modality_verb<us::tools::geospatial_verbs_t>(world, argc, argv))
+        return *exit;
     if (first == "metadata") return us::tools::checkpoints_metadata(world, argc - 1, argv + 1);
     if (first == "slots") return us::tools::checkpoints_slots(world, argc - 1, argv + 1);
     if (first == "copy") return us::tools::checkpoints_copy(world, argc - 1, argv + 1);
+    if (first == "export") return us::tools::checkpoints_export(world, argc - 1, argv + 1);
+    if (first == "import") return us::tools::checkpoints_import(world, argc - 1, argv + 1);
+    if (first == "recall") return us::tools::checkpoints_recall(world, argc - 1, argv + 1);
     bool const asked = first == "--help";
     std::FILE* const stream = asked ? stdout : stderr;
-    if (world.rank == 0) fmt::println(stream, "Usage: usearch dense <insert|absorb|refine|split|health> --help");
-    if (world.rank == 0) fmt::println(stream, "       usearch <metadata|slots|copy> --help");
+    if (world.rank == 0)
+        fmt::println(stream, "Usage: usearch <dense|sequence|shapes|geospatial> " //
+                             "<insert|absorb|refine|split|health|search|metadata> --help");
+    if (world.rank == 0) fmt::println(stream, "       usearch dense get --help");
+    if (world.rank == 0) fmt::println(stream, "       usearch <metadata|slots|copy|export|import|recall> --help");
     return asked ? EXIT_SUCCESS : EXIT_FAILURE;
 }

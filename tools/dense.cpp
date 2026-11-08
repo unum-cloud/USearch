@@ -2,14 +2,20 @@
  *  @file tools/dense.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The dense verbs: insert, absorb, refine, split and health, each over SafeGraphs
- *      checkpoints at any address.
+ *  @brief The dense verbs: insert, absorb, refine, split, health, search and get, each over
+ *      SafeGraphs checkpoints at any address.
  *
- *  @c insert indexes a contiguous slice of one RetriEval file on a GPU or in RAM and saves it,
- *  @c absorb merges checkpoints into one, donor by donor, @c refine re-selects a checkpoint's
- *  neighbors, @c split cuts one into the parts of a manifest, and @c health audits how much of one
- *  a search reaches. Keys come row-aligned from @c --keys, or are the dataset row numbers, so
- *  slices built apart keep distinct keys when merged.
+ *  @c insert indexes a contiguous slice of one RetriEval file or Arrow input on a GPU or in RAM and
+ *  saves it, @c absorb merges checkpoints into one, donor by donor, @c refine re-selects a
+ *  checkpoint's neighbors, @c split cuts one into the parts of a manifest, @c health audits how
+ *  much of one a search reaches, @c search queries one with the rows of another RetriEval or Arrow
+ *  input, and @c get retrieves the vectors of an Arrow column of keys. Keys come row-aligned from
+ *  @c --keys or @c --keys-column, or are the dataset row numbers, so slices built apart keep
+ *  distinct keys when merged.
+ *
+ *  An Arrow input reads a path or standard input, sniffed by its first bytes, and its columns reach
+ *  the library through the converters of @c usearch/arrow.h. A checkpoint or an Arrow output may
+ *  take @c - for a pipe, whose verb then prints its steps to standard error.
  *
  *  Across several ranks, @c insert is a distributed build: rank r of R takes rows ⌊N·r/R⌋ to
  *  ⌊N·(r+1)/R⌋ of the slice, saves them as one part under the name a sharded save gives it, and
@@ -18,18 +24,16 @@
  *  from the world size alone, and talk only to stop together and to gather the parts.
  */
 #include <cstdint> // `std::uint64_t`, `std::int32_t`
-#include <cstdio>  // `std::fopen`, `std::fwrite`
+#include <cstdio>  // `stderr`
 #include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`
 
 #include <fcntl.h>    // `open`, `O_RDONLY`
-#include <sys/stat.h> // `fstat`, `stat`, `S_ISREG`
-#include <unistd.h>   // `pread`, `close`, `fsync`
+#include <sys/stat.h> // `fstat`
+#include <unistd.h>   // `pread`, `close`
 
 #include <algorithm>   // `std::min`
 #include <array>       // `std::array`
-#include <chrono>      // `std::chrono::steady_clock`
-#include <iterator>    // `std::back_inserter`
-#include <span>        // `std::span`
+#include <limits>      // `std::numeric_limits`
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <vector>      // `std::vector`
@@ -38,41 +42,46 @@
 
 #include <forkunion/forkunion.h> // `fu_topology_new`, `fu_memory_domain_id_at_index`
 
+#include "usearch/arrow.h"
 #include "usearch/dense_index.h"
 
-#include "abi.hpp"   // `count_t`, `devices_from_environment`
-#include "world.hpp" // `world_t`, `parse_verb`
+#include "abi.hpp"   // `count_t`, `devices_from_environment`, `session_t`, `handle`
+#include "world.hpp" // `world_t`, `parse_verb`, `checkpoint_save`, `checkpoint_split`
 
 namespace unum::usearch::tools {
-
-using dense_clock_t = std::chrono::steady_clock;
 
 /** Two little-endian `u32` counters, rows then columns, open every RetriEval file. */
 static constexpr std::size_t dense_header_bytes_k = 8;
 
-/** @p path without its @c .safegraphs suffix: the stem the parts beside a manifest are named
- *  after. */
-static std::string_view dense_stem(std::string_view path) noexcept {
-    constexpr std::string_view suffix_k = ".safegraphs";
-    return path.ends_with(suffix_k) ? path.substr(0, path.size() - suffix_k.size()) : path;
-}
-
-/** Every setting the command line takes, each spelled as its flag with dashes. */
+/** Every setting the insert takes beyond the checkpoint verbs', each spelled as its flag with
+ *  dashes. */
 struct dense_settings_t {
+    checkpoint_settings_t checkpoint;
     std::string_view keys;
-    std::string_view save;
     std::string_view stored_dtype;
     std::string_view metric = "angular";
-    std::string_view residency;
-    count_t first_vector {.minimum = 0};
-    count_t rows {.minimum = 0};
-    count_t parts {.minimum = 2};
-    count_t connectivity {.minimum = 0};
-    count_t expansion_add {.minimum = 0};
-    count_t expansion_refine {.minimum = 0};
-    count_t max_refines {.minimum = 0};
-    count_t batch {.value = 65536};
-    count_t threads {.minimum = 0};
+    std::string_view input;
+    std::string_view vectors_column;
+    std::string_view keys_column;
+};
+
+/** What @ref dense_source_t::rows holds for an input read to its end, sized by nothing up front. */
+static constexpr std::size_t dense_rows_unknown_k = std::numeric_limits<std::size_t>::max();
+
+/** The Arrow input an insert reads, its columns, and the first non-empty batch already read. */
+struct dense_arrow_t {
+
+    /** The input, on the batch the insert takes next. */
+    arrow_input_t input;
+
+    /** Where the rows sit among its columns. */
+    std::size_t vectors_column = arrow_no_column_k;
+
+    /** Where the keys sit among its columns, none for row numbers. */
+    std::size_t keys_column = arrow_no_column_k;
+
+    /** Row-number or widened keys of the rows the insert takes next. */
+    std::vector<usearch_key_t> keys;
 };
 
 /** The RetriEval file an insert reads and its keys, closed whichever way the insert ends. */
@@ -96,22 +105,6 @@ struct dense_source_t {
     }
 };
 
-/** The executor and the index handles a verb holds, freed whichever way it ends. */
-struct dense_engine_t {
-    usearch_residency_t residency = usearch_residency_ram_k;
-    std::int32_t placement = -1;
-    usearch_executor_t executor = nullptr;
-    std::vector<usearch_dense_index_t> indexes;
-
-    dense_engine_t() = default;
-    dense_engine_t(dense_engine_t const&) = delete;
-    dense_engine_t& operator=(dense_engine_t const&) = delete;
-    ~dense_engine_t() noexcept {
-        for (usearch_dense_index_t index : indexes) usearch_dense_free(index);
-        usearch_executor_free(executor);
-    }
-};
-
 /** One of two alternating staging buffers: the file fills one while the index ingests the other. */
 struct dense_staging_t {
     std::vector<usearch_byte_t> rows;
@@ -124,16 +117,6 @@ struct dense_staging_t {
     dense_staging_t& operator=(dense_staging_t const&) = delete;
     ~dense_staging_t() noexcept { usearch_outcome_wait(&outcome); }
 };
-
-/** One saved part as the manifest records it. */
-struct dense_part_t {
-    std::uint64_t bytes = 0;
-    std::uint64_t nodes = 0;
-};
-
-static double dense_seconds_since(dense_clock_t::time_point started) noexcept {
-    return std::chrono::duration<double>(dense_clock_t::now() - started).count();
-}
 
 /** Reads exactly @p length bytes at @p offset, retrying short reads; false on an error or at the
  *  end of the file. */
@@ -149,22 +132,7 @@ static bool dense_read_at(int descriptor, void* buffer, std::size_t length, std:
 
 /** Prints a failed call's status and message under the rank that saw it; true when it failed. */
 static bool dense_failed(world_t const& world, usearch_outcome_t const& outcome, std::string_view verb) {
-    if (outcome.status == usearch_status_success_k) return false;
-    fmt::println(stderr, "{}{} failed with {}: {}", rank_label(world), verb, usearch_status_name(outcome.status),
-                 outcome.message ? outcome.message : "no message");
-    return true;
-}
-
-/** Bytes the regular file at @p path holds, or zero for a device, an SPDK address or a failure. */
-static std::uint64_t dense_file_bytes(std::string const& path) noexcept {
-    struct stat file_stat;
-    bool const measured = stat(path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode);
-    return measured ? static_cast<std::uint64_t>(file_stat.st_size) : 0;
-}
-
-/** `<stem>-00001-of-00004.safegraphs` for @p part counted from zero. */
-static std::string dense_part_path(std::string_view stem, std::size_t part, std::size_t parts) {
-    return fmt::format("{}-{:05}-of-{:05}.safegraphs", stem, part + 1, parts);
+    return report_failure(outcome, fmt::format("{}{}", rank_label(world), verb));
 }
 
 /** Opens @p path and checks its counters against its size. */
@@ -240,9 +208,9 @@ static bool dense_device_of(world_t const& world, std::size_t devices_count, std
 }
 
 /** Creates a CPU executor over the memory domain at the node-local rank's position, wrapping
- *  around, so ranks sharing a node spread over its sockets; every index of the verb lives there
- *  as one shard, so a saved monolith stays one graph. */
-static bool dense_engine_for_ram(world_t const& world, count_t const& threads, dense_engine_t& engine) {
+ *  around, so ranks sharing a node spread over its sockets; the index lives there as one shard,
+ *  so a saved monolith stays one graph. */
+static bool dense_session_for_ram(world_t const& world, count_t const& threads, session_t& session) {
     fu_topology_t topology = nullptr;
     std::size_t domains_count = 0;
     fu_memory_domain_id_t found = -1;
@@ -255,91 +223,22 @@ static bool dense_engine_for_ram(world_t const& world, count_t const& threads, d
         fmt::println(stderr, "{}cannot list the memory domains", rank_label(world));
         return false;
     }
-    engine.residency = usearch_residency_ram_k;
-    engine.placement = static_cast<std::int32_t>(found);
+    session.residency = usearch_residency_ram_k;
+    session.memory_domains = {static_cast<std::int32_t>(found)};
+    std::vector<std::int32_t> domains;
     usearch_outcome_t outcome {};
-    usearch_executor_for_ram_t executor {.executor = &engine.executor,
+    usearch_executor_for_ram_t executor {.executor = &session.executor,
                                          .outcome = &outcome,
-                                         .ram = {&engine.placement, 1},
+                                         .ram = session.ram_options(1, domains),
                                          .threads = threads.value};
     usearch_executor_for_ram(&executor);
     return !dense_failed(world, outcome, "creating the CPU executor");
 }
 
-/** Copies the checkpoint at @p address into @p index, a new RAM handle in the engine's domain. */
-static bool dense_load(world_t const& world, dense_engine_t const& engine, std::string_view address,
-                       usearch_dense_index_t& index) {
-    dense_clock_t::time_point const started = dense_clock_t::now();
-    usearch_outcome_t outcome {};
-    usearch_dense_load_ram_t load {.index = &index,
-                                   .executor = engine.executor,
-                                   .outcome = &outcome,
-                                   .path = bytes_view(address),
-                                   .ram = {&engine.placement, 1}};
-    usearch_dense_load_ram(&load);
-    if (dense_failed(world, outcome, fmt::format("loading {}", address))) return false;
-    fmt::println("loaded {} in {:.1f} s", address, dense_seconds_since(started));
-    return true;
-}
-
-static bool dense_describe(world_t const& world, dense_engine_t const& engine, usearch_dense_index_t index,
-                           usearch_dense_index_description_t& description) {
-    usearch_outcome_t outcome {};
-    usearch_dense_describe_t describe {.index = index,
-                                       .executor = engine.executor,
-                                       .outcome = &outcome,
-                                       .description = &description};
-    usearch_dense_describe(&describe);
-    return !dense_failed(world, outcome, "describing");
-}
-
-/** Saves @p index under @p address and prints the step. */
-static bool dense_save(world_t const& world, dense_engine_t const& engine, usearch_dense_index_t index,
-                       std::string const& address) {
-    dense_clock_t::time_point const started = dense_clock_t::now();
-    usearch_outcome_t outcome {};
-    usearch_dense_save_t save {.index = index,
-                               .executor = engine.executor,
-                               .outcome = &outcome,
-                               .path = bytes_view(address)};
-    usearch_dense_save(&save);
-    if (dense_failed(world, outcome, fmt::format("saving {}", address))) return false;
-    double const seconds = dense_seconds_since(started);
-    if (std::uint64_t const bytes = dense_file_bytes(address))
-        fmt::println("{}saved {}: {} bytes in {:.1f} s", rank_label(world), address, bytes, seconds);
-    else fmt::println("{}saved {} in {:.1f} s", rank_label(world), address, seconds);
-    return true;
-}
-
-/** Runs up to @p passes refinements over @p index, stopping once one changes nothing. */
-static bool dense_refine_passes(world_t const& world, dense_engine_t const& engine, usearch_dense_index_t index,
-                                std::size_t passes, std::size_t expansion_factor) {
-    usearch_outcome_t outcome {};
-    for (std::size_t pass = 0; pass != passes; ++pass) {
-        dense_clock_t::time_point const started = dense_clock_t::now();
-        std::size_t changed = 0;
-        usearch_reachability_t reachability {};
-        usearch_dense_refine_t refine {
-            .index = index,
-            .executor = engine.executor,
-            .outcome = &outcome,
-            .changed = &changed,
-            .reachability = &reachability,
-            .expansion_factor = expansion_factor,
-        };
-        usearch_dense_refine(&refine);
-        if (dense_failed(world, outcome, "refining")) return false;
-        fmt::println("{}refined pass {}: {} changed, {} of {} reachable in {:.1f} s", rank_label(world), pass + 1,
-                     changed, reachability.reachable, reachability.audited, dense_seconds_since(started));
-        if (!changed) break;
-    }
-    return true;
-}
-
 /** Inserts the slice, reading one staging while the index ingests the other. */
 static bool dense_insert_slice(world_t const& world, dense_settings_t const& settings, dense_source_t const& source,
-                               dense_engine_t const& engine) {
-    std::size_t const batch_rows = std::min(settings.batch.value, source.slice_rows);
+                               handle<dense_verbs_t> const& index) {
+    std::size_t const batch_rows = std::min(settings.checkpoint.batch.value, source.slice_rows);
     std::array<dense_staging_t, 2> stagings;
     for (dense_staging_t& staging : stagings) {
         staging.rows.resize(batch_rows * source.row_bytes);
@@ -376,14 +275,14 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
             for (std::size_t position = 0; position != count; ++position)
                 staging.keys[position] = std::bit_cast<usearch_key_t>(uuid_of(row + position));
         usearch_dense_insert_t insert {
-            .index = engine.indexes[0],
-            .executor = engine.executor,
+            .index = index.get(),
+            .executor = index.executor(),
             .outcome = &staging.outcome,
             .completion = usearch_completion_deferred_k,
             .count = count,
             .keys = {staging.keys.data(), sizeof(usearch_key_t)},
             .vectors = {staging.rows.data(), source.row_bytes, source.columns, source.scalar},
-            .expansion_factor = settings.expansion_add.value,
+            .expansion_factor = settings.checkpoint.expansion_add.value,
         };
         usearch_dense_insert(&insert);
     }
@@ -396,24 +295,135 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
     return !failed;
 }
 
+/** Inserts the rows of @p input's batch from @p first_position on, in calls of at most
+ *  <tt>--batch</tt> rows, the keys of its keys column or the row numbers from @p first_row on. */
+static bool dense_insert_batch(world_t const& world, dense_settings_t const& settings, dense_arrow_t& arrow,
+                               handle<dense_verbs_t> const& index, std::size_t first_position, std::size_t count,
+                               std::uint64_t first_row) {
+    usearch_rows_view_t rows {};
+    usearch_keys_view_t keys {};
+    std::string failure = arrow_rows_of(arrow.input, arrow.vectors_column, rows);
+    if (failure.empty() && arrow.keys_column != arrow_no_column_k)
+        failure = arrow_keys_of(arrow.input, arrow.keys_column, arrow.keys, keys);
+    else if (failure.empty()) {
+        arrow.keys.resize(first_position + count);
+        for (std::size_t position = 0; position != count; ++position)
+            arrow.keys[first_position + position] = std::bit_cast<usearch_key_t>(uuid_of(first_row + position));
+        keys = {arrow.keys.data(), sizeof(usearch_key_t)};
+    }
+    if (!failure.empty()) {
+        fmt::println(stderr, "{}{}", rank_label(world), failure);
+        return false;
+    }
+    std::size_t const batch_rows = std::min(settings.checkpoint.batch.value, count);
+    for (std::size_t offset = 0; offset < count; offset += batch_rows) {
+        std::size_t const position = first_position + offset;
+        usearch_outcome_t outcome {};
+        usearch_dense_insert_t insert {
+            .index = index.get(),
+            .executor = index.executor(),
+            .outcome = &outcome,
+            .count = std::min(batch_rows, count - offset),
+            .keys = {keys.data + position, keys.stride},
+            .vectors = {static_cast<usearch_byte_t const*>(rows.data) + position * rows.stride, rows.stride,
+                        rows.columns, rows.scalar},
+            .expansion_factor = settings.checkpoint.expansion_add.value,
+        };
+        usearch_dense_insert(&insert);
+        if (dense_failed(world, outcome, "insert")) return false;
+    }
+    return true;
+}
+
+/** Inserts the slice of an Arrow input batch by batch, the columns read in place, and answers how
+ *  many rows it took into @p source; an input shorter than an explicit slice fails. */
+static bool dense_insert_arrow(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
+                               dense_arrow_t& arrow, handle<dense_verbs_t> const& index) {
+    std::uint64_t const begin = source.first_row;
+    std::uint64_t const end = source.slice_rows == dense_rows_unknown_k ? dense_rows_unknown_k
+                                                                        : begin + source.slice_rows;
+    std::uint64_t row = 0;
+    for (bool more = true; more && row < end;) {
+        std::uint64_t const batch_end = row + arrow.input.rows();
+        std::uint64_t const taken_begin = std::max(row, begin), taken_end = std::min(batch_end, end);
+        if (taken_begin < taken_end &&
+            !dense_insert_batch(world, settings, arrow, index, static_cast<std::size_t>(taken_begin - row),
+                                static_cast<std::size_t>(taken_end - taken_begin), taken_begin))
+            return false;
+        row = batch_end;
+        if (row >= end) break;
+        if (std::string const failure = arrow.input.next(more); !failure.empty()) {
+            fmt::println(stderr, "{}{}", rank_label(world), failure);
+            return false;
+        }
+    }
+    if (row <= begin || (end != dense_rows_unknown_k && row < end)) {
+        fmt::println(stderr, "{}--first-entry={} --entries={} reach past the {} rows of {}", rank_label(world),
+                     settings.checkpoint.first_entry.value, settings.checkpoint.entries.value, row, arrow.input.name());
+        return false;
+    }
+    source.slice_rows = static_cast<std::size_t>(std::min(row, end) - begin);
+    return true;
+}
+
+/** Opens the Arrow input, picks its columns and reads its first non-empty batch, which sets the
+ *  rows' scalar and width; across several ranks, walks a second reading to count the rows they
+ *  share, and otherwise leaves the count unknown, as a pipe has it. */
+static bool dense_open_arrow(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
+                             dense_arrow_t& arrow) {
+    std::string failure = arrow.input.open(settings.input);
+    if (failure.empty()) failure = arrow_pick_rows(arrow.input, settings.vectors_column, arrow.vectors_column);
+    if (failure.empty() && !settings.keys_column.empty())
+        failure = arrow_pick_column(arrow.input, settings.keys_column, arrow.keys_column);
+    bool more = failure.empty();
+    while (failure.empty() && more && (failure = arrow.input.next(more)).empty() && more && !arrow.input.rows()) {}
+    if (failure.empty() && !more) failure = fmt::format("{} holds no rows", arrow.input.name());
+    usearch_rows_view_t rows {};
+    if (failure.empty()) failure = arrow_rows_of(arrow.input, arrow.vectors_column, rows);
+    if (!failure.empty()) {
+        fmt::println(stderr, "{}{}", rank_label(world), failure);
+        return false;
+    }
+    source.scalar = rows.scalar, source.columns = rows.columns, source.row_bytes = rows.stride;
+    source.rows = dense_rows_unknown_k;
+    if (world.size == 1) return true;
+
+    arrow_input_t counted;
+    source.rows = 0;
+    failure = counted.open(settings.input);
+    for (more = failure.empty(); failure.empty() && more;) {
+        failure = counted.next(more);
+        source.rows += more ? counted.rows() : 0;
+    }
+    if (!failure.empty()) fmt::println(stderr, "{}{}", rank_label(world), failure);
+    return failure.empty();
+}
+
 /** Opens the vectors, takes this rank's share of the slice, creates the executor and the empty
- *  index on the residency asked for, and reserves room for the share's entries, stopping at the
- *  first failure. */
+ *  one-shard index on the residency asked for, and reserves room for the share's entries where its
+ *  count is known, stopping at the first failure. */
 static bool dense_insert_setup(world_t const& world, dense_settings_t const& settings, std::string_view vectors,
-                               usearch_dense_metric_t metric, dense_source_t& source, dense_engine_t& engine) {
+                               usearch_dense_metric_t metric, dense_source_t& source, dense_arrow_t& arrow,
+                               session_t& session, handle<dense_verbs_t>& index) {
     std::string const rank = rank_label(world);
-    if (!dense_open_vectors(world, vectors, source)) return false;
-    if (!settings.keys.empty() && !dense_open_keys(world, settings.keys, source)) return false;
-    std::uint64_t const first = settings.first_vector.value;
-    if (first >= source.rows || settings.rows.value > source.rows - first) {
-        fmt::println(stderr, "{}--first-vector={} --rows={} reach past the {} rows of {}", rank, first,
-                     settings.rows.value, source.rows, vectors);
+    if (settings.input.empty()) {
+        if (!dense_open_vectors(world, vectors, source)) return false;
+        if (!settings.keys.empty() && !dense_open_keys(world, settings.keys, source)) return false;
+    }
+    else if (!dense_open_arrow(world, settings, source, arrow)) return false;
+    std::uint64_t const first = settings.checkpoint.first_entry.value;
+    std::uint64_t const entries = settings.checkpoint.entries.value;
+    if (first >= source.rows || entries > source.rows - first) {
+        fmt::println(stderr, "{}--first-entry={} --entries={} reach past the {} rows of {}", rank, first, entries,
+                     source.rows, vectors);
         return false;
     }
     // Ranks share the slice as evenly as integers allow, so every share is known without asking.
-    std::uint64_t const slice = settings.rows.value ? settings.rows.value : source.rows - first;
+    std::uint64_t const slice = entries ? entries : source.rows - first;
     source.first_row = first + slice * world.rank / world.size;
     source.slice_rows = static_cast<std::size_t>(first + slice * (world.rank + 1) / world.size - source.first_row);
+    bool const unbounded = source.rows == dense_rows_unknown_k && !entries;
+    if (unbounded) source.slice_rows = dense_rows_unknown_k;
     if (!source.slice_rows) {
         fmt::println(stderr, "{}{} rows leave no share for each of {} ranks", rank, slice, world.size);
         return false;
@@ -434,134 +444,106 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     usearch_gpu_devices(&devices);
     if (dense_failed(world, outcome, "listing GPUs")) return false;
 
-    engine.residency = !settings.residency.empty()
-                           ? usearch_residency_from_name(bytes_view(settings.residency))
-                           : (devices_count ? usearch_residency_vram_k : usearch_residency_ram_k);
-    if (engine.residency == usearch_residency_unknown_k || engine.residency == usearch_residency_nvme_k ||
-        (engine.residency == usearch_residency_vram_k && !devices_count)) {
+    usearch_residency_t const asked = settings.checkpoint.session.residency;
+    session.residency = asked != usearch_residency_unknown_k
+                            ? asked
+                            : (devices_count ? usearch_residency_vram_k : usearch_residency_ram_k);
+    if (session.residency == usearch_residency_nvme_k ||
+        (session.residency == usearch_residency_vram_k && !devices_count)) {
         fmt::println(stderr, "{}--residency=\"{}\" is neither ram nor vram over a listed GPU", rank,
-                     settings.residency.empty() ? "vram" : settings.residency);
+                     usearch_residency_name(session.residency));
         return false;
     }
 
-    engine.indexes.resize(1);
-    if (engine.residency == usearch_residency_vram_k) {
-        if (!dense_device_of(world, devices_count, engine.placement)) return false;
-        usearch_vram_options_t const vram {&engine.placement, 1};
-        usearch_executor_for_vram_t executor {.executor = &engine.executor, .outcome = &outcome, .vram = vram};
+    if (session.residency == usearch_residency_vram_k) {
+        std::int32_t device = 0;
+        if (!dense_device_of(world, devices_count, device)) return false;
+        session.devices = {device};
+        std::vector<std::int32_t> ordinals;
+        usearch_executor_for_vram_t executor {.executor = &session.executor,
+                                              .outcome = &outcome,
+                                              .vram = session.vram_options(1, ordinals)};
         usearch_executor_for_vram(&executor);
         if (dense_failed(world, outcome, "creating the GPU executor")) return false;
-        usearch_dense_init_vram_t init {
-            .index = &engine.indexes[0],
-            .outcome = &outcome,
-            .metric = metric,
-            .quantization = quantization,
-            .dimensions = source.columns,
-            .connectivity = settings.connectivity.value,
-            .vram = vram,
-        };
-        usearch_dense_init_vram(&init);
     }
-    else {
-        if (!dense_engine_for_ram(world, settings.threads, engine)) return false;
-        usearch_dense_init_ram_t init {
-            .index = &engine.indexes[0],
-            .outcome = &outcome,
-            .metric = metric,
-            .quantization = quantization,
-            .dimensions = source.columns,
-            .connectivity = settings.connectivity.value,
-            .ram = {&engine.placement, 1},
-        };
-        usearch_dense_init_ram(&init);
-    }
-    if (dense_failed(world, outcome, "creating the index")) return false;
+    else if (!dense_session_for_ram(world, settings.checkpoint.session.threads, session)) return false;
+    usearch_arena_init_t arena {
+        .arena = &session.arena,
+        .executor = session.residency == usearch_residency_vram_k ? session.executor : nullptr,
+        .outcome = &outcome,
+    };
+    usearch_arena_init(&arena);
+    if (dense_failed(world, outcome, "opening the arena")) return false;
+    index = open_index<dense_verbs_t>(
+        session, {metric, quantization, source.columns, settings.checkpoint.connectivity.value}, 1);
+    if (!index) return false;
 
-    usearch_dense_reserve_t reserve {.index = engine.indexes[0],
-                                     .executor = engine.executor,
+    if (unbounded) return true;
+    usearch_dense_reserve_t reserve {.index = index.get(),
+                                     .executor = index.executor(),
                                      .outcome = &outcome,
                                      .capacity = source.slice_rows};
     usearch_dense_reserve(&reserve);
     return !dense_failed(world, outcome, "reserving");
 }
 
-/** Inserts this rank's share, refines it and saves it to @p address, printing each step. */
-static bool dense_construct(world_t const& world, dense_settings_t const& settings, dense_source_t const& source,
-                            dense_engine_t const& engine, std::string const& address,
-                            dense_clock_t::time_point started) {
-    if (!dense_insert_slice(world, settings, source, engine)) return false;
-    fmt::println("{}inserted rows {} to {} on {} {} {} in {:.1f} s", rank_label(world), source.first_row,
-                 source.first_row + source.slice_rows, usearch_residency_name(engine.residency),
-                 engine.residency == usearch_residency_vram_k ? "device" : "memory domain", engine.placement,
-                 dense_seconds_since(started));
-    return dense_refine_passes(world, engine, engine.indexes[0], settings.max_refines.value,
-                               settings.expansion_refine.value) &&
-           dense_save(world, engine, engine.indexes[0], address);
+/** Inserts this rank's share, refines it and saves it to @p address, printing each step to
+ *  @p steps. */
+static bool dense_construct(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
+                            dense_arrow_t& arrow, handle<dense_verbs_t> const& index, std::string const& address,
+                            checkpoint_clock_t::time_point started, std::FILE* steps) {
+    bool const inserted = settings.input.empty() ? dense_insert_slice(world, settings, source, index)
+                                                 : dense_insert_arrow(world, settings, source, arrow, index);
+    if (!inserted) return false;
+    bool const on_device = index.residency == usearch_residency_vram_k;
+    fmt::println(steps, "{}inserted rows {} to {} on {} {} {} in {:.1f} s", rank_label(world), source.first_row,
+                 source.first_row + source.slice_rows, usearch_residency_name(index.residency),
+                 on_device ? "device" : "memory domain",
+                 on_device ? index.session->devices[0] : index.session->memory_domains[0],
+                 checkpoint_seconds_since(started));
+    checkpoint_settings_t const& checkpoint = settings.checkpoint;
+    return checkpoint_refine_passes(world, index, checkpoint.max_refines.value,
+                                    {checkpoint.expansion_refine.value, checkpoint.memory_limit.value}, steps) &&
+           checkpoint_save(world, index, address, steps);
 }
 
-/** Appends @p text as a JSON string, escaping quotes, backslashes and control bytes. */
-static void dense_append_json_string(std::string& json, std::string_view text) {
-    json += '"';
-    for (unsigned char const character : text) {
-        if (character == '"' || character == '\\') json += '\\';
-        if (character < 0x20) fmt::format_to(std::back_inserter(json), "\\u{:04x}", character);
-        else json += static_cast<char>(character);
-    }
-    json += '"';
-}
-
-/** Commits the checkpoint: the manifest naming every part, its bytes and nodes. */
-static bool dense_write_manifest(std::string_view manifest_path, std::span<dense_part_t const> parts) {
-    std::string_view const stem = dense_stem(manifest_path);
-    std::size_t const slash = stem.rfind('/');
-    std::string_view const part_stem = slash == std::string_view::npos ? stem : stem.substr(slash + 1);
-    std::string json = "{\"files\":[";
-    for (std::size_t part = 0; part != parts.size(); ++part) {
-        json += part ? ",{\"path\":" : "{\"path\":";
-        dense_append_json_string(json, dense_part_path(part_stem, part, parts.size()));
-        fmt::format_to(std::back_inserter(json), ",\"bytes\":{},\"nodes\":{}}}", parts[part].bytes, parts[part].nodes);
-    }
-    json += "]}";
-    std::FILE* file = std::fopen(manifest_path.data(), "wb");
-    if (!file) return false;
-    bool const written = std::fwrite(json.data(), 1, json.size(), file) == json.size() && std::fflush(file) == 0 &&
-                         fsync(fileno(file)) == 0;
-    return std::fclose(file) == 0 && written;
-}
-
-int dense_insert(world_t& world, int argc, char const* const* argv) {
+int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
     dense_settings_t settings;
-    std::array<flag_t, 13> const flags {{
-        {"--save", "address",
-         "required: where the index is saved; several ranks save a manifest there, a part each beside it",
-         &settings.save},
-        {"--first-vector", "row", "defaults to 0: the first row of the slice to index", &settings.first_vector},
-        {"--rows", "count", "defaults to every row past --first-vector: rows in the slice", &settings.rows},
+    settings.checkpoint.session.residency = usearch_residency_unknown_k;
+    std::array<flag_t, 6> const modality_flags {{
         {"--keys", "path", "defaults to row numbers: a .u64bin or .u128bin of one key per vector row", &settings.keys},
+        {"--input", "path", "an Arrow file or stream in place of a RetriEval file, or - for standard input",
+         &settings.input},
+        {"--vectors-column", "name", "defaults to the only fixed-size column of rows in --input",
+         &settings.vectors_column},
+        {"--keys-column", "name", "defaults to row numbers: a uuid, uint64 or int64 column of --input",
+         &settings.keys_column},
         {"--stored-dtype", "name",
          "defaults to the file's: bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, i4x2, u8, u4x2 or u1x8",
          &settings.stored_dtype},
         {"--metric", "name", "defaults to angular: inner, angular, euclidean, hamming or jaccard", &settings.metric},
-        {"--residency", "name", "defaults to vram when a GPU is listed, else ram", &settings.residency},
-        {"--connectivity", "count", "defaults to the library's derivation: graph degree", &settings.connectivity},
-        {"--expansion-add", "count", "defaults to the library's derivation: candidate pool while inserting",
-         &settings.expansion_add},
-        {"--max-refines", "count", "defaults to 0: refinement passes after ingestion, stopping early once settled",
-         &settings.max_refines},
-        {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
-         &settings.expansion_refine},
-        {"--batch", "count", "defaults to 65536: entries per insertion, two batches staged at once", &settings.batch},
-        {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads, ram only", &settings.threads},
     }};
+    std::vector<flag_t> const flags = insert_flags(settings.checkpoint, modality_flags);
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
     if (std::optional<int> const exit = parse_verb(
-            world, argc, argv, "usearch dense insert <vectors> --save <address> [flags]", flags, positionals, given))
+            world, argc, argv, "usearch dense insert <vectors|--input path> --save <address|-> [flags]", flags,
+            positionals, given))
         return *exit;
     bool const distributed = world.size > 1;
     bool const speaks = world.rank == 0;
-    if (given != 1 || settings.save.empty()) {
-        if (speaks) fmt::println(stderr, "the vectors and --save are required");
+    std::string_view const save = settings.checkpoint.save;
+    bool const from_arrow = !settings.input.empty();
+    if (given + from_arrow != 1 || save.empty()) {
+        if (speaks) fmt::println(stderr, "the vectors or --input, and --save, are required");
+        return EXIT_FAILURE;
+    }
+    if (from_arrow ? !settings.keys.empty() : !settings.keys_column.empty() || !settings.vectors_column.empty()) {
+        if (speaks) fmt::println(stderr, "--keys reads a RetriEval file's keys, and the column flags --input's");
+        return EXIT_FAILURE;
+    }
+    if (distributed && (settings.input == "-" || save == "-")) {
+        if (speaks) fmt::println(stderr, "- is one pipe, which several ranks cannot share");
         return EXIT_FAILURE;
     }
     usearch_dense_metric_t const metric = usearch_dense_metric_from_name(bytes_view(settings.metric));
@@ -569,246 +551,270 @@ int dense_insert(world_t& world, int argc, char const* const* argv) {
         if (speaks) fmt::println(stderr, "--metric=\"{}\" names no metric", settings.metric);
         return EXIT_FAILURE;
     }
-    if (!distributed && !checkpoints_admit_save(settings.save)) return EXIT_FAILURE;
+    std::optional<std::string> const admitted = distributed ? std::optional<std::string> {save}
+                                                            : checkpoints_admit_save(save);
+    if (!admitted) return EXIT_FAILURE;
 
-    dense_clock_t::time_point const started = dense_clock_t::now();
+    std::FILE* const steps = save == "-" ? stderr : stdout;
+    checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     dense_source_t source;
-    dense_engine_t engine;
+    dense_arrow_t arrow;
+    session_t session;
+    handle<dense_verbs_t> index;
     // One rank unable to start stops every rank before any of them spends hours building.
-    if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, engine)))
+    if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, arrow, session, index)))
         return EXIT_FAILURE;
 
-    std::string const address = distributed ? dense_part_path(dense_stem(settings.save), world.rank, world.size)
-                                            : std::string(settings.save);
-    bool const built = dense_construct(world, settings, source, engine, address, started);
+    std::string const address = distributed ? checkpoint_part_path(save, world.rank, world.size) : *admitted;
+    bool const built = dense_construct(world, settings, source, arrow, index, address, started, steps);
     if (world.barrier(!built)) return EXIT_FAILURE;
     if (!distributed) return EXIT_SUCCESS;
 
-    std::array<std::uint64_t, 2> const sent {dense_file_bytes(address), source.slice_rows};
+    std::array<std::uint64_t, 2> const sent {checkpoint_file_bytes(address), source.slice_rows};
     std::vector<std::uint64_t> gathered(speaks ? sent.size() * world.size : 0);
     world.gather(sent, gathered);
     if (!speaks) return EXIT_SUCCESS;
-    std::vector<dense_part_t> parts(world.size);
+    std::vector<safegraphs_part_t> parts(world.size);
     for (std::size_t part = 0; part != parts.size(); ++part)
-        parts[part] = {gathered[part * sent.size()], gathered[part * sent.size() + 1]};
-    if (!dense_write_manifest(settings.save, parts)) {
-        fmt::println(stderr, "rank 0: cannot write {}", settings.save);
+        parts[part] = {.bytes = gathered[part * sent.size()], .nodes = gathered[part * sent.size() + 1]};
+    if (!checkpoint_write_manifest(save, parts)) {
+        fmt::println(stderr, "rank 0: cannot write {}", save);
         return EXIT_FAILURE;
     }
-    fmt::println("committed {} over {} parts of {} entries in {:.1f} s", settings.save, world.size,
-                 settings.rows.value ? settings.rows.value : source.rows - settings.first_vector.value,
-                 dense_seconds_since(started));
+    std::size_t const entries = settings.checkpoint.entries.value;
+    fmt::println("committed {} over {} parts of {} entries in {:.1f} s", save, world.size,
+                 entries ? entries : source.rows - settings.checkpoint.first_entry.value,
+                 checkpoint_seconds_since(started));
     return EXIT_SUCCESS;
 }
 
-int dense_absorb(world_t& world, int argc, char const* const* argv) {
-    dense_settings_t settings;
-    std::array<flag_t, 3> const flags {{
-        {"--save", "address", "required: where the merged index is saved", &settings.save},
-        {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
-         &settings.expansion_refine},
-        {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads", &settings.threads},
-    }};
-    // Every argument is at most one positional, so the arguments bound the donors.
-    std::vector<std::string_view> positionals(static_cast<std::size_t>(argc));
-    std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(world, argc, argv,
-                                                   "usearch dense absorb <base> <donors>... --save <address> [flags]",
-                                                   flags, positionals, given))
-        return *exit;
-    if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given < 2 || settings.save.empty()) {
-        fmt::println(stderr, "a base, at least one donor and --save are required");
-        return EXIT_FAILURE;
-    }
-    if (!checkpoints_admit_save(settings.save)) return EXIT_FAILURE;
-
-    dense_engine_t engine;
-    if (!dense_engine_for_ram(world, settings.threads, engine)) return EXIT_FAILURE;
-    engine.indexes.resize(2);
-    if (!dense_load(world, engine, positionals[0], engine.indexes[0])) return EXIT_FAILURE;
-    for (std::string_view const donor : std::span {positionals}.subspan(1, given - 1)) {
-        usearch_dense_index_description_t description {};
-        if (!dense_load(world, engine, donor, engine.indexes[1])) return EXIT_FAILURE;
-        if (!dense_describe(world, engine, engine.indexes[1], description)) return EXIT_FAILURE;
-
-        dense_clock_t::time_point const started = dense_clock_t::now();
-        usearch_outcome_t outcome {};
-        std::size_t changed = 0;
-        usearch_reachability_t reachability {};
-        // A consumed donor's slot is nulled; a refused one stays for the engine to free.
-        usearch_dense_absorb_t absorb {
-            .index = engine.indexes[0],
-            .executor = engine.executor,
-            .outcome = &outcome,
-            .count = 1,
-            .donors = &engine.indexes[1],
-            .changed = &changed,
-            .reachability = &reachability,
-            .expansion_factor = settings.expansion_refine.value,
-        };
-        usearch_dense_absorb(&absorb);
-        if (dense_failed(world, outcome, fmt::format("absorbing {}", donor))) return EXIT_FAILURE;
-        fmt::println("absorbed {}: {} entries in {:.1f} s, {} changed, {} of {} reachable", donor, description.size,
-                     dense_seconds_since(started), changed, reachability.reachable, reachability.audited);
-    }
-    return dense_save(world, engine, engine.indexes[0], std::string(settings.save)) ? EXIT_SUCCESS : EXIT_FAILURE;
+int modality_split(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
+    return checkpoint_split<dense_verbs_t>(world, argc, argv, {},
+                                           [](usearch_dense_metadata_t const& metadata) { return metadata; });
 }
 
-int dense_refine(world_t& world, int argc, char const* const* argv) {
-    dense_settings_t settings;
-    settings.max_refines = {.value = 1};
-    std::array<flag_t, 4> const flags {{
-        {"--save", "address", "required: where the refined index is saved", &settings.save},
-        {"--max-refines", "count", "defaults to 1: refinement passes, stopping early once settled",
-         &settings.max_refines},
-        {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
-         &settings.expansion_refine},
-        {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads", &settings.threads},
-    }};
-    std::array<std::string_view, 1> positionals;
-    std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(
-            world, argc, argv, "usearch dense refine <address> --save <address> [flags]", flags, positionals, given))
-        return *exit;
-    if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1 || settings.save.empty()) {
-        fmt::println(stderr, "a checkpoint and --save are required");
-        return EXIT_FAILURE;
-    }
-    if (!checkpoints_admit_save(settings.save)) return EXIT_FAILURE;
+/** Gathers the rows of the Arrow @p input into @p rows, and its keys when @p keys_column names a
+ *  column, as one search's queries; prints why not. */
+static std::optional<checkpoint_queries<dense_verbs_t>> dense_read_queries(std::string_view input,
+                                                                           std::string_view vectors_column,
+                                                                           std::string_view keys_column,
+                                                                           std::vector<usearch_byte_t>& rows) {
+    arrow_input_t source;
+    std::size_t vectors = arrow_no_column_k, keys = arrow_no_column_k;
+    std::string failure = source.open(input);
+    if (failure.empty()) failure = arrow_pick_rows(source, vectors_column, vectors);
+    if (failure.empty() && !keys_column.empty()) failure = arrow_pick_column(source, keys_column, keys);
 
-    dense_engine_t engine;
-    if (!dense_engine_for_ram(world, settings.threads, engine)) return EXIT_FAILURE;
-    engine.indexes.resize(1);
-    if (!dense_load(world, engine, positionals[0], engine.indexes[0])) return EXIT_FAILURE;
-    if (!dense_refine_passes(world, engine, engine.indexes[0], settings.max_refines.value,
-                             settings.expansion_refine.value))
-        return EXIT_FAILURE;
-    return dense_save(world, engine, engine.indexes[0], std::string(settings.save)) ? EXIT_SUCCESS : EXIT_FAILURE;
+    checkpoint_queries<dense_verbs_t> queries;
+    std::vector<usearch_key_t> widened;
+    while (failure.empty()) {
+        bool more = false;
+        failure = source.next(more);
+        if (!failure.empty() || !more) break;
+        usearch_rows_view_t batch {};
+        usearch_keys_view_t batch_keys {};
+        failure = arrow_rows_of(source, vectors, batch);
+        if (failure.empty() && keys != arrow_no_column_k) failure = arrow_keys_of(source, keys, widened, batch_keys);
+        if (!failure.empty()) break;
+        if (queries.count && (batch.columns != queries.queries.columns || batch.scalar != queries.queries.scalar)) {
+            failure = fmt::format("{} changes its rows' type between batches", source.name());
+            break;
+        }
+        queries.queries.columns = batch.columns, queries.queries.scalar = batch.scalar;
+        queries.queries.stride = batch.stride;
+        auto const* const bytes = static_cast<usearch_byte_t const*>(batch.data);
+        for (std::size_t row = 0; row != source.rows(); ++row) {
+            rows.insert(rows.end(), bytes + row * batch.stride, bytes + (row + 1) * batch.stride);
+            if (keys != arrow_no_column_k) queries.keys.push_back(batch_keys.data[row]);
+        }
+        queries.count += source.rows();
+    }
+    if (!failure.empty()) {
+        fmt::println(stderr, "{}", failure);
+        return std::nullopt;
+    }
+    queries.queries.data = rows.data();
+    return queries;
 }
 
-int dense_split(world_t& world, int argc, char const* const* argv) {
-    dense_settings_t settings;
-    std::array<flag_t, 4> const flags {{
-        {"--parts", "count", "required: receivers to split into, at least 2", &settings.parts},
-        {"--save", "path", "required: the manifest to commit, its parts written beside it", &settings.save},
-        {"--expansion-refine", "count", "defaults to the library's derivation: candidate pool while refining",
-         &settings.expansion_refine},
-        {"--threads", "count", "defaults to 7/8 of the domain's cores: executor threads", &settings.threads},
+int modality_search(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
+    std::string_view query_vectors, input, vectors_column, keys_column, index_address;
+    std::array<flag_t, 5> const flags {{
+        {"--query-vectors", "path", "a RetriEval file of one query per row, unless --input is given", &query_vectors},
+        {"--input", "path", "an Arrow file or stream of queries, or - for standard input", &input},
+        {"--vectors-column", "name", "defaults to the only fixed-size column of rows in --input", &vectors_column},
+        {"--keys-column", "name", "defaults to row numbers: a uuid, uint64 or int64 column of --input", &keys_column},
+        {"--index", "address", "the checkpoint in place of the positional, or - for standard input", &index_address},
     }};
-    std::array<std::string_view, 1> positionals;
-    std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(
-            world, argc, argv, "usearch dense split <address> --parts <count> --save <path> [flags]", flags,
-            positionals, given))
-        return *exit;
-    if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1 || !settings.parts.value || settings.save.empty()) {
-        fmt::println(stderr, "a checkpoint, --parts and --save are required");
-        return EXIT_FAILURE;
+    mapped_rows_t queries_file;
+    std::vector<usearch_byte_t> query_rows;
+    return checkpoint_search<dense_verbs_t>(
+        world, argc, argv, "usearch dense search <address> --query-vectors <path> [flags]", flags,
+        [&]() -> std::optional<checkpoint_queries<dense_verbs_t>> {
+            if (query_vectors.empty() == input.empty()) {
+                fmt::println(stderr, "exactly one of --query-vectors and --input is required");
+                return std::nullopt;
+            }
+            if (input == "-" && index_address == "-") {
+                fmt::println(stderr, "--input and --index cannot both read standard input");
+                return std::nullopt;
+            }
+            if (!input.empty()) return dense_read_queries(input, vectors_column, keys_column, query_rows);
+            auto [file, status] = mapped_rows_t::open(query_vectors);
+            queries_file = std::move(file);
+            usearch_rows_view_t const rows = queries_file.view(0, queries_file.rows());
+            if (failed(status) || queries_file.scalar() == usearch_scalar_unknown_k || !rows.data) {
+                fmt::println(stderr,
+                             "--query-vectors=\"{}\" is no .fbin, .bf16bin, .f16bin, .i8bin, .u8bin or .u1x8bin",
+                             query_vectors);
+                return std::nullopt;
+            }
+            return checkpoint_queries<dense_verbs_t> {rows, queries_file.rows()};
+        },
+        index_address);
+}
+
+/** The rows a get gathered: every key once per entry, the entries' bytes packed, and the schema of
+ *  their column, taken from the library's first export. */
+struct dense_retrieved_t {
+    std::vector<usearch_key_t> keys;
+    std::vector<usearch_byte_t> rows;
+    ArrowSchema vector {};
+
+    dense_retrieved_t() = default;
+    dense_retrieved_t(dense_retrieved_t const&) = delete;
+    dense_retrieved_t& operator=(dense_retrieved_t const&) = delete;
+    ~dense_retrieved_t() noexcept {
+        if (vector.release) vector.release(&vector);
     }
+};
 
-    dense_engine_t engine;
-    if (!dense_engine_for_ram(world, settings.threads, engine)) return EXIT_FAILURE;
-    std::size_t const parts_count = settings.parts.value;
-    engine.indexes.resize(1 + parts_count);
-    usearch_dense_index_description_t description {};
-    if (!dense_load(world, engine, positionals[0], engine.indexes[0])) return EXIT_FAILURE;
-    if (!dense_describe(world, engine, engine.indexes[0], description)) return EXIT_FAILURE;
-
+/** Retrieves every vector under @p key out of @p index into @p retrieved; false after printing
+ *  why. */
+static bool dense_get_key(handle<dense_verbs_t> const& index, usearch_key_t key, usearch_scalar_t outputs,
+                          dense_retrieved_t& retrieved) {
     usearch_outcome_t outcome {};
-    usearch_dense_metadata_t const& metadata = description.metadata;
-    for (std::size_t part = 0; part != parts_count; ++part) {
-        usearch_dense_init_ram_t init {
-            .index = &engine.indexes[1 + part],
-            .outcome = &outcome,
-            .metric = metadata.metric,
-            .quantization = metadata.quantization,
-            .dimensions = metadata.dimensions,
-            .connectivity = metadata.connectivity,
-            .ram = {&engine.placement, 1},
-        };
-        usearch_dense_init_ram(&init);
-        if (dense_failed(world, outcome, "creating a receiver")) return EXIT_FAILURE;
-    }
-
-    dense_clock_t::time_point const started = dense_clock_t::now();
-    std::size_t changed = 0;
-    usearch_reachability_t reachability {};
-    usearch_dense_split_t split {
-        .index = engine.indexes[0],
-        .executor = engine.executor,
+    usearch_rows_view_t vectors {};
+    std::size_t written = 0;
+    usearch_dense_get_t get {
+        .index = index.get(),
+        .executor = index.executor(),
         .outcome = &outcome,
-        .count = parts_count,
-        .receivers = engine.indexes.data() + 1,
-        .changed = &changed,
-        .reachability = &reachability,
-        .expansion_factor = settings.expansion_refine.value,
+        .key = key,
+        .vectors = &vectors,
+        .written = &written,
+        .arena = index.session->arena,
+        .outputs_scalar = outputs,
     };
-    usearch_dense_split(&split);
-    if (dense_failed(world, outcome, "splitting")) return EXIT_FAILURE;
-    fmt::println("split into {} parts in {:.1f} s, {} changed, {} of {} reachable", parts_count,
-                 dense_seconds_since(started), changed, reachability.reachable, reachability.audited);
-
-    std::string_view const stem = dense_stem(settings.save);
-    std::vector<dense_part_t> parts(parts_count);
-    for (std::size_t part = 0; part != parts_count; ++part) {
-        std::string const part_path = dense_part_path(stem, part, parts_count);
-        if (!dense_describe(world, engine, engine.indexes[1 + part], description)) return EXIT_FAILURE;
-        if (!dense_save(world, engine, engine.indexes[1 + part], part_path)) return EXIT_FAILURE;
-        parts[part] = {dense_file_bytes(part_path), description.size};
+    usearch_dense_get(&get);
+    if (report_failure(outcome, "getting")) return false;
+    if (!written) return true;
+    if (!retrieved.vector.release) {
+        ArrowDeviceArray exported {};
+        usearch_status_t const status = usearch_rows_view_to_arrow(vectors, written, index.session->arena,
+                                                                   &retrieved.vector, &exported);
+        if (status != usearch_status_success_k) {
+            fmt::println(stderr, "exporting rows failed with {}", usearch_status_name(status));
+            return false;
+        }
+        // The next get rewinds the arena, which the export pins until its array lets go.
+        exported.array.release(&exported.array);
     }
-    if (!dense_write_manifest(settings.save, parts)) {
-        fmt::println(stderr, "cannot write {}", settings.save);
-        return EXIT_FAILURE;
+    std::size_t const offset = retrieved.rows.size(), bytes = written * vectors.stride;
+    retrieved.rows.resize(offset + bytes);
+    if (!download(retrieved.rows.data() + offset, vectors.data, bytes)) {
+        fmt::println(stderr, "cannot read the rows back off their device");
+        return false;
     }
-    fmt::println("committed {} over {} parts", settings.save, parts_count);
-    return EXIT_SUCCESS;
+    retrieved.keys.insert(retrieved.keys.end(), written, key);
+    return true;
 }
 
-int dense_health(world_t& world, int argc, char const* const* argv) {
-    dense_settings_t settings;
-    std::array<flag_t, 1> const flags {{
-        {"--threads", "count", "defaults to the devices' queue capabilities: executor threads", &settings.threads},
-    }};
+int dense_get(world_t& world, int argc, char const* const* argv) {
+    checkpoint_settings_t settings;
+    std::string_view index_address, input, keys_column, outputs_dtype;
+    std::vector<flag_t> const flags = with_session_flags(
+        settings.session,
+        {
+            {"--index", "address", "required: the checkpoint at any address, or - for standard input", &index_address},
+            {"--input", "path", "required: an Arrow file or stream of keys, or - for standard input", &input},
+            {"--keys-column", "name", "required: a uuid, uint64 or int64 column of --input", &keys_column},
+            {"--outputs-dtype", "name", "defaults to the checkpoint's: the scalar to convert the vectors to",
+             &outputs_dtype},
+            {"--output", "path",
+             "required: where the keys and vectors land as Arrow, a stream for - or an .arrows path, else a file",
+             &settings.output},
+        });
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch dense health <address> [flags]", flags,
-                                                   positionals, given))
+    if (std::optional<int> const exit = parse_verb(
+            world, argc, argv,
+            "usearch dense get --index <address|-> --input <path|-> --keys-column <name> --output <path|-> [flags]",
+            flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1) {
-        fmt::println(stderr, "a checkpoint is required");
+    if (given || index_address.empty() || input.empty() || keys_column.empty() || settings.output.empty()) {
+        fmt::println(stderr, "--index, --input, --keys-column and --output are required, and nothing else");
         return EXIT_FAILURE;
     }
+    if (input == "-" && index_address == "-") {
+        fmt::println(stderr, "--input and --index cannot both read standard input");
+        return EXIT_FAILURE;
+    }
+    usearch_scalar_t outputs = usearch_scalar_unknown_k;
+    if (!outputs_dtype.empty()) {
+        outputs = usearch_scalar_from_name(bytes_view(outputs_dtype));
+        if (outputs == usearch_scalar_unknown_k) {
+            fmt::println(stderr, "--outputs-dtype=\"{}\" names no scalar", outputs_dtype);
+            return EXIT_FAILURE;
+        }
+    }
+    std::FILE* const steps = settings.output == "-" ? stderr : stdout;
 
-    // A view reads the graph from storage, so the audit holds nothing that grows with the index.
-    dense_engine_t engine;
-    usearch_outcome_t outcome {};
-    usearch_executor_for_nvme_t executor {.executor = &engine.executor,
-                                          .outcome = &outcome,
-                                          .threads = settings.threads.value};
-    usearch_executor_for_nvme(&executor);
-    if (dense_failed(world, outcome, "creating the NVMe executor")) return EXIT_FAILURE;
-    engine.indexes.resize(1);
-    usearch_dense_view_nvme_t view {.index = &engine.indexes[0],
-                                    .executor = engine.executor,
-                                    .outcome = &outcome,
-                                    .path = bytes_view(positionals[0])};
-    usearch_dense_view_nvme(&view);
-    if (dense_failed(world, outcome, fmt::format("viewing {}", positionals[0]))) return EXIT_FAILURE;
+    arrow_input_t source;
+    std::size_t keys = arrow_no_column_k;
+    std::string failure = source.open(input);
+    if (failure.empty()) failure = arrow_pick_column(source, keys_column, keys);
+    if (!failure.empty()) {
+        fmt::println(stderr, "{}", failure);
+        return EXIT_FAILURE;
+    }
+    settings.session.devices = devices_from_environment();
+    session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
+    if (!session) return EXIT_FAILURE;
+    handle<dense_verbs_t> index = checkpoint_open<dense_verbs_t>(session, index_address, settings.session.residency, {},
+                                                                 steps);
+    if (!index) return EXIT_FAILURE;
+    if (outputs == usearch_scalar_unknown_k) outputs = describe(index).metadata.quantization;
 
-    dense_clock_t::time_point const started = dense_clock_t::now();
-    usearch_reachability_t reachability {};
-    usearch_dense_health_t health {.index = engine.indexes[0],
-                                   .executor = engine.executor,
-                                   .outcome = &outcome,
-                                   .reachability = &reachability};
-    usearch_dense_health(&health);
-    if (dense_failed(world, outcome, "auditing")) return EXIT_FAILURE;
-    fmt::println("{}: {} of {} reachable over {} sweeps in {:.1f} s", positionals[0], reachability.reachable,
-                 reachability.audited, reachability.sweeps, dense_seconds_since(started));
+    checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
+    dense_retrieved_t retrieved;
+    std::vector<usearch_key_t> widened;
+    std::size_t asked = 0, missing = 0;
+    while (true) {
+        bool more = false;
+        failure = source.next(more);
+        if (!failure.empty() || !more) break;
+        usearch_keys_view_t batch_keys {};
+        failure = arrow_keys_of(source, keys, widened, batch_keys);
+        if (!failure.empty()) break;
+        for (std::size_t row = 0; row != source.rows(); ++row) {
+            std::size_t const held = retrieved.keys.size();
+            if (!dense_get_key(index, batch_keys.data[row], outputs, retrieved)) return EXIT_FAILURE;
+            missing += retrieved.keys.size() == held;
+        }
+        asked += source.rows();
+    }
+    if (failure.empty() && retrieved.keys.empty()) failure = "none of the keys is in the index";
+    if (failure.empty())
+        failure = arrow_vectors_write(settings.output, retrieved.keys, retrieved.vector,
+                                      std::as_bytes(std::span {retrieved.rows}));
+    if (!failure.empty()) {
+        fmt::println(stderr, "{}", failure);
+        return EXIT_FAILURE;
+    }
+    fmt::println(steps, "retrieved {} vectors of {} keys in {:.3f} s, {} keys missing", retrieved.keys.size(), asked,
+                 checkpoint_seconds_since(started), missing);
     return EXIT_SUCCESS;
 }
 

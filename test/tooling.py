@@ -2,9 +2,14 @@
 
 Run:
     python -m pytest test/tooling.py -v
+
+File: test/tooling.py
+Author: Ash Vardanian
+Date: August 16, 2026
 """
 
 import os
+import struct
 import uuid
 
 import numpy as np
@@ -46,6 +51,24 @@ def test_key_columns_roundtrip(tmp_path, rows: int):
     loaded = load_matrix(path)
     assert loaded.shape == (rows, 1)
     assert [uuid.UUID(int=int.from_bytes(row.tobytes(), "little")) for row in loaded[:, 0]] == uuids
+
+
+def test_packed_bits_header_counts_bits(tmp_path):
+    """A `.u1x8bin` header counts bits per row, as the tools read it, and its rows read back as bytes."""
+    packed = np.array([[0xF0, 0x0F], [0xFF, 0x00]], dtype=np.uint8)
+    path = str(tmp_path / "bits.u1x8bin")
+    save_matrix(packed, path)
+    with open(path, "rb") as file:
+        assert struct.unpack("<ii", file.read(8)) == (2, 16)
+    assert np.array_equal(packed, load_matrix(path))
+
+
+def test_bf16_extension_reads_its_words(tmp_path):
+    """A `.bf16bin` keeps its 16-bit words, which no NumPy dtype would decode."""
+    words = np.array([[0x3F80, 0xBF80]], dtype=np.uint16)
+    path = str(tmp_path / "words.bf16bin")
+    save_matrix(words, path)
+    assert np.array_equal(words, load_matrix(path))
 
 
 def test_missing_matrix_raises(tmp_path):

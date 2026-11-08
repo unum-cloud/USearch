@@ -196,7 +196,7 @@ def test_class_enums_carry_the_library_spellings():
     """Every class member is named by the library's spelling of its value, in value order, from one up."""
     spellings = {
         CPUClass: "serial intel-haswell intel-sierra intel-skylake intel-icelake amd-genoa intel-sapphire intel-granite"
-        " intel-diamond aws-g2 apple-m2 apple-m4 aws-g5 nvidia-vera alibaba-c930 wasm32-v128 wasm64-extended",
+        " intel-diamond aws-g2 apple-m2 apple-m4 aws-g5 nvidia-vera alibaba-c930 wasm32-v128 wasm64-extended monoversioned",
         GPUClass: "nvidia-ampere nvidia-ada nvidia-hopper nvidia-blackwell nvidia-blackwellrtx nvidia-rubin amd-cdna3"
         " amd-cdna4 amd-cdna5 apple-metal7 apple-metal9 apple-metal10",
         NVMeClass: "posix linux-aio linux-uring linux-uring-passthrough linux-spdk windows-ioring",
@@ -301,6 +301,7 @@ def test_arena_is_made_by_an_executor_or_none():
     """An executor makes an arena where it computes, none makes one for the calling thread, and nothing else does."""
     with Executor.for_ram(threads=1) as pool:
         assert isinstance(Arena(pool), Arena) and isinstance(Arena(), Arena)
+        assert Arena(pool).describe() == (Residency.RAM, None) == Arena().describe()
     with pytest.raises(UninitializedError):
         Arena(pool)
     with pytest.raises(TypeError):
@@ -650,6 +651,79 @@ def test_search_reports_fewer_matches_than_asked(executor):
     assert len(matches[0]) == count
 
 
+class ArrowArrayColumn:
+    """A column exporting only the PyCapsule array protocol, as a foreign producer does."""
+
+    def __init__(self, exported):
+        self.exported = exported
+
+    def __arrow_c_array__(self, requested_schema=None):
+        return self.exported.__arrow_c_array__(requested_schema)
+
+
+class ArrowStreamColumn:
+    """A column exporting only the PyCapsule stream protocol, as a Polars Series does."""
+
+    def __init__(self, exported):
+        self.exported = exported
+
+    def __arrow_c_stream__(self, requested_schema=None):
+        return self.exported.__arrow_c_stream__(requested_schema)
+
+
+@pytest.mark.parametrize("column", [ArrowArrayColumn, ArrowStreamColumn])
+def test_insert_reads_its_own_arrow_columns(executor, column: type):
+    """Rows exported as Arrow insert through the converter, with no Arrow library loaded."""
+    source, _ = build_index(1, 8, executor)
+    exported = source.on(executor).get(0, Arena(executor))
+    target = DenseIndex.init_ram(dimensions=8, quantization=Scalar.BF16)
+    target.on(executor).insert([41], column(exported))
+    assert np.array_equal(np.asarray(target.on(executor).get(41, Arena(executor))), np.asarray(exported))
+
+
+def test_arrow_export_refuses_a_rewind_until_released(executor):
+    """An exported column holds its arena, so a call naming it is refused until the capsules die."""
+    index, vectors = build_index(4, 8, executor)
+    arena = Arena(executor)
+    capsules = index.on(executor).search(vectors[:1], 2, arena).distances.__arrow_c_device_array__()
+    with pytest.raises(ContendedError):
+        index.on(executor).search(vectors[:1], 2, arena)
+    del capsules
+    gc.collect()
+    assert len(index.on(executor).search(vectors[:1], 2, arena)) == 1
+
+
+def test_stale_results_refuse_to_export(executor):
+    """A result a later call rewound exports nothing."""
+    index, vectors = build_index(4, 8, executor)
+    arena = Arena(executor)
+    stale = index.on(executor).search(vectors[:1], 2, arena)
+    index.on(executor).search(vectors[1:2], 2, arena)
+    with pytest.raises(UninitializedError):
+        stale.__arrow_c_array__()
+
+
+def test_arrow_columns_read_as_pyarrow_writes_them(executor):
+    """PyArrow's fixed-size lists and integer keys insert, across chunks, and matches export compacted."""
+    pa = pytest.importorskip("pyarrow")
+    rows = np.random.default_rng(0).random((6, 8), dtype=np.float32)
+    embedding = pa.chunked_array(
+        [pa.FixedSizeListArray.from_arrays(pa.array(part.ravel()), 8) for part in np.array_split(rows, 2)]
+    )
+    identifiers = pa.chunked_array([pa.array([10, 11, 12], pa.int64()), pa.array([13, 14, 15], pa.int64())])
+    index = DenseIndex.init_ram(dimensions=8)
+    index.on(executor).insert(identifiers, embedding)
+    assert len(index) == 6
+
+    arena = Arena(executor)
+    queries = pa.FixedSizeListArray.from_arrays(pa.array(rows[:2].ravel()), 8)
+    matches = index.on(executor).search(queries, 2, arena)
+    compacted = pa.array(matches)
+    assert compacted.type == pa.large_list(compacted.type.value_field)
+    assert compacted.offsets.to_pylist() == [0, 2, 4]
+    assert pa.array(matches.distances).type == pa.list_(pa.float64(), 2)
+
+
 def test_search_reuses_one_arena(executor):
     """One arena serves a whole sweep, each call rewinding what the one before it wrote."""
     index, vectors = build_index(64, 16, executor)
@@ -819,6 +893,43 @@ def test_arena_refuses_to_rewind_while_a_buffer_is_exported(executor):
     assert np.allclose(np.asarray(rows), vectors[1:2], rtol=BF16_EPSILON, atol=BF16_EPSILON)
     exported.release()
     assert np.asarray(index.on(executor).get(2, arena)).shape == (1, 8)
+
+
+def test_outputs_export_dlpack_and_hold_their_arena(executor):
+    """An output exports a DLPack tensor in place, and a live tensor refuses the call that would rewind its arena."""
+    index, _ = build_index(4, 8, executor)
+    arena = Arena(executor)
+    rows = index.on(executor).get(1, arena)
+    assert rows.__dlpack_device__() == (1, 0)
+    tensor = np.from_dlpack(rows)
+    assert np.array_equal(tensor, np.asarray(rows))
+    with pytest.raises(ContendedError):
+        index.on(executor).get(2, arena)
+    del tensor
+    assert np.from_dlpack(index.on(executor).get(2, arena)).shape == (1, 8)
+
+
+class DLPackOnly:
+    """Shows an array through DLPack alone, recording what each consumer asked the producer for."""
+
+    def __init__(self, array: npt.NDArray[np.float32]) -> None:
+        self.array, self.requests = array, []
+
+    def __dlpack__(self, **requested):
+        self.requests.append(requested)
+        return self.array.__dlpack__(**requested)
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return self.array.__dlpack_device__()
+
+
+def test_inputs_arrive_through_dlpack(executor):
+    """A tensor exporting only DLPack reaches an index in place, its producer asked for no stream."""
+    index, vectors = build_index(16, 8, executor)
+    queries = DLPackOnly(vectors[:2])
+    found = keys_to_integers(index.on(executor).search(queries, 1, Arena(executor)).keys)
+    assert found[:, 0].tolist() == [0, 1]
+    assert queries.requests and all(requested["stream"] is None for requested in queries.requests)
 
 
 def test_results_refuse_reads_once_their_arena_rewinds(executor):

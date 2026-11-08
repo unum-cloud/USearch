@@ -55,9 +55,9 @@ func main() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = dimensions
 	options.Metric = usearch.DenseMetricAngular
-	// Quantization also accepts ScalarBF16, ScalarF16, ScalarE5M2, ScalarE4M3, ScalarE3M2,
+	// Quantization also accepts ScalarF16, ScalarE5M2, ScalarE4M3, ScalarE3M2,
 	// ScalarE2M3, ScalarI8, ScalarU8 and ScalarU1x8.
-	options.Quantization = usearch.ScalarF32
+	options.Quantization = usearch.ScalarBF16
 
 	// A nil list of memory domains places a shard on every NUMA node.
 	index, err := usearch.DenseInitRam(options, nil)

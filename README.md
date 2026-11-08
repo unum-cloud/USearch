@@ -60,7 +60,7 @@ Its core is a header-only C++ 20 library with no external dependencies, a commit
 - ✅ __Three Residencies__ - RAM, VRAM, & NVMe, exchanging portable [SafeGraphs](https://github.com/unum-cloud/USearch/blob/main/docs/format.md) files.
 - ✅ __128-bit Keys__ - Built around UUIDs for large-scale systems, with several vectors allowed under one key.
 - ✅ __Atomic Visibility__ - RAM insertion batches publish complete entries & keys behind each shard's watermark.
-- ✅ __Concurrent Mutability__ - RAM indexing, refinement, & queries can overlap.
+- ✅ __Concurrent Mutability__ - RAM queries overlap indexing & refinement, which take turns with each other.
 - ✅ __14 Programming Languages__ - From IoT & mobile to GPU neoclouds, through one C ABI & a lower-level C++ core.
 
 One of the most important features of USearch is using the hardware your machine already has, but most software leaves idle.
@@ -161,8 +161,6 @@ See the [C++ guide](https://github.com/unum-cloud/USearch/blob/main/include/usea
 | __Shapes__          | 3D point clouds of any size                 | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein | Experimental C++ engine & C interface |
 | __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths  | Point proximity; declared Overlap, Shape, Coverage, & Route      | Experimental C++ engine & C interface |
 
-The experimental geospatial C interface currently uses a brute-force stand-in while its native engine & bindings develop.
-
 ### Building Indexes
 
 Indexes are built in two very different regimes, & USearch keeps them as separate operations.
@@ -184,7 +182,7 @@ An index grows as it inserts; `reserve` is only a hint of the capacity to come.
 It solves a different problem from insertion: building an approximate nearest-neighbor graph over every entry at once, plus the global properties no single walk can see.
 Its audit sweeps the graph from landmarks, finds islands no search reaches, & heals them.
 Like compaction in a database, refinement is optional & never changes what the index contains, only how well it is connected, & it must never lower recall.
-Because nothing waits on its answers, refinement can use bandwidth-oriented kernels a search cannot afford: on GPUs, a two-hop pass scores an entry's neighbors-of-neighbors as one Gram matrix on Tensor Cores, trading per-entry latency for many more distances per byte loaded.
+Because nothing waits on its answers, refinement can use bandwidth-oriented kernels a search cannot afford: on GPUs, a two-hop pass will score an entry's neighbors-of-neighbors as one Gram matrix on Tensor Cores, trading per-entry latency for many more distances per byte loaded.
 
 #### Absorption & Compaction
 

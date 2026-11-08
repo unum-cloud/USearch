@@ -1,9 +1,11 @@
 # The command-line tools, calling the library through its C interface: `usearch` runs every verb on one process, and
-# `usearch-mpi` runs them across an MPI world. Flags parse through the table `abi.hpp` shares with the benchmarks and
-# the suites. MPI is the one the cluster runs, never fetched, since a build must match the launcher and interconnect it
-# starts under: `FindMPI` takes the first `mpicc` on the path, and `-DMPI_C_COMPILER=<wrapper>` or `-DMPI_HOME=<prefix>`
+# `usearch-mpi` runs them across an MPI world. Flags parse through the table `arguments.hpp` shares with the benchmarks
+# and the suites. MPI is the one the cluster runs, never fetched, since a build must match the launcher and interconnect
+# it starts under: `FindMPI` takes the first `mpicc` on the path, and `-DMPI_C_COMPILER=<wrapper>` or `-DMPI_HOME=<prefix>`
 # picks another.
-add_executable(usearch_tools usearch.cpp dense.cpp checkpoints.cpp world_local.cpp)
+add_executable(
+    usearch_tools usearch.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp checkpoints.cpp world_local.cpp
+)
 usearch_setup_target(usearch_tools HOST)
 set_target_properties(usearch_tools PROPERTIES OUTPUT_NAME usearch)
 target_link_libraries(usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::static yyjson)
@@ -15,7 +17,9 @@ find_package(
     QUIET
 )
 if (MPI_C_FOUND)
-    add_executable(usearch_tools_mpi usearch.cpp dense.cpp checkpoints.cpp world_mpi.cpp)
+    add_executable(
+        usearch_tools_mpi usearch.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp checkpoints.cpp world_mpi.cpp
+    )
     usearch_setup_target(usearch_tools_mpi HOST)
     set_target_properties(usearch_tools_mpi PROPERTIES OUTPUT_NAME usearch-mpi)
     target_link_libraries(
