@@ -4,18 +4,28 @@
 [workspace]
 authors = ["Ash Vardanian <info@unum.cloud>"]
 channels = ["conda-forge", "https://conda.modular.com/max"]
-description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
 license = "Apache-2.0"
 license-file = "LICENSE"
 name = "usearch"
-platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+platforms = [
+  { name = "linux-64-glibc239", platform = "linux-64", glibc = "2.39" },
+  { name = "linux-aarch64-glibc239", platform = "linux-aarch64", glibc = "2.39" },
+  "osx-arm64",
+]
 preview = ["pixi-build"]
 readme = "README.md"
 version = "3.0.0-rc.1"
 
+[workspace.target.linux-64.build-variants]
+c_stdlib_version = ["2.39"]
+
+[workspace.target.linux-aarch64.build-variants]
+c_stdlib_version = ["2.39"]
+
 # A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]
-mojo = ">=1.1.0,<2"
+mojo = ">=1.2.0,<1.3" # ? Mojo minors still change the language, as 1.1 and 1.2 did, so each is adopted by hand
 usearch = { path = "." }
 
 # `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default
@@ -33,16 +43,16 @@ version = "3.0.0-rc.1"
 [package.build]
 backend = { name = "pixi-build-cmake", version = "0.*" }
 
-# The backend defaults to a C++-only toolchain, and the C interface's own units compile as C.
+# The backend defaults to a C++-only toolchain, and the C interface's own units compile as C. It also passes
+# `BUILD_SHARED_LIBS=ON`, which would split yyjson into a library the package never ships.
 [package.build.config]
 compilers = ["c", "cxx"]
 extra-args = [
+  "-DBUILD_SHARED_LIBS=OFF",
   "-DUSEARCH_BUILD_SHARED=1",
   "-DUSEARCH_DENSE_DTYPES=11",
 ]
 
 [tasks]
-# The pure-logic half of the suite needs no engine, so this half runs without one.
-test-mojo = { cmd = "mojo run -I mojo mojo/test.mojo" }
 build = { cmd = "mkdir -p build_mojo && mojo build -I mojo mojo/test.mojo -o build_mojo/mojo_test" }
 test = { cmd = "mojo run -I mojo mojo/test.mojo" }

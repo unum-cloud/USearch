@@ -53,11 +53,12 @@ from usearch.dense import (
     DenseViewRam,
 )
 from usearch.types import (
-    Address,
+    ArenaDescribe,
     ArenaInit,
-    CpuClass,
-    GpuClass,
+    CPUClass,
+    GPUClass,
     BytesView,
+    CString,
     Error,
     ExecutorDrain,
     ExecutorForNvme,
@@ -67,7 +68,6 @@ from usearch.types import (
     FromName,
     Mood,
     NameOf,
-    NULL_ADDRESS,
     Outcome,
     OutcomeStatus,
     Release,
@@ -89,7 +89,7 @@ comptime BINDING_MAJOR = 3
 
 # region Signatures
 
-comptime StaticText = def() thin abi("C") -> Address
+comptime StaticText = def() thin abi("C") -> Optional[CString]
 """`usearch_version_name` and both capability getters: a static C string returned by value."""
 
 comptime VersionOf = def(
@@ -103,7 +103,7 @@ was measured reading back the value stored before the call."""
 # endregion Signatures
 
 
-@always_inline
+@inline(.always)
 def _resolve[
     Signature: TrivialRegisterPassable
 ](ref handle: OwnedDLHandle, name: StaticString) raises Error -> Signature:
@@ -113,10 +113,9 @@ def _resolve[
     stale library name the symbol it is missing instead of dying without a message.
     """
     comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
-    var address = handle.get_symbol[NoneType](name)
-    if not address:
-        raise Error(Status.SYMBOL_MISSING, name)
-    return Pointer(to=address.value()).unsafe_bitcast[Signature]()[]
+    if case .Some(address) = handle.get_symbol[NoneType](name):
+        return Pointer(to=address).unsafe_bitcast[Signature]()[]
+    raise Error(Status.SYMBOL_MISSING, name)
 
 
 struct Symbols:
@@ -170,6 +169,8 @@ struct Symbols:
     """`usearch_arena_init`."""
     var arena_free: Release
     """`usearch_arena_free`."""
+    var arena_describe: ArenaDescribe
+    """`usearch_arena_describe`."""
     var executor_for_ram: ExecutorForRam
     """`usearch_executor_for_ram`."""
     var executor_on_pool: ExecutorOnPool
@@ -288,6 +289,7 @@ struct Symbols:
 
         self.arena_init = _resolve[ArenaInit](handle, "usearch_arena_init")
         self.arena_free = _resolve[Release](handle, "usearch_arena_free")
+        self.arena_describe = _resolve[ArenaDescribe](handle, "usearch_arena_describe")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
         self.executor_on_pool = _resolve[ExecutorOnPool](handle, "usearch_executor_on_pool")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")
@@ -379,7 +381,7 @@ struct Library(ImplicitlyCopyable):
         """
         self.shared = ArcPointer(_Loaded())
 
-    @always_inline
+    @inline(.always)
     def symbols(self) -> ref[origin_of(self.shared[].symbols)] Symbols:
         """The resolved entry points, borrowed rather than copied on every call.
 
@@ -422,7 +424,7 @@ struct Library(ImplicitlyCopyable):
 
     def status_from_name(self, name: StringSlice) -> Status:
         """Reads a spelling back; `INVALID_ARGUMENT` when unrecognized. Calls `usearch_status_from_name`."""
-        return Status.of(self.symbols().status_from_name(BytesView.of(name).untracked()))
+        return Status.of(self.symbols().status_from_name(BytesView.of(name).arguments()))
 
     def scalar_name(self, scalar: ScalarKind) -> String:
         """The engine's spelling of a scalar kind, as `F32` spells "f32". Calls `usearch_scalar_name`."""
@@ -430,7 +432,7 @@ struct Library(ImplicitlyCopyable):
 
     def scalar_from_name(self, name: StringSlice) -> ScalarKind:
         """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_scalar_from_name`."""
-        return ScalarKind(self.symbols().scalar_from_name(BytesView.of(name).untracked()))
+        return ScalarKind(self.symbols().scalar_from_name(BytesView.of(name).arguments()))
 
     def residency_name(self, residency: Residency) -> String:
         """The engine's spelling of a residency, as `RAM` spells "ram". Calls `usearch_residency_name`."""
@@ -438,7 +440,7 @@ struct Library(ImplicitlyCopyable):
 
     def residency_from_name(self, name: StringSlice) -> Residency:
         """Reads a spelling back; `RAM` when unrecognized. Calls `usearch_residency_from_name`."""
-        return Residency(self.symbols().residency_from_name(BytesView.of(name).untracked()))
+        return Residency(self.symbols().residency_from_name(BytesView.of(name).arguments()))
 
     def traversal_name(self, traversal: Traversal) -> String:
         """The engine's spelling of a traversal, as `SCAN` spells "scan". Calls `usearch_traversal_name`."""
@@ -446,13 +448,13 @@ struct Library(ImplicitlyCopyable):
 
     def traversal_from_name(self, name: StringSlice) -> Traversal:
         """Reads a spelling back; `WALK` when unrecognized. Calls `usearch_traversal_from_name`."""
-        return Traversal(self.symbols().traversal_from_name(BytesView.of(name).untracked()))
+        return Traversal(self.symbols().traversal_from_name(BytesView.of(name).arguments()))
 
-    def cpu_class_name(self, cpu_class: CpuClass) -> String:
+    def cpu_class_name(self, cpu_class: CPUClass) -> String:
         """The engine's spelling of a CPU class, as dispatch reports it. Calls `usearch_cpu_class_name`."""
         return text_at(self.symbols().cpu_class_name(cpu_class.code))
 
-    def gpu_class_name(self, gpu_class: GpuClass) -> String:
+    def gpu_class_name(self, gpu_class: GPUClass) -> String:
         """The engine's spelling of a GPU class, as dispatch reports it. Calls `usearch_gpu_class_name`."""
         return text_at(self.symbols().gpu_class_name(gpu_class.code))
 
@@ -462,7 +464,7 @@ struct Library(ImplicitlyCopyable):
 
     def mood_from_name(self, name: StringSlice) -> Mood:
         """Reads a spelling back; `PARKED` when unrecognized. Calls `usearch_mood_from_name`."""
-        return Mood(self.symbols().mood_from_name(BytesView.of(name).untracked()))
+        return Mood(self.symbols().mood_from_name(BytesView.of(name).arguments()))
 
     def dense_metric_name(self, metric: DenseMetric) -> String:
         """The engine's spelling of a metric kind, as `INNER` spells "inner". Calls `usearch_dense_metric_name`."""
@@ -470,7 +472,7 @@ struct Library(ImplicitlyCopyable):
 
     def dense_metric_from_name(self, name: StringSlice) -> DenseMetric:
         """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_dense_metric_from_name`."""
-        return DenseMetric(self.symbols().dense_metric_from_name(BytesView.of(name).untracked()))
+        return DenseMetric(self.symbols().dense_metric_from_name(BytesView.of(name).arguments()))
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:
         """The failure a final outcome reports, its status spelled by the engine's own table."""

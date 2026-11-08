@@ -8,25 +8,26 @@ widening this one.
 second would force every caller raising `Error` to catch and convert. A refusal is a failure, not an absence - a key the index does not hold answers zero, but a
 call the engine declines raises.
 
-Four Mojo 1.1 facts shape the descriptors and the pointer aliases below, and all four were measured
+Four Mojo facts shape the descriptors and the pointer aliases below, and all four were measured
 rather than assumed.
 
 `MutAnyOrigin` rather than `MutUntrackedOrigin` is load-bearing on anything C writes through: with
 a narrower origin the compiler folds a read of the slot back to whatever the caller last stored
 there, and every out-parameter reads back as zero.
 
-Mojo's `Pointer` is non-nullable by construction, so a C pointer that may be null crosses as
-`Address` - its numeric value - rather than as a pointer type that cannot represent the null the
-ABI asks for.
+A typed C pointer that may be null crosses as `Optional[Pointer[T, ...]]`, whose empty case is the
+null the ABI asks for and costs nothing to pass, in a field, as an argument, or as a return value.
+Opaque handles and `void *` state name no element type, so they cross as `Address`, their numeric
+value. A struct holding an `Optional` is not `TrivialRegisterPassable`, so C reads those by address.
 
 Every descriptor that borrows caller storage carries that storage's origin as a struct parameter,
 because Mojo destroys a value at its last use rather than at the end of its scope, and an address
 laundered through `Address` is not a use. A descriptor built from a list and handed straight to a
 call was measured destroying that list before the call ran, leaving the engine reading a freed
 allocation; naming the origin in the descriptor's type moved the destruction after the call. The
-parameter alone does the work - no field need mention it - so the pointer fields keep the untracked
-types the C layout needs, and `untracked` erases the parameter at the boundary to reach the one
-instantiation the ABI signatures name. A `Deferred` carries the union of every origin its call
+pointer fields carry that origin too, so the compiler tracks the pointer itself, and `arguments`
+erases it inside the verb, while the descriptor is still alive, to reach the one instantiation the
+ABI signatures name. A `Deferred` carries the union of every origin its call
 borrows the same way, which keeps the index, the executor, and the inputs alive until it is gone.
 
 A struct whose address crosses to C is materialized into a `stack_allocation` slot rather than held
@@ -49,15 +50,14 @@ from usearch.library import Library
 # region Pointers
 
 comptime CString = Pointer[Int8, ImmUntrackedOrigin]
-"""A borrowed null-terminated C string, which only the introspection getters return."""
+"""A borrowed null-terminated C string, such as an enumerator's spelling or an outcome's message."""
 
 comptime Address = Int
-"""A C pointer crossing as its numeric value, which is how a null one is expressed.
+"""An opaque handle or a `void *` crossing as its numeric value, zero for null.
 
-Mojo's `Pointer` is non-nullable by construction - constructing one from zero is refused at compile
-time and aborts at run time - so every ABI slot that accepts `NULL` takes this instead. The
-integer is pointer-width and shares the pointer's argument class on both x86-64 and AArch64, so it
-lands in the same register a pointer would.
+A typed slot crosses as `Pointer`, or as `Optional[Pointer]` where it may be null; this is for the
+slots that name no element type. The integer is pointer-width and shares the pointer's argument
+class on both x86-64 and AArch64, so it lands in the same register a pointer would.
 """
 
 comptime NULL_ADDRESS = 0
@@ -141,7 +141,7 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct Outcome(ImplicitlyCopyable, TrivialRegisterPassable):
+struct Outcome(ImplicitlyCopyable):
     """The `usearch_outcome_t` every verb reports through, laid out as the ABI declares it.
 
     Never marked as anything richer than this: the engine writes the two words and the binding
@@ -150,13 +150,13 @@ struct Outcome(ImplicitlyCopyable, TrivialRegisterPassable):
 
     var status: c_int
     """The `usearch_status_t` the call reported."""
-    var message: Address
-    """The engine's own static message, or `NULL_ADDRESS` when the call succeeded."""
+    var message: Optional[CString]
+    """The engine's own static message, or `None` when the call succeeded."""
 
     def __init__(out self):
         """Zeroes the slot, so a call that writes nothing still reads as a success."""
         self.status = c_int(0)
-        self.message = NULL_ADDRESS
+        self.message = None
 
 
 @fieldwise_init
@@ -167,14 +167,14 @@ struct Error(Copyable, ImplicitlyCopyable, Writable):
     """Which class of failure the engine reported."""
     var detail: StaticString
     """The entry point it was about, for a reader rather than for a branch."""
-    var message: Address
-    """The engine's own static message, or `NULL_ADDRESS` when it carried none.
+    var message: Optional[CString]
+    """The engine's own static message, or `None` when it carried none.
 
     Messages are static storage inside the shared object, so keeping the address costs nothing and
     outlives the call. `write_to` walks it; there is nothing to free.
     """
-    var name: Address
-    """The engine's spelling of `status` from `usearch_status_name`, or `NULL_ADDRESS` where no engine named it."""
+    var name: Optional[CString]
+    """The engine's spelling of `status` from `usearch_status_name`, or `None` where no engine named it."""
     var library: Optional[Library]
     """The engine `message` and `name` live in, kept mapped for as long as the error is; Mojo would
     otherwise unload it at the last handle's last use, while the error is still being read."""
@@ -188,8 +188,8 @@ struct Error(Copyable, ImplicitlyCopyable, Writable):
         """
         self.status = status
         self.detail = detail
-        self.message = NULL_ADDRESS
-        self.name = NULL_ADDRESS
+        self.message = None
+        self.name = None
         self.library = None
 
     def write_to(self, mut writer: Some[Writer]):
@@ -199,37 +199,39 @@ struct Error(Copyable, ImplicitlyCopyable, Writable):
             writer: The sink the message is appended to.
         """
         writer.write("USearch: ")
-        if self.name != NULL_ADDRESS:
-            writer.write(text_at(self.name))
-        elif self.status == Status.LIBRARY_MISSING:
-            writer.write("library-missing")
-        elif self.status == Status.SYMBOL_MISSING:
-            writer.write("symbol-missing")
-        elif self.status == Status.VERSION_MISMATCH:
-            writer.write("version-mismatch")
+        if case .Some(name) = self.name:
+            writer.write(text_at(name))
         else:
-            writer.write("status ", self.status.code)
+            match self.status:
+                case == Status.LIBRARY_MISSING:
+                    writer.write("library-missing")
+                case == Status.SYMBOL_MISSING:
+                    writer.write("symbol-missing")
+                case == Status.VERSION_MISMATCH:
+                    writer.write("version-mismatch")
+                case _:
+                    writer.write("status ", self.status.code)
         writer.write(" [", self.detail, "]")
-        if self.message != NULL_ADDRESS:
-            writer.write(": ", text_at(self.message))
+        if case .Some(message) = self.message:
+            writer.write(": ", text_at(message))
 
 
-def text_at(address: Address) -> String:
+def text_at(text: Optional[CString]) -> String:
     """Decodes a null-terminated C string the engine owns, stopping at its terminator.
 
     Args:
-        address: Where the bytes start; `NULL_ADDRESS` reads as the empty string.
+        text: Where the bytes start; `None` reads as the empty string.
 
     Returns:
         A copy of the bytes, since the caller may keep it longer than it wants a raw address.
     """
-    if address == NULL_ADDRESS:
-        return String("")
-    var bytes = Pointer[UInt8, ImmUntrackedOrigin](unsafe_from_address=address)
-    var length = 0
-    while bytes[unsafe_offset=length] != 0:
-        length += 1
-    return String(StringSlice(unsafe_from_utf8=Span[UInt8, ImmUntrackedOrigin](unsafe_ptr=bytes, length=length)))
+    if case .Some(start) = text:
+        var bytes = start.unsafe_bitcast[UInt8]()
+        var length = 0
+        while bytes[unsafe_offset=length] != 0:
+            length += 1
+        return String(unsafe_from_utf8=Span[UInt8, ImmUntrackedOrigin](unsafe_ptr=bytes, length=length))
+    return String("")
 
 
 # endregion Errors
@@ -347,26 +349,27 @@ struct ScalarKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
         Returns:
             The matching kind, or `UNKNOWN`, which every verb refuses.
         """
-        comptime if dtype == DType.float64:
-            return Self.F64
-        elif dtype == DType.float32:
-            return Self.F32
-        elif dtype == DType.bfloat16:
-            return Self.BF16
-        elif dtype == DType.float16:
-            return Self.F16
-        elif dtype == DType.float8_e5m2:
-            return Self.E5M2
-        elif dtype == DType.float8_e4m3fn:
-            return Self.E4M3
-        elif dtype == DType.int32:
-            return Self.I32
-        elif dtype == DType.int8:
-            return Self.I8
-        elif dtype == DType.uint8:
-            return Self.U8
-        else:
-            return Self.UNKNOWN
+        comptime match dtype:
+            case == DType.float64:
+                return Self.F64
+            case == DType.float32:
+                return Self.F32
+            case == DType.bfloat16:
+                return Self.BF16
+            case == DType.float16:
+                return Self.F16
+            case == DType.float8_e5m2:
+                return Self.E5M2
+            case == DType.float8_e4m3fn:
+                return Self.E4M3
+            case == DType.int32:
+                return Self.I32
+            case == DType.int8:
+                return Self.I8
+            case == DType.uint8:
+                return Self.U8
+            case _:
+                return Self.UNKNOWN
 
     def bits_per_scalar(self) -> Int:
         """How many bits one logical dimension occupies, which sub-byte kinds share.
@@ -430,7 +433,8 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Where an index's payload lives and which engine traverses it - `usearch_residency_t`.
 
     Each lifecycle verb names its residency, as `DenseIndex.init_vram` does, so this tag only travels
-    through the name tables: `Library.residency_name` and `Library.residency_from_name`.
+    through the name tables, `Library.residency_name` and `Library.residency_from_name`, and back
+    from `Arena.describe`.
     """
 
     var code: c_int
@@ -468,7 +472,7 @@ struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct CpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The CPU family dispatch picks, or a placement pins - `usearch_cpu_class_t`."""
 
     var code: c_int
@@ -478,7 +482,7 @@ struct CpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct GpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+struct GPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The GPU family dispatch picks, or a placement pins - `usearch_gpu_class_t`."""
 
     var code: c_int
@@ -488,7 +492,7 @@ struct GpuClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct NvmeClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+struct NVMeClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The NVMe I/O engine family an executor drives - `usearch_nvme_class_t`."""
 
     var code: c_int
@@ -526,10 +530,57 @@ struct ProgressArguments(Defaultable, ImplicitlyCopyable):
     """Reports a call makes at most, the last at completion; zero derives to ten."""
 
     def __init__(out self):
-        """No handler, which is all this binding installs."""
+        """No handler, so the call runs as one slice and reports nothing."""
         self.callback = NULL_ADDRESS
         self.state = NULL_ADDRESS
         self.steps = c_size_t(0)
+
+    @staticmethod
+    def of[
+        State: AnyType, //, handler: def(Int, Int, mut State) thin -> Continuation
+    ](state: Pointer[State, MutAnyOrigin], steps: Int = 0) -> Self:
+        """Installs a Mojo handler, never called concurrently, that may stop the call. Binding-only.
+
+        Parameters:
+            State: The handler's state, inferred from the argument.
+            handler: Called with the units completed, the units in total, and the state.
+
+        Args:
+            state: What the handler reads and writes; it must outlive the call.
+            steps: Reports the call makes at most, the last at completion; zero derives to ten.
+
+        Returns:
+            The progress slot every config with a `progress` knob takes.
+        """
+        var callback: ProgressCallback = _progress_trampoline[State, handler]
+        var progress = Self()
+        progress.callback = Pointer(to=callback).unsafe_bitcast[Address]()[]
+        progress.state = Int(state)
+        progress.steps = c_size_t(steps)
+        return progress
+
+
+@fieldwise_init
+struct Continuation(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Whether the call a progress handler watches carries on or unwinds - `usearch_continuation_t`."""
+
+    var code: c_int
+    """The raw `usearch_continuation_t` value the ABI exchanges."""
+    comptime CONTINUE = Self(0)
+    """Carry on to the next unit of work."""
+    comptime CANCEL = Self(1)
+    """Stop with `CANCELLED`; whether finished units stand is each verb's own contract."""
+
+
+comptime ProgressCallback = def(c_size_t, c_size_t, Address) thin abi("C") -> c_int
+"""`usearch_progress_callback_t`: the units completed, the units in total, and the state."""
+
+
+def _progress_trampoline[
+    State: AnyType, handler: def(Int, Int, mut State) thin -> Continuation
+](completed: c_size_t, total: c_size_t, state: Address) abi("C") -> c_int:
+    """The C handler one Mojo handler compiles into, its state typed again."""
+    return handler(Int(completed), Int(total), Pointer[State, MutAnyOrigin](unsafe_from_address=state)[]).code
 
 
 @fieldwise_init
@@ -550,11 +601,61 @@ struct PredicateArguments(ImplicitlyCopyable):
     state it is called with."""
 
     var callback: Address
-    """A `usearch_predicate_callback_t` compiled in C; `NULL_ADDRESS` admits every key."""
+    """The handler, compiled in Mojo by `of` or in C; `NULL_ADDRESS` admits every key."""
     var state: Address
     """Forwarded into every `callback` call."""
     var cost: PredicateCost
     """How many keys each `callback` call carries."""
+
+    def __init__(out self):
+        """No handler, which admits every key."""
+        self.callback = NULL_ADDRESS
+        self.state = NULL_ADDRESS
+        self.cost = PredicateCost.CHEAP
+
+    @staticmethod
+    def of[
+        State: AnyType,
+        //,
+        judge: def(Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], State) thin -> None,
+    ](state: Pointer[State, MutAnyOrigin], cost: PredicateCost = PredicateCost.CHEAP) -> Self:
+        """Installs a Mojo handler, called concurrently from the executor's threads. Binding-only.
+
+        Parameters:
+            State: The handler's state, inferred from the argument.
+            judge: Writes one admission per candidate key, reading the state but never writing it.
+
+        Args:
+            state: What the handler reads; it must outlive the call.
+            cost: How many keys each call carries.
+
+        Returns:
+            The predicate a filtered search takes.
+        """
+        var callback: PredicateCallback = _predicate_trampoline[State, judge]
+        return Self(Pointer(to=callback).unsafe_bitcast[Address]()[], Int(state), cost)
+
+
+comptime PredicateCallback = def(
+    Pointer[Key, ImmUntrackedOrigin], Pointer[Admission, MutUntrackedOrigin], c_size_t, Address
+) thin abi("C") -> None
+"""`usearch_predicate_callback_t`: the candidate keys, one admission slot apiece, their count, and the state."""
+
+
+def _predicate_trampoline[
+    State: AnyType, judge: def(Span[Key, ImmUntrackedOrigin], Span[Admission, MutUntrackedOrigin], State) thin -> None
+](
+    keys: Pointer[Key, ImmUntrackedOrigin],
+    admissions: Pointer[Admission, MutUntrackedOrigin],
+    count: c_size_t,
+    state: Address,
+) abi("C"):
+    """The C handler one Mojo predicate compiles into, its keys and admissions spanned again."""
+    judge(
+        Span[Key, ImmUntrackedOrigin](unsafe_ptr=keys, length=Int(count)),
+        Span[Admission, MutUntrackedOrigin](unsafe_ptr=admissions, length=Int(count)),
+        Pointer[State, MutAnyOrigin](unsafe_from_address=state)[],
+    )
 
 
 # endregion Residency & Execution
@@ -572,7 +673,7 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
         origin: The borrowed storage, named so it outlives every call this view crosses.
     """
 
-    var data: CString
+    var data: Pointer[Int8, Self.origin]
     """The first byte, borrowed for the duration of the call."""
     var length: c_size_t
     """How many bytes the run covers, since nothing terminates it."""
@@ -590,10 +691,7 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
         Returns:
             A view of exactly those bytes, with no terminator manufactured.
         """
-        return BytesView[text_origin](
-            text.unsafe_ptr().unsafe_bitcast[Int8]().unsafe_origin_cast[ImmUntrackedOrigin](),
-            c_size_t(text.byte_length()),
-        )
+        return BytesView[text_origin](text.unsafe_ptr().unsafe_bitcast[Int8](), c_size_t(text.byte_length()))
 
     @staticmethod
     def of[bytes_origin: ImmOrigin, //](bytes: Span[UInt8, bytes_origin]) -> BytesView[bytes_origin]:
@@ -608,18 +706,15 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Tri
         Returns:
             A view of exactly those bytes.
         """
-        return BytesView[bytes_origin](
-            CString(unsafe_from_address=Int(bytes.unsafe_ptr())),
-            c_size_t(len(bytes)),
-        )
+        return BytesView[bytes_origin](bytes.unsafe_ptr().unsafe_bitcast[Int8](), c_size_t(len(bytes)))
 
-    def untracked(self) -> BytesView[ImmUntrackedOrigin]:
+    def arguments(self) -> BytesView[ImmUntrackedOrigin]:
         """The same run with its borrow erased - the one instantiation the ABI signatures name.
 
         Returns:
             A view of the same bytes, whose type no longer keeps their storage alive.
         """
-        return BytesView[ImmUntrackedOrigin](self.data, self.length)
+        return BytesView[ImmUntrackedOrigin](self.data.unsafe_origin_cast[ImmUntrackedOrigin](), self.length)
 
 
 # endregion Byte Runs
@@ -638,7 +733,7 @@ struct KeysView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
         origin: The borrowed storage, named so it outlives every call this view crosses.
     """
 
-    var data: Pointer[Key, ImmUntrackedOrigin]
+    var data: Pointer[Key, Self.origin]
     """The first key, borrowed for the duration of the call."""
     var stride: c_size_t
     """Bytes between consecutive keys; zero repeats the first."""
@@ -656,18 +751,15 @@ struct KeysView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
         Returns:
             A view of exactly those keys.
         """
-        return KeysView[keys_origin](
-            Pointer[Key, ImmUntrackedOrigin](unsafe_from_address=Int(keys.unsafe_ptr())),
-            c_size_t(size_of[Key]()),
-        )
+        return KeysView[keys_origin](keys.unsafe_ptr(), c_size_t(size_of[Key]()))
 
-    def untracked(self) -> KeysView[ImmUntrackedOrigin]:
+    def arguments(self) -> KeysView[ImmUntrackedOrigin]:
         """The same run with its borrow erased - the one instantiation the ABI layouts name.
 
         Returns:
             A view of the same keys, whose type no longer keeps their storage alive.
         """
-        return KeysView[ImmUntrackedOrigin](self.data, self.stride)
+        return KeysView[ImmUntrackedOrigin](self.data.unsafe_origin_cast[ImmUntrackedOrigin](), self.stride)
 
 
 @fieldwise_init
@@ -715,7 +807,7 @@ struct RowsViewArguments(ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
-struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
+struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """A borrowed run of rows of one width - `usearch_rows_view_t`, the batch currency every verb reads.
 
     One vector is a one-row view. The row count becomes the verb's `count`, and the column count
@@ -727,8 +819,8 @@ struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
         origin: The borrowed rows, named so they outlive every call this view crosses.
     """
 
-    var data: Pointer[NoneType, ImmUntrackedOrigin]
-    """Base pointer of the first row; non-null, since a Mojo pointer cannot be otherwise."""
+    var data: Pointer[NoneType, Self.origin]
+    """Base pointer of the first row, borrowed for the duration of the call."""
     var rows: c_size_t
     """Rows the view carries, which the verb takes as its `count`."""
     var columns: c_size_t
@@ -773,7 +865,7 @@ struct RowsView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Triv
         if columns <= 0 or row_bytes == 0 or spanned % row_bytes != 0:
             raise Error(Status.SHAPE_MISMATCH, "RowsView.of")
         return RowsView[rows_origin](
-            Pointer[NoneType, ImmUntrackedOrigin](unsafe_from_address=Int(rows.unsafe_ptr())),
+            rows.unsafe_ptr().unsafe_bitcast[NoneType](),
             c_size_t(spanned // row_bytes),
             c_size_t(columns),
             c_size_t(row_bytes),
@@ -931,10 +1023,10 @@ comptime Verb[Arguments: AnyType] = def(Pointer[Arguments, MutAnyOrigin]) thin a
 comptime Release = def(Address) thin abi("C") -> None
 """The positional `_free` family - executors, arenas, indexes, cursors, streams; `NULL` is safe."""
 
-comptime OutcomeStatus = def(Address) thin abi("C") -> c_int
+comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`usearch_outcome_wait` and `usearch_outcome_status`: an outcome's status, the first once it is final."""
 
-comptime NameOf = def(c_int) thin abi("C") -> Address
+comptime NameOf = def(c_int) thin abi("C") -> Optional[CString]
 """The `_name` family: an enumerator's static spelling."""
 
 comptime FromName = def(BytesView[ImmUntrackedOrigin]) thin abi("C") -> c_int
@@ -953,6 +1045,9 @@ comptime ExecutorDrain = Verb[ExecutorDrainArguments]
 comptime ArenaInit = Verb[ArenaInitArguments]
 """`usearch_arena_init`."""
 
+comptime ArenaDescribe = Verb[ArenaDescribeArguments]
+"""`usearch_arena_describe`."""
+
 # endregion Signatures
 
 # region Placement
@@ -970,23 +1065,23 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         origin: The borrowed node-id array, named so it outlives the constructor that reads it.
     """
 
-    var memory_domains: Address
-    """The `int32_t` node ids to place shards on; `NULL_ADDRESS` derives every node the process may use."""
+    var memory_domains: Optional[Pointer[Int32, Self.origin]]
+    """The node ids to place shards on; `None` derives every node the process may use."""
     var memory_domains_count: c_size_t
     """How many ids the array holds; zero derives."""
     var shard_capacity: c_size_t
     """Entries one shard holds before the index opens another shard generation; zero derives."""
-    var cpu_class: CpuClass
+    var cpu_class: CPUClass
     """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
     var memory_limit: c_size_t
     """Bytes an NVMe view's key tables may take on each named domain; zero sets no ceiling."""
 
     def __init__(out self):
         """Derives every memory domain the process may allocate on."""
-        self.memory_domains = NULL_ADDRESS
+        self.memory_domains = None
         self.memory_domains_count = c_size_t(0)
         self.shard_capacity = c_size_t(0)
-        self.cpu_class = CpuClass.UNKNOWN
+        self.cpu_class = CPUClass.UNKNOWN
         self.memory_limit = c_size_t(0)
 
     @staticmethod
@@ -1003,17 +1098,20 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
             Options naming exactly those nodes, one shard apiece.
         """
         return RamOptions[domains_origin](
-            Int(memory_domains.unsafe_ptr()), c_size_t(len(memory_domains)), c_size_t(0), CpuClass.UNKNOWN, c_size_t(0)
+            memory_domains.unsafe_ptr(), c_size_t(len(memory_domains)), c_size_t(0), CPUClass.UNKNOWN, c_size_t(0)
         )
 
-    def untracked(self) -> RamOptions[ImmUntrackedOrigin]:
+    def arguments(self) -> RamOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
+        var memory_domains: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
+        if case .Some(domains) = self.memory_domains:
+            memory_domains = domains.unsafe_origin_cast[ImmUntrackedOrigin]()
         return RamOptions[ImmUntrackedOrigin](
-            self.memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class, self.memory_limit
+            memory_domains, self.memory_domains_count, self.shard_capacity, self.cpu_class, self.memory_limit
         )
 
 
@@ -1029,21 +1127,21 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         origin: The borrowed ordinal array, named so it outlives the constructor that reads it.
     """
 
-    var devices: Address
-    """The CUDA ordinals to place shards on; `NULL_ADDRESS` derives one free device."""
+    var devices: Optional[Pointer[Int32, Self.origin]]
+    """The CUDA ordinals to place shards on; `None` derives one free device."""
     var devices_count: c_size_t
     """How many ordinals the array holds; zero derives."""
     var shard_capacity: c_size_t
     """Entries one shard holds before the index opens another shard generation; zero derives."""
-    var gpu_class: GpuClass
+    var gpu_class: GPUClass
     """The class to dispatch as; `UNKNOWN` derives the devices' own."""
 
     def __init__(out self):
         """Derives one free device."""
-        self.devices = NULL_ADDRESS
+        self.devices = None
         self.devices_count = c_size_t(0)
         self.shard_capacity = c_size_t(0)
-        self.gpu_class = GpuClass.UNKNOWN
+        self.gpu_class = GPUClass.UNKNOWN
 
     @staticmethod
     def on[devices_origin: ImmOrigin, //](devices: Span[Int32, devices_origin]) -> VramOptions[devices_origin]:
@@ -1058,17 +1156,18 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming exactly those devices, one shard apiece.
         """
-        return VramOptions[devices_origin](
-            Int(devices.unsafe_ptr()), c_size_t(len(devices)), c_size_t(0), GpuClass.UNKNOWN
-        )
+        return VramOptions[devices_origin](devices.unsafe_ptr(), c_size_t(len(devices)), c_size_t(0), GPUClass.UNKNOWN)
 
-    def untracked(self) -> VramOptions[ImmUntrackedOrigin]:
+    def arguments(self) -> VramOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
-        return VramOptions[ImmUntrackedOrigin](self.devices, self.devices_count, self.shard_capacity, self.gpu_class)
+        var devices: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
+        if case .Some(ordinals) = self.devices:
+            devices = ordinals.unsafe_origin_cast[ImmUntrackedOrigin]()
+        return VramOptions[ImmUntrackedOrigin](devices, self.devices_count, self.shard_capacity, self.gpu_class)
 
 
 @fieldwise_init
@@ -1084,18 +1183,18 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         origin: The borrowed path array, named so it outlives the constructor that reads it.
     """
 
-    var paths: Address
-    """A `usearch_bytes_view_t` array; `NULL_ADDRESS` leaves every shard where its manifest points."""
+    var paths: Optional[Pointer[BytesView[ImmUntrackedOrigin], Self.origin]]
+    """The device or directory names; `None` leaves every shard where its manifest points."""
     var paths_count: c_size_t
     """How many paths the array holds; zero derives."""
-    var cpu_class: CpuClass
+    var cpu_class: CPUClass
     """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
 
     def __init__(out self):
         """Leaves every shard where its own manifest points."""
-        self.paths = NULL_ADDRESS
+        self.paths = None
         self.paths_count = c_size_t(0)
-        self.cpu_class = CpuClass.UNKNOWN
+        self.cpu_class = CPUClass.UNKNOWN
 
     @staticmethod
     def on[
@@ -1112,15 +1211,18 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         Returns:
             Options naming exactly those paths, one shard apiece.
         """
-        return NvmeOptions[paths_origin](Int(paths.unsafe_ptr()), c_size_t(len(paths)), CpuClass.UNKNOWN)
+        return NvmeOptions[paths_origin](paths.unsafe_ptr(), c_size_t(len(paths)), CPUClass.UNKNOWN)
 
-    def untracked(self) -> NvmeOptions[ImmUntrackedOrigin]:
+    def arguments(self) -> NvmeOptions[ImmUntrackedOrigin]:
         """The same options with the borrow erased - the one instantiation the ABI signature names.
 
         Returns:
             Options naming the same array, whose type no longer keeps it alive.
         """
-        return NvmeOptions[ImmUntrackedOrigin](self.paths, self.paths_count, self.cpu_class)
+        var paths: Optional[Pointer[BytesView[ImmUntrackedOrigin], ImmUntrackedOrigin]] = None
+        if case .Some(names) = self.paths:
+            paths = names.unsafe_origin_cast[ImmUntrackedOrigin]()
+        return NvmeOptions[ImmUntrackedOrigin](paths, self.paths_count, self.cpu_class)
 
 
 # endregion Placement
@@ -1132,8 +1234,8 @@ struct NvmeOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
 struct ExecutorForRamArguments(ImplicitlyCopyable):
     """`usearch_executor_for_ram_t`, laid out as the ABI declares it."""
 
-    var executor: Address
-    var outcome: Address
+    var executor: Pointer[Address, MutUntrackedOrigin]
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var threads: c_size_t
     var deferred_limit: c_size_t
@@ -1143,8 +1245,8 @@ struct ExecutorForRamArguments(ImplicitlyCopyable):
 struct ExecutorOnPoolArguments(ImplicitlyCopyable):
     """`usearch_executor_on_pool_t`, laid out as the ABI declares it."""
 
-    var executor: Address
-    var outcome: Address
+    var executor: Pointer[Address, MutUntrackedOrigin]
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var pool: Address
     var deferred_limit: c_size_t
@@ -1154,8 +1256,8 @@ struct ExecutorOnPoolArguments(ImplicitlyCopyable):
 struct ExecutorForVramArguments(ImplicitlyCopyable):
     """`usearch_executor_for_vram_t`, laid out as the ABI declares it."""
 
-    var executor: Address
-    var outcome: Address
+    var executor: Pointer[Address, MutUntrackedOrigin]
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
     var streams: Address
     var scratch_limit: c_size_t
@@ -1166,12 +1268,12 @@ struct ExecutorForVramArguments(ImplicitlyCopyable):
 struct ExecutorForNvmeArguments(ImplicitlyCopyable):
     """`usearch_executor_for_nvme_t`, laid out as the ABI declares it."""
 
-    var executor: Address
-    var outcome: Address
+    var executor: Pointer[Address, MutUntrackedOrigin]
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var nvme: NvmeOptions[ImmUntrackedOrigin]
     var threads: c_size_t
     var deferred_limit: c_size_t
-    var nvme_class: NvmeClass
+    var nvme_class: NVMeClass
 
 
 @fieldwise_init
@@ -1179,7 +1281,7 @@ struct ExecutorDrainArguments(ImplicitlyCopyable):
     """`usearch_executor_drain_t`, laid out as the ABI declares it."""
 
     var executor: Address
-    var outcome: Address
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var mood: Mood
 
 
@@ -1220,8 +1322,6 @@ struct Executor:
     """The loaded engine, held so its symbol table outlives every call made through the handle."""
     var address: Address
     """The opaque `usearch_executor_t` every verb hands back to the engine; `NULL_ADDRESS` runs inline."""
-    var residency: Residency
-    """Where the arenas it makes live; the caller-thread executor makes host pages."""
     var _handle: ArcPointer[_ExecutorHandle]
     """The handle's owner, which a VRAM arena shares so the executor outlives it."""
 
@@ -1231,19 +1331,17 @@ struct Executor:
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
         """
-        self = Self(library=library, address=NULL_ADDRESS, residency=Residency.RAM)
+        self = Self(library=library, address=NULL_ADDRESS)
 
-    def __init__(out self, *, library: Library, address: Address, residency: Residency):
+    def __init__(out self, *, library: Library, address: Address):
         """Adopts a handle that is already spawned, which is how the factories hand one back.
 
         Args:
             library: The loaded engine the handle was created through, and is freed through.
             address: A `usearch_executor_t` whose lifetime this executor takes over.
-            residency: The residency of the handles it drives, which places the arenas it makes.
         """
         self.library = library
         self.address = address
-        self.residency = residency
         self._handle = ArcPointer(_ExecutorHandle(library, address))
 
     @staticmethod
@@ -1281,14 +1379,17 @@ struct Executor:
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorForRamArguments]()
         arguments[unsafe_offset=0] = ExecutorForRamArguments(
-            Int(created), Int(outcome), ram.untracked(), c_size_t(threads), c_size_t(deferred_limit)
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+            ram.arguments(),
+            c_size_t(threads),
+            c_size_t(deferred_limit),
         )
         library.symbols().executor_for_ram(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_ram")
         return Self(
             library=library,
             address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0],
-            residency=Residency.RAM,
         )
 
     @staticmethod
@@ -1324,14 +1425,17 @@ struct Executor:
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorOnPoolArguments]()
         arguments[unsafe_offset=0] = ExecutorOnPoolArguments(
-            Int(created), Int(outcome), ram.untracked(), pool, c_size_t(deferred_limit)
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+            ram.arguments(),
+            pool,
+            c_size_t(deferred_limit),
         )
         library.symbols().executor_on_pool(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_on_pool")
         return Self(
             library=library,
             address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0],
-            residency=Residency.RAM,
         )
 
     @staticmethod
@@ -1370,14 +1474,18 @@ struct Executor:
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorForNvmeArguments]()
         arguments[unsafe_offset=0] = ExecutorForNvmeArguments(
-            Int(created), Int(outcome), nvme.untracked(), c_size_t(threads), c_size_t(deferred_limit), NvmeClass.UNKNOWN
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+            nvme.arguments(),
+            c_size_t(threads),
+            c_size_t(deferred_limit),
+            NVMeClass.UNKNOWN,
         )
         library.symbols().executor_for_nvme(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_nvme")
         return Self(
             library=library,
             address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0],
-            residency=Residency.NVME,
         )
 
     @staticmethod
@@ -1418,9 +1526,9 @@ struct Executor:
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorForVramArguments]()
         arguments[unsafe_offset=0] = ExecutorForVramArguments(
-            Int(created),
-            Int(outcome),
-            vram.untracked(),
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+            vram.arguments(),
             streams,
             c_size_t(scratch_limit),
             c_size_t(deferred_limit),
@@ -1430,7 +1538,6 @@ struct Executor:
         return Self(
             library=library,
             address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0],
-            residency=Residency.VRAM,
         )
 
     def drain(self, mood: Mood = Mood.PARKED) raises Error:
@@ -1450,7 +1557,9 @@ struct Executor:
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ExecutorDrainArguments]()
-        arguments[unsafe_offset=0] = ExecutorDrainArguments(self.address, Int(outcome), mood)
+        arguments[unsafe_offset=0] = ExecutorDrainArguments(
+            self.address, outcome.unsafe_origin_cast[MutUntrackedOrigin](), mood
+        )
         self.library.symbols().executor_drain(arguments.unsafe_origin_cast[MutAnyOrigin]())
         self.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_drain")
 
@@ -1464,9 +1573,28 @@ struct Executor:
 struct ArenaInitArguments(ImplicitlyCopyable):
     """`usearch_arena_init_t`, laid out as the ABI declares it."""
 
-    var arena: Address
+    var arena: Pointer[Address, MutUntrackedOrigin]
     var executor: Address
-    var outcome: Address
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
+
+
+@fieldwise_init
+struct ArenaDescription(ImplicitlyCopyable):
+    """`usearch_arena_description_t`: where an arena's outputs live."""
+
+    var residency: Residency
+    """`RAM` for host pages, `VRAM` for one device's memory."""
+    var device: c_size_t
+    """The device ordinal, as `Executor.for_vram` takes it, on `VRAM`; 0 for host pages."""
+
+
+@fieldwise_init
+struct ArenaDescribeArguments(ImplicitlyCopyable):
+    """`usearch_arena_describe_t`, laid out as the ABI declares it."""
+
+    var arena: Address
+    var outcome: Pointer[Outcome, MutUntrackedOrigin]
+    var description: Pointer[ArenaDescription, MutUntrackedOrigin]
 
 
 struct Arena:
@@ -1491,8 +1619,6 @@ struct Arena:
     """The loaded engine, held so the release can still reach `usearch_arena_free`."""
     var _address: Address
     """The `usearch_arena_t`, never null."""
-    var _residency: Residency
-    """Where its memory lives, so a host read of device memory is refused rather than made."""
     var _executor: Optional[ArcPointer[_ExecutorHandle]]
     """The VRAM executor that made it, held so the arena is freed first, on that executor's first stream."""
     var _generation: Int
@@ -1525,14 +1651,19 @@ struct Arena:
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         var arguments = stack_allocation[1, ArenaInitArguments]()
-        arguments[unsafe_offset=0] = ArenaInitArguments(Int(created), executor.address, Int(outcome))
+        arguments[unsafe_offset=0] = ArenaInitArguments(
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            executor.address,
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+        )
         executor.library.symbols().arena_init(arguments.unsafe_origin_cast[MutAnyOrigin]())
         executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_init")
         self._library = executor.library
         self._address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
-        self._residency = executor.residency
-        self._executor = Optional(executor._handle) if executor.residency == Residency.VRAM else None
+        self._executor = None
         self._generation = 0
+        if self.describe().residency == Residency.VRAM:
+            self._executor = Optional(executor._handle)
 
     def __deinit__(deinit self):
         """Frees the arena and every output in it, then lets a VRAM arena's executor go.
@@ -1545,13 +1676,28 @@ struct Arena:
         _ = self._executor^
         _ = self._library^
 
-    def residency(self) -> Residency:
-        """Where its memory lives, decided once by the executor that made it. Binding-only.
+    def describe(self) raises Error -> ArenaDescription:
+        """Where its outputs live, as the executor that made it decided. Calls `usearch_arena_describe`.
 
         Returns:
-            `VRAM` for device memory, which host reads refuse, and the host residency otherwise.
+            `VRAM` and the device for device memory, which host reads refuse, and `RAM` otherwise.
+
+        Raises:
+            `Error` if the engine refuses the query.
         """
-        return self._residency
+        var description = stack_allocation[1, ArenaDescription]()
+        description[unsafe_offset=0] = ArenaDescription(Residency.RAM, c_size_t(0))
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        var arguments = stack_allocation[1, ArenaDescribeArguments]()
+        arguments[unsafe_offset=0] = ArenaDescribeArguments(
+            self._address,
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+            description.unsafe_origin_cast[MutUntrackedOrigin](),
+        )
+        self._library.symbols().arena_describe(arguments.unsafe_origin_cast[MutAnyOrigin]())
+        self._library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_arena_describe")
+        return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
 
 def _served[origin: MutOrigin](arena: Pointer[Arena, origin], status: Status) -> Int:
@@ -1565,7 +1711,7 @@ def _served[origin: MutOrigin](arena: Pointer[Arena, origin], status: Status) ->
 
 def _readable[origin: MutOrigin](arena: Pointer[Arena, origin], generation: Int, detail: StaticString) raises Error:
     """Refuses a host read of a result over device memory, or over an arena a later call rewound."""
-    if arena[]._residency == Residency.VRAM:
+    if arena[].describe().residency == Residency.VRAM:
         raise Error(Status.DEVICE, detail)
     if arena[]._generation != generation:
         raise Error(Status.UNINITIALIZED, detail)
@@ -1654,8 +1800,8 @@ trait Call(Deinitable, Movable):
         index: Address,
         executor: Address,
         completion: Completion,
-        outcome: Address,
-        outputs: Address,
+        outcome: Pointer[Outcome, MutUntrackedOrigin],
+        outputs: Pointer[Self.Outputs, MutUntrackedOrigin],
     ):
         """Crosses into the engine, or writes the binding's own refusal into `outcome` without crossing."""
         ...
@@ -1671,9 +1817,9 @@ trait Call(Deinitable, Movable):
         ...
 
 
-def _refuse(outcome: Address, status: Status):
+def _refuse(outcome: Pointer[Outcome, MutUntrackedOrigin], status: Status):
     """Finishes a call the binding refused before it crossed, so every receiver reports it alike."""
-    Pointer[Outcome, MutAnyOrigin](unsafe_from_address=outcome)[] = Outcome(c_int(status.code), NULL_ADDRESS)
+    outcome[] = Outcome(c_int(status.code), None)
 
 
 def _block[C: Call](library: Library, var call: C, index: Address, executor: Address) raises Error -> C.Result:
@@ -1686,8 +1832,8 @@ def _block[C: Call](library: Library, var call: C, index: Address, executor: Add
         index,
         executor,
         Completion.BLOCKING,
-        Int(Pointer(to=mutable_slots[unsafe_offset=0].outcome)),
-        Int(Pointer(to=mutable_slots[unsafe_offset=0].outputs)),
+        Pointer(to=mutable_slots[unsafe_offset=0].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+        Pointer(to=mutable_slots[unsafe_offset=0].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
     )
     var written = mutable_slots[unsafe_offset=0]
     var generation = call.served(Status.of(written.outcome.status))
@@ -1748,8 +1894,8 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
             index,
             executor,
             Completion.DEFERRED,
-            Int(Pointer(to=slots[].outcome)),
-            Int(Pointer(to=slots[].outputs)),
+            Pointer(to=slots[].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
+            Pointer(to=slots[].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
         )
         self.generation = self.call.value().served(self.status())
 
@@ -1759,7 +1905,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
             var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
                 unsafe_from_address=Int(Pointer(to=self.slots[]))
             )
-            _ = self.library.symbols().outcome_wait(Int(Pointer(to=slots[].outcome)))
+            _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             _ = self.call.take().conclude(slots[].outputs, self.generation)
         _ = self.library^
 
@@ -1773,7 +1919,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         Returns:
             The status the outcome holds.
         """
-        return Status(self.library.symbols().outcome_status(Int(Pointer(to=self._slots()[].outcome))))
+        return Status(self.library.symbols().outcome_status(Pointer(to=self._slots()[].outcome)))
 
     def wait(mut self) raises Error -> ref[self] Self.C.Result:
         """Blocks until the call is final, then answers its result or raises its failure, every time it is asked.
@@ -1787,15 +1933,15 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         """
         if self.call:
             var slots = self._slots()
-            _ = self.library.symbols().outcome_wait(Int(Pointer(to=slots[].outcome)))
+            _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             var written = slots[]
             var result = self.call.take().conclude(written.outputs, self.generation)
             if written.outcome.status == c_int(0):
                 self.answer = result^
             else:
                 self.failure = self.library._error(written.outcome, Self.C.symbol)
-        if self.failure:
-            raise self.failure.value()
+        if case .Some(failure) = self.failure:
+            raise failure
         return Pointer(to=self.answer.value()).unsafe_origin_cast[origin_of(self)]()[]
 
 

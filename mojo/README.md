@@ -1,16 +1,20 @@
 # USearch for Mojo
 
 The Mojo package binds the C ABI in `c/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
-It needs Mojo 1.1 or a later 1.x release through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
+It needs Mojo 1.2 through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
+On Linux it needs glibc 2.39 or newer, the first conda-forge sysroot whose kernel headers carry the `io_uring` flags the NVMe engine sets.
 It exposes dense indexes, Vector Search over equidimensional embeddings; sequence, matrix and geospatial indexes follow as the C library ships them.
 
 ## Installation
 
-Name the package by `path` or `git` in a Pixi manifest; the engine arrives as its run dependency, in the environment prefix `mojo build` bakes as runpath.
+Let Pixi build the package from source, with no channel to add and no linker flag to pass; the engine arrives as its run dependency, in the environment prefix `mojo build` bakes as runpath.
 
 ```toml
+[workspace]
+preview = ["pixi-build"]
+
 [dependencies]
-usearch_mojo = { path = "path/to/USearch/mojo" }
+usearch_mojo = { git = "https://github.com/unum-cloud/USearch", subdirectory = "mojo", tag = "v3.0.0-rc.1" }
 ```
 
 From a checkout, `pixi run test` builds the engine through the tree's own CMake and runs `mojo/test.mojo` against it.
@@ -245,14 +249,22 @@ The breadth of the candidates rides each call as `expansion_factor` rather than 
 ### Filtered Search
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-It is the address of a `usearch_predicate_callback_t` compiled in C, judging a batch of keys per call, and its state crosses beside it as an address.
+`PredicateArguments.of` compiles a Mojo function into the handler, judging a batch of keys per call against a state it reads through a pointer; a `usearch_predicate_callback_t` compiled in C installs unchanged through the same struct.
 
 ```mojo
-var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admits_even, predicate_state=tenant))
+def admits_tenant(keys: Span[Key, ImmUntrackedOrigin], admissions: Span[Admission, MutUntrackedOrigin], tenant: UInt64):
+    for position in range(len(keys)):
+        var owned = keys[position].as_integer().value() >> 32 == tenant
+        admissions[position] = Admission.ADMIT if owned else Admission.REJECT
+
+var predicate = PredicateArguments.of[admits_tenant](tenant_slot)
+var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=predicate))
 ```
 
 The predicate runs on the executor's threads together, so it must be safe for concurrent use.
-This binding installs no progress handler, so an `insert` batch is all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no entry.
+A `progress` knob on the configs of the long verbs hears how far a call has come, and a handler installed by `ProgressArguments.of` stops it by answering `Continuation.CANCEL`.
+An insertion's handler reports but never cancels, so an `insert` batch stays all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no entry.
+Mojo handlers work on linux-64 in Mojo 1.2; AArch64 and macOS are confirmed by CI.
 
 ### Retrieval and Streaming
 
@@ -388,10 +400,8 @@ print(library.version_name(), library.capabilities_available())
 
 ## What This Binding Does Not Expose
 
-- __Progress handlers and cancellation.__
-  A handler returns a verdict, and a Mojo 1.1 `def ... abi("C")` that returns a value does not lower to the C calling convention, so every `progress` slot crosses as `NULL_ADDRESS`.
-- __Predicates written in Mojo.__
-  `predicate` takes the address of a `usearch_predicate_callback_t` compiled in C.
+- __Progress on loads, saves, absorbs and splits.__
+  Their entry points take no config, so those calls run without a handler.
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` offers neither, since their pulls block.
 
@@ -399,6 +409,8 @@ print(library.version_name(), library.capabilities_available())
 
 - __A thin layer over the C ABI.__
   Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, and enums mirror C enums, never strings.
+- __Pointers keep their types and their borrows.__
+  A C pointer that may be null is an `Optional[Pointer]`, a view carries the origin of what it borrows into its pointer, and only opaque handles and `void *` state cross as an integer `Address`.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__

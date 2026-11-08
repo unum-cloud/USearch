@@ -3,7 +3,7 @@
 
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
 license = "Apache-2.0"
 name = "usearch_mojo"
 version = "3.0.0-rc.1"

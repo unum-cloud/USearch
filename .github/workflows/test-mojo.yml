@@ -1,0 +1,29 @@
+name: Test Mojo
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test_mojo:
+    name: Test Mojo on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: git submodule update --init --recursive
+      - name: Set Up Pixi
+        uses: prefix-dev/setup-pixi@v0
+        with:
+          pixi-version: v0.84.1
+      # The binding opens the engine with `dlopen`, so this builds it through CMake and proves the test links with no flag of its own.
+      - name: Test Mojo
+        run: pixi run test

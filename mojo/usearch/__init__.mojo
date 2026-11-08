@@ -1,4 +1,4 @@
-"""Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, bound over its C ABI.
+"""One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe, bound over its C ABI.
 
 USearch indexes dense embeddings in a navigable graph and answers approximate nearest-neighbor
 queries over it, with SIMD kernels dispatched to the machine it runs on. This package binds the
@@ -44,11 +44,10 @@ Every fallible entry point raises `Error` and nothing else, because Mojo allows 
 function, so a second would force every caller raising `Error` to catch and convert. A function raises if and only if it can fail, so a
 refusal is never folded into an `Optional` a caller has to interpret.
 
-A closure capturing anything cannot be handed to C, and a `def ... abi("C")` that returns a value
-does not lower to the C calling convention, so only a callback returning nothing is written in
-Mojo: the `ValueLookup` of `attend`, its state crossing beside it as an address. Progress handlers
-are not exposed at all, and the admission predicate of `search` crosses as a raw address, so a
-kernel compiled in C installs unchanged.
+A closure capturing anything cannot be handed to C, so every callback is a capture-free function
+with its state crossing beside it as an address: the `ValueLookup` of `attend`, and the handlers
+`PredicateArguments.of` and `ProgressArguments.of` compile from a comptime Mojo function. A kernel
+compiled in C installs unchanged through the same slots.
 
 This package root re-exports every public symbol from the modules that mirror the C headers, so
 `from usearch import X` resolves whatever module X lives in.
@@ -63,23 +62,26 @@ from .library import Library
 
 # types
 from .types import (
-    Address,
     Admission,
     Arena,
+    ArenaDescription,
     BytesView,
-    CpuClass,
+    Continuation,
+    CPUClass,
     Deferred,
     Distance,
     Error,
     Executor,
-    GpuClass,
+    GPUClass,
     Key,
     Matches,
     Monolith,
     Mood,
-    NULL_ADDRESS,
-    NvmeClass,
+    NVMeClass,
     NvmeOptions,
+    PredicateArguments,
+    PredicateCost,
+    ProgressArguments,
     RamOptions,
     Residency,
     RowsView,

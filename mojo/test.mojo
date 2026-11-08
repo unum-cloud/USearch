@@ -11,8 +11,9 @@ from std.memory import stack_allocation
 from std.testing import TestSuite, assert_almost_equal, assert_equal, assert_false, assert_true
 
 from usearch import (
-    Address,
+    Admission,
     Arena,
+    Continuation,
     DenseAttendConfig,
     DenseIndex,
     DenseInsertConfig,
@@ -28,7 +29,8 @@ from usearch import (
     Key,
     Library,
     Mood,
-    NULL_ADDRESS,
+    PredicateArguments,
+    ProgressArguments,
     Residency,
     RowsView,
     ScalarKind,
@@ -36,6 +38,7 @@ from usearch import (
     Traversal,
     dense_metadata_read_buffer,
 )
+from usearch.types import Address, NULL_ADDRESS
 
 # region Pure Logic
 
@@ -138,7 +141,6 @@ def test_telemetry_starts_at_an_untaken_walk() raises:
     var stats = DenseTraversalStats()
     assert_equal(Int(stats.visited_members), 0, "nothing visited")
     assert_equal(Int(stats.computed_distances), 0, "nothing computed")
-
 
 
 # endregion Pure Logic
@@ -302,6 +304,8 @@ def test_arena_is_reused_and_results_outlive_the_call() raises:
     var index = _basis(library)
     var arena = Arena(library)
     var other = Arena(library)
+    var described = arena.describe()
+    assert_true(described.residency == Residency.RAM and described.device == 0, "an inline arena is host pages")
 
     var first = index.get[DType.float32](Key(integer=0), arena)
     var second = index.get[DType.float32](Key(integer=1), other)
@@ -545,6 +549,74 @@ def test_scans_find_every_query_itself() raises:
     assert_equal(len(matches), 3, "every row is a query")
     for query in range(3):
         assert_true(matches.query_keys(query)[0] == keys[query], "each query finds itself first")
+
+
+def _cancel_at_once(completed: Int, total: Int, mut reports: Int) -> Continuation:
+    """Counts its reports and stops the call at the first one."""
+    reports += 1
+    return Continuation.CANCEL
+
+
+def test_progress_cancels_a_search() raises:
+    """A handler answering `CANCEL` at its first report stops the search, which raises `CANCELLED`."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = _basis(library)
+    var queries = List[Float32]()
+    for _ in range(16):
+        queries.append(0)
+        queries.append(1)
+    var reports = stack_allocation[1, Int]().unsafe_origin_cast[MutAnyOrigin]()
+    reports[unsafe_offset=0] = 0
+    var arena = Arena(library)
+    var status = Status.SUCCESS
+    try:
+        _ = index.search(
+            RowsView.of(queries, 2),
+            1,
+            arena,
+            DenseSearchConfig(progress=ProgressArguments.of[_cancel_at_once](reports)),
+        )
+    except error:
+        status = error.status
+    assert_true(status == Status.CANCELLED, "the search stops when its handler cancels")
+    assert_equal(reports[unsafe_offset=0], 1, "and the handler hears no report after cancelling")
+
+
+def _admit_parity(keys: Span[Key, ImmUntrackedOrigin], admissions: Span[Admission, MutUntrackedOrigin], parity: UInt64):
+    """Admits the keys whose integer identity has the given parity."""
+    for position in range(len(keys)):
+        var matching = keys[position].as_integer().value() % 2 == parity
+        admissions[position] = Admission.ADMIT if matching else Admission.REJECT
+
+
+def test_predicate_filters_keys() raises:
+    """A Mojo predicate admitting odd keys leaves only those among every query's matches."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = DenseIndex.init_ram(library, DenseOptions(2))
+    index.reserve(4)
+    var rows = [Float32(1), 0, Float32(0), 1, Float32(1), 1, Float32(2), 1]
+    var keys = [Key(integer=0), Key(integer=1), Key(integer=2), Key(integer=3)]
+    index.insert(keys, RowsView.of(rows, 2))
+    var parity = stack_allocation[1, UInt64]().unsafe_origin_cast[MutAnyOrigin]()
+    parity[unsafe_offset=0] = 1
+    var arena = Arena(library)
+    var matches = index.search(
+        RowsView.of(rows, 2),
+        4,
+        arena,
+        DenseSearchConfig(traversal=Traversal.SCAN, predicate=PredicateArguments.of[_admit_parity](parity)),
+    )
+    for query in range(4):
+        var found = matches.query_keys(query)
+        assert_equal(len(found), 2, "both odd keys and neither even one")
+        for position in range(len(found)):
+            assert_equal(found[position].as_integer().value() % 2, UInt64(1), "only odd keys are reported")
 
 
 # endregion Engine
@@ -807,6 +879,8 @@ def main() raises:
     suite.test[test_split_and_sample]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
     suite.test[test_scans_find_every_query_itself]()
+    suite.test[test_progress_cancels_a_search]()
+    suite.test[test_predicate_filters_keys]()
     suite.test[test_deferred_calls_wait_until_final]()
     suite.test[test_deferred_failures_repeat]()
     suite.test[test_deferred_refusals_finish_at_submission]()
