@@ -35,7 +35,7 @@
 
 #include "usearch/usearch.h"                 // every modality's argument structures
 #include "usearch/dense/types.hpp"           // `dense::search_config_t` & kin - the configs every verb lowers
-#include "usearch/utilities/nvme_device.hpp" // `nvme_executor_t`, `io_engine_config_t`
+#include "usearch/utilities/nvme_device.hpp" // `nvme_executor`, `default_io_engine`, `io_engine_config_t`
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_executor_t`, `forkunion_allocator_t`, `no_memory_domain_k`
 #include "usearch/utilities/sample.hpp"      // `sample_inputs`, `sample_outputs` - what SAMPLE reads and writes
 #include "usearch/utilities/safegraphs_format.hpp" // `checkpoint_source_t` - a checkpoint on a device
@@ -176,6 +176,21 @@ status_t emplace_on_every_domain(emplace_type_&& emplace) noexcept {
     status_t const placed = place_on_every_domain();
     fu_topology_delete(topology);
     return placed;
+}
+
+/** The domain host tables sit on: the first @p ram names, else the heap's. */
+inline fu_memory_domain_id_t tables_domain(usearch_ram_options_t const& ram) noexcept {
+    return ram.memory_domains && ram.memory_domains_count ? static_cast<fu_memory_domain_id_t>(ram.memory_domains[0])
+                                                          : no_memory_domain_k;
+}
+
+/** The host allocator a variant keeps its tables on: @ref tables_domain on RAM, the heap's
+ *  otherwise. */
+template <typename residency_options_type_>
+inline forkunion_allocator_t host_allocator_of(residency_options_type_ const& options) noexcept {
+    if constexpr (std::is_same_v<residency_options_type_, usearch_ram_options_t>)
+        return forkunion_allocator_t {tables_domain(options)};
+    else return forkunion_allocator_t {no_memory_domain_k};
 }
 
 /** Whether a result carries traversal telemetry - one probe both crossings read. */
@@ -399,6 +414,11 @@ struct split_config_t {
     u64_t seed = 0;
 };
 
+/** The engine config a C call's refine options name. */
+inline refine_config_t refine_config_of(usearch_refine_options_t options) noexcept {
+    return {static_cast<candidates_count_t>(options.expansion_factor), options.memory_limit};
+}
+
 /** The variants behind a call's other handles, a split's receivers or a refinement's donors, read
  *  through the caller's own array, so a verb builds its one typed list straight from them. */
 struct variants_view_t {
@@ -419,13 +439,10 @@ inline search_config_t search_config_of(std::size_t expansion_factor, usearch_tr
     return config;
 }
 
-/** Where an arena lives, and where the walks it serves compute: RAM in a NUMA domain, or one
- *  device's VRAM, the only residencies an arena takes. */
+/** Where an arena lives, and where the walks it serves compute: RAM, or one device's VRAM, the
+ *  only residencies an arena takes. A RAM shard's memory domain travels beside it, never in it. */
 struct arena_residency_t {
     usearch_residency_t residency = usearch_residency_ram_k;
-
-    /** The host memory domain, on RAM. */
-    u32_t numa_domain = 0;
 
     /** The vendor ordinal, on VRAM. */
     u32_t device = 0;
@@ -437,11 +454,7 @@ struct arena_residency_t {
 inline constexpr arena_residency_t ram_residency_k {};
 
 inline constexpr arena_residency_t vram_residency(std::size_t device) noexcept {
-    return {usearch_residency_vram_k, 0, static_cast<u32_t>(device)};
-}
-
-inline constexpr arena_residency_t ram_residency(fu_memory_domain_id_t domain) noexcept {
-    return {usearch_residency_ram_k, static_cast<u32_t>(domain), 0};
+    return {usearch_residency_vram_k, static_cast<u32_t>(device)};
 }
 
 /** Writes what a refinement @p refined counts into the caller's @p report, if it names one. */
@@ -512,6 +525,148 @@ using dense_dtypes_t = first_dtypes<USEARCH_DENSE_DTYPES, nk_bf16_k, nk_u1_k, nk
 #pragma endregion Type Lists
 
 #pragma region CPU Classes
+
+/** The CPU families USearch ships tuned variants for - our own vocabulary, never an
+ *  alias of a sister library's feature bits. Each class bundles the compute features,
+ *  wait instruction, and atomics its silicon generation guarantees; explicit helpers
+ *  lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
+ *  libraries are linked. */
+enum class cpu_class_t : u32_t {
+
+    /** No class detected yet, or none of the classes below. */
+    unknown_k = 0,
+
+    // Portable floor
+
+    /** The portable floor: no SIMD assumptions, standard yields. */
+    serial_k,
+
+    // x86 classes
+
+    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+    intel_haswell_k,
+
+    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
+     *  successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+    intel_sierra_k,
+
+    /** Skylake-class x86: the AVX-512 foundation tier. */
+    intel_skylake_k,
+
+    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
+    intel_icelake_k,
+
+    /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
+    amd_genoa_k,
+
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
+     *  AMX-INT8 tiles. */
+    intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions and
+     *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
+    intel_diamond_k,
+
+    // Arm classes
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones fall
+     *  here too. */
+    aws_g2_k,
+
+    /** Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for Apple M2;
+     *  Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
+    apple_m2_k,
+
+    /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
+     *  @c BMOPA among them, without plain SVE. */
+    apple_m4_k,
+
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with waits that
+     *  monitor through @c WFE instead of spinning; no build compiles it yet. */
+    aws_g5_k,
+
+    /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
+    nvidia_vera_k,
+
+    // RISC-V classes
+
+    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
+     *  @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
+    alibaba_c930_k,
+
+    // WebAssembly classes
+
+    /** WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width
+     *  @c simd128 tier, so it runs on WebKit and in pages served without cross-origin isolation. */
+    wasm32_v128_k,
+
+    /** WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
+     *  bundled because every engine that ships one ships the other two. */
+    wasm64_extended_k,
+
+    // Monoversioned builds
+
+    /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
+     *  preset vouches for, as the libraries compiled them. */
+    monoversioned_k,
+};
+
+/** The GPU families USearch ships tuned variants for, the device twin of @c cpu_class_t: one
+ *  class per generation of kernel kits, each compiled for its own architecture alone. A class
+ *  implies its vendor, and an unknown newer device takes the newest class it satisfies within
+ *  that vendor's classes. */
+enum class gpu_class_t : u32_t {
+
+    /** No class detected yet, or none of the classes below. */
+    unknown_k = 0,
+
+    // NVIDIA classes
+
+    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
+    nvidia_ampere_k,
+
+    /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
+    nvidia_ada_k,
+
+    /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
+    nvidia_hopper_k,
+
+    /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA @c gather4 scattered fetches
+     *  and @c tcgen05 tensor-core GEMMs. */
+    nvidia_blackwell_k,
+
+    /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's conversions
+     *  without @c tcgen05. */
+    nvidia_blackwellrtx_k,
+
+    /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+    nvidia_rubin_k,
+
+    // AMD classes
+
+    /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
+    amd_cdna3_k,
+
+    /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
+    amd_cdna4_k,
+
+    /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
+    amd_cdna5_k,
+
+    // Apple classes
+
+    /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
+    apple_metal7_k,
+
+    /** Apple9-family GPUs - M3 & M4. */
+    apple_metal9_k,
+
+    /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
+    apple_metal10_k,
+};
 
 /** Lowers one CPU class onto NumKong's compute mask - cumulative within a platform, so the chains
  *  pick their best row per dtype under it. */
@@ -1169,6 +1324,13 @@ constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
 
 #pragma region Residencies
 
+/** Every I/O engine this build admits, yielding between polls, since one NVMe executor serves every
+ *  CPU class. */
+using default_io_engine_t = default_io_engine<fu::standard_yield_t>;
+
+/** The executor over every engine this build admits, each thread's transport picked at spawn. */
+using nvme_executor_t = nvme_executor<default_io_engine_t>;
+
 /** Residency discrimination off the alternative's own executor type - no second tag exists to
  *  disagree with the variant. */
 template <typename multi_type_>
@@ -1229,6 +1391,33 @@ inline constexpr vendored_residency_t vendored_residency_of =
     : std::is_same_v<executor_type_, cuda_executor_t>    ? vendored_residency_t::vram_nvidia_k
     : std::is_same_v<executor_type_, hip_executor_t>     ? vendored_residency_t::vram_amd_k
                                                          : vendored_residency_t::vram_apple_k;
+
+/** The first compute capability one class's cubins run on; the class covers the rest of that major
+ *  version up to the next row, the family its @c f or @c a target covers. */
+struct nvidia_class_span_t {
+    gpu_class_t gpu_class;
+    cuda_arch_t first;
+};
+
+/** Every NVIDIA class and the GPUs its unit runs natively; a new family is a new row. */
+inline constexpr nvidia_class_span_t nvidia_class_spans_k[] = {
+    {gpu_class_t::nvidia_ampere_k, cuda_arch_ampere_k},
+    {gpu_class_t::nvidia_ada_k, cuda_arch_ada_k},
+    {gpu_class_t::nvidia_hopper_k, cuda_arch_hopper_k},
+    {gpu_class_t::nvidia_blackwell_k, cuda_arch_blackwell_k},
+    {gpu_class_t::nvidia_blackwellrtx_k, cuda_arch_blackwellrtx_k},
+};
+
+/** The class whose unit carries cubins for compute capability @p arch: the last row of its major
+ *  version at or below it, else the Ampere unit, whose PTX JIT-compiles for any newer GPU, and none
+ *  older than Ampere. */
+constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
+    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
+    gpu_class_t picked = gpu_class_t::nvidia_ampere_k;
+    for (nvidia_class_span_t const& span : nvidia_class_spans_k)
+        if (span.first <= arch && span.first / 100 == arch / 100) picked = span.gpu_class;
+    return picked;
+}
 
 /** The class whose kernels run on an AMD GPU of @c gfx version @p major. @p minor: 9.4 is MI300's
  *  @c gfx942, 9.5 is MI350's @c gfx950, and 12.5 is MI400's @c gfx1250 and @c gfx1251; any other
@@ -1448,11 +1637,11 @@ using deferred_arguments_t = std::variant< //
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
     usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
     usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
-    usearch_sequence_load_vram_t,                                                                        //
+    usearch_sequence_load_vram_t, usearch_sequence_load_vram_buffer_t,                                   //
     usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
-    usearch_shapes_load_vram_t,                                                                          //
+    usearch_shapes_load_vram_t, usearch_shapes_load_vram_buffer_t,                                       //
     usearch_geospatial_load_ram_t, usearch_geospatial_load_ram_buffer_t, usearch_geospatial_view_nvme_t, //
-    usearch_geospatial_load_vram_t,                                                                      //
+    usearch_geospatial_load_vram_t, usearch_geospatial_load_vram_buffer_t,                               //
 
     /* Building */
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
@@ -1548,15 +1737,24 @@ inline void request_tile_state(cpu_ceiling_t ceiling) noexcept {
     [[maybe_unused]] nk_status_t const requested = nk_cpu_configure_thread(nk_cap_sapphireamx_k);
 }
 
-/** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, answering
- *  @p handle, or null once the outcome records why not; one thread is the caller. */
+/** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
+ *  one memory domain @p ram names on a machine of several, answering @p handle, or null once the
+ *  outcome records why not; one thread is the caller. */
 inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
-                                             cpu_ceiling_t ceiling, usearch_outcome_t* outcome) noexcept {
+                                             cpu_ceiling_t ceiling, usearch_ram_options_t const& ram,
+                                             usearch_outcome_t* outcome) noexcept {
     fu_topology_t topology = nullptr;
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
     handle.topology.reset(topology);
-    auto [spawned, status] = forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
+    // A pool spawns near one memory domain or across all of them, so several named ones take all.
+    std::size_t domains_count = 0;
+    bool const near_one = ram.memory_domains && ram.memory_domains_count == 1 &&
+                          fu_memory_domains_count(topology, &domains_count) == fu_success_k && domains_count > 1;
+    auto [spawned, status] = near_one ? forkunion_executor_t::spawn_near(
+                                            topology, static_cast<fu_memory_domain_id_t>(ram.memory_domains[0]),
+                                            threads, forkunion_allowed_of(ceiling))
+                                      : forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     request_tile_state(ceiling);
     handle.executor = std::move(spawned);
@@ -1624,7 +1822,8 @@ template <typename multi_type_>
     requires is_ram_index<multi_type_>
 inline usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
-    return spawn_ram_executor(call_executor, 1, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value, outcome);
+    return spawn_ram_executor(call_executor, 1, pick_cpu_ceiling(usearch_cpu_class_unknown_k).value,
+                              usearch_ram_options_t {}, outcome);
 }
 
 /** The executor a null handle runs NVMe work on: one thread of synchronous reads. */
@@ -1736,9 +1935,35 @@ inline void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) 
             .compare_exchange_strong(call, nullptr, std::memory_order_release, std::memory_order_relaxed);
 }
 
+/** Where @c usearch_gpu_devices lists the device @p arena lives on, or 0 for host pages; the arena
+ *  keeps its vendor's own ordinal, which the listing maps back. */
+inline std::size_t arena_device_ordinal(usearch_arena_handle_t const& arena) noexcept {
+    gpu_executor_t const* const devices = arena.executor ? std::get_if<gpu_executor_t>(&arena.executor->executor)
+                                                         : nullptr;
+    if (!devices) return 0;
+    gpu_vendor_t const vendor = std::visit(
+        []<typename executor_type_>(executor_type_ const&) noexcept {
+            if constexpr (is_gpu_executor<executor_type_>) return executor_type_::vendor_k;
+            else return gpu_vendor_t::unknown_k;
+        },
+        *devices);
+    std::span<gpu_device_t const> const listed = gpu_devices();
+    for (std::size_t ordinal = 0; ordinal != listed.size(); ++ordinal)
+        if (listed[ordinal].vendor == vendor && listed[ordinal].vendor_ordinal == arena.residency.device)
+            return ordinal;
+    return 0;
+}
+
 /** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
 inline bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
     return arena.device_memory ? arena.device_memory.contains(address) : arena.memory.contains(address);
+}
+
+/** Where @ref claim_arena wants @p arena for a verb filling host pages over an index at
+ *  @p residency : a host arena keeps them, and any other must sit on that device to take them over
+ *  by @ref publish. */
+inline arena_residency_t staging_residency(usearch_arena_t arena, arena_residency_t residency) noexcept {
+    return arena && arena->residency == ram_residency_k ? ram_residency_k : residency;
 }
 
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
@@ -1791,7 +2016,8 @@ inline value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcep
 template <typename value_type_>
 inline expected<value_type_*> publish(usearch_arena_handle_t& arena, value_type_* output, std::size_t count) noexcept {
     if (!arena.device_memory || !output || !count) return {output, status_t::success_k};
-    value_type_* const uploaded = carve<value_type_>(arena.device_memory, count);
+    using uploaded_t = std::remove_const_t<value_type_>;
+    uploaded_t* const uploaded = carve<uploaded_t>(arena.device_memory, count);
     if (!uploaded) return {nullptr, status_t::bad_alloc_k};
     return {uploaded, arena.device_memory.upload(uploaded, output, count * sizeof(value_type_))};
 }
@@ -1909,6 +2135,15 @@ struct links_outputs_t {
         return {reinterpret_cast<usearch_key_t const*>(keys.data()), offsets.data()};
     }
 };
+
+/** Where the host @p links a pull gathered reach the caller, as @ref publish moves them. */
+inline expected<usearch_keys_tape_view_t> publish_links(usearch_arena_handle_t& arena,
+                                                        links_outputs_t const& links) noexcept {
+    usearch_keys_tape_view_t const gathered = links.tape();
+    auto const [keys, keys_status] = publish(arena, gathered.keys, links.keys.size());
+    auto const [offsets, offsets_status] = publish(arena, gathered.offsets, links.offsets.size());
+    return {{keys, offsets}, first_failure({keys_status, offsets_status})};
+}
 
 /** Where a sample is written on a claimed arena's host pages, @c wanted rows each: the plan writes
  *  its keys, ordinals, parents, f32 parent distances and coordinates, and @ref publish_sample

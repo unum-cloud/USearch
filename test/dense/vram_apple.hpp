@@ -46,7 +46,8 @@ struct counting_metal_allocator_t {
  *  collection, built over the stream of the executor the Metal entry opened. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
-    using index_t = vram_apple_index<dtype_, nk_cap_metal_k, counting_metal_allocator_t, counting_metal_allocator_t>;
+    using index_t = vram_apple_index<dtype_, nk_cap_metal_k, fu::standard_yield_t, counting_metal_allocator_t,
+                                     counting_metal_allocator_t>;
     using indexes_t = vram_apple_indexes<uuid_t, dtype_, nk_cap_metal_k>;
     inline static constexpr char const* vendor_prefix_k = "metal";
 

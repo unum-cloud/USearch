@@ -19,6 +19,12 @@
  *  with the stream bound at construction; the @c cuda_reservable_allocator is the flat storage
  *  backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing models
  *  both.
+ *
+ *  GPUDirect Storage follows the same rule: @ref unum::usearch::utilities::cufile_api_t opens
+ *  @c libcufile.so.0 beside the driver and spells the few structures it passes, so no cuFile
+ *  header is included and nothing links it. The cuFile driver is process-wide, opened at the first
+ *  load through it and never closed here, since the library closes it at exit. A read lands under
+ *  the CUDA context current on the calling thread, as the range it lands in was registered.
  */
 #pragma once
 
@@ -38,6 +44,7 @@
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the driver opened at load
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's table of contexts
+#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator_t`, `fu_memory_domain_id_of_pci` - pinned placement
 #include "usearch/utilities/types.hpp"          // `gpu_device_t`, `gpu_devices_capacity_k`
 
 namespace unum::usearch::utilities {
@@ -180,6 +187,78 @@ inline constexpr unsigned cuda_memory_type_device_k = 2;
 
 #pragma endregion Driver ABI
 
+#pragma region cuFile ABI
+
+/** The @c CUfileOpError values USearch tells apart; any other non-zero value is a failure. */
+enum cufile_operation_error_t : int {
+    cufile_success_k = 0,
+    cufile_driver_already_open_k = 5026,
+};
+
+/** What every cuFile call answers, @c CUfileError_t: the library's error and the CUDA driver's
+ *  beneath it. */
+struct cufile_error_t {
+    cufile_operation_error_t error;
+    int cuda_error;
+};
+
+/** A file as cuFile registers it, @c CUfileDescr_t, which USearch fills with a Linux descriptor. */
+struct cufile_descriptor_t {
+    int type;
+    union handle_t {
+        int file;
+        void* handle;
+    } handle;
+    void const* file_system_operations;
+};
+
+/** @c CU_FILE_HANDLE_TYPE_OPAQUE_FD, the descriptor type of a Linux file. */
+inline constexpr int cufile_handle_type_descriptor_k = 1;
+
+/** A registered file, @c CUfileHandle_t. */
+using cufile_handle_t = void*;
+
+#pragma endregion cuFile ABI
+
+/**
+ *  @brief The cuFile entry points USearch calls, resolved from @c libcufile once per process.
+ *
+ *  Every entry is null where the library is absent or lacks any of them, which leaves every load
+ *  on its host path.
+ */
+struct cufile_api_t {
+    cufile_error_t (*driver_open)() = nullptr;
+    cufile_error_t (*handle_register)(cufile_handle_t*, cufile_descriptor_t*) = nullptr;
+    void (*handle_deregister)(cufile_handle_t) = nullptr;
+    cufile_error_t (*buffer_register)(void const*, std::size_t, int) = nullptr;
+    cufile_error_t (*buffer_deregister)(void const*) = nullptr;
+    std::ptrdiff_t (*read)(cufile_handle_t, void*, std::size_t, std::int64_t, std::int64_t) = nullptr;
+
+    /** Whether the library loaded with every entry resolved. */
+    explicit operator bool() const noexcept { return read != nullptr; }
+
+    /** Opens the library and resolves every entry, or answers the empty table. The library stays
+     *  open for the life of the process, as the table points into it. */
+    static cufile_api_t load() noexcept {
+        shared_library_t const library = shared_library_t::open("libcufile.so.0");
+        if (!library) return {};
+        cufile_api_t api;
+        bool const resolved = //
+            library.resolve("cuFileDriverOpen", api.driver_open) &&
+            library.resolve("cuFileHandleRegister", api.handle_register) &&
+            library.resolve("cuFileHandleDeregister", api.handle_deregister) &&
+            library.resolve("cuFileBufRegister", api.buffer_register) &&
+            library.resolve("cuFileBufDeregister", api.buffer_deregister) && library.resolve("cuFileRead", api.read);
+        return resolved ? api : cufile_api_t {};
+    }
+
+    /** Opens the process-wide driver, or finds it opened by the host program. */
+    bool open_driver() const noexcept {
+        cufile_operation_error_t const status = driver_open().error;
+        return status == cufile_success_k || status == cufile_driver_already_open_k;
+    }
+};
+
 /**
  *  @brief The driver entry points USearch calls, resolved from @c libcuda once per process.
  *
@@ -193,6 +272,7 @@ struct cuda_api_t {
     cuda_result_t (*get_device)(int*, int) = nullptr;
     cuda_result_t (*get_device_attribute)(int*, cuda_device_attribute_t, int) = nullptr;
     cuda_result_t (*get_device_name)(char*, int, int) = nullptr;
+    cuda_result_t (*get_pci_bus_id)(char*, int, int) = nullptr;
     cuda_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
     cuda_result_t (*can_access_peer)(int*, int, int) = nullptr;
     cuda_result_t (*retain_primary_context)(cuda_context_handle_t*, int) = nullptr;
@@ -253,6 +333,13 @@ struct cuda_api_t {
      *  released, as the driver stays open; null past the listed devices. */
     cuda_context_handle_t primary_contexts[gpu_devices_capacity_k] = {};
 
+    /** The memory domain nearest each listed device, where its pinned host bytes go, or
+     *  @c no_memory_domain_k where none is known. */
+    fu_memory_domain_id_t memory_domains[gpu_devices_capacity_k] = {};
+
+    /** cuFile's entries, opened beside the driver, which stay null without the library. */
+    cufile_api_t cufile;
+
     /** Whether the driver loaded and initialized with every entry resolved. */
     explicit operator bool() const noexcept { return memory_set_access != nullptr; }
 
@@ -270,6 +357,7 @@ struct cuda_api_t {
             library.resolve("cuDeviceGet", api.get_device) &&
             library.resolve("cuDeviceGetAttribute", api.get_device_attribute) &&
             library.resolve("cuDeviceGetName", api.get_device_name) &&
+            library.resolve("cuDeviceGetPCIBusId", api.get_pci_bus_id) &&
             library.resolve("cuDeviceTotalMem_v2", api.get_device_memory) &&
             library.resolve("cuDeviceCanAccessPeer", api.can_access_peer) &&
             library.resolve("cuDevicePrimaryCtxRetain", api.retain_primary_context) &&
@@ -310,6 +398,7 @@ struct cuda_api_t {
         library.resolve("cuTensorMapEncodeTiled", api.encode_tensor_map_tiled);
         // A driver without a usable GPU fails its initialization, which lists no devices either.
         if (!resolved || api.init(0) != cuda_success_k) return {};
+        api.cufile = cufile_api_t::load();
         int devices_count = 0;
         if (api.get_device_count(&devices_count) != cuda_success_k) return {};
         for (int ordinal = 0; ordinal != devices_count && static_cast<std::size_t>(ordinal) != gpu_devices_capacity_k;
@@ -320,6 +409,11 @@ struct cuda_api_t {
             if (api.get_device(&device, ordinal) == cuda_success_k &&
                 api.retain_primary_context(&primary, device) == cuda_success_k)
                 api.primary_contexts[ordinal] = primary;
+            // A bus that names no memory domain leaves the device's pinned bytes on the heap.
+            char bus_id[32] = {};
+            [[maybe_unused]] cuda_result_t const named = api.get_pci_bus_id(bus_id, sizeof(bus_id), device);
+            [[maybe_unused]] fu_status_t const placed = fu_memory_domain_id_of_pci(bus_id,
+                                                                                   &api.memory_domains[ordinal]);
         }
         return api;
     }
@@ -430,32 +524,6 @@ enum cuda_arch_t : int {
 /** Compute capability @p major. @p minor on the @c cuda_arch_t scale, as the driver reports it. */
 constexpr cuda_arch_t cuda_arch_of(u32_t major, u32_t minor) noexcept {
     return static_cast<cuda_arch_t>(major * 100 + minor * 10);
-}
-
-/** The compute capabilities one class's cubins run on, both ends included: each class lists the
- *  family its @c f or @c a target covers, never a whole major version. */
-struct nvidia_class_span_t {
-    gpu_class_t gpu_class;
-    cuda_arch_t first;
-    cuda_arch_t last;
-};
-
-/** Every NVIDIA class and the GPUs its unit runs natively; a new family is a new row. */
-inline constexpr nvidia_class_span_t nvidia_class_spans_k[] = {
-    {gpu_class_t::nvidia_ampere_k, cuda_arch_ampere_k, static_cast<cuda_arch_t>(870)},
-    {gpu_class_t::nvidia_ada_k, cuda_arch_ada_k, cuda_arch_ada_k},
-    {gpu_class_t::nvidia_hopper_k, cuda_arch_hopper_k, cuda_arch_hopper_k},
-    {gpu_class_t::nvidia_blackwell_k, cuda_arch_blackwell_k, static_cast<cuda_arch_t>(1030)},
-    {gpu_class_t::nvidia_blackwellrtx_k, cuda_arch_blackwellrtx_k, static_cast<cuda_arch_t>(1210)},
-};
-
-/** The class whose unit carries cubins for compute capability @p arch: the row listing it, else the
- *  Ampere unit, whose PTX JIT-compiles for any newer GPU, and none older than Ampere. */
-constexpr gpu_class_t nvidia_class_of(cuda_arch_t arch) noexcept {
-    if (arch < cuda_arch_ampere_k) return gpu_class_t::unknown_k;
-    for (nvidia_class_span_t const& span : nvidia_class_spans_k)
-        if (span.first <= arch && arch <= span.last) return span.gpu_class;
-    return gpu_class_t::nvidia_ampere_k;
 }
 
 /** One GPU's hardware specification - the facts runtime dispatch consults; hardware only,
@@ -978,8 +1046,10 @@ struct cuda_arena_allocator {
 /** The byte specialization a walk carves its scratch through. */
 using cuda_arena_allocator_t = cuda_arena_allocator<byte_t>;
 
-/** Page-locked host allocator - the DMA source and sink; pinning is synchronous, the
- *  stream is identity only. */
+/** Page-locked host allocator - the DMA source and sink; pinning is synchronous, the stream is
+ *  identity only. Knowing the device, it places its pages on the memory domain nearest the device's
+ *  PCIe slot, where the copy engines read them, and page-locks them there; otherwise, or where the
+ *  system names no domain, the driver allocates them. */
 template <typename value_type_ = byte_t>
 struct cuda_pinned_allocator {
     using value_type = value_type_;
@@ -994,23 +1064,38 @@ struct cuda_pinned_allocator {
     /** Pins through @p api for host bounces that ride no stream. */
     explicit cuda_pinned_allocator(cuda_api_t const& api) noexcept : api_(&api) {}
 
+    /** Pins through @p api beside device @p device, for buffers that ride no stream. */
+    cuda_pinned_allocator(cuda_api_t const& api, int device) noexcept
+        : api_(&api), device_(device), memory_domain_(api.memory_domains[device]) {}
+
     /** Takes the identity of the executor's @p stream and the device it names. */
     template <typename stream_type_>
     explicit cuda_pinned_allocator(stream_type_ const& stream) noexcept
-        : api_(stream.api), stream_(stream.handle), device_(stream.device) {}
+        : api_(stream.api), stream_(stream.handle), device_(stream.device),
+          memory_domain_(stream.api->memory_domains[stream.device]) {}
     template <typename other_>
     cuda_pinned_allocator(cuda_pinned_allocator<other_> const& other) noexcept
-        : api_(other.api_), stream_(other.stream()), device_(other.device()) {}
+        : api_(other.api_), stream_(other.stream()), device_(other.device()), memory_domain_(other.memory_domain_) {}
 
     value_type* allocate(std::size_t count) noexcept {
-        void* pointer = nullptr;
-        return api_ && *api_ &&
-                       api_->allocate_host(&pointer, count * sizeof(value_type), cuda_host_portable_k) == cuda_success_k
-                   ? static_cast<value_type*>(pointer)
-                   : nullptr;
+        if (!api_ || !*api_) return nullptr;
+        std::size_t const bytes = pinned_bytes_(count);
+        if (memory_domain_ == no_memory_domain_k) {
+            void* pointer = nullptr;
+            return api_->allocate_host(&pointer, bytes, cuda_host_portable_k) == cuda_success_k
+                       ? static_cast<value_type*>(pointer)
+                       : nullptr;
+        }
+        byte_t* const pointer = forkunion_allocator_t {memory_domain_}.allocate(bytes);
+        if (pointer && api_->register_host(pointer, bytes, cuda_host_portable_k) != cuda_success_k)
+            return forkunion_allocator_t {memory_domain_}.deallocate(pointer, bytes), nullptr;
+        return reinterpret_cast<value_type*>(pointer);
     }
-    void deallocate(value_type* pointer, std::size_t) noexcept {
-        if (pointer) api_->free_host(pointer);
+    void deallocate(value_type* pointer, std::size_t count) noexcept {
+        if (!pointer) return;
+        if (memory_domain_ == no_memory_domain_k) return void(api_->free_host(pointer));
+        api_->unregister_host(pointer);
+        forkunion_allocator_t {memory_domain_}.deallocate(reinterpret_cast<byte_t*>(pointer), pinned_bytes_(count));
     }
 
     /** Page-locks @p bytes the caller owns, like a read-only file mapping, so copies from them
@@ -1036,10 +1121,109 @@ struct cuda_pinned_allocator {
     cuda_api_t const* api_ = nullptr;
     cuda_stream_handle_t stream_ = nullptr;
     int device_ = 0;
+
+    /** Where the pages sit, @c no_memory_domain_k where the driver allocates them. */
+    fu_memory_domain_id_t memory_domain_ = no_memory_domain_k;
+
+    /** The bytes @p count values pin: whole pages, since two registrations sharing a page refuse
+     *  each other. */
+    static std::size_t pinned_bytes_(std::size_t count) noexcept {
+        return round_up_to_multiple<std::size_t>(count * sizeof(value_type), fu::ram_page_size());
+    }
 };
 
 /** The byte specialization a host bounce is pinned through. */
 using cuda_pinned_allocator_t = cuda_pinned_allocator<byte_t>;
+
+#pragma region cuFile Reads
+
+/** A mapped file cuFile reads, registered on an @c O_DIRECT descriptor of its own beside the
+ *  mapping; empty where cuFile or the file refuses, which keeps a load on its driver copies. */
+struct linux_cufile_file_t {
+
+    /** The block a read starts and ends on, as @c O_DIRECT demands. */
+    inline static constexpr std::size_t block_bytes_k = 4096;
+
+    linux_cufile_file_t() noexcept = default;
+    linux_cufile_file_t(linux_cufile_file_t&& other) noexcept
+        : api_(std::exchange(other.api_, nullptr)), handle_(std::exchange(other.handle_, nullptr)),
+          file_(std::move(other.file_)) {}
+    linux_cufile_file_t& operator=(linux_cufile_file_t&& other) noexcept {
+        std::swap(api_, other.api_);
+        std::swap(handle_, other.handle_);
+        std::swap(file_, other.file_);
+        return *this;
+    }
+    linux_cufile_file_t(linux_cufile_file_t const&) = delete;
+    linux_cufile_file_t& operator=(linux_cufile_file_t const&) = delete;
+    ~linux_cufile_file_t() noexcept {
+        if (handle_) api_->handle_deregister(handle_);
+    }
+
+    /** Whether the file is registered. */
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+    /** The cuFile entries that registered it. */
+    cufile_api_t const& api() const noexcept { return *api_; }
+
+    /** Opens the cuFile driver through @p api and registers @p mapping 's file, or answers the
+     *  empty file. */
+    static linux_cufile_file_t open(cuda_api_t const& api, mapped_file_t const& mapping) noexcept {
+        linux_cufile_file_t file;
+        if (!api.cufile || !api.cufile.open_driver()) return file;
+        file.file_ = mapping.open_direct();
+        if (!file.file_) return file;
+        cufile_descriptor_t described {};
+        described.type = cufile_handle_type_descriptor_k;
+        described.handle.file = file.file_.descriptor();
+        if (api.cufile.handle_register(&file.handle_, &described).error == cufile_success_k) file.api_ = &api.cufile;
+        else file.handle_ = nullptr;
+        return file;
+    }
+
+    /**
+     *  @brief Reads the bytes of @p extent, which sits at @p offset in the file, into the buffer
+     *      @p base registered, @p into bytes past it, whole blocks around them; moves @p into past
+     *      those blocks and answers where the extent sits.
+     *
+     *  @par Statuses:
+     *  - @c io_k The read ended short.
+     */
+    expected<bytes_view_t> read(std::size_t offset, std::size_t bytes, byte_t* base, std::size_t& into) const noexcept {
+        std::size_t const lead = offset % block_bytes_k, ending = lead + bytes;
+        std::size_t const asked = round_up_to_multiple(ending, block_bytes_k);
+        std::ptrdiff_t const read_bytes = api_->read(handle_, base, asked, static_cast<std::int64_t>(offset - lead),
+                                                     static_cast<std::int64_t>(into));
+        // A file ending inside its last block lands short of that block, past every byte asked.
+        if (read_bytes < 0 || static_cast<std::size_t>(read_bytes) < ending) return {{}, status_t::io_k};
+        bytes_view_t const staged {base + into + lead, bytes};
+        into += asked;
+        return {staged, status_t::success_k};
+    }
+
+  private:
+    cufile_api_t const* api_ = nullptr;
+    cufile_handle_t handle_ = nullptr;
+    seekable_file_t file_;
+};
+
+/** A mapped part a load reads, through cuFile when @c file registered. */
+struct cuda_part_source_t {
+    linux_cufile_file_t file;
+    bytes_view_t part;
+};
+
+/** The registered part of @p sources holding @p extent, or null. */
+inline cuda_part_source_t const* cufile_holder(std::span<cuda_part_source_t const> sources,
+                                               bytes_view_t extent) noexcept {
+    for (cuda_part_source_t const& source : sources)
+        if (source.file && extent.data() >= source.part.data() &&
+            extent.data() + extent.size() <= source.part.data() + source.part.size())
+            return &source;
+    return nullptr;
+}
+
+#pragma endregion cuFile Reads
 
 /** Page-locked slots the traversal contexts on one executor stream copy their counters into. Each
  *  context takes one at birth and gives it back at death, so two alive at once never share one, and
@@ -1056,8 +1240,8 @@ struct cuda_pinned_slots_t {
      *  run pins twice as many. */
     inline static constexpr std::size_t slots_per_pin_k = 64;
 
-    /** Pins its slots through @p api. */
-    explicit cuda_pinned_slots_t(cuda_api_t const& api) noexcept : slots_ {cuda_pinned_allocator_t {api}} {}
+    /** Pins its slots through @p api beside device @p device. */
+    cuda_pinned_slots_t(cuda_api_t const& api, int device) noexcept : slots_ {cuda_pinned_allocator_t {api, device}} {}
 
     /** Hands out a slot, a returned one first; null when pinning more fails. */
     void* take() noexcept {
@@ -1460,7 +1644,8 @@ struct cuda_traversal_context {
      *  stream's pool, and borrows their host twins from the stream's pinned slots; sized buffers
      *  wait for the first verb. */
     cuda_traversal_context(allocator_t allocator) noexcept
-        : results {growing_buffer<scored_node_t, cuda_pinned_allocator_t> {cuda_pinned_allocator_t {allocator.api()}}},
+        : results {growing_buffer<scored_node_t, cuda_pinned_allocator_t> {
+              cuda_pinned_allocator_t {allocator.api(), allocator.device()}}},
           allocator_ {(cuda_set_device(allocator.api(), allocator.device()), allocator)}, //
           telemetry_ {cuda_make_unique(telemetry_allocator_t {device_allocator_t {allocator_}}, 1)},
           assigned_nodes_ {
@@ -1744,7 +1929,7 @@ struct cuda_executor_t {
         /** Takes @p handle, opened on @p device through @p api, and binds the arena to it; the
          *  event is born there too, so @p device must be current. */
         stream_t(cuda_api_t const& api, int device, cuda_stream_t&& handle) noexcept
-            : api(&api), device(device), pinned_slots(new (std::nothrow) cuda_pinned_slots_t {api}),
+            : api(&api), device(device), pinned_slots(new (std::nothrow) cuda_pinned_slots_t {api, device}),
               kernel_tables(new (std::nothrow) cuda_kernel_tables_t), handle(std::move(handle)), event(api),
               arena(cuda_device_allocator_t {*this}) {}
 

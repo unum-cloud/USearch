@@ -1,4 +1,4 @@
-# Contribution Guide
+# Contributing to USearch
 
 Thank you for coming here!
 It's always nice to have third-party contributors 🤗
@@ -11,7 +11,7 @@ To keep the quality of the code high, we have a set of guidelines common to [all
 - [How to organize branches?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#branches)
 - [How to style commits?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#commits)
 
-## Before you start
+## Before You Start
 
 Before building the first time, please pull `git` submodules.
 That's how we bring in NumKong and other optional dependencies to test all of the available functionality.
@@ -309,6 +309,22 @@ Each residency and each GPU vendor is a dedicated tower with its own customizabl
 Code two towers genuinely share becomes a component each tower owns as a member, or a free function each tower calls.
 Host and device towers never fuse, since a RAM walk is a much finer-grained processing mode than a device batch.
 A tower never takes a lock to make a shared design fit; it redesigns the protocol instead.
+
+### Layers
+
+`.githooks/pre-commit` checks the includes.
+
+- `utilities/` includes itself, `usearch/types.h`, ForkUnion, NumKong and, in `*_device.hpp`, the vendor runtimes.
+  It stops at hardware, memory, files and the SafeGraphs format: no item meaning and no CPU or GPU class.
+- `basic/` includes itself and `utilities/`.
+  It stops at a graph over opaque values, through the kits it is handed.
+- `dense/` includes itself and `utilities/`.
+  It stops at vectors and their kernels, through the kits it is handed.
+- `sequence/`, `shapes/` and `geospatial/` include themselves, `basic/`, `utilities/` and their sibling library.
+  Each stops at one value type's kits, and never includes dense or a `c/usearch` header.
+- `cpp/usearch/` includes only `c/usearch/`, the C ABI in C++ clothes.
+- `tools/` includes `c/usearch/`, `cpp/` and `utilities/`.
+  Tools use the C ABI and never include an engine header.
 
 ### CPU Classes
 
@@ -781,16 +797,16 @@ The Rust crate hands CMake the same toolchain file on its own, so `cargo build -
 
 ## Documentation
 
-Sphinx builds the site under `docs/`.
+unum.cloud renders the reference from a symbol bundle that every release carries as `usearch_docs_<version>.tar.gz`.
 A function's `@par Statuses:` block lists only its contract statuses, the conditions the caller controls or can observe, since the status enum documents once which categories any allocating, device-binding, file-touching or cancellable verb may also return.
-Doxygen feeds the C and C++ references through Breathe, and the Python reference imports the compiled `usearch` package:
+The bundle holds each binding's own tool output: Doxygen XML for C, C++, Java and C#, griffe for Python, rustdoc JSON, a Swift symbol graph and `mojo doc`, plus the sources of the rest:
 
 ```sh
-pip install -r docs/requirements.txt
-pip install -e .                        # the package the Python reference documents
-cd docs && doxygen conf.dox             # writes the XML into `build/xml`
-sphinx-build -M html . ../build/docs -W # writes the site into `build/docs/html`
+.github/scripts/build-docs.sh # writes build/usearch_docs_<version>.tar.gz
 ```
+
+It needs Doxygen, `griffe`, the Rust toolchain the script names, Swift and Mojo on the path.
+Swift typechecks against NumKong's module from the `numkong` submodule, or from `FETCHCONTENT_SOURCE_DIR_NUMKONG`.
 
 ## Commits
 

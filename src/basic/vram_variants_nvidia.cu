@@ -4,9 +4,9 @@
  *  @date October 17, 2026
  *  @brief The NVIDIA unit of the kernels every basic face shares, over 32-bit node IDs.
  *
- *  The rebase of absorbed nodes, the reachability audit with its reconnection, and a split's
- *  partition and scatter read the neighbors matrix alone and move values as opaque bytes, so one
- *  unit serves every modality on every NVIDIA class.
+ *  The rebase of absorbed nodes, the reachability audit with its reconnection, a sweep's count and
+ *  scatter, and a split's partition and scatter read the neighbors matrix alone and move values as
+ *  opaque bytes, so one unit serves every modality on every NVIDIA class.
  *
  *  Compiled twice: by NVCC device-only into the unit's fatbin, and by Clang host-only, where it
  *  names that fatbin, linked in beside it, to the faces, which load it at their first @c reserve.
@@ -36,6 +36,10 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
     if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         dense::vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.nodes_count, graph.connectivity,
                                               graph.source_first, graph.source_bound, graph.shift);
+    else if constexpr (kernel_ == vram_kernel_t::widen_links_k)
+        dense::vram_widen_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.nodes_count, graph.connectivity,
+                                             graph.saved_neighbors, graph.saved_offsets, graph.degree,
+                                             graph.source_bound, graph.shift, graph.malformed);
     else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
         dense::vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.nodes_count, graph.seed_count);
     else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
@@ -52,6 +56,12 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
         dense::vram_reconnect_island<cuda_warp_t>(graph.neighbors, graph.connectivity, graph.island_ids,
                                                   graph.islands_count, graph.reached, graph.nodes_count,
                                                   graph.seed_count, graph.in_links, graph.reconnected);
+    else if constexpr (kernel_ == vram_kernel_t::count_back_links_k)
+        dense::vram_count_back_links<cuda_warp_t>(graph.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::offset_back_links_k)
+        dense::vram_offset_back_links<cuda_warp_t>(graph.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k)
+        dense::vram_scatter_back_links<cuda_warp_t>(graph.sweep);
     else if constexpr (kernel_ == vram_kernel_t::partition_roots_k)
         dense::vram_partition_roots<cuda_warp_t>(graph.roots, graph.seed_count, graph.node_parts, graph.frontier,
                                                  graph.part_sizes);

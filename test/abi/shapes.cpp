@@ -52,7 +52,9 @@ struct shapes_tape_t {
     std::vector<f32_t> coordinates;
     std::vector<std::size_t> offsets {0};
 
-    usearch_tape_view_t view() const noexcept { return {coordinates.data(), offsets.data(), usearch_scalar_f32_k}; }
+    usearch_tape_view_t view() const noexcept {
+        return tape_of(coordinates.data(), offsets.data(), usearch_scalar_f32_k);
+    }
 };
 
 /** @p count shapes from eight template clouds of @p sizes ' points, each keeping a prefix of
@@ -115,13 +117,13 @@ static std::vector<float> poses_of(handle<shapes_verbs_t>& index, std::size_t co
         usearch_shapes_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
         get.key = key_of_offset(index.session->seed, offset);
-        get.shapes = &shapes, get.written = &written, get.arena = index.session->arena;
+        get.shapes = &shapes, get.written = &written, get.arena = index.arena();
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_shapes_get(&get);
         failures += check(outcome) + check(written == 1);
         if (outcome.status != usearch_status_success_k || written != 1) break;
         float const* const coordinates = static_cast<float const*>(shapes.data);
-        poses.insert(poses.end(), coordinates + shapes.offsets[0] * 3, coordinates + shapes.offsets[1] * 3);
+        poses.insert(poses.end(), coordinates + tape_offset(shapes, 0) * 3, coordinates + tape_offset(shapes, 1) * 3);
         offsets.push_back(poses.size());
     }
     return poses;
@@ -179,7 +181,7 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     failures += expect_hints(
         index, queries, sizes.queries, shapes_expansion_k,
         index.residency == usearch_residency_ram_k ? usearch_status_success_k : usearch_status_unsupported_k);
-    failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, sizes.queries, shapes_expansion_k, usearch_status_success_k);
     failures += expect_health(index, sizes.shapes);
     failures += expect_cursor(index, sizes.shapes);
     failures += expect_sample(index, sizes.shapes);
@@ -191,9 +193,10 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
                                    saved_bytes_t::differing_k,
                                    shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, shapes.view(), sizes.shapes, usearch_status_unsupported_k);
-    failures += expect_absorbed(index, donated.view(), sizes.donor_shapes, sizes.shapes, usearch_status_unsupported_k);
-    failures += expect_split(index, usearch_status_unsupported_k);
+    failures += expect_refinement(index, shapes.view(), sizes.shapes, usearch_status_success_k);
+    failures += expect_absorbed(index, donated.view(), sizes.donor_shapes, sizes.shapes, usearch_status_success_k);
+    failures += check(describe(index).total_points == shapes.offsets[sizes.shapes] + donated.offsets.back());
+    failures += expect_split(index, usearch_status_success_k);
     return failures + expect_cleared(index, shapes.view());
 }
 

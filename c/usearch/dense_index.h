@@ -447,8 +447,9 @@ typedef struct usearch_dense_load_vram_t {
 } usearch_dense_load_vram_t;
 
 /**
- *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
- *  @c usearch_dense_load_ram. @ref dense_index_serialization
+ *  @brief Copies a checkpoint into a new, mutable index in device memory, with the placement
+ *      rules of @c usearch_dense_load_ram.
+ *  @ref dense_index_serialization
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, or a checkpoint or part path that
@@ -466,6 +467,7 @@ typedef struct usearch_dense_load_vram_t {
  *    for, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound.
+ *  - @c usearch_status_io_k A read of the checkpoint failed mid-load.
  */
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments);
 
@@ -817,8 +819,8 @@ typedef struct usearch_dense_refine_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the re-selection pass. */
+    usearch_refine_options_t refine;
 
     /** The @b optional handler, called with nodes re-selected; a cancel stops the re-selection,
      *  still heals, and answers @c usearch_status_cancelled_k. */
@@ -834,7 +836,7 @@ typedef struct usearch_dense_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_dense_insert.
+ *  @c refine.expansion_factor belongs here rather than in @c usearch_dense_insert.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting a node's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
@@ -1145,11 +1147,11 @@ typedef struct usearch_dense_absorb_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refine. */
+    usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
-     *  as it stops @c usearch_dense_refine, never a move. */
+    /** The @b optional handler, called with the donor rows stitched so far out of every donor's;
+     *  a cancel stops the stitching walks as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1223,8 +1225,8 @@ typedef struct usearch_dense_compact_t {
      *  bound, means that bound. */
     size_t shard_capacity;
 
-    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refine. */
+    usearch_refine_options_t refine;
 
     /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
      *  counts it; @c NULL skips reporting. */
@@ -1291,8 +1293,8 @@ typedef struct usearch_dense_split_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refines. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
     uint64_t seed;
@@ -1372,8 +1374,8 @@ typedef struct usearch_dense_refinement_init_t {
      *  @c usearch_dense_refinement_finish frees it. */
     usearch_dense_refinement_t* refinement;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of every pass the refinement steps. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_dense_split. */
     uint64_t seed;

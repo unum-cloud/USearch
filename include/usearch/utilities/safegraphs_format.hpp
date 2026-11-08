@@ -1830,6 +1830,150 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string
 }
 
 /**
+ *  @brief The saved columns of one part as its file holds them, unconverted: what
+ *      @c safegraphs_read_index hands a columned index that converts them itself.
+ *
+ *  Neighbors are fixed rows of @c degree IDs, whose sentinels are any ID at or past the node count,
+ *  or prefix sums into @c neighbor_ids; values are rows of @c value_width bytes, or prefix sums
+ *  counting @c element_bytes elements into @c values. Keys are @c key_dtype wide.
+ */
+template <typename node_id_type_>
+struct safegraphs_saved_columns {
+    bytes_view_t keys;
+    dtype_t key_dtype = dtype_t::unknown_k;
+    std::span<u64_t const> neighbor_offsets;
+    std::span<node_id_type_ const> neighbor_ids;
+    std::size_t degree = 0;
+    std::span<u64_t const> value_offsets;
+    std::size_t value_width = 0;
+    std::size_t element_bytes = 0;
+    bytes_view_t values;
+
+    /** Nodes the columns hold, one per key. */
+    std::size_t nodes() const noexcept {
+        std::size_t const key_bytes = dtype_bytes(key_dtype);
+        return key_bytes ? keys.size() / key_bytes : 0;
+    }
+
+    /** Where node @p node 's saved value starts among the values, in bytes; the node count names
+     *  their end. */
+    std::size_t value_first(std::size_t node) const noexcept {
+        return value_width ? node * value_width : value_offsets[node] * element_bytes;
+    }
+};
+
+/** Loads @p nodes nodes through @p plan, one region per thread of @p executor, then finishes it. */
+template <typename node_id_type_, typename plan_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_>
+status_t safegraphs_load_regions_(plan_type_& plan, std::size_t nodes, codec_type_ const& codec,
+                                  executor_type_& executor, progress_type_& progress) noexcept {
+    std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
+    std::size_t const per_region = divide_round_up(nodes, regions);
+    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
+    status_t outcome = status_t::success_k;
+    auto load_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
+        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
+        std::size_t const first = min_of(region * per_region, nodes);
+        std::size_t const bound = min_of(first + per_region, nodes);
+        status_t loaded = plan.load(
+            iota_view<node_id_type_> {static_cast<node_id_type_>(first), static_cast<node_id_type_>(bound)}, codec);
+        if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
+        status_t expected_status = status_t::success_k;
+        if (failed(loaded))
+            outcome_ref_t(outcome).compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed,
+                                                           std::memory_order_relaxed);
+    };
+    if (status_t const fanned = executor.for_tasks(regions, load_region); failed(fanned)) return fanned;
+    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
+        return settled;
+    return plan.finish();
+}
+
+/** Loads @p saved into an @p index that converts the file's columns itself. */
+template <typename index_type_, typename node_id_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_, typename allocator_type_>
+    requires requires(index_type_& index, safegraphs_saved_columns<node_id_type_> const& saved) {
+        index.plan_load(saved);
+    }
+status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<node_id_type_> const& saved,
+                                  codec_type_ const& codec, executor_type_& executor, progress_type_& progress,
+                                  allocator_type_ const&) noexcept {
+    auto planned = index.plan_load(saved);
+    if (failed(planned.status)) return planned.status;
+    return safegraphs_load_regions_<node_id_type_>(planned.value, saved.nodes(), codec, executor, progress);
+}
+
+/**
+ *  @brief Loads @p saved into an @p index that takes the snapshot columns, staged on the host.
+ *
+ *  Ragged neighbor sums are the file's own buffer; @c plan_load proves they start at zero, never
+ *  fall and end at the ID count. Fixed rows stage their IDs below the node count packed, every
+ *  sentinel skipped. Value sums count bytes here, so a fixed shape synthesizes them and a ragged
+ *  one of wider elements scales them up. Keys of the index's own dtype are read in place, and
+ *  narrower ones widen into a staged copy.
+ *
+ *  @par Statuses:
+ *  - @c malformed_k An element sum passes the values.
+ */
+template <typename index_type_, typename node_id_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_, typename allocator_type_>
+status_t safegraphs_load_columns_(index_type_& index, safegraphs_saved_columns<node_id_type_> const& saved,
+                                  codec_type_ const& codec, executor_type_& executor, progress_type_& progress,
+                                  allocator_type_ const& allocator) noexcept {
+    using key_t = typename index_type_::key_t;
+    using columns_view_t = typename index_type_::columns_view_t;
+    std::size_t const nodes = saved.nodes(), degree = saved.degree;
+    growing_buffer<u64_t, allocator_type_> staged_neighbor_sums {allocator};
+    growing_buffer<node_id_type_, allocator_type_> staged_neighbor_ids {allocator};
+    std::span<u64_t const> neighbor_sums = saved.neighbor_offsets;
+    std::span<node_id_type_ const> neighbor_ids = saved.neighbor_ids;
+    if (degree) {
+        std::size_t kept = 0;
+        for (node_id_type_ const neighbor : saved.neighbor_ids) kept += static_cast<std::size_t>(neighbor) < nodes;
+        if (failed(staged_neighbor_sums.resize(nodes + 1)) || failed(staged_neighbor_ids.resize_uninitialized(kept)))
+            return status_t::bad_alloc_k;
+        kept = 0;
+        for (std::size_t node = 0; node != nodes; ++node) {
+            for (node_id_type_ const neighbor : saved.neighbor_ids.subspan(node * degree, degree))
+                if (static_cast<std::size_t>(neighbor) < nodes) staged_neighbor_ids[kept++] = neighbor;
+            staged_neighbor_sums[node + 1] = kept;
+        }
+        neighbor_sums = std::span<u64_t const> {staged_neighbor_sums};
+        neighbor_ids = std::span<node_id_type_ const> {staged_neighbor_ids};
+    }
+    growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
+    std::span<u64_t const> value_sums = saved.value_offsets;
+    if (saved.value_width) {
+        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
+        for (std::size_t node = 0; node <= nodes; ++node) staged_value_sums[node] = node * saved.value_width;
+        value_sums = std::span<u64_t const> {staged_value_sums};
+    }
+    else if (saved.element_bytes != 1) {
+        std::size_t const elements = saved.values.size() / saved.element_bytes;
+        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
+        for (std::size_t node = 0; node <= nodes; ++node) {
+            if (saved.value_offsets[node] > elements) return status_t::malformed_k;
+            staged_value_sums[node] = saved.value_offsets[node] * saved.element_bytes;
+        }
+        value_sums = std::span<u64_t const> {staged_value_sums};
+    }
+    growing_buffer<key_t, allocator_type_> staged_keys {allocator};
+    std::span<key_t const> keys;
+    if (saved.key_dtype == safegraphs_key_dtype<key_t>())
+        keys = safegraphs_typed_span_<key_t const>(saved.keys, 0, nodes);
+    else {
+        std::size_t const key_bytes = dtype_bytes(saved.key_dtype);
+        if (failed(staged_keys.resize(nodes))) return status_t::bad_alloc_k;
+        for (std::size_t node = 0; node != nodes; ++node)
+            staged_keys[node] = safegraphs_widened_key<key_t>(saved.keys.data() + node * key_bytes, saved.key_dtype);
+        keys = std::span<key_t const> {staged_keys};
+    }
+    auto planned = index.plan_load(columns_view_t {keys, neighbor_sums, neighbor_ids, value_sums, saved.values});
+    if (failed(planned.status)) return planned.status;
+    return safegraphs_load_regions_<node_id_type_>(planned.value, nodes, codec, executor, progress);
+}
+
+/**
  *  @brief Restores a columned index from one monolith: the header is vetted against the codec's
  *      dtype and shape before any payload byte, the index is reserved when it has no capacity,
  *      and regions decode in parallel.
@@ -1871,7 +2015,6 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
                                allocator_type_ allocator = {}) noexcept {
     using key_t = typename index_type_::key_t;
     using node_id_t = typename index_type_::node_id_t;
-    using columns_view_t = typename index_type_::columns_view_t;
     constexpr column_shape_t shape = safegraphs_value_shape<codec_type_>();
     constexpr std::size_t element_bytes = dtype_bytes(codec_type_::value_dtype_k);
 
@@ -1934,95 +2077,24 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     bytes_view_t const segment = monolith.subspan(header.data_offset, segment_bytes);
     if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
 
-    // Ragged neighbor sums are the file's own buffer; `plan_load` proves they start at zero, never
-    // fall and end at the ID count. Fixed rows stage their IDs below the node count packed, every
-    // sentinel skipped. Value sums count bytes here, so a fixed shape synthesizes them and a ragged
-    // one of wider elements scales them up.
-    growing_buffer<u64_t, allocator_type_> staged_neighbor_sums {allocator};
-    growing_buffer<node_id_t, allocator_type_> staged_neighbor_ids {allocator};
-    std::span<u64_t const> neighbor_sums;
-    std::span<node_id_t const> neighbor_ids;
-    if (degree) {
-        std::span<node_id_t const> const rows = safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first,
-                                                                                        nodes * degree);
-        std::size_t kept = 0;
-        for (node_id_t const neighbor : rows) kept += static_cast<std::size_t>(neighbor) < nodes;
-        if (failed(staged_neighbor_sums.resize(nodes + 1)) || failed(staged_neighbor_ids.resize_uninitialized(kept)))
-            return status_t::bad_alloc_k;
-        kept = 0;
-        for (std::size_t node = 0; node != nodes; ++node) {
-            for (node_id_t const neighbor : rows.subspan(node * degree, degree))
-                if (static_cast<std::size_t>(neighbor) < nodes) staged_neighbor_ids[kept++] = neighbor;
-            staged_neighbor_sums[node + 1] = kept;
-        }
-        neighbor_sums = std::span<u64_t const> {staged_neighbor_sums};
-        neighbor_ids = std::span<node_id_t const> {staged_neighbor_ids};
-    }
-    else {
-        neighbor_sums = safegraphs_typed_span_<u64_t const>(segment, adjacency.offsets->bytes.first, nodes + 1);
-        neighbor_ids = safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first,
-                                                               adjacency.data.size() / sizeof(node_id_t));
-    }
-    growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
-    std::span<u64_t const> value_sums;
-    if constexpr (fixed_width) {
-        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
-        for (std::size_t node = 0; node <= nodes; ++node)
-            staged_value_sums[node] = node * *regular_width(shape) * element_bytes;
-        value_sums = std::span<u64_t const> {staged_value_sums};
-    }
-    else if (element_bytes == 1)
-        value_sums = safegraphs_typed_span_<u64_t const>(segment, value.offsets->bytes.first, nodes + 1);
-    else {
-        std::span<u64_t const> const value_elements = safegraphs_typed_span_<u64_t const>(
-            segment, value.offsets->bytes.first, nodes + 1);
-        std::size_t const elements = value.data.size() / element_bytes;
-        if (failed(staged_value_sums.resize(nodes + 1))) return status_t::bad_alloc_k;
-        for (std::size_t node = 0; node <= nodes; ++node) {
-            if (value_elements[node] > elements) return status_t::malformed_k;
-            staged_value_sums[node] = value_elements[node] * element_bytes;
-        }
-        value_sums = std::span<u64_t const> {staged_value_sums};
-    }
-
-    // Keys of the index's own dtype are read in place; narrower ones widen into a staged copy.
-    growing_buffer<key_t, allocator_type_> staged_keys {allocator};
-    std::span<key_t const> keys;
-    if (header.key.dtype == wanted_key_dtype)
-        keys = safegraphs_typed_span_<key_t const>(segment, header.key.data.first, nodes);
-    else {
-        if (failed(staged_keys.resize(nodes))) return status_t::bad_alloc_k;
-        byte_t const* const stored = segment.data() + header.key.data.first;
-        for (std::size_t node = 0; node != nodes; ++node)
-            staged_keys[node] = safegraphs_widened_key<key_t>(stored + node * key_bytes, header.key.dtype);
-        keys = std::span<key_t const> {staged_keys};
-    }
-    columns_view_t const columns {
-        keys, neighbor_sums, neighbor_ids, value_sums, segment.subspan(value.data.first, value.data.size()),
+    // What the file holds, unconverted: an index that takes these converts them itself.
+    safegraphs_saved_columns<node_id_t> const saved {
+        .keys = segment.subspan(header.key.data.first, nodes * key_bytes),
+        .key_dtype = header.key.dtype,
+        .neighbor_offsets = degree ? std::span<u64_t const> {}
+                                   : safegraphs_typed_span_<u64_t const>(segment, adjacency.offsets->bytes.first,
+                                                                         nodes + 1),
+        .neighbor_ids = safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first,
+                                                                adjacency.data.size() / sizeof(node_id_t)),
+        .degree = degree,
+        .value_offsets = fixed_width
+                             ? std::span<u64_t const> {}
+                             : safegraphs_typed_span_<u64_t const>(segment, value.offsets->bytes.first, nodes + 1),
+        .value_width = fixed_width ? *regular_width(shape) * element_bytes : 0,
+        .element_bytes = element_bytes,
+        .values = segment.subspan(value.data.first, value.data.size()),
     };
-    auto planned = index.plan_load(columns);
-    if (failed(planned.status)) return planned.status;
-
-    std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
-    std::size_t const per_region = divide_round_up(nodes, regions);
-    using outcome_ref_t = fu::standard_atomic_ref<status_t>;
-    status_t outcome = status_t::success_k;
-    auto load_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(outcome_ref_t(outcome).load(std::memory_order_relaxed))) return;
-        std::size_t const first = min_of(region * per_region, nodes);
-        std::size_t const bound = min_of(first + per_region, nodes);
-        status_t loaded = planned.value.load(
-            iota_view<node_id_t> {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)}, codec);
-        if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
-        status_t expected_status = status_t::success_k;
-        if (failed(loaded))
-            outcome_ref_t(outcome).compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed,
-                                                           std::memory_order_relaxed);
-    };
-    if (status_t const fanned = executor.for_tasks(regions, load_region); failed(fanned)) return fanned;
-    if (status_t const settled = outcome_ref_t(outcome).load(std::memory_order_relaxed); failed(settled))
-        return settled;
-    return planned.value.finish();
+    return safegraphs_load_columns_(index, saved, codec, executor, progress, allocator);
 }
 
 /**

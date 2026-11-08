@@ -456,11 +456,13 @@ std::size_t test_dense_vram_indexes_get_cold(u64_t seed, typename indexes_type_:
 }
 
 /** A RAM group's monolith loaded into the VRAM collection and saved again comes back byte for byte,
- *  norms included, and the NVMe tier views the VRAM save as it views the RAM one. */
+ *  norms included, whether loaded by path, which reads through cuFile where it can, or from its
+ *  mapped bytes, and the NVMe tier views the VRAM save like the RAM one. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
-    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
+                                    blocking_files_engine<fu::standard_yield_t>>;
     using scalar_t = typename nvme_t::scalar_t;
     std::size_t const rows_count = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -469,24 +471,27 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     std::size_t failures = reference.failures;
     failures += expect(succeeded(
         reference.whole().save(reference.checkpoint.monolith.data(), save_config_t {}, reference.builder.executor)));
-
-    indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(indexes, placement)));
+    auto [ram_file, ram_status] = mapped_file_t::read(reference.checkpoint.monolith.data());
+    failures += expect(succeeded(ram_status));
     dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status) || failures) return failures + expect(false);
+    bytes_view_t const ram_bytes = ram_file.view();
     nvme_checkpoint_t const resaved {"vram_nvme_resaved"};
-    failures += expect(
-        succeeded(indexes.load(reference.checkpoint.monolith.data(), load_config_t {}, driver.executor)));
-    failures += expect(
-        succeeded(indexes.save(resaved.monolith.data(), dense_indexes_save_config<indexes_type_>(), driver.executor)));
-
-    auto [ram_file, ram_status] = mapped_file_t::read(reference.checkpoint.monolith.data());
-    auto [vram_file, vram_status] = mapped_file_t::read(resaved.monolith.data());
-    failures += expect(succeeded(ram_status) && succeeded(vram_status));
-    if (failures) return failures;
-    bytes_view_t const ram_bytes = ram_file.view(), vram_bytes = vram_file.view();
-    failures += expect(ram_bytes.size() == vram_bytes.size() &&
-                       std::memcmp(ram_bytes.data(), vram_bytes.data(), ram_bytes.size()) == 0);
+    for (std::size_t source = 0; source != 2; ++source) {
+        indexes_type_ indexes {kernel_, {dimensions, connectivity_16_k}, forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(indexes, placement)));
+        failures += expect(
+            succeeded(source ? indexes.load(ram_bytes, load_config_t {}, driver.executor)
+                             : indexes.load(reference.checkpoint.monolith.data(), load_config_t {}, driver.executor)));
+        failures += expect(succeeded(
+            indexes.save(resaved.monolith.data(), dense_indexes_save_config<indexes_type_>(), driver.executor)));
+        auto [vram_file, vram_status] = mapped_file_t::read(resaved.monolith.data());
+        failures += expect(succeeded(vram_status));
+        if (failures) return failures;
+        bytes_view_t const vram_bytes = vram_file.view();
+        failures += expect(ram_bytes.size() == vram_bytes.size() &&
+                           std::memcmp(ram_bytes.data(), vram_bytes.data(), ram_bytes.size()) == 0);
+    }
 
     nvme_t viewed {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect_eq(viewed.view(resaved.monolith.data()), status_t::success_k);
@@ -504,7 +509,8 @@ std::size_t test_dense_vram_indexes_compact(u64_t seed, typename indexes_type_::
                                             std::size_t shards_count) {
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
-    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
+                                    blocking_files_engine<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using node_id_t = typename ram_t::index_t::node_id_t;
     constexpr std::size_t samples_k = 32;
@@ -599,7 +605,8 @@ std::size_t test_dense_vram_indexes_split(u64_t seed, typename indexes_type_::ex
     using key_t = typename indexes_type_::key_t;
     using scalar_t = typename indexes_type_::scalar_t;
     using distance_t = typename indexes_type_::distance_t;
-    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using nvme_t = nvme_indexes_for<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k,
+                                    blocking_files_engine<fu::standard_yield_t>>;
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
     using reference_t = typename ram_t::index_t;
     constexpr std::size_t samples_k = 32;

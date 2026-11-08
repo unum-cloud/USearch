@@ -2978,12 +2978,38 @@ int second;
 } // namespace unum::usearch::test
 FIXTURE
 
-assert_rejects "utility reaching into a design" "reaches above utilities" include/usearch/utilities/probe.hpp <<'FIXTURE'
+assert_rejects "utility reaching into a design" "reaches past its layer" include/usearch/utilities/probe.hpp <<'FIXTURE'
 #include "usearch/dense/types.hpp"
 FIXTURE
 
 assert_accepts "utility including a utility" include/usearch/utilities/probe.hpp <<'FIXTURE'
 #include "usearch/utilities/types.hpp"
+FIXTURE
+
+assert_rejects "dense reaching into basic" "reaches past its layer" include/usearch/dense/probe.hpp <<'FIXTURE'
+#include "usearch/basic/ram_index.hpp"
+FIXTURE
+
+assert_rejects "modality reaching into dense" "reaches past its layer" include/usearch/sequence/probe.hpp <<'FIXTURE'
+#include "usearch/dense/types.hpp"
+FIXTURE
+
+assert_rejects "modality including a C header" "reaches past its layer" include/usearch/sequence/probe.hpp <<'FIXTURE'
+#include "usearch/sequence_index.h"
+FIXTURE
+
+assert_accepts "modality including basic and utilities" include/usearch/sequence/probe.hpp <<'FIXTURE'
+#include "usearch/utilities/types.hpp"
+#include "usearch/basic/ram_index.hpp"
+FIXTURE
+
+assert_rejects "tool reaching into an engine" "reaches past its layer" tools/probe.hpp <<'FIXTURE'
+#include "usearch/dense/ram_index.hpp"
+FIXTURE
+
+assert_accepts "tool including a drive utility and the SafeGraphs format" tools/probe.hpp <<'FIXTURE'
+#include "usearch/utilities/blocking_files.hpp"
+#include "usearch/utilities/safegraphs_format.hpp"
 FIXTURE
 
 assert_rejects "function-like ALL_CAPS macro" "defines a function-like ALL_CAPS macro" include/usearch/probe.hpp <<'FIXTURE'
@@ -3179,6 +3205,10 @@ assert_accepts "C verb served by its face" src/dense_index.cpp <<'FIXTURE'
 inline status_t probe(index_t const &index) { return index.face().probe(); }
 FIXTURE
 
+assert_rejects "C verb refusing off RAM" "branches a C verb on residency or vendor" src/dense_index.cpp <<'FIXTURE'
+inline bool probe(residency_t residency) { return residency != ram_residency_k; }
+FIXTURE
+
 assert_rejects "deleted verb" "deletes a verb" include/usearch/dense/ram_index.hpp <<'FIXTURE'
 struct probe_index_t {
     status_t search(query_t query) = delete;
@@ -3366,6 +3396,15 @@ FIXTURE
 
 assert_accepts "wait through the class waiter" include/usearch/probe.hpp <<'FIXTURE'
 inline void probe(int const &word) { waiter_t::wait(&word, 0); }
+FIXTURE
+
+assert_rejects "yielding waiter called in an engine" "sleeps or yields in an engine" include/usearch/probe.hpp <<'FIXTURE'
+inline void probe(int const &word) { fu::standard_yield_t {}(&word, 0, 0u); }
+FIXTURE
+
+assert_rejects "yielding waiter defaulted in an engine" "sleeps or yields in an engine" include/usearch/probe.hpp <<'FIXTURE'
+template <typename wait_type_ = fu::standard_yield_t>
+struct probe {};
 FIXTURE
 
 assert_rejects "capability mask in an engine" "holds or takes a NumKong capability mask" include/usearch/probe.hpp <<'FIXTURE'
@@ -3718,7 +3757,6 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
         mkdir -p mojo java csharp/nuget c/usearch src_stub
         printf '%s\n' "$version" > VERSION
         printf '{\n  "name": "usearch",\n  "version": "%s",\n}\n' "$version" > package.json
-        printf 'cff-version: 1.2.0\nversion: %s\n' "$version" > CITATION.cff
         printf '[package]\nname = "usearch"\nversion = "%s"\n' "$version" > Cargo.toml
         printf '[workspace]\nversion = "%s"\n\n[package]\nversion = "%s"\n' "$version" "$version" > pixi.toml
         printf '[package]\nversion = "%s"\n' "$version" > mojo/pixi.toml

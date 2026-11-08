@@ -35,7 +35,7 @@
 #include <utility>     // `std::move`
 
 #include <forkunion/atomics.hpp>               // `fu::standard_atomic_ref` - the default reference
-#include <forkunion/types.hpp>                 // `fu::standard_yield_t` - the default waiter
+#include <forkunion/types.hpp>                 // `fu::limited_array` - a quad's staged lanes
 #include <smashtable/immutable_elias_fano.hpp> // `st::immutable_elias_fano` - the row directories
 
 #include "usearch/utilities/types.hpp"
@@ -70,11 +70,10 @@ struct nvme_indexes_cursor;
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
  *  @tparam engine_type_ The I/O engine every executor thread drives.
  */
-template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
-          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
-          typename row_kit_type_ = st::serial_row_kit_t,
-          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
-          typename wait_type_ = fu::standard_yield_t>
+template <
+    typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename distance_type_ = f64_t,
+    typename engine_type_ = default_io_engine<dummy_waiter_t>, typename row_kit_type_ = st::serial_row_kit_t,
+    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_parts_catalog {
     template <typename, typename, typename>
@@ -1956,11 +1955,10 @@ class nvme_parts_catalog {
  *  @tparam distance_type_ The distance the metrics drain and the walks rank by.
  *  @tparam engine_type_ The I/O engine every executor thread drives.
  */
-template <typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t,
-          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine_t,
-          typename row_kit_type_ = st::serial_row_kit_t,
-          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
-          typename wait_type_ = fu::standard_yield_t>
+template <
+    typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename distance_type_ = f64_t,
+    typename engine_type_ = default_io_engine<dummy_waiter_t>, typename row_kit_type_ = st::serial_row_kit_t,
+    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_index {
     template <typename>

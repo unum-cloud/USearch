@@ -167,6 +167,14 @@ void usearch_arena_free(usearch_arena_t arena) {
     delete arena;
 }
 
+void usearch_arena_describe(usearch_arena_describe_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->arena || !arguments->description, usearch_status_invalid_argument_k,
+                  "The arena and description must not be NULL", outcome))
+        return;
+    *arguments->description = {usearch_residency_ram_k, 0};
+}
+
 void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
@@ -419,5 +427,39 @@ usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
 }
 
 #pragma endregion Vocabulary
+
+#pragma region Arrow
+
+usearch_status_t usearch_keys_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_keys_view_t*, size_t*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_rows_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_rows_view_t*, size_t*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_tape_view_from_arrow(ArrowSchema const*, ArrowArray const*, usearch_tape_view_t*, size_t*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_keys_view_to_arrow(usearch_keys_view_t, size_t, usearch_arena_t, ArrowSchema*,
+                                            ArrowDeviceArray*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t, size_t, usearch_arena_t, ArrowSchema*,
+                                            ArrowDeviceArray*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_tape_view_to_arrow(usearch_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
+                                            ArrowDeviceArray*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_keys_tape_view_to_arrow(usearch_keys_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
+                                                 ArrowDeviceArray*) {
+    return usearch_status_unsupported_k;
+}
+usearch_status_t usearch_matches_tape_view_to_arrow(usearch_matches_tape_view_t, size_t, usearch_arena_t, ArrowSchema*,
+                                                    ArrowDeviceArray*) {
+    return usearch_status_unsupported_k;
+}
+
+#pragma endregion Arrow
 
 } // extern "C"

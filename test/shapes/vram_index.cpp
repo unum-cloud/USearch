@@ -26,12 +26,13 @@
 #endif
 
 #include "harness.hpp"
+#include "lib.hpp" // `gpu_class_t`, `nvidia_class_of` - the class the library picks a unit by
 
 #if USEARCH_ARCH_CUDA_
 
 /** The library's fatbin of one class's shapes kits over one dtype, defined in that class's
  *  @c src/shapes/vram_variants_nvidia*.cpp unit. */
-template <us::utilities::gpu_class_t gpu_class_, nk_dtype_t dtype_>
+template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
 struct shapes_nvidia_fatbin {
     static us::utilities::bytes_view_t bytes() noexcept;
 };

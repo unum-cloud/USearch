@@ -85,9 +85,9 @@ struct vram_nvidia_indexes {
     using cursor_t = vram_nvidia_indexes_cursor<vram_nvidia_indexes>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t =
-        vram_nvidia_index<vector_dtype_, kernels_type_, cache_hints_type_, cuda_virtual_memory_allocator<byte_t>,
-                          cuda_virtual_memory_allocator<byte_t>, cuda_arena_allocator_t, key_type_, key_hash_type_>;
+    using index_t = vram_nvidia_index<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_,
+                                      cuda_virtual_memory_allocator<byte_t>, cuda_virtual_memory_allocator<byte_t>,
+                                      cuda_arena_allocator_t, key_type_, key_hash_type_>;
 
     /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = key_type_;
@@ -1809,9 +1809,17 @@ struct vram_nvidia_indexes {
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
         typename executor_t::claim_t streams;
 
-        /** The device a load's columns sit on, or @c host_device_k when they cross from host
-         *  memory. */
-        int source_device = host_device_k;
+        /** One source per mapped part of a load from a path, in part order; a file cuFile refuses
+         *  leaves its source copying. */
+        growing_buffer<cuda_part_source_t, forkunion_allocator_t> sources {forkunion_allocator_t {}};
+
+        /** Opens a source per mapped part, cuFile-registered where the file takes O_DIRECT. */
+        status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
+            if (failed(sources.resize(mappings.size()))) return status_t::bad_alloc_k;
+            for (std::size_t part = 0; part != mappings.size(); ++part)
+                sources[part] = {linux_cufile_file_t::open(executor->api(), mappings[part]), mappings[part].view()};
+            return status_t::success_k;
+        }
 
         /**
          *  Opens shard @p shard 's save into @p columns on the stream of its device.
@@ -1830,9 +1838,8 @@ struct vram_nvidia_indexes {
         }
 
         /**
-         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, pinning its
-         *      bounce only when the parts' columns cross from host memory; device columns copy
-         *      device to device.
+         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, whose steps
+         *      copy the parts' columns from memory, or read their registered files through cuFile.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The shard was never reserved, or its @c status keeps it.
@@ -1845,11 +1852,8 @@ struct vram_nvidia_indexes {
         expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
                                                                 std::size_t rows) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return {{}, entered};
-            auto [plan, status] = shards[shard].index->plan_load(
-                rows, executor->stream(fanout_t::stream_of(shards, *executor, shard)));
-            if (failed(status) || source_device != host_device_k) return {std::move(plan), status};
-            status_t const pinned = plan.pin_bounce();
-            return {std::move(plan), pinned};
+            return shards[shard].index->plan_load(rows, executor->stream(fanout_t::stream_of(shards, *executor, shard)),
+                                                  to_span(sources));
         }
 
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
@@ -2023,7 +2027,6 @@ struct vram_nvidia_indexes {
                                     executor_t& executor) noexcept {
         auto [residency, status] = gate_load_(executor);
         if (failed(status)) return {{}, status};
-        residency.source_device = source.device;
         cuda_api_t const& api = shards_[0].index->api();
         auto copy = [&api, device = source.device](bytes_span_t host, bytes_view_t bytes) noexcept {
             return cuda_set_device(api, device) == cuda_success_k &&
@@ -2102,7 +2105,8 @@ struct vram_nvidia_indexes {
      *
      *  The index must be empty, and a batch in flight refuses the load as @c contended_k, as the
      *  load refuses a batch. A cancelled or failed load clears it and reports why, so nothing is
-     *  published and the next load starts clean.
+     *  published and the next load starts clean. Where cuFile takes a part's file, its columns read
+     *  into device staging; every other part copies from the mapping.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index has no shards or a shard was never reserved, a bounce was
@@ -2119,6 +2123,7 @@ struct vram_nvidia_indexes {
      *  - @c overflow_k A part passes a shard's bound or a key column, or
      *    @ref status keeps it.
      *  - @c unsupported_k or @c unsupported_layout_k The index keeps it, as @ref status says.
+     *  - @c io_k A read through cuFile failed.
      */
     template <typename progress_type_ = dummy_progress_t>
     status_t load(std::string_view path, load_config_t const& config, executor_t& executor,

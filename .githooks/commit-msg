@@ -13,6 +13,7 @@
 # Bypass knowingly, which you almost never should, with: git commit --no-verify
 
 set -u
+
 export LC_ALL=C
 
 approved_verbs='Add|Break|Chore|Docs|Fix|Improve|Make'
@@ -35,7 +36,6 @@ Release:*)
         IFS=. read -r major minor patch <<< "$core"
         [ "$(git show :VERSION 2>/dev/null)" = "$version" ] || stale="$stale VERSION"
         git show :package.json 2>/dev/null | grep -qxF "  \"version\": \"$version\"," || stale="$stale package.json"
-        git show :CITATION.cff 2>/dev/null | grep -qxF "version: $version" || stale="$stale CITATION.cff"
         git show :Cargo.toml 2>/dev/null | grep -qxF "version = \"$version\"" || stale="$stale Cargo.toml"
         # Both the workspace and the package name the version.
         [ "$(git show :pixi.toml 2>/dev/null | grep -cxF "version = \"$version\"")" = 2 ] || stale="$stale pixi.toml"

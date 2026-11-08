@@ -65,6 +65,22 @@ __device__ __forceinline__ vram_pack_query_t vram_prepare_pack(basic::vram_entry
     return {span};
 }
 
+/** Packs every cloud of @p load 's run into the tape, a warp per cloud, as the serial pack lays one
+ *  out; the saved sums count scalars, three per point. */
+template <typename scalar_type_, typename node_id_type_>
+__device__ __forceinline__ void cuda_shapes_load_values(basic::vram_load<node_id_type_> const& load) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
+    u64_t const first = load.saved_offsets[0];
+    for (u32_t node = warp.index; node < load.count; node += warp.count) {
+        scalar_type_ const* const points = reinterpret_cast<scalar_type_ const*>(load.saved) +
+                                           (load.saved_offsets[node] - first);
+        nk_size_t const count = static_cast<nk_size_t>(load.saved_offsets[node + 1] - load.saved_offsets[node]) / 3;
+        void* const packed = load.tape + load.stored_offsets[node];
+        if constexpr (std::is_same_v<scalar_type_, nk_f32_t>) nk_shapes_pack_f32_cuda_(points, count, packed);
+        else nk_shapes_pack_f16_cuda_(points, count, packed);
+    }
+}
+
 /** Chamfer and Hausdorff between f16 packs in f32 math, a warp to a shape. */
 struct f16_ampere_shapes_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
@@ -76,6 +92,12 @@ struct f16_ampere_shapes_kit_t {
     using selector_t = basic::vram_keep_diverse_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
+
+    /** Packs a load's clouds into the tape on the device. */
+    template <typename node_id_type_>
+    static __device__ __forceinline__ void load_values(basic::vram_load<node_id_type_> const& load) noexcept {
+        cuda_shapes_load_values<nk_f16_t>(load);
+    }
 
     /** Bytes the pack at @p data takes once prepared: the pack itself. */
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
@@ -118,6 +140,13 @@ struct f16_blackwell_shapes_kit_t {
     using selector_t = basic::vram_keep_diverse_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
+
+    /** Packs a load's clouds into the tape on the device. */
+    template <typename node_id_type_>
+    static __device__ __forceinline__ void load_values(basic::vram_load<node_id_type_> const& load) noexcept {
+        cuda_shapes_load_values<nk_f16_t>(load);
+    }
+
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
@@ -159,6 +188,13 @@ struct f32_ampere_shapes_kit_t {
     using selector_t = basic::vram_keep_diverse_t;
 
     static constexpr bool serves(std::size_t) noexcept { return true; }
+
+    /** Packs a load's clouds into the tape on the device. */
+    template <typename node_id_type_>
+    static __device__ __forceinline__ void load_values(basic::vram_load<node_id_type_> const& load) noexcept {
+        cuda_shapes_load_values<nk_f32_t>(load);
+    }
+
     static constexpr std::size_t span_bytes(byte_t const*, std::size_t bytes) noexcept {
         return round_up_to_multiple<std::size_t>(bytes, 16);
     }
@@ -240,21 +276,14 @@ status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::s
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
 expected<std::size_t> vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::stored_bytes_(
-    bytes_view_t saved) noexcept {
+    std::size_t saved) noexcept {
     using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
     constexpr std::size_t point_bytes_k = 3 * sizeof(typename scalar_::raw_t);
-    if (saved.size() % point_bytes_k) return {0, status_t::malformed_k};
+    if (saved % point_bytes_k) return {0, status_t::malformed_k};
     nk_size_t bytes = 0;
-    if (status_t const sized = status_of(pack_kit_t::pack_size(saved.size() / point_bytes_k, &bytes)); failed(sized))
+    if (status_t const sized = status_of(pack_kit_t::pack_size(saved / point_bytes_k, &bytes)); failed(sized))
         return {0, sized};
     return {bytes, status_t::success_k};
-}
-
-template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<scalar_, node_id_type_, capability_, kernels_type_>::load_value_(
-    bytes_view_t saved, bytes_span_t stored) noexcept {
-    using pack_kit_t = typename shapes_ladder<scalar_, nk_cap_serial_k>::kit_t;
-    return codec<pack_kit_t>::load_pack(saved, stored);
 }
 
 template <nk::shapes_dtype scalar_, typename node_id_type_, nk_capability_t capability_, typename kernels_type_>
@@ -289,6 +318,8 @@ template <nk_capability_t capability_, nk_dtype_t dtype_, typename node_id_type_
 __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_rungs<capability_, dtype_, node_id_type_>(
         std::make_index_sequence<std::size(basic::cuda_rungs)> {});
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, dtype_, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, dtype_, node_id_type_, 0>);
 }
 
 #pragma endregion Face

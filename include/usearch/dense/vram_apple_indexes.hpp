@@ -73,8 +73,8 @@ struct vram_apple_indexes {
     using cursor_t = vram_apple_indexes_cursor<vram_apple_indexes>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t = vram_apple_index<vector_dtype_, capability_, metal_shared_allocator_t, metal_shared_allocator_t,
-                                     metal_shared_allocator_t, key_type_, key_hash_type_>;
+    using index_t = vram_apple_index<vector_dtype_, capability_, wait_type_, metal_shared_allocator_t,
+                                     metal_shared_allocator_t, metal_shared_allocator_t, key_type_, key_hash_type_>;
 
     /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = key_type_;

@@ -238,10 +238,42 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
         schedule, view.storage, view.assigned_nodes, 0u, *view.touched_count, slice, [&](u32_t offset) {
             node_id_type_ const node_id = view.touched_ids[offset];
             vram_telemetry_t telemetry;
-            vram_back_link_one<kit_, typename kit_::selector_t>( //
-                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane);
+            vram_back_link_one<vram_kernel_t::back_link_k, kit_, typename kit_::selector_t>( //
+                view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane,
+                static_cast<node_id_type_ const*>(nullptr), 0);
             if (lane == 0) view.link_heads[node_id] = std::numeric_limits<node_id_type_>::max();
             telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
+        });
+}
+
+/** One walker merges one target node of a sweep's tile at a time with the run its scatter left,
+ *  assigning itself the tile's nodes from the launch counter; a walked node that gains a member
+ *  counts as changed once, whichever of its merges gains it. */
+template <vram_basic_kit kit_, u32_t rung_, typename node_id_type_>
+__device__ __forceinline__ void cuda_merge_back_links(vram_build_view<node_id_type_> const& view) {
+    using schedule_t = cuda_schedule<kit_, rung_, node_id_type_>;
+    extern __shared__ byte_t dynamic_scratch[];
+    __shared__ typename schedule_t::shared_t schedule_state;
+
+    vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
+    u32_t const lane = slice.lane;
+    vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
+        slice.scratch + 2 * view.span_bytes, view.selection_nodes);
+    schedule_t schedule {schedule_state};
+    cuda_for_each_assigned( //
+        schedule, view.storage, view.assigned_nodes, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
+            node_id_type_ const row = node_id - view.first_id;
+            u32_t const first = row ? min_of(view.incoming_offsets[row - 1], view.tape_size) : 0u;
+            u32_t const bound = min_of(view.incoming_offsets[row], view.tape_size);
+            if (first == bound) return;
+            vram_telemetry_t telemetry;
+            bool const gained =
+                vram_back_link_one<vram_kernel_t::merge_back_links_k, kit_, typename kit_::selector_t>( //
+                    view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane,
+                    view.back_links + first, bound - first);
+            if (lane == 0 && gained && node_id >= view.walked_first && node_id < view.walked_bound)
+                telemetry.changed_nodes += vram_bitset_insert<cuda_warp_t>(view.changed, node_id);
+            telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
         });
 }
 
@@ -302,7 +334,13 @@ __device__ __forceinline__ vram_build_view<node_id_type_> vram_view(vram_build<n
             build.link_heads,
             build.link_next,
             build.touched_ids,
-            build.touched_count};
+            build.touched_count,
+            build.changed,
+            build.incoming_offsets,
+            build.back_links,
+            build.tape_size,
+            build.walked_first,
+            build.walked_bound};
 }
 template <typename node_id_type_>
 __device__ __forceinline__ vram_search_view<node_id_type_> vram_view(
@@ -339,6 +377,15 @@ __device__ __forceinline__ void cuda_kernel_body(vram_arguments<node_id_type_> c
     if constexpr (kernel_ == vram_kernel_t::insert_k || kernel_ == vram_kernel_t::refine_k)
         cuda_insert<kit_, rung_, slots_, kernel_>(vram_view(build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k) cuda_back_link<kit_, rung_>(vram_view(build));
+    else if constexpr (kernel_ == vram_kernel_t::merge_back_links_k)
+        cuda_merge_back_links<kit_, rung_>(vram_view(build));
+    // Kits without the hook store values as saved and size spans by length; these never launch.
+    else if constexpr (kernel_ == vram_kernel_t::load_values_k) {
+        if constexpr (requires { kit_::load_values(arguments.load); }) kit_::load_values(arguments.load);
+    }
+    else if constexpr (kernel_ == vram_kernel_t::size_spans_k) {
+        if constexpr (requires { kit_::size_spans(arguments.load); }) kit_::size_spans(arguments.load);
+    }
     else cuda_walk<kit_, rung_, slots_>(vram_view(arguments.search));
 }
 

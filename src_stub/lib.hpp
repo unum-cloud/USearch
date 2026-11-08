@@ -190,13 +190,28 @@ inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) {
                                                    offset * keys.stride);
 }
 
-/** Refuses a tape without its storage or offsets, or whose offsets ever decrease. */
+/** Offset @p entry of a tape, in the width it arrives in. */
+inline std::size_t offset_at(usearch_tape_view_t const& tape, std::size_t entry) {
+    return tape.layout == usearch_tape_u64_k ? static_cast<std::size_t>(tape.offsets.u64[entry])
+                                             : tape.offsets.u32[entry];
+}
+
+/** Where a tape's offsets start, which the arena a call rewinds must not hold. */
+inline void const* offsets_address(usearch_tape_view_t const& tape) {
+    return tape.layout == usearch_tape_u64_k ? static_cast<void const*>(tape.offsets.u64) : tape.offsets.u32;
+}
+
+/** Refuses a tape of an unknown width, without its storage or offsets, or whose offsets ever
+ *  decrease. */
 inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_outcome_t* outcome) {
-    if (reject_if(!tape.offsets || (!tape.data && count), usearch_status_invalid_argument_k,
+    if (reject_if(tape.layout != usearch_tape_u32_k && tape.layout != usearch_tape_u64_k,
+                  usearch_status_unsupported_layout_k, "Unknown width of a tape's offsets", outcome))
+        return true;
+    if (reject_if(!offsets_address(tape) || (!tape.data && count), usearch_status_invalid_argument_k,
                   "The tape must name storage", outcome))
         return true;
     for (std::size_t entry = 0; entry != count; ++entry)
-        if (reject_if(tape.offsets[entry + 1] < tape.offsets[entry], usearch_status_invalid_argument_k,
+        if (reject_if(offset_at(tape, entry + 1) < offset_at(tape, entry), usearch_status_invalid_argument_k,
                       "The tape's offsets must not decrease", outcome))
             return true;
     return false;
@@ -229,11 +244,11 @@ using call_arguments_t = std::variant< //
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
     usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
     usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
-    usearch_sequence_load_vram_t,                                                                        //
+    usearch_sequence_load_vram_t, usearch_sequence_load_vram_buffer_t,                                   //
     usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
-    usearch_shapes_load_vram_t,                                                                          //
+    usearch_shapes_load_vram_t, usearch_shapes_load_vram_buffer_t,                                       //
     usearch_geospatial_load_ram_t, usearch_geospatial_load_ram_buffer_t, usearch_geospatial_view_nvme_t, //
-    usearch_geospatial_load_vram_t,                                                                      //
+    usearch_geospatial_load_vram_t, usearch_geospatial_load_vram_buffer_t,                               //
 
     /* Building */
     usearch_dense_reserve_t, usearch_dense_clear_t, usearch_dense_insert_t,                //
@@ -889,6 +904,16 @@ struct match_t {
     /** The key of the entry scored. */
     usearch_key_t key;
 };
+
+/** Writes @p tape over @p data of @p scalar with the @p offsets a get wrote, in place, as wide as
+ *  @c std::size_t. */
+inline void write_output_tape(void const* data, std::size_t const* offsets, usearch_scalar_t scalar,
+                              usearch_tape_view_t& tape) noexcept {
+    tape = {data, usearch_tape_u64_k, {}, scalar};
+    if constexpr (sizeof(std::size_t) == sizeof(std::uint64_t))
+        tape.offsets.u64 = reinterpret_cast<std::uint64_t const*>(offsets);
+    else tape.layout = usearch_tape_u32_k, tape.offsets.u32 = reinterpret_cast<std::uint32_t const*>(offsets);
+}
 
 /** A ranked run's storage inside a claimed arena: @c wanted keys and scores per query, and a count
  *  per query. */

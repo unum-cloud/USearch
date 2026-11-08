@@ -206,18 +206,18 @@ struct thread_scratch {
 };
 
 /**
- *  @brief Inserts @p count entries under their keys as one batch: every thread builds its share of
- *      the values from the index's allocator, then one plan writes them on every thread and
- *      publishes once.
+ *  @brief Inserts the entries of @p tape under their keys as one batch: every thread builds its
+ *      share of the values from the index's allocator, then one plan writes them on every thread
+ *      and publishes once.
  *
- *  Everything fallible runs before the plan dispenses: the keys and values, the traversals and the
- *  metrics. A refused build frees every value built so far and leaves the index untouched. Once the
- *  plan dispensed, every position is written and the progress handler cannot cancel. The plan
- *  routes the entries over the shards of @p indexes, and their walks run on each shard's own
- *  scratch, never on a shared one.
+ *  Everything fallible runs before the plan dispenses: the tape's offsets, lowered into the first
+ *  arena after its one rewind, the keys and values, the traversals and the metrics. A refused build
+ *  frees every value built so far and leaves the index untouched. Once the plan dispensed, every
+ *  position is written and the progress handler cannot cancel. The plan routes the entries over the
+ *  shards of @p indexes, and their walks run on each shard's own scratch, never on a shared one.
  */
 template <typename indexes_type_, typename make_metric_type_, typename build_type_>
-expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, std::size_t count,
+expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_view_t keys, caller_tape_t tape,
                                            std::size_t connectivity, std::size_t expansion,
                                            make_metric_type_&& make_metric, build_type_&& build,
                                            progress_ticks_t& ticks, forkunion_executor_t& executor) noexcept {
@@ -231,6 +231,9 @@ expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_vi
         failed(prepared))
         return {{}, prepared};
 
+    auto const [entries, lower_status] = counted_tape_of(tape.tape, tape.count, executor.arena(0));
+    if (failed(lower_status)) return {{}, lower_status};
+    std::size_t const count = tape.count;
     thread_allocator_t const caller {executor.arena(0)};
     growing_buffer<key_t, thread_allocator_t> identities {caller};
     growing_buffer<value_t, thread_allocator_t> values {caller};
@@ -244,7 +247,8 @@ expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_vi
     drain_in_order<indexes_type_::template atomic_ref>(
         executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
             if (succeeded(typename indexes_type_::template atomic_ref<status_t>(built).load(std::memory_order_relaxed)))
-                keep_first_failure<indexes_type_::template atomic_ref>(built, build(offset, values[offset], thread));
+                keep_first_failure<indexes_type_::template atomic_ref>(built,
+                                                                       build(entries, offset, values[offset], thread));
         });
     if (failed(built)) return {{}, built};
 
@@ -282,48 +286,40 @@ expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_re
  *      context from @p scratch, until no phase follows or @p ticks cancels; @c cancelled_k means a
  *      later call has more to do.
  *
- *  Every step a thread takes runs, and a thread takes none once a tick cancelled, so the plan's
- *  @c taken says exactly where the next call starts. The scratch is this call's, from
- *  @ref prepare_refinement; the plan keeps everything the index needs between calls.
+ *  Every step of a phase runs before the barrier, and the ticks move once per re-selected tile
+ *  after it, so a cancel leaves the plan at the next phase, where the next call starts. The scratch
+ *  is this call's, from @ref prepare_refinement, and the plan holds what later calls need.
  */
 template <typename plan_type_, typename shard_type_, typename metric_type_, typename selector_type_>
 status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
                           selector_type_ const& selector, progress_ticks_t& ticks,
                           forkunion_executor_t& executor) noexcept {
     using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
-    using flag_ref_t = typename shard_type_::template atomic_ref<bool>;
     std::size_t const population = plan.planned_nodes();
-    // Every step bumps them, so they take their own lines, away from the locals every thread reads.
-    alignas(default_alignment_k) std::size_t ticked = plan.ticked;
+    // Every step bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(default_alignment_k) std::size_t taken = plan.taken;
-    alignas(default_alignment_k) bool cancelled = false;
+    bool cancelling = false;
     while (true) {
-        bool const reselecting = plan.reselecting();
+        std::size_t const walked = plan.tile_nodes();
         auto const steps = plan.steps();
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
             count_ref_t const next {taken};
-            while (!flag_ref_t(cancelled).load(std::memory_order_relaxed)) {
-                std::size_t const position = next.fetch_add(1, std::memory_order_relaxed);
-                if (position >= steps.size()) break;
-                auto const step = steps[position];
-                std::size_t const computed_before = scratch.traversals[thread].telemetry.computed_distances;
-                [[maybe_unused]] status_t const ran = plan.run(step, scratch.metrics[thread],
-                                                               scratch.traversals[thread], selector);
-                if (!reselecting) continue;
-                std::size_t const nodes = plan.nodes_in(step);
-                std::size_t const done = count_ref_t(ticked).fetch_add(nodes, std::memory_order_relaxed) + nodes;
-                // A step whose node was not picked walked nothing, so only a walking step reports.
-                if (scratch.traversals[thread].telemetry.computed_distances == computed_before) continue;
-                if (ticks(done, population) == continuation_t::cancel_k)
-                    flag_ref_t(cancelled).store(true, std::memory_order_relaxed);
-            }
+            for (std::size_t position = next.fetch_add(1, std::memory_order_relaxed); position < steps.size();
+                 position = next.fetch_add(1, std::memory_order_relaxed)) [[maybe_unused]]
+                status_t const ran = plan.run(steps[position], scratch.metrics[thread], scratch.traversals[thread],
+                                              selector);
         };
         if (failed(executor.for_threads(drain))) drain(0, 0);
-        plan.ticked = ticked;
-        plan.taken = min_of(taken, steps.size());
-        if (cancelled) return status_t::cancelled_k;
         plan.taken = taken = 0;
-        if (!plan.advance()) return status_t::success_k;
+        bool const following = plan.advance();
+        // Progress moves once per tile, past the barrier, so a cancel resumes at the tile's merge;
+        // a copy no stop skips runs to its end first.
+        if (walked) {
+            plan.ticked += walked;
+            cancelling = cancelling || ticks(plan.ticked, population) == continuation_t::cancel_k;
+        }
+        if (cancelling && !plan.moving()) return status_t::cancelled_k;
+        if (!following) return status_t::success_k;
     }
 }
 
@@ -1022,13 +1018,14 @@ struct specialized_variant {
     static variant_t const& of(void const* variant) noexcept { return *static_cast<variant_t const*>(variant); }
 
     /** The variant of @p geometry, which adopts @p adopted, a default connectivity taking its
-     *  place; a device one on @p residency 's device. */
+     *  place; a host one keeps its tables through @p tables, and a device one sits on the device
+     *  of @p residency. */
     static expected<void*> create(geometry_t geometry, typename traits_t::geometry_extras_t const& adopted,
-                                  arena_residency_t residency) noexcept {
+                                  arena_residency_t residency, forkunion_allocator_t tables) noexcept {
         variant_t* created = nullptr;
         if constexpr (is_vram_index<variant_t>)
             created = new (std::nothrow) variant_t(static_cast<int>(residency.device), geometry);
-        else created = new (std::nothrow) variant_t(forkunion_allocator_t {no_memory_domain_k});
+        else created = new (std::nothrow) variant_t(tables);
         if (!created) return {nullptr, status_t::bad_alloc_k};
         if (status_t const adopting = bodies_t::adopt(*created, geometry, adopted); failed(adopting))
             return delete created, expected<void*> {nullptr, adopting};
@@ -1039,11 +1036,11 @@ struct specialized_variant {
         if constexpr (requires(variant_t& typed) { typed.index.bound_shards(nodes); })
             of(variant).index.bound_shards(nodes);
     }
-    static status_t emplace(void* variant, arena_residency_t residency) noexcept {
+    static status_t emplace(void* variant, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
         else if constexpr (is_vram_index<variant_t>)
             return of(variant).index.emplace(static_cast<int>(residency.device));
-        else return of(variant).index.emplace(static_cast<fu_memory_domain_id_t>(residency.numa_domain));
+        else return of(variant).index.emplace(memory_domain);
     }
     static status_t view(void* variant, std::string_view path, std::span<std::string_view const> paths,
                          executor_t* executor) noexcept {
@@ -1056,13 +1053,11 @@ struct specialized_variant {
         else return of(variant).load(path, executor, ticks);
     }
 
-    /** Reads a checkpoint from memory into a RAM variant; a GPU variant reads none from memory
-     *  yet. */
+    /** Reads a checkpoint from host memory into a RAM or GPU variant. */
     static status_t load_buffer(void* variant, bytes_view_t buffer, executor_t& executor,
                                 progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else if constexpr (is_ram_index<variant_t>) return of(variant).load(buffer, executor, ticks);
-        else return status_t::unsupported_k;
+        else return of(variant).load(buffer, executor, ticks);
     }
     static status_t save(void* variant, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
         return of(variant).save(path, executor, ticks);
@@ -1193,7 +1188,8 @@ struct specialized_variant {
             // A RAM plan borrows these slots, whose storage moves along with the buffer.
             auto [plan, status] = [&]() noexcept -> expected<refine_plan_t> {
                 if constexpr (is_vram_index<variant_t>) {
-                    typename index_t::refine_config_t const refine_config {config.refine.expansion_factor};
+                    typename index_t::refine_config_t const refine_config {config.refine.expansion_factor,
+                                                                           config.refine.memory_limit};
                     if (!receivers.empty())
                         return refined.index.plan_split(typed, {refine_config, config.seed}, executor);
                     if (!donors.empty()) return refined.index.plan_absorb(typed, refine_config, executor);

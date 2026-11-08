@@ -18,6 +18,7 @@ None of it is a public header: the C libraries, the C test and every binding lin
 - `sequence_specializations.cuh`, `shapes_specializations.cuh` and `geospatial_specializations.cuh` spell each modality's variants, such as `sequence_ram_variant<cpu_class>` and `shapes_ram_variant<scalar, cpu_class>`, with their NVMe and NVIDIA siblings, the `<modality>_variants_of` each class compiles per residency, and the `variant_bodies<traits>` that freeze, describe and place one variant.
 - `basic_index.cuh` holds the one handle over a modality's picked variant, the CPU and GPU ladders, and every verb once, each modality's traits supplying only what differs.
 - `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp` implement `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`: the handle and one forward per verb.
+- `arrow.cpp` implements `arrow.h`: Arrow columns read into views, and views exported as Arrow columns in place.
 - `<modality>/cpu_variants_<class>.cpp` are their class units, each instantiating its modality's RAM and NVMe tables for the class, and `<modality>/vram_variants_nvidia.cpp` holds the modality's NVIDIA table beside a `vram_kernels_nvidia_<key>.cu` per metric or dtype, where geospatial's one `vram_variants_nvidia.cu` compiles both ways.
 
 ## From a Verb to an Engine Template
@@ -93,7 +94,7 @@ Each class unit compiles its variants with the class's own flags into a table of
   Nothing links Metal, Foundation or `libobjc`: `metal_api_t::load` opens them.
 - `usearch_sequence_cpu_variants`, `usearch_shapes_cpu_variants` and `usearch_geospatial_cpu_variants` collect each modality's class units, `<modality>/cpu_variants_<class>.cpp`, each instantiating its RAM and NVMe tables, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
 - `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
-- `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
+- `usearch_punned` - `types.cpp`, `arrow.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
 `USEARCH_DENSE_DTYPES` trims every unit's variants from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.

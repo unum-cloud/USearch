@@ -62,9 +62,9 @@ template <                                                                    //
     typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
     typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
-    typename engine_type_ = default_io_engine_t,                              //
+    typename engine_type_ = default_io_engine<dummy_waiter_t>,                //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
-    typename wait_type_ = fu::standard_yield_t                                //
+    typename wait_type_ = dummy_waiter_t                                      //
     >
 struct nvme_indexes {
     template <typename>
@@ -1096,7 +1096,6 @@ struct nvme_indexes {
     using candidates_allocator_t = typename index_t::candidates_allocator_t;
     using results_array_t = typename index_t::results_array_t;
     using walk_t = typename index_t::walk_t;
-    using node_id_t = dense::node_id_t;
     using resident_keys_t = nvme_resident_keys<key_t, node_id_t, atomic_ref_template_>;
 
 #pragma region Rows

@@ -117,10 +117,12 @@ typedef struct usearch_geospatial_refinement_handle_t* usearch_geospatial_refine
  */
 typedef struct usearch_geospatial_observation_t {
 
-    /** Degrees on WGS-84, north and east positive. EXIF @c GPSLatitude and @c GPSLongitude with
-     *  their @c Ref signs; QuickTime @c ISO6709; GoPro GPMF @c GPS5; MISB ST 0601 tags 13 and 14;
-     *  ROS @c NavSatFix. */
+    /** Degrees north on WGS-84, south negative. EXIF @c GPSLatitude with its @c Ref sign;
+     *  QuickTime @c ISO6709; GoPro GPMF @c GPS5; MISB ST 0601 tag 13; ROS @c NavSatFix. */
     double latitude_degrees;
+
+    /** Degrees east on WGS-84, west negative. EXIF @c GPSLongitude with its @c Ref sign;
+     *  QuickTime @c ISO6709; GoPro GPMF @c GPS5; MISB ST 0601 tag 14; ROS @c NavSatFix. */
     double longitude_degrees;
 
     /** Metres above the WGS-84 ellipsoid. EXIF @c GPSAltitude means the sea level before Exif 3.0
@@ -156,11 +158,13 @@ typedef struct usearch_geospatial_observation_t {
      *  image; a LiDAR return. */
     double range_metres;
 
-    /** The first and last instant the observation covers, in Unix seconds, UTC. EXIF
-     *  @c DateTimeOriginal with @c OffsetTimeOriginal, or @c GPSDateStamp with @c GPSTimeStamp;
-     *  a clip's creation date and duration; MISB tag 2; a ROS @c header.stamp. One NaN makes the
-     *  observation an instant at the other. */
+    /** The first instant the observation covers, in Unix seconds, UTC. EXIF @c DateTimeOriginal
+     *  with @c OffsetTimeOriginal, or @c GPSDateStamp with @c GPSTimeStamp; a clip's creation date;
+     *  MISB tag 2; a ROS @c header.stamp. NaN makes it an instant at @c end_seconds. */
     double begin_seconds;
+
+    /** The last instant the observation covers, in Unix seconds, UTC: a clip's creation date plus
+     *  its duration, or the sources of @c begin_seconds. NaN makes it an instant at the start. */
     double end_seconds;
 } usearch_geospatial_observation_t;
 
@@ -205,16 +209,22 @@ typedef void (*usearch_geospatial_terrain_callback_t)(size_t first_row, size_t f
  */
 typedef struct usearch_geospatial_terrain_t {
 
-    /** The grid's extent: rows run south from the north edge, columns east from the west edge. */
+    /** The grid's row count; rows run south from the north edge. */
     size_t rows;
+
+    /** The grid's column count; columns run east from the west edge. */
     size_t columns;
 
-    /** The centre of cell [0,0], in degrees. */
+    /** The latitude of the centre of cell [0,0], in degrees. */
     double north_latitude_degrees;
+
+    /** The longitude of the centre of cell [0,0], in degrees. */
     double west_longitude_degrees;
 
-    /** The steps between rows and between columns, in degrees, both positive. */
+    /** The step between rows, in degrees, positive. */
     double row_step_degrees;
+
+    /** The step between columns, in degrees, positive. */
     double column_step_degrees;
 
     /** The whole grid, row-major, borrowed for the handle's lifetime. */
@@ -226,6 +236,8 @@ typedef struct usearch_geospatial_terrain_t {
     /** Or a handler filling windows of the grid on demand, called with @c state; VRAM handles
      *  refuse it with @c usearch_status_unsupported_k, as no device calls the host. */
     usearch_geospatial_terrain_callback_t callback;
+
+    /** The opaque pointer passed back to every @c callback call. */
     void* state;
 
     /** Or a dataset on disk, which only an NVMe residency will read; RAM and VRAM handles refuse
@@ -446,8 +458,8 @@ typedef struct usearch_geospatial_load_vram_t {
 } usearch_geospatial_load_vram_t;
 
 /**
- *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
- *  @c usearch_geospatial_load_ram.
+ *  @brief Copies a checkpoint into a new, mutable index in device memory, with the placement rules
+ *      of @c usearch_geospatial_load_ram.
  *
  *  @par Statuses:
  *  - @c usearch_status_invalid_argument_k An empty @c path, a checkpoint or part path that does
@@ -463,8 +475,62 @@ typedef struct usearch_geospatial_load_vram_t {
  *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
  *  - @c usearch_status_contended_k Another call holds the executor.
  *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
+ *  - @c usearch_status_io_k A read of the checkpoint failed mid-load.
  */
 USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments);
+
+/** The arguments of @c usearch_geospatial_load_vram_buffer. */
+typedef struct usearch_geospatial_load_vram_buffer_t {
+
+    /** Output for the new index, written by the time the call is final. */
+    usearch_geospatial_index_t* index;
+
+    /** The executor the upload runs on, one stream per device. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Source holding one serialized monolith, or the manifest of several parts leading them, in
+     *  host memory. */
+    usearch_bytes_view_t buffer;
+
+    /** The devices to place the parts on. */
+    usearch_vram_options_t vram;
+
+    /** Observations one key may hold at most, which no checkpoint records; zero is unbounded. */
+    size_t values_per_key;
+
+    /** The @b optional terrain lines of sight are tested over, which no checkpoint carries. */
+    usearch_geospatial_terrain_t terrain;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_t progress;
+} usearch_geospatial_load_vram_buffer_t;
+
+/**
+ *  @brief Copies a checkpoint from a memory buffer into a new, mutable index in device memory,
+ *      reporting and cancelling like @c usearch_geospatial_load_vram.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer, or a terrain both borrowing
+ *    @c heights and naming a @c callback.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
+ *    sums do not parse.
+ *  - @c usearch_status_unsupported_k A @c buffer in device memory, a terrain @c path or
+ *    @c callback, a @c values_per_key bound, or devices that do not run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, a terrain whose row or column
+ *    step is not positive, the executor driving no stream on some shard's device, or the
+ *    checkpoint's columns differing from the shards' in dtype, shape or key width.
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
+ */
+USEARCH_EXPORT void usearch_geospatial_load_vram_buffer(usearch_geospatial_load_vram_buffer_t* arguments);
 
 /** The arguments of @c usearch_geospatial_view_ram. */
 typedef struct usearch_geospatial_view_ram_t {
@@ -705,8 +771,8 @@ typedef struct usearch_geospatial_refine_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the re-selection pass. */
+    usearch_refine_options_t refine;
 
     /** The @b optional handler, called with entries re-selected; a cancel stops the re-selection,
      *  still heals, and answers @c usearch_status_cancelled_k. */
@@ -722,9 +788,9 @@ typedef struct usearch_geospatial_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_geospatial_insert. A refined entry
- *  keeps its cone winners and the longest of its other candidates, then has its long links drawn
- *  again by the insertion's rule, so a refine never leaves an entry without them.
+ *  @c refine.expansion_factor belongs here rather than in @c usearch_geospatial_insert. A refined
+ *  entry keeps its cone winners and the longest of its other candidates, then has its long links
+ *  drawn again by the insertion's rule, so a refine never leaves an entry without them.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
@@ -1060,11 +1126,11 @@ typedef struct usearch_geospatial_absorb_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refine. */
+    usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
-     *  it as it stops @c usearch_geospatial_refine, never a move. */
+    /** The @b optional handler, called with donor entries stitched so far and their total; a cancel
+     *  stops the stitching walks as it stops @c usearch_geospatial_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1130,8 +1196,8 @@ typedef struct usearch_geospatial_split_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refines. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
     uint64_t seed;
@@ -1212,8 +1278,8 @@ typedef struct usearch_geospatial_refinement_init_t {
      *  @c usearch_geospatial_refinement_finish frees it. */
     usearch_geospatial_refinement_t* refinement;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of every pass the refinement steps. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_geospatial_split. */
     uint64_t seed;

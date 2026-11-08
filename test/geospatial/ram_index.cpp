@@ -520,7 +520,7 @@ static std::size_t check_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
     using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
-                                                   blocking_files_engine<>>;
+                                                   blocking_files_engine<fu::standard_yield_t>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;
     constexpr std::size_t nodes_k = 256, probes_k = 6;

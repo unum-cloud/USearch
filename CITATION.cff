@@ -1,37 +1,26 @@
 cff-version: 1.2.0
-title: "USearch: Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+title: "USearch: One Proximity Graph for Search, Sparse Products and Attention, across RAM, VRAM and NVMe"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 3.0.0-rc.1
 repository-code: https://github.com/unum-cloud/USearch
 url: https://github.com/unum-cloud/USearch
 doi: 10.5281/zenodo.7949415
 abstract: >-
-  USearch is a similarity-search engine generalizable to sparse linear algebra and machine-learning
-  workloads, designed to put each part of the machine on the work it is best at: GPUs for the
-  compute- and bandwidth-bound passes, CPUs for the latency-bound ones, and NVMe solid-state drives
-  for scale beyond what memory holds. It indexes dense embeddings, biological and textual sequences,
-  geospatial coordinates, and molecular geometries, each addressed as its own modality over a shared
-  proximity graph rather than flattened into a single embedding pipeline. That same graph serves as
-  a sparse operand, folding matrix products, late-interaction MaxSim scoring, and softmax attention
-  into the traversal rather than materializing a match list. It carries native support for x86, Arm,
-  RISC-V, and WebAssembly instruction sets, spanning AVX2 through AVX-512, AVX10.2 and Intel AMX,
-  NEON through SVE2 and SME, RVV, and relaxed SIMD, with the arm chosen from what the host reports
-  at run time. Rows reside in host memory, device memory, or a block-addressable array reached by
-  asynchronous I/O, and one checkpoint materializes into any of the three without being rewritten.
-  Quantization spans Float64 down to NVFP4, packed nibbles and single bits, trading precision for
-  footprint per row, across Linux, Windows, macOS and beyond. Native bindings cover C, C++, Python,
-  Rust, Go, Java, JavaScript, Swift, C#, Zig, Mojo, and Wolfram, with Kotlin and Scala consuming the
-  Java surface directly.
+  USearch is an open-source proximity-graph index for nearest-neighbor search over dense vectors,
+  sequences, shapes and geospatial sets. The same graph serves as a sparse operand, folding sparse
+  matrix products, late-interaction MaxSim scoring and softmax attention into its traversal, and one
+  checkpoint opens in host memory, GPU memory or on NVMe drives without being rewritten. Its core
+  is a header-only C++ 20 library with no external dependencies, and ClickHouse, DuckDB, ScyllaDB
+  and YugabyteDB embed it for vector search.
 keywords:
-  - vector-search
-  - similarity-search
-  - nearest-neighbors
-  - clustering
-  - multi-modal
-  - quantization
-  - simd
+  - nearest-neighbor search
+  - vector search
+  - similarity search
+  - proximity graph
+  - sparse matrix multiplication
+  - attention
+  - nvme
   - gpu
 
 authors:
@@ -44,28 +33,24 @@ references:
   - type: article
     title: "Scaling Vector Search with Intel and USearch"
     url: https://www.unum.cloud/blog/2023-11-07-scaling-vector-search-with-intel
-    date-published: 2023-11-07
     authors:
       - family-names: Vardanian
         given-names: Ash
   - type: article
     title: "Porting a C++ Library to 10 Languages"
     url: https://ashvardanian.com/posts/porting-cpp-library-to-ten-languages/
-    date-published: 2024-01-01
     authors:
       - family-names: Vardanian
         given-names: Ash
   - type: article
     title: "Abusing Vector Search for Fun and Profit"
     url: https://ashvardanian.com/posts/abusing-vector-search
-    date-published: 2023-08-01
     authors:
       - family-names: Vardanian
         given-names: Ash
   - type: article
     title: "Combinatorial Stable Marriages for Semantic Search"
     url: https://ashvardanian.com/posts/searching-stable-marriages
-    date-published: 2023-07-01
     authors:
       - family-names: Vardanian
         given-names: Ash

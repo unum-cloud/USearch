@@ -4,9 +4,10 @@
  *  @date August 27, 2026
  *  @brief The header-only tier's proof.
  *
- *  Everything under @c utilities/, @c basic/ & @c geospatial/ compiles & runs from headers
- *  alone - its own and the header-only ForkUnion & NumKong - and this translation unit
- *  instantiates the whole public surface to witness it.
+ *  Everything under @c utilities/, @c basic/ & @c geospatial/ compiles & runs from headers alone,
+ *  and this translation unit instantiates the whole public surface to witness it. The RAM tier of
+ *  @c basic/ needs the standard library and the OS headers only, which @c header_core.cpp proves,
+ *  while the rest of the tier also requires the header-only ForkUnion & NumKong.
  *
  *  @c utilities/serialization.hpp is deliberately absent: it consumes yyjson for the
  *  SafeGraphs JSON header, so it sits outside the tier this file vouches for. Checks are

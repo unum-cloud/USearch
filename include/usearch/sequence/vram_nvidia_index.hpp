@@ -20,18 +20,26 @@
 
 #include <stringzilla/capabilities.h> // `sz_capability_t` - the kits' capabilities
 
-#include "usearch/sequence_index.h" // `usearch_sequence_metric_t` - the kind a face scores
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the window widths on the host
 #include "usearch/basic/vram_nvidia_index.hpp"
 #include "usearch/sequence/ram_metric.hpp" // `needleman_wunsch_costs_t` - the costs a face keeps
 
-/** The C enum's spelling in a kernel's symbol, whole, as it sits in the global namespace, where
- *  @c vram_kernel_symbol finds it beside the enum. */
-constexpr char const* kernel_enum_mangling(usearch_sequence_metric_t) noexcept { return "25usearch_sequence_metric_t"; }
-
 namespace unum::usearch::sequence {
 using namespace unum::usearch::utilities;
+
+/** The distance a sequence kit scores. Its values are the C ABI's metric's, so @c src maps one
+ *  onto the other with a cast. */
+enum class vram_sequence_metric_t : u32_t {
+    levenshtein_bytes_k = 1,
+    levenshtein_runes_k,
+    needleman_wunsch_k,
+    overlap_k
+};
+
+/** The Itanium spelling of the sequence metric inside a sequence kernel's own scope, @c S1_, as
+ *  @c vram_kernel_symbol documents. */
+constexpr char const* kernel_enum_mangling(vram_sequence_metric_t) noexcept { return "NS1_22vram_sequence_metric_tE"; }
 
 /** Myers words of the longest query each Levenshtein rung's kernels score, narrowest first: a warp
  *  walks each query up to sixteen words, 1 KiB, a block past them, up to 4 KiB, where a block's
@@ -58,9 +66,9 @@ inline constexpr u32_t vram_overlap_rungs_k[] = {1, 4, 8, 16, 32};
 inline constexpr u32_t vram_needleman_wunsch_rows_k[] = {1, 2, 3, 4, 5, 6, 7, 8};
 
 /** The rungs the kit of @p metric scores on, narrowest first. */
-constexpr std::span<u32_t const> vram_sequence_rungs(usearch_sequence_metric_t metric) noexcept {
-    if (metric == usearch_sequence_metric_overlap_k) return vram_overlap_rungs_k;
-    if (metric == usearch_sequence_metric_needleman_wunsch_k) return vram_needleman_wunsch_rows_k;
+constexpr std::span<u32_t const> vram_sequence_rungs(vram_sequence_metric_t metric) noexcept {
+    if (metric == vram_sequence_metric_t::overlap_k) return vram_overlap_rungs_k;
+    if (metric == vram_sequence_metric_t::needleman_wunsch_k) return vram_needleman_wunsch_rows_k;
     return vram_levenshtein_words_k;
 }
 
@@ -68,8 +76,7 @@ constexpr std::span<u32_t const> vram_sequence_rungs(usearch_sequence_metric_t m
  *  loaded: the kit of the sequence kind @p metric_ its ladder picks under @p capability_, on the
  *  rungs of @c vram_sequence_rungs, over node IDs of @p node_id_type_, with the window widths the
  *  overlap kind hashes or the costs the Needleman-Wunsch kind scores with. */
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 struct vram_nvidia_kits {
 
     /** Rungs of the kit's kernels, one per entry of @c vram_sequence_rungs. */
@@ -108,6 +115,11 @@ struct vram_nvidia_kits {
     /** Bytes the @p bytes long sequence at @p data takes once prepared, a multiple of 16. */
     std::size_t span_bytes_(byte_t const* data, std::size_t bytes) const noexcept;
 
+    /** Bytes any loaded sequence of up to @p longest bytes takes once prepared, from length alone:
+     *  overlap's exact span, Needleman-Wunsch's for the most codes those bytes pack, an upper bound
+     *  tight for ASCII, and none for Levenshtein, whose spans the device counts. */
+    std::size_t span_bytes_(std::size_t longest) const noexcept;
+
     /** Bytes the @p stored sequence saves into: its own, since a sequence is its bytes, as a RAM
      *  string. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
@@ -122,18 +134,19 @@ struct vram_nvidia_kits {
      */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
-    /** Bytes the @p saved sequence stores into: its own. */
-    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept {
-        return {saved.size(), status_t::success_k};
-    }
+    /** Bytes a sequence of @p saved bytes stores into: its own. */
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_t::success_k}; }
 
-    /**
-     *  Stores the @p saved sequence into @p stored as it is.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The two differ in size.
-     */
-    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
+    /** Stores a step's sequences as saved, one copy of their run into the tape, then sizes their
+     *  spans on the device where they follow from content: Levenshtein counts each sequence's
+     *  classes, while the others size from length at planning. */
+    status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept {
+        if (status_t const copied = step.copy_values(); failed(copied)) return copied;
+        if constexpr (metric_ == vram_sequence_metric_t::overlap_k ||
+                      metric_ == vram_sequence_metric_t::needleman_wunsch_k)
+            return status_t::success_k;
+        else return step.launch_kits(vram_kernel_t::size_spans_k);
+    }
 
     /** The fatbin holding the kits' kernels. */
     static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
@@ -173,8 +186,7 @@ struct vram_nvidia_kits {
  *  its ladder picks under @p capability_ on the rungs of @c vram_sequence_rungs. Node IDs are
  *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
  *  over its kits and forwards its verbs, types and constants, which that graph documents. */
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 struct vram_nvidia_index {
     /* Components */
     using kits_t = vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>;
@@ -302,13 +314,12 @@ struct vram_nvidia_index {
     status_t save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         return graph_.save(columns, context);
     }
-    expected<load_plan_t> plan_load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                                    traversal_context_t& context) noexcept {
-        return graph_.plan_load(columns, context);
+    expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context,
+                                    std::span<cuda_part_source_t const> sources = {}) noexcept {
+        return graph_.plan_load(saved, context, sources);
     }
-    status_t load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                  traversal_context_t& context) noexcept {
-        return graph_.load(columns, context);
+    status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
+        return graph_.load(saved, context);
     }
 
     keyed_t const& keys() const noexcept { return graph_.keys(); }

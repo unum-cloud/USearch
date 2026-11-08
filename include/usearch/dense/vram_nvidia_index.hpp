@@ -80,6 +80,8 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     case vram_kernel_t::reachability_sweep_k:
     case vram_kernel_t::reachability_back_sweep_k:
     case vram_kernel_t::reached_in_links_k:
+    case vram_kernel_t::count_back_links_k:
+    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::partition_propose_k:
     case vram_kernel_t::partition_count_k:
     case vram_kernel_t::partition_accept_k:
@@ -142,6 +144,9 @@ inline constexpr cuda_rung<vram_kernel_t> cuda_rungs[] = {
     {vram_kernel_t::reachability_islands_k, 0},
     {vram_kernel_t::reached_in_links_k, 0},
     {vram_kernel_t::reconnect_island_k, 0},
+    {vram_kernel_t::count_back_links_k, 0},
+    {vram_kernel_t::offset_back_links_k, 0},
+    {vram_kernel_t::scatter_back_links_k, 0},
     {vram_kernel_t::partition_roots_k, 0},
     {vram_kernel_t::partition_propose_k, 0},
     {vram_kernel_t::partition_count_k, 0},
@@ -277,7 +282,7 @@ struct cuda_dense_kernel_speller_t {
 
 /** The NVIDIA dense shard's kernels: the loaded fatbin and the hooks its @c vram_shard_core
  *  calls to load, launch and stage them, each reading the core it is handed. */
-template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
           typename key_type_, typename key_hash_type_>
 struct vram_nvidia_kernels {
@@ -285,9 +290,9 @@ struct vram_nvidia_kernels {
     /** The capabilities the kernels compiled under, as the binary holding them states. */
     inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
 
-    using core_t =
-        vram_shard_core<cuda_vendor_t, vram_nvidia_kernels, vector_dtype_, cache_hints_type_, vectors_allocator_type_,
-                        neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
+    using core_t = vram_shard_core<cuda_vendor_t, vram_nvidia_kernels, vector_dtype_, cache_hints_type_, wait_type_,
+                                   vectors_allocator_type_, neighbors_allocator_type_, traversals_allocator_type_,
+                                   key_type_, key_hash_type_>;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using dot_t = typename dot_result_t::raw_t;
@@ -313,6 +318,97 @@ struct vram_nvidia_kernels {
     static expected<kernel_table_t const*> kernels_(cuda_executor_t::stream_t const& stream) noexcept {
         return stream.table_of(kernels_type_::bytes(), cuda_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
+
+    /** A mapped part a load reads, through cuFile where its file registered. */
+    using part_source_t = cuda_part_source_t;
+
+    /** Reads a load's steps of a part cuFile registered into two device staging slots, which the
+     *  core's load plan alternates between while the other slot's copies run. */
+    struct part_reader_t {
+
+        part_reader_t() noexcept = default;
+        part_reader_t(part_reader_t&& other) noexcept
+            : staging_(std::move(other.staging_)), sources_(other.sources_),
+              cufile_(std::exchange(other.cufile_, nullptr)), slot_bytes_(other.slot_bytes_) {}
+        part_reader_t& operator=(part_reader_t&&) = delete;
+        part_reader_t(part_reader_t const&) = delete;
+        part_reader_t& operator=(part_reader_t const&) = delete;
+        ~part_reader_t() noexcept {
+            if (cufile_) [[maybe_unused]]
+                cufile_error_t const deregistered = cufile_->buffer_deregister(staging_.get());
+        }
+
+        /** Whether the staging slots opened, so a step waits for its slot to drain. */
+        explicit operator bool() const noexcept { return staging_ != nullptr; }
+
+        /**
+         *  @brief Opens the staging on @p stream once one of @p sources registered: one slot per
+         *      step up to two, each holding @p step_rows rows of every column @p column_row_bytes
+         *      sizes, and registers it with cuFile.
+         *
+         *  cuFile reads into an unregistered buffer too, buffered, and a device refusing the
+         *  allocation leaves every step on its driver copies.
+         *
+         *  @par Statuses:
+         *  - @c device_error_k The allocation never finished on @p stream.
+         */
+        status_t open(cuda_executor_t::stream_t const& stream, std::span<part_source_t const> sources,
+                      std::size_t step_rows, std::size_t steps,
+                      std::span<std::size_t const> column_row_bytes) noexcept {
+            part_source_t const* registered = nullptr;
+            for (part_source_t const& source : sources)
+                if (!registered && source.file) registered = &source;
+            if (!registered) return status_t::success_k;
+            // Each column rounds out to whole blocks, and one more for a read's lead.
+            std::size_t const block_bytes = linux_cufile_file_t::block_bytes_k;
+            for (std::size_t const row_bytes : column_row_bytes)
+                if (row_bytes) slot_bytes_ += round_up_to_multiple(step_rows * row_bytes + block_bytes, block_bytes);
+            std::size_t const bytes = min_of<std::size_t>(steps, 2) * slot_bytes_;
+            staging_ = cuda_make_unique(cuda_device_allocator_t {stream}, bytes);
+            if (!staging_) return status_t::success_k;
+            // cuFile writes from the host, so the stream's allocation must finish first.
+            cuda_event_t allocated {*stream.api};
+            if (failed(allocated.record(stream.handle)) || failed(allocated.wait())) return status_t::device_error_k;
+            cufile_ = &registered->file.api();
+            [[maybe_unused]] cufile_error_t const buffer = cufile_->buffer_register(staging_.get(), bytes, 0);
+            sources_ = sources;
+            return status_t::success_k;
+        }
+
+        /**
+         *  @brief Reads @p extents into slot @p slot when they lie in a registered part, through
+         *      whole blocks, and points each at its staged bytes; leaves them otherwise.
+         *
+         *  @par Statuses:
+         *  - @c io_k A read ended short.
+         */
+        status_t read(std::size_t slot, std::span<bytes_view_t* const> extents) noexcept {
+            part_source_t const* const holder = staging_ ? cufile_holder(sources_, *extents.front()) : nullptr;
+            if (!holder) return status_t::success_k;
+            std::size_t into = slot * slot_bytes_;
+            for (bytes_view_t* const extent : extents) {
+                auto const [staged, read_status] = holder->file.read(
+                    static_cast<std::size_t>(extent->data() - holder->part.data()), extent->size(), staging_.get(),
+                    into);
+                if (failed(read_status)) return read_status;
+                *extent = staged;
+            }
+            return status_t::success_k;
+        }
+
+      private:
+        /** The slots back to back; empty until a registered part opened them. */
+        cuda_unique_ptr<byte_t, cuda_device_allocator_t> staging_;
+
+        /** The mapped parts the steps read from. */
+        std::span<part_source_t const> sources_;
+
+        /** The cuFile entries the staging registered with, which deregister it as it dies. */
+        cufile_api_t const* cufile_ = nullptr;
+
+        /** Bytes one slot holds. */
+        std::size_t slot_bytes_ = 0;
+    };
 
     /** Sixteen bytes every NVIDIA kit loads at once - the host's spelling of the kernels' @c uint4,
      *  which only the CUDA SDK declares. */
@@ -697,8 +793,8 @@ struct vram_nvidia_kernels {
 
 #pragma region Refinement
 
-    /** What one refinement pass hands its launches: the walked rows, the pass-local buffers, and
-     *  the walk's arena, which the kernel side turns into its refine views. */
+    /** What one refinement pass hands its launch: the walked rows and the walk's arena, which the
+     *  kernel side turns into its refine view. */
     struct refine_launch_t {
 
         /** The walked rows: an ID range, or under @c node_ids the offsets into that array. */
@@ -707,20 +803,13 @@ struct vram_nvidia_kernels {
         /** Optional device-resident IDs to walk instead of the range. */
         u32_t const* node_ids = nullptr;
 
-        /** Rows published when the pass began: the walks' sampling bound and the merge's sweep. */
+        /** Rows published when the pass began: the walks' sampling bound. */
         u32_t nodes_count = 0;
 
-        /** The shadow neighbors the walks write, @b [rows,connectivity]. */
-        u32_t* shadow_neighbors = nullptr;
+        /** The rows the plan counted as changed, a bit each. */
+        vram_bitset_t changed;
 
-        /** The heads of the walkers' chains @b [rows], their links @b [rows,connectivity], and the
-         *  bitset of rows the pass walked. */
-        u32_t* link_heads = nullptr;
-        u32_t* link_next = nullptr;
-        vram_bitset_t walked;
-
-        /** The walk's and the merge's claim counters, zeroed with the chains, read once the pass
-         *  finished. */
+        /** The walk's claim counter, read once the pass finished. */
         u32_t* claims = nullptr;
 
         /** The traversal arena, the shape of one warp's slice, the arena frontier's expansion, and
@@ -744,13 +833,11 @@ struct vram_nvidia_kernels {
         u32_t resident_blocks = 0;
     };
 
-    /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
-     *  @p scratch through @p kernel: the pass covers @p nodes, or under a device-resident
-     *  @p node_ids the listed IDs with @p nodes spanning the array's offsets, each node first
-     *  walking across the neighboring group in round @p round when @p parts parts are given; the
-     *  merge folds the re-selected rows' forward picks and the rows chained onto every picked row
-     *  into the live rows, and leaves every other row as it was. Nothing waits: the staging queued
-     *  after it checks its claims. */
+    /** Queues one walk of the refinement behind @c refine_plan_t into its carved @p scratch through
+     *  @p kernel: the pass covers @p nodes, or under a device-resident @p node_ids the listed IDs
+     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
+     *  group in round @p round when @p parts parts are given, then merging its picks into its live
+     *  row. Nothing waits: the copy queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                           refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
                           std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
@@ -760,13 +847,11 @@ struct vram_nvidia_kernels {
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
-        vram_refine_passes_t const passes = core.refine_passes_(context);
-        if (!passes.link_heads) return status_t::bad_alloc_k;
-        // Chains start empty and no row walked yet.
-        if (cuda_fill_async(core.api(), scratch.claims, 0, 2 * sizeof(u32_t), stream) != cuda_success_k ||
-            cuda_fill_async(core.api(), passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) !=
-                cuda_success_k ||
-            cuda_fill_async(core.api(), passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) !=
+        if (cuda_fill_async(core.api(), scratch.claims, 0, sizeof(u32_t), stream) != cuda_success_k)
+            return status_t::device_error_k;
+        // A split's receivers count their own rows from the first round of each.
+        if (!round && node_ids.empty() &&
+            cuda_fill_async(core.api(), scratch.changed.words, 0, scratch.words * sizeof(u32_t), stream) !=
                 cuda_success_k)
             return status_t::device_error_k;
 
@@ -790,10 +875,7 @@ struct vram_nvidia_kernels {
         launch.nodes = nodes;
         launch.node_ids = node_ids.data();
         launch.nodes_count = static_cast<u32_t>(nodes_count);
-        launch.shadow_neighbors = passes.shadow_neighbors;
-        launch.link_heads = passes.link_heads;
-        launch.link_next = passes.link_next;
-        launch.walked = passes.walked;
+        launch.changed = scratch.changed;
         launch.claims = scratch.claims;
         launch.arena = arena;
         launch.arena_shape = arena_shape;
@@ -805,12 +887,7 @@ struct vram_nvidia_kernels {
         launch.round = round;
         launch.function = kernel_function_(*kernels, kernel, candidate_slots);
         launch.resident_blocks = resident_blocks_(kernel, candidate_slots);
-        if (status_t const launched = launch_refine_(core, *kernels, launch, context); failed(launched))
-            return launched;
-
-        // Fold every walked row's forward picks and every chain of walkers into the live rows; a
-        // heal round's islands chain nowhere, so only their own rows merge.
-        return launch_refine_back_links_(core, *kernels, launch, context);
+        return launch_refine_(core, *kernels, launch, context);
     }
 
     /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
@@ -881,20 +958,18 @@ struct vram_nvidia_kernels {
         return core.copy_counters_(scratch, counters, 2 * first_sweep - 1, stream);
     }
 
-    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
-     *  on @p context 's stream: the reached in-links first, counted in the pass's staging, so no
-     *  reconnection takes the last link a reached node is found through, then each unreached
-     *  island into a reached pick or its landmark, and each island reaching no landmark back to
-     *  its nearest walked pick that does or to its landmark. */
+    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected on
+     *  @p context 's stream: the reached in-links first, so no reconnection takes the last link a
+     *  reached node is found through, then each unreached island into a reached pick or its
+     *  landmark, and each island reaching no landmark back to its landmark, unless a live pick
+     *  already reaches one. */
     status_t queue_reconnect_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                               u32_t islands) noexcept {
         std::size_t const rows = core.size();
         cuda_stream_handle_t const stream = context.stream();
         auto const [kernels, kernels_status] = kernels_(context);
         if (failed(kernels_status)) return kernels_status;
-        vram_refine_passes_t const passes = core.refine_passes_(context);
-        u32_t* const in_links = passes.link_heads;
-        if (!in_links) return status_t::bad_alloc_k;
+        u32_t* const in_links = scratch.in_links;
         if (cuda_fill_async(core.api(), in_links, 0, rows * sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         vram_arguments_t arguments {};
@@ -909,7 +984,6 @@ struct vram_nvidia_kernels {
         graph.islands_count = islands;
         graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(core.connectivity(), rows));
         graph.reconnected = scratch.reconnected;
-        graph.shadow_neighbors = passes.shadow_neighbors;
         if (status_t const counted = launch_(
                 *kernels, kernel_function_(*kernels, vram_kernel_t::reached_in_links_k, 0),
                 core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reached_in_links_k, 0), 0, stream,
@@ -1055,13 +1129,15 @@ struct vram_nvidia_kernels {
         return status_t::success_k;
     }
 
-    /** Walks the rows of @p launch, writing their re-selected neighbors to its shadow matrix. */
+    /** Walks the rows of @p launch, each merging its picks into its live row, so a warp caches a
+     *  walk's candidates or a merge round's, whichever are more. */
     status_t launch_refine_(core_t& core, kernel_table_t const& kernels, refine_launch_t const& launch,
                             traversal_context_t& context) noexcept {
         vram_arguments_t arguments {};
-        u32_t const selection_nodes = core.walk_selection_nodes_(launch.expansion, launch.candidate_slots);
+        u32_t const reselection_nodes = core.reselection_nodes_();
+        u32_t const selection_nodes = max_of(core.walk_selection_nodes_(launch.expansion, launch.candidate_slots),
+                                             reselection_nodes);
         arguments.refine = {core.storage(), //
-                            launch.shadow_neighbors,
                             launch.nodes.bound,
                             launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_nodes),
                             selection_nodes,
@@ -1077,49 +1153,11 @@ struct vram_nvidia_kernels {
                             launch.part_bases,
                             launch.parts,
                             launch.round,
-                            launch.link_heads,
-                            launch.link_next,
-                            launch.walked};
+                            reselection_nodes,
+                            launch.changed};
         return launch_(kernels, launch.function, core.device_.multiprocessor_count * launch.resident_blocks,
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments,
                        rows_map_(core));
-    }
-
-    /** Merges every walked row's forward picks and every chain of walkers the walks of @p launch
-     *  threaded into the live neighbors. */
-    status_t launch_refine_back_links_(core_t& core, kernel_table_t const& kernels, refine_launch_t const& launch,
-                                       traversal_context_t& context) noexcept {
-        vram_arguments_t arguments {};
-        // The merge sweeps the whole ID space and skips the rows the pass neither walked nor
-        // picked, carving its slices from the arena sized for the refine's grid, so it launches
-        // that grid.
-        static_assert(resident_blocks_(vram_dense_kernel_t::merge_back_links_k, 0) ==
-                      resident_blocks_(vram_kernel_t::refine_k, 0));
-        arguments.refine = {
-            core.storage(),
-            launch.shadow_neighbors,
-            launch.nodes_count,
-            launch.arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(core.reselection_nodes_()),
-            core.reselection_nodes_(),
-            0,
-            launch.arena,
-            launch.arena_shape,
-            launch.expansion,
-            launch.epoch_base,
-            context.telemetry_.get(),
-            launch.claims + 1,
-            nullptr,
-            launch.nodes_count,
-            nullptr,
-            0,
-            0,
-            launch.link_heads,
-            launch.link_next,
-            launch.walked};
-        return launch_(
-            kernels, kernel_function_(kernels, vram_dense_kernel_t::merge_back_links_k, 0),
-            core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, launch.candidate_slots),
-            vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments);
     }
 
     /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
@@ -1378,11 +1416,12 @@ struct vram_nvidia_kernels {
  *  @ref dense_vram_nvidia_index_concurrency for how a batch's rows publish on the device. The
  *  kernels come from the fatbin @p kernels_type_ hands out through its static @c bytes, compiled
  *  under its @c capability_k, and a checkpoint load's bounce halves demote through
- *  @p cache_hints_type_.
+ *  @p cache_hints_type_. A batch waits through @p wait_type_ for the batches before it to publish.
  */
 template <                                                                      //
     nk_dtype_t vector_dtype_,                                                   //
     typename kernels_type_,                                                     //
+    typename wait_type_,                                                        //
     typename cache_hints_type_ = dummy_cache_hints_t,                           //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
@@ -1394,11 +1433,12 @@ struct vram_nvidia_index {
 
     /* Components */
     using kernels_t =
-        vram_nvidia_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+        vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
                             neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
     using core_t = typename kernels_t::core_t;
     using kernel_table_t = typename kernels_t::kernel_table_t;
     using vendor_t = typename core_t::vendor_t;
+
     using vectors_allocator_t = typename core_t::vectors_allocator_t;
     using neighbors_allocator_t = typename core_t::neighbors_allocator_t;
     using traversals_allocator_t = typename core_t::traversals_allocator_t;
@@ -1806,8 +1846,9 @@ struct vram_nvidia_index {
      *  - @c cancelled_k, @c config_mismatch_k, @c unsupported_k or @c unsupported_layout_k
      *    The index keeps it, as @c status says.
      */
-    expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream) noexcept {
-        return core_.plan_load(rows, stream);
+    expected<load_plan_t> plan_load(std::size_t rows, typename executor_t::stream_t const& stream,
+                                    std::span<cuda_part_source_t const> sources = {}) noexcept {
+        return core_.plan_load(rows, stream, sources);
     }
 
     /**

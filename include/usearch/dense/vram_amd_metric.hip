@@ -1794,7 +1794,7 @@ struct cdna4_lds_schedule_t {
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
         if (cache.ids_) return;
-        constexpr u32_t lane_bytes_k = sizeof(uint4);
+        constexpr u32_t lane_bytes_k = sizeof(typename storage_::fragment_t);
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_k;
         u32_t const row_units = storage.geometry.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
@@ -1806,7 +1806,7 @@ struct cdna4_lds_schedule_t {
                                    (unit - row * row_units) * lane_bytes_k;
             __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
                                              hip_shared_pointer(cache_bytes + base * lane_bytes_k),
-                                             static_cast<u32_t>(lane_bytes_k), 0, 0);
+                                             std::integral_constant<u32_t, lane_bytes_k> {}, 0, 0);
         }
     }
 

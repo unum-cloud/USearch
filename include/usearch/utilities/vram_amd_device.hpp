@@ -35,6 +35,7 @@
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - the HIP runtime opened by `hip_api_t::load`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's table of streams
+#include "usearch/utilities/ram_device.hpp" // `forkunion_allocator_t`, `fu_memory_domain_id_of_pci` - pinned placement
 #include "usearch/utilities/types.hpp"          // `gpu_device_t`, `gpu_devices_capacity_k`
 
 namespace unum::usearch::utilities {
@@ -112,8 +113,8 @@ struct hip_access_descriptor_t {
 };
 
 /** The flags USearch passes: @c hipStreamNonBlocking, @c hipEventBlockingSync,
- *  @c hipEventDisableTiming, @c hipHostMallocPortable, @c hipMemAttachGlobal,
- *  @c hipMemAllocationGranularityMinimum and @c hipCpuDeviceId. */
+ *  @c hipEventDisableTiming, @c hipHostMallocPortable, which @c hipHostRegisterPortable equals,
+ *  @c hipMemAttachGlobal, @c hipMemAllocationGranularityMinimum and @c hipCpuDeviceId. */
 inline constexpr unsigned hip_stream_non_blocking_k = 1;
 inline constexpr unsigned hip_event_blocking_sync_k = 1;
 inline constexpr unsigned hip_event_disable_timing_k = 2;
@@ -138,6 +139,7 @@ struct hip_api_t {
     hip_result_t (*get_device)(int*, int) = nullptr;
     hip_result_t (*get_device_attribute)(int*, hip_device_attribute_t, int) = nullptr;
     hip_result_t (*get_device_name)(char*, int, int) = nullptr;
+    hip_result_t (*get_pci_bus_id)(char*, int, int) = nullptr;
     hip_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
     hip_result_t (*can_access_peer)(int*, int, int) = nullptr;
     hip_result_t (*set_device)(int) = nullptr;
@@ -148,6 +150,8 @@ struct hip_api_t {
     hip_result_t (*free)(void*) = nullptr;
     hip_result_t (*host_malloc)(void**, std::size_t, unsigned) = nullptr;
     hip_result_t (*host_free)(void*) = nullptr;
+    hip_result_t (*host_register)(void*, std::size_t, unsigned) = nullptr;
+    hip_result_t (*host_unregister)(void*) = nullptr;
     hip_result_t (*copy)(void*, void const*, std::size_t, hip_copy_kind_t) = nullptr;
     hip_result_t (*copy_async)(void*, void const*, std::size_t, hip_copy_kind_t, hip_stream_handle_t) = nullptr;
     hip_result_t (*copy_2d_async)(void*, std::size_t, void const*, std::size_t, std::size_t, std::size_t,
@@ -181,6 +185,10 @@ struct hip_api_t {
     hip_result_t (*memory_unmap)(void*, std::size_t) = nullptr;
     hip_result_t (*memory_set_access)(void*, std::size_t, hip_access_descriptor_t const*, std::size_t) = nullptr;
 
+    /** The memory domain nearest each device, where its pinned host bytes go, or
+     *  @c no_memory_domain_k where none is known. */
+    fu_memory_domain_id_t memory_domains[gpu_devices_capacity_k] = {};
+
     /** Whether the runtime loaded with every entry resolved. */
     explicit operator bool() const noexcept { return memory_set_access != nullptr; }
 
@@ -199,6 +207,7 @@ struct hip_api_t {
             library.resolve("hipDeviceGet", runtime.get_device) &&
             library.resolve("hipDeviceGetAttribute", runtime.get_device_attribute) &&
             library.resolve("hipDeviceGetName", runtime.get_device_name) &&
+            library.resolve("hipDeviceGetPCIBusId", runtime.get_pci_bus_id) &&
             library.resolve("hipDeviceTotalMem", runtime.get_device_memory) &&
             library.resolve("hipDeviceCanAccessPeer", runtime.can_access_peer) &&
             library.resolve("hipSetDevice", runtime.set_device) &&
@@ -207,8 +216,10 @@ struct hip_api_t {
             library.resolve("hipMallocManaged", runtime.malloc_managed) &&
             library.resolve("hipMemAdvise", runtime.memory_advise) && library.resolve("hipFree", runtime.free) &&
             library.resolve("hipHostMalloc", runtime.host_malloc) &&
-            library.resolve("hipHostFree", runtime.host_free) && library.resolve("hipMemcpy", runtime.copy) &&
-            library.resolve("hipMemcpyAsync", runtime.copy_async) &&
+            library.resolve("hipHostFree", runtime.host_free) &&
+            library.resolve("hipHostRegister", runtime.host_register) &&
+            library.resolve("hipHostUnregister", runtime.host_unregister) &&
+            library.resolve("hipMemcpy", runtime.copy) && library.resolve("hipMemcpyAsync", runtime.copy_async) &&
             library.resolve("hipMemcpy2DAsync", runtime.copy_2d_async) && library.resolve("hipMemset", runtime.fill) &&
             library.resolve("hipMemsetAsync", runtime.fill_async) &&
             library.resolve("hipMemsetD32Async", runtime.fill_words_async) &&
@@ -234,7 +245,15 @@ struct hip_api_t {
             library.resolve("hipMemRelease", runtime.memory_release) &&
             library.resolve("hipMemMap", runtime.memory_map) && library.resolve("hipMemUnmap", runtime.memory_unmap) &&
             library.resolve("hipMemSetAccess", runtime.memory_set_access);
-        return resolved ? runtime : hip_api_t {};
+        if (!resolved) return {};
+        // A bus that names no memory domain leaves the device's pinned bytes on the heap.
+        for (int device = 0; static_cast<std::size_t>(device) != gpu_devices_capacity_k; ++device) {
+            char bus_id[32] = {};
+            [[maybe_unused]] hip_result_t const named = runtime.get_pci_bus_id(bus_id, sizeof(bus_id), device);
+            [[maybe_unused]] fu_status_t const placed = fu_memory_domain_id_of_pci(bus_id,
+                                                                                   &runtime.memory_domains[device]);
+        }
+        return runtime;
     }
 };
 
@@ -797,7 +816,9 @@ struct hip_arena_allocator {
 using hip_arena_allocator_t = hip_arena_allocator<byte_t>;
 
 /** Page-locked host allocator - the DMA source and sink; pinning is synchronous, the stream is
- *  identity only. */
+ *  identity only. Knowing the device, it places its pages on the memory domain nearest the device's
+ *  PCIe slot, where the copy engines read them, and page-locks them there; otherwise, or where the
+ *  system names no domain, the runtime allocates them. */
 template <typename value_type_ = byte_t>
 struct hip_pinned_allocator {
     using value_type = value_type_;
@@ -812,22 +833,38 @@ struct hip_pinned_allocator {
     /** Pins through @p api for a host bounce that rides no stream. */
     explicit hip_pinned_allocator(hip_api_t const& api) noexcept : api_(&api) {}
 
+    /** Pins through @p api beside device @p device, for buffers that ride no stream. */
+    hip_pinned_allocator(hip_api_t const& api, int device) noexcept
+        : api_(&api), device_(device), memory_domain_(api.memory_domains[device]) {}
+
     /** Takes the identity of the executor's @p stream and the device it names. */
     template <typename stream_type_>
     explicit hip_pinned_allocator(stream_type_ const& stream) noexcept
-        : api_(stream.api), stream_(stream.handle), device_(stream.device) {}
+        : api_(stream.api), stream_(stream.handle), device_(stream.device),
+          memory_domain_(stream.api->memory_domains[stream.device]) {}
     template <typename other_>
     hip_pinned_allocator(hip_pinned_allocator<other_> const& other) noexcept
-        : api_(other.api_), stream_(other.stream()), device_(other.device()) {}
+        : api_(other.api_), stream_(other.stream()), device_(other.device()), memory_domain_(other.memory_domain_) {}
 
     value_type* allocate(std::size_t count) noexcept {
-        void* pointer = nullptr;
-        return api_ && api_->host_malloc(&pointer, count * sizeof(value_type), hip_host_portable_k) == hip_success_k
-                   ? static_cast<value_type*>(pointer)
-                   : nullptr;
+        if (!api_) return nullptr;
+        std::size_t const bytes = pinned_bytes_(count);
+        if (memory_domain_ == no_memory_domain_k) {
+            void* pointer = nullptr;
+            return api_->host_malloc(&pointer, bytes, hip_host_portable_k) == hip_success_k
+                       ? static_cast<value_type*>(pointer)
+                       : nullptr;
+        }
+        byte_t* const pointer = forkunion_allocator_t {memory_domain_}.allocate(bytes);
+        if (pointer && api_->host_register(pointer, bytes, hip_host_portable_k) != hip_success_k)
+            return forkunion_allocator_t {memory_domain_}.deallocate(pointer, bytes), nullptr;
+        return reinterpret_cast<value_type*>(pointer);
     }
-    void deallocate(value_type* pointer, std::size_t) noexcept {
-        if (api_) api_->host_free(pointer);
+    void deallocate(value_type* pointer, std::size_t count) noexcept {
+        if (!api_ || !pointer) return;
+        if (memory_domain_ == no_memory_domain_k) return void(api_->host_free(pointer));
+        api_->host_unregister(pointer);
+        forkunion_allocator_t {memory_domain_}.deallocate(reinterpret_cast<byte_t*>(pointer), pinned_bytes_(count));
     }
     hip_api_t const& api() const noexcept { return *api_; }
     hip_stream_handle_t stream() const noexcept { return stream_; }
@@ -840,6 +877,15 @@ struct hip_pinned_allocator {
     hip_api_t const* api_ = nullptr;
     hip_stream_handle_t stream_ = nullptr;
     int device_ = 0;
+
+    /** Where the pages sit, @c no_memory_domain_k where the runtime allocates them. */
+    fu_memory_domain_id_t memory_domain_ = no_memory_domain_k;
+
+    /** The bytes @p count values pin: whole pages, since two registrations sharing a page refuse
+     *  each other. */
+    static std::size_t pinned_bytes_(std::size_t count) noexcept {
+        return round_up_to_multiple<std::size_t>(count * sizeof(value_type), fu::ram_page_size());
+    }
 };
 
 /** The byte specialization a host bounce is pinned through. */
@@ -860,8 +906,8 @@ struct hip_pinned_slots_t {
      *  run pins twice as many. */
     inline static constexpr std::size_t slots_per_pin_k = 64;
 
-    /** Pins its slots through @p api. */
-    explicit hip_pinned_slots_t(hip_api_t const& api) noexcept : slots_ {hip_pinned_allocator_t {api}} {}
+    /** Pins its slots through @p api beside device @p device. */
+    hip_pinned_slots_t(hip_api_t const& api, int device) noexcept : slots_ {hip_pinned_allocator_t {api, device}} {}
 
     /** Hands out a slot, a returned one first; null when pinning more fails. */
     void* take() noexcept {
@@ -1206,7 +1252,8 @@ struct hip_traversal_context {
      *  stream's pool, and takes their host twins from the stream's pinned slots; sized buffers wait
      *  for a verb. */
     hip_traversal_context(allocator_t allocator = {}) noexcept
-        : results {growing_buffer<scored_node_t, hip_pinned_allocator_t> {hip_pinned_allocator_t {allocator.api()}}},
+        : results {growing_buffer<scored_node_t, hip_pinned_allocator_t> {
+              hip_pinned_allocator_t {allocator.api(), allocator.device()}}},
           allocator_ {(hip_set_device(allocator.api(), allocator.device()), allocator)}, //
           telemetry_ {hip_make_unique(telemetry_allocator_t {device_allocator_t {allocator_}}, 1)},
           assigned_nodes_ {hip_make_unique(counter_allocator_t {device_allocator_t {allocator_}}, 2)},
@@ -1230,6 +1277,10 @@ struct hip_traversal_context {
     hip_api_t const& api() const noexcept { return allocator_.api(); }
     hip_stream_handle_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
+
+    /** The allocator this context carves its scratch from, for a caller's own launches beside
+     *  it. */
+    allocator_t allocator() const noexcept { return allocator_; }
 
     /**
      *  @brief The table of @p fatbin on this context's stream, loaded through @p speller at the
@@ -1480,7 +1531,7 @@ struct hip_executor_t {
         /** Takes @p handle, opened on @p device, and binds the arena to it; the event is born
          *  there too, so @p device must be current. */
         stream_t(hip_api_t const& api, int device, hip_stream_t&& handle) noexcept
-            : api(&api), device(device), pinned_slots(new (std::nothrow) hip_pinned_slots_t {api}),
+            : api(&api), device(device), pinned_slots(new (std::nothrow) hip_pinned_slots_t {api, device}),
               kernel_tables(new (std::nothrow) hip_kernel_tables_t), handle(std::move(handle)), event(api),
               arena(hip_device_allocator_t {*this}) {}
 

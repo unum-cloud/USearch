@@ -22,10 +22,10 @@ bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>
             static_cast<std::size_t>(sequence_nvidia_levenshtein_bytes_bundle_end -
                                      sequence_nvidia_levenshtein_bytes_bundle_start)};
 }
-template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_levenshtein_bytes_k, u32_t,
+template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::levenshtein_bytes_k, u32_t,
                                                 sequence_nvidia_capabilities_k,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
-template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_levenshtein_bytes_k, u32_t,
+template struct us::sequence::vram_nvidia_kits<us::sequence::vram_sequence_metric_t::levenshtein_bytes_k, u32_t,
                                                sequence_nvidia_capabilities_k,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
@@ -36,10 +36,10 @@ bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>:
             static_cast<std::size_t>(sequence_nvidia_levenshtein_utf8_bundle_end -
                                      sequence_nvidia_levenshtein_utf8_bundle_start)};
 }
-template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_levenshtein_utf8_k, u32_t,
+template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::levenshtein_runes_k, u32_t,
                                                 sequence_nvidia_capabilities_k,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
-template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_levenshtein_utf8_k, u32_t,
+template struct us::sequence::vram_nvidia_kits<us::sequence::vram_sequence_metric_t::levenshtein_runes_k, u32_t,
                                                sequence_nvidia_capabilities_k,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
 
@@ -49,10 +49,11 @@ bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>::bytes() 
     return {sequence_nvidia_overlap_bundle_start,
             static_cast<std::size_t>(sequence_nvidia_overlap_bundle_end - sequence_nvidia_overlap_bundle_start)};
 }
-template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, u32_t,
+template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::overlap_k, u32_t,
                                                 sequence_nvidia_capabilities_k,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
-template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_overlap_k, u32_t, sequence_nvidia_capabilities_k,
+template struct us::sequence::vram_nvidia_kits<us::sequence::vram_sequence_metric_t::overlap_k, u32_t,
+                                               sequence_nvidia_capabilities_k,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 
 extern "C" byte_t const sequence_nvidia_needleman_wunsch_bundle_start[], sequence_nvidia_needleman_wunsch_bundle_end[];
@@ -62,10 +63,10 @@ bytes_view_t sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>:
             static_cast<std::size_t>(sequence_nvidia_needleman_wunsch_bundle_end -
                                      sequence_nvidia_needleman_wunsch_bundle_start)};
 }
-template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_needleman_wunsch_k, u32_t,
+template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::needleman_wunsch_k, u32_t,
                                                 sequence_nvidia_capabilities_k,
                                                 sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
-template struct us::sequence::vram_nvidia_kits<usearch_sequence_metric_needleman_wunsch_k, u32_t,
+template struct us::sequence::vram_nvidia_kits<us::sequence::vram_sequence_metric_t::needleman_wunsch_k, u32_t,
                                                sequence_nvidia_capabilities_k,
                                                sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 

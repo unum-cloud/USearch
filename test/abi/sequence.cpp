@@ -84,15 +84,18 @@ struct sequence_tape_t {
     std::string elements;
     std::vector<std::size_t> offsets {0};
 
-    usearch_tape_view_t view() const noexcept { return {elements.data(), offsets.data(), usearch_scalar_u8_k}; }
+    usearch_tape_view_t view() const noexcept { return tape_of(elements.data(), offsets.data(), usearch_scalar_u8_k); }
 };
 
-static sequence_tape_t tape_of(std::vector<std::string> const& strings, bool packed) {
+/** How a tape lays out nucleotides: one byte each, or packed to the fewest bits a code takes. */
+enum class nucleotides_layout_t : bool { bytes_k, packed_k };
+
+static sequence_tape_t generate_sequences(std::vector<std::string> const& strings, nucleotides_layout_t layout) {
     sequence_tape_t tape;
     u32_t const code_bits = packed_code_bits(nucleotides_k.size());
     std::vector<u8_t> codes;
     for (std::string const& symbols : strings) {
-        if (!packed) {
+        if (layout == nucleotides_layout_t::bytes_k) {
             tape.elements += symbols, tape.offsets.push_back(tape.elements.size());
             continue;
         }
@@ -127,7 +130,7 @@ static std::size_t expect_gets(handle<sequence_verbs_t>& index, std::size_t coun
         usearch_sequence_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
         get.key = key_of_offset(index.session->seed, offset);
-        get.sequences = &sequences, get.written = &written, get.arena = index.session->arena;
+        get.sequences = &sequences, get.written = &written, get.arena = index.arena();
         usearch_sequence_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
     }
@@ -146,16 +149,18 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     handle<sequence_verbs_t> index = open_index<sequence_verbs_t>(session, geometry, cell.shards);
     if (!index) return 1;
     sequence_sizes_t const sizes = aligned ? aligned_sizes_k : sequence_sizes_k;
-    sequence_tape_t const sequences = tape_of(generate_nucleotides(sizes.sequences + sizes.queries, sizes.length, seed),
-                                              aligned);
-    sequence_tape_t const donated = tape_of(generate_nucleotides(sizes.donor_sequences, sizes.length, ~seed), aligned);
+    nucleotides_layout_t const layout = aligned ? nucleotides_layout_t::packed_k : nucleotides_layout_t::bytes_k;
+    sequence_tape_t const sequences = generate_sequences(
+        generate_nucleotides(sizes.sequences + sizes.queries, sizes.length, seed), layout);
+    sequence_tape_t const donated = generate_sequences(generate_nucleotides(sizes.donor_sequences, sizes.length, ~seed),
+                                                       layout);
     usearch_tape_view_t const queries = sequence_verbs_t::slice(sequences.view(), sizes.sequences);
 
     std::size_t failures = expect_built(cell, index, sequences.view(), sizes.sequences);
     if (failures) return failures;
     failures += expect_gets(index, sizes.sequences);
     failures += expect_walk_recall(index, queries, sizes.queries, sequence_expansion_k, 0.8);
-    failures += expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, sizes.queries, sequence_expansion_k, usearch_status_success_k);
     failures += expect_health(index, sizes.sequences);
     failures += expect_cursor(index, sizes.sequences);
     failures += expect_sample(index, sizes.sequences);
@@ -165,10 +170,10 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     failures += expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8,
                                    stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, sequences.view(), sizes.sequences, usearch_status_unsupported_k);
+    failures += expect_refinement(index, sequences.view(), sizes.sequences, usearch_status_success_k);
     failures += expect_absorbed(index, donated.view(), sizes.donor_sequences, sizes.sequences,
-                                usearch_status_unsupported_k);
-    failures += expect_split(index, usearch_status_unsupported_k);
+                                usearch_status_success_k);
+    failures += expect_split(index, usearch_status_success_k);
     return failures + expect_cleared(index, sequences.view());
 }
 

@@ -480,6 +480,8 @@ __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept 
 template <nk_capability_t capability_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_rungs<capability_, node_id_type_>(std::make_index_sequence<std::size(basic::cuda_rungs)> {});
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, node_id_type_, 0>);
     static_cast<void>(&cuda_admit<capability_, node_id_type_>);
     static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_count_k>);
     static_cast<void>(&cuda_within<capability_, node_id_type_, vram_kernel_t::within_write_k>);

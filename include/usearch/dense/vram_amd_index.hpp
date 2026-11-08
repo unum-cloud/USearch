@@ -55,6 +55,8 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
     case vram_kernel_t::reachability_sweep_k:
     case vram_kernel_t::reachability_back_sweep_k:
     case vram_kernel_t::reached_in_links_k:
+    case vram_kernel_t::count_back_links_k:
+    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::partition_propose_k:
     case vram_kernel_t::partition_count_k:
     case vram_kernel_t::partition_accept_k:
@@ -122,6 +124,9 @@ inline constexpr amd_rung<vram_kernel_t> amd_rungs[] = {
     {vram_kernel_t::reachability_islands_k, 0},
     {vram_kernel_t::reached_in_links_k, 0},
     {vram_kernel_t::reconnect_island_k, 0},
+    {vram_kernel_t::count_back_links_k, 0},
+    {vram_kernel_t::offset_back_links_k, 0},
+    {vram_kernel_t::scatter_back_links_k, 0},
     {vram_kernel_t::partition_roots_k, 0},
     {vram_kernel_t::partition_propose_k, 0},
     {vram_kernel_t::partition_count_k, 0},
@@ -228,7 +233,7 @@ struct hip_dense_kernel_speller_t {
 
 /** The AMD dense shard's kernels: the loaded code object and the hooks its @c vram_shard_core
  *  calls to load, launch and stage them, each reading the core it is handed. */
-template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
           typename key_type_, typename key_hash_type_>
 struct vram_amd_kernels {
@@ -236,9 +241,9 @@ struct vram_amd_kernels {
     /** The capabilities the kernels compiled under, as the binary holding them states. */
     inline static constexpr nk_capability_t capability_k = kernels_type_::capability_k;
 
-    using core_t =
-        vram_shard_core<hip_vendor_t, vram_amd_kernels, vector_dtype_, cache_hints_type_, vectors_allocator_type_,
-                        neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
+    using core_t = vram_shard_core<hip_vendor_t, vram_amd_kernels, vector_dtype_, cache_hints_type_, wait_type_,
+                                   vectors_allocator_type_, neighbors_allocator_type_, traversals_allocator_type_,
+                                   key_type_, key_hash_type_>;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using dot_t = typename dot_result_t::raw_t;
@@ -264,6 +269,19 @@ struct vram_amd_kernels {
     static expected<kernel_table_t const*> kernels_(hip_executor_t::stream_t const& stream) noexcept {
         return stream.table_of(kernels_type_::bytes(), hip_dense_kernel_speller_t {capability_k, vector_dtype_});
     }
+
+    /** A part a load reads; empty, since every part arrives through the driver copies. */
+    struct part_source_t {};
+
+    /** Reads no part, leaving every step of a load on its driver copies. */
+    struct part_reader_t {
+        explicit operator bool() const noexcept { return false; }
+        status_t open(hip_executor_t::stream_t const&, std::span<part_source_t const>, std::size_t, std::size_t,
+                      std::span<std::size_t const>) noexcept {
+            return status_t::success_k;
+        }
+        status_t read(std::size_t, std::span<bytes_view_t* const>) noexcept { return status_t::success_k; }
+    };
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a
      *  warp. */
@@ -594,13 +612,11 @@ struct vram_amd_kernels {
 
 #pragma region Refinement
 
-    /** Queues one pass of the three-pass refinement engine behind @c refine_plan_t into its carved
-     *  @p scratch through @p kernel: the pass covers @p nodes, or under a device-resident
-     *  @p node_ids the listed IDs with @p nodes spanning the array's offsets, each node first
-     *  walking across the neighboring group in round @p round when @p parts parts are given; the
-     *  merge folds the re-selected rows' forward picks and the rows chained onto every picked row
-     *  into the live rows, and leaves every other row as it was. Nothing waits: the staging queued
-     *  after it checks its claims. */
+    /** Queues one walk of the refinement behind @c refine_plan_t into its carved @p scratch through
+     *  @p kernel: the pass covers @p nodes, or under a device-resident @p node_ids the listed IDs
+     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
+     *  group in round @p round when @p parts parts are given, then merging its picks into its live
+     *  row. Nothing waits: the staging queued after it checks its claims. */
     status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                           refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
                           std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
@@ -610,12 +626,11 @@ struct vram_amd_kernels {
         std::size_t const nodes_count = core.size();
         std::size_t const walk_count = nodes.size();
         hip_stream_handle_t const stream = context.stream();
-        vram_refine_passes_t const passes = core.refine_passes_(context);
-        if (!passes.link_heads) return status_t::bad_alloc_k;
-        // Chains start empty and no row walked yet.
-        if (core.api().fill_async(scratch.claims, 0, 2 * sizeof(u32_t), stream) != hip_success_k ||
-            core.api().fill_async(passes.link_heads, 0xFF, nodes_count * sizeof(u32_t), stream) != hip_success_k ||
-            core.api().fill_async(passes.walked.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
+        if (core.api().fill_async(scratch.claims, 0, sizeof(u32_t), stream) != hip_success_k)
+            return status_t::device_error_k;
+        // A split's receivers count their own rows from the first round of each.
+        if (!round && node_ids.empty() &&
+            core.api().fill_async(scratch.changed.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
@@ -634,9 +649,10 @@ struct vram_amd_kernels {
         auto const [epoch_base, epochs_status] = context.take_epochs(walk_count, arena_bytes_before);
         if (failed(epochs_status)) return epochs_status;
 
-        u32_t const selection_nodes = core.walk_selection_nodes_(expansion, candidate_slots);
+        // A warp caches a walk's candidates or a merge round's, whichever are more.
+        u32_t const reselection_nodes = core.reselection_nodes_();
+        u32_t const selection_nodes = max_of(core.walk_selection_nodes_(expansion, candidate_slots), reselection_nodes);
         vram_refine_t view {core.storage(), //
-                            passes.shadow_neighbors,
                             nodes.bound,
                             arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_nodes),
                             selection_nodes,
@@ -652,16 +668,9 @@ struct vram_amd_kernels {
                             parts > 1 ? scratch.part_bases : nullptr,
                             parts > 1 ? parts : 0,
                             round,
-                            passes.link_heads,
-                            passes.link_next,
-                            passes.walked};
-        if (status_t const launched = launch_refine_(core, *kernels, kernel, view, candidate_slots, stream);
-            failed(launched))
-            return launched;
-
-        // Fold every walked row's forward picks and every chain of walkers into the live rows; a
-        // heal round's islands chain nowhere, so only their own rows merge.
-        return launch_refine_back_links_(core, *kernels, view, stream);
+                            reselection_nodes,
+                            scratch.changed};
+        return launch_refine_(core, *kernels, kernel, view, candidate_slots, stream);
     }
 
     /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
@@ -758,20 +767,18 @@ struct vram_amd_kernels {
         return core.copy_counters_(scratch, counters, 2 * first_sweep - 1, stream);
     }
 
-    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected
-     *  on @p context 's stream: the reached in-links first, counted in the pass's staging, so no
-     *  reconnection takes the last link a reached node is found through, then each unreached
-     *  island into a reached pick or its landmark, and each island reaching no landmark back to
-     *  its nearest walked pick that does or to its landmark. */
+    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected on
+     *  @p context 's stream: the reached in-links first, so no reconnection takes the last link a
+     *  reached node is found through, then each unreached island into a reached pick or its
+     *  landmark, and each island reaching no landmark back to its landmark, unless a live pick
+     *  already reaches one. */
     status_t queue_reconnect_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
                               u32_t islands) noexcept {
         std::size_t const rows = core.size();
         hip_stream_handle_t const stream = context.stream();
         auto const [kernels, kernels_status] = kernels_(context);
         if (failed(kernels_status)) return kernels_status;
-        vram_refine_passes_t const passes = core.refine_passes_(context);
-        u32_t* const in_links = passes.link_heads;
-        if (!in_links) return status_t::bad_alloc_k;
+        u32_t* const in_links = scratch.in_links;
         if (core.api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
             return status_t::device_error_k;
         vram_arguments_t heal {};
@@ -780,7 +787,6 @@ struct vram_amd_kernels {
         heal.graph.connectivity = static_cast<u32_t>(core.connectivity());
         heal.graph.reached = scratch.reached;
         heal.graph.reaches_back = scratch.reaches_back;
-        heal.graph.shadow_neighbors = passes.shadow_neighbors;
         heal.graph.in_links = in_links;
         heal.graph.island_ids = scratch.island_ids;
         heal.graph.islands_count = islands;
@@ -880,31 +886,6 @@ struct vram_amd_kernels {
         return launch_(kernels, kernel, candidate_slots,
                        core.device_.multiprocessor_count * resident_blocks_(kernel, candidate_slots),
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
-    }
-
-    /** Merges every walked row's forward picks and every chain of walkers the walks of @p view
-     *  threaded into the live neighbors. */
-    status_t launch_refine_back_links_(core_t& core, kernel_table_t const& kernels, vram_refine_t const& view,
-                                       hip_stream_handle_t stream) noexcept {
-        // The merge sweeps the whole ID space and skips the rows the pass neither walked nor
-        // picked, carving its slices from the arena sized for the refine's grid, which its count
-        // matches.
-        static_assert(resident_blocks_(vram_dense_kernel_t::merge_back_links_k, 0) ==
-                      resident_blocks_(vram_kernel_t::refine_k, 0));
-        vram_arguments_t arguments {};
-        arguments.refine = view;
-        arguments.refine.scratch_bytes_per_warp = view.arena_shape.scratch_bytes
-                                                      ? 0u
-                                                      : core.build_scratch_bytes_per_warp(core.reselection_nodes_());
-        arguments.refine.selection_nodes = core.reselection_nodes_();
-        // The merge's claim counter follows the walk's.
-        arguments.refine.assigned_nodes = view.assigned_nodes + 1;
-        arguments.refine.node_ids = nullptr;
-        arguments.refine.first_id = 0;
-        arguments.refine.end_id = view.sampling_bound;
-        return launch_(kernels, vram_dense_kernel_t::merge_back_links_k, 0,
-                       core.device_.multiprocessor_count * resident_blocks_(vram_dense_kernel_t::merge_back_links_k, 0),
-                       vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
     }
 
     /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
@@ -1022,11 +1003,12 @@ struct vram_amd_kernels {
  *  wavefront plays the part an NVIDIA warp plays, 64 lanes wide before CDNA5 and 32 on it. The
  *  kernels come from the code object @p kernels_type_ hands out through its static @c bytes,
  *  compiled under its @c capability_k, and a checkpoint load's bounce halves demote through
- *  @p cache_hints_type_.
+ *  @p cache_hints_type_. A batch waits through @p wait_type_ for the batches before it to publish.
  */
 template <                                                                     //
     nk_dtype_t vector_dtype_,                                                  //
     typename kernels_type_,                                                    //
+    typename wait_type_,                                                       //
     typename cache_hints_type_ = dummy_cache_hints_t,                          //
     typename vectors_allocator_type_ = hip_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = hip_virtual_memory_allocator<byte_t>, //
@@ -1038,11 +1020,12 @@ struct vram_amd_index {
 
     /* Components */
     using kernels_t =
-        vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+        vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
                          neighbors_allocator_type_, traversals_allocator_type_, key_type_, key_hash_type_>;
     using core_t = typename kernels_t::core_t;
     using kernel_table_t = typename kernels_t::kernel_table_t;
     using vendor_t = typename core_t::vendor_t;
+
     using vectors_allocator_t = typename core_t::vectors_allocator_t;
     using neighbors_allocator_t = typename core_t::neighbors_allocator_t;
     using traversals_allocator_t = typename core_t::traversals_allocator_t;

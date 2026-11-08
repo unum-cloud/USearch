@@ -833,11 +833,13 @@ usearch_variants(basic vram nvidia nvidia)
 # which GPU vendors entered.
 usearch_object_library(
     usearch_punned
-    SOURCES types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp
+    SOURCES types.cpp arrow.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp
     DEFINITIONS ${usearch_cpu_gates_} ${usearch_gpu_gates_} ${usearch_nvidia_definitions_} ${usearch_amd_definitions_}
                 ${usearch_apple_definitions_}
     LIBRARIES stringzilla::header
 )
+# The GPU drivers open at first use, and glibc before 2.34 keeps `dlopen` in libdl.
+target_link_libraries(usearch_punned PUBLIC ${CMAKE_DL_LIBS})
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared
 # libraries link the targets and inherit their dependencies, an archive takes the objects themselves.

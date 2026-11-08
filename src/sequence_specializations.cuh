@@ -110,7 +110,7 @@ struct sequence_ram_variant {
 
     status_t reserve(reserve_capacity_t capacity) noexcept { return index.reserve(capacity.entries).status; }
     status_t clear() noexcept { return index.clear(); }
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, counted_tape_t sequences, insert_config_t config,
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
                                        executor_t& executor, progress_ticks_t& ticks) noexcept;
     expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
                                        predicate_t const& predicate, executor_t& executor,
@@ -120,14 +120,15 @@ struct sequence_ram_variant {
      *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
     expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, {config.expansion_factor}, basic::keep_diverse_t {geometry.connectivity},
-                                 planning);
+        return index.plan_absorb(donors, {config.expansion_factor, config.memory_limit},
+                                 basic::keep_diverse_t {geometry.connectivity}, planning);
     }
 
     /** Opens a refinement of every live shard in place, its walks as wide as @p expansion. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_refine({config.expansion_factor}, basic::keep_diverse_t {geometry.connectivity}, planning);
+        return index.plan_refine({config.expansion_factor, config.memory_limit},
+                                 basic::keep_diverse_t {geometry.connectivity}, planning);
     }
 
     /** Opens a split of every live shard into the same shard of each of @p receivers, its part
@@ -135,7 +136,7 @@ struct sequence_ram_variant {
      *  wide as @p expansion. */
     expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_split(receivers, {{config.refine.expansion_factor}, config.seed},
+        return index.plan_split(receivers, {{config.refine.expansion_factor, config.refine.memory_limit}, config.seed},
                                 basic::keep_diverse_t {geometry.connectivity}, planning);
     }
     status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
@@ -158,15 +159,15 @@ struct sequence_ram_variant {
 };
 
 template <cpu_class_t cpu_class_>
-expected<traversal_stats_t> sequence_ram_variant<cpu_class_>::insert(usearch_keys_view_t keys, counted_tape_t sequences,
+expected<traversal_stats_t> sequence_ram_variant<cpu_class_>::insert(usearch_keys_view_t keys, caller_tape_t sequences,
                                                                      insert_config_t config, executor_t& executor,
                                                                      progress_ticks_t& ticks) noexcept {
     std::size_t const connectivity = geometry.connectivity, expansion = config.expansion_factor;
     auto with_metric = [&](auto make_metric) noexcept {
-        auto build = [&](std::size_t offset, value_t& value, std::size_t) noexcept {
-            return us::sequence::status_of(value.assign(chars_at(sequences.tape, offset)));
+        auto build = [](counted_tape_t const& entries, std::size_t offset, value_t& value, std::size_t) noexcept {
+            return us::sequence::status_of(value.assign(chars_at(entries, offset)));
         };
-        return insert_entries(index, keys, sequences.count, connectivity, expansion ? expansion : connectivity * 2,
+        return insert_entries(index, keys, sequences, connectivity, expansion ? expansion : connectivity * 2,
                               make_metric, build, ticks, executor);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
@@ -179,9 +180,9 @@ expected<traversal_stats_t> sequence_ram_variant<cpu_class_>::search(counted_tap
                                                                      progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto query_of = [&](std::size_t query_index, std::size_t, auto&& answer) noexcept {
-            return answer(chars_at(queries.tape, query_index));
+            return answer(chars_at(queries, query_index));
         };
-        return search_entries(index, queries.count, geometry.connectivity, make_metric, query_of, outputs, config,
+        return search_entries(index, queries.count(), geometry.connectivity, make_metric, query_of, outputs, config,
                               predicate, executor, ticks);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
@@ -313,9 +314,10 @@ expected<traversal_stats_t> sequence_nvme_variant<cpu_class_>::search(
     executor_t& executor, progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto query_of = [&](std::size_t query_index, thread_allocator_t const&) noexcept {
-            return expected<std::string_view> {chars_at(queries.tape, query_index), status_t::success_k};
+            return expected<std::string_view> {chars_at(queries, query_index), status_t::success_k};
         };
-        return search_entries(index, queries.count, make_metric, query_of, outputs, config, predicate, executor, ticks);
+        return search_entries(index, queries.count(), make_metric, query_of, outputs, config, predicate, executor,
+                              ticks);
     };
     return with_sequence_metric<capability_k, cache_hints_t>(geometry, costs, with_metric);
 }
@@ -348,32 +350,42 @@ struct sequence_nvidia_fatbin {
  *  cubin per class carries. */
 inline constexpr sz_capability_t sequence_nvidia_capabilities_k = sz_cap_cuda_k;
 
+/* The engine's metric keeps the C enum's values, so a variant maps one to the other with a cast. */
+static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_levenshtein_bytes_k) ==
+              us::sequence::vram_sequence_metric_t::levenshtein_bytes_k);
+static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_levenshtein_utf8_k) ==
+              us::sequence::vram_sequence_metric_t::levenshtein_runes_k);
+static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_needleman_wunsch_k) ==
+              us::sequence::vram_sequence_metric_t::needleman_wunsch_k);
+static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_overlap_k) ==
+              us::sequence::vram_sequence_metric_t::overlap_k);
+
 /** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cpp. */
 extern template struct us::sequence::vram_nvidia_index<
-    usearch_sequence_metric_levenshtein_bytes_k, u32_t, sequence_nvidia_capabilities_k,
+    us::sequence::vram_sequence_metric_t::levenshtein_bytes_k, u32_t, sequence_nvidia_capabilities_k,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    usearch_sequence_metric_levenshtein_utf8_k, u32_t, sequence_nvidia_capabilities_k,
+    us::sequence::vram_sequence_metric_t::levenshtein_runes_k, u32_t, sequence_nvidia_capabilities_k,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
-extern template struct us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, u32_t,
+extern template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::overlap_k, u32_t,
                                                        sequence_nvidia_capabilities_k,
                                                        sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    usearch_sequence_metric_needleman_wunsch_k, u32_t, sequence_nvidia_capabilities_k,
+    us::sequence::vram_sequence_metric_t::needleman_wunsch_k, u32_t, sequence_nvidia_capabilities_k,
     sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
 /** A GPU overlap index scores in the same fixed point as the RAM metric. */
 template <typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-inline constexpr usearch_distance_t distance_unit<
-    us::sequence::vram_nvidia_index<usearch_sequence_metric_overlap_k, node_id_type_, capability_, kernels_type_>> =
+inline constexpr usearch_distance_t distance_unit<us::sequence::vram_nvidia_index<
+    us::sequence::vram_sequence_metric_t::overlap_k, node_id_type_, capability_, kernels_type_>> =
     1.0 / us::sequence::overlap_resolution_k;
 
 /** Builds one shard of the sequence kind @p metric_ on a CUDA device, holding the window widths and
  *  costs the variant's frozen @c geometry names, which its first reservation uploads. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_build {
-    using face_t = us::sequence::vram_nvidia_index<metric_, u32_t, sequence_nvidia_capabilities_k,
-                                                   sequence_nvidia_fatbin<metric_>>;
+    using face_t = us::sequence::vram_nvidia_index<static_cast<us::sequence::vram_sequence_metric_t>(metric_), u32_t,
+                                                   sequence_nvidia_capabilities_k, sequence_nvidia_fatbin<metric_>>;
 
     /** The geometry and costs of the variant holding the shards, frozen before the first is
      *  placed. */
@@ -415,17 +427,21 @@ struct sequence_vram_nvidia_variant {
         return vram_nvidia_reserve(index, capacity.entries, geometry.connectivity, capacity.bytes);
     }
 
-    expected<traversal_stats_t> insert(usearch_keys_view_t keys, counted_tape_t sequences, insert_config_t config,
+    expected<traversal_stats_t> insert(usearch_keys_view_t keys, caller_tape_t sequences, insert_config_t config,
                                        cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return vram_nvidia_insert(index, keys, bytes_tape_of(sequences.tape, sequences.count), geometry.connectivity,
-                                  config.expansion_factor, ticks, executor);
+        // The batch's own pages, since batches routed to disjoint shards may land at once.
+        growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
+        auto const [entries, lower_status] = counted_tape_of(sequences.tape, sequences.count, staging);
+        if (failed(lower_status)) return {{}, lower_status};
+        return vram_nvidia_insert(index, keys, bytes_tape_of(entries), geometry.connectivity, config.expansion_factor,
+                                  ticks, executor);
     }
 
     /** A device walk takes no host predicate. */
     expected<traversal_stats_t> search(counted_tape_t queries, matches_outputs_t& outputs, search_config_t config,
                                        cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return vram_nvidia_search(index, bytes_tape_of(queries.tape, queries.count), outputs.wanted,
-                                  config.expansion_factor, outputs, ticks, executor);
+        return vram_nvidia_search(index, bytes_tape_of(queries), outputs.wanted, config.expansion_factor, outputs,
+                                  ticks, executor);
     }
 
     /** Writes the strings as the RAM variants write them: a lone live shard's monolith, or one per
@@ -437,9 +453,11 @@ struct sequence_vram_nvidia_variant {
         });
     }
 
-    /** Reads a checkpoint any residency wrote into the placed shards, one part per shard. */
-    status_t load(std::string_view path, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return index.load(path, us::sequence::codec_t {}, executor, load_config_t {},
+    /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
+     *  one part per shard. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, cuda_executor_t& executor, progress_ticks_t& ticks) noexcept {
+        return index.load(checkpoint, us::sequence::codec_t {}, executor, load_config_t {},
                           static_cast<connectivity_t>(geometry.connectivity), ticks);
     }
 
@@ -577,7 +595,7 @@ struct variant_bodies<sequence_traits_t> {
         for (std::size_t entry = 0; entry != count; ++entry)
             if (auto const& value = value_at(entry); value.size())
                 std::memcpy(bytes + offsets[entry], value.data(), value.size());
-        *sequences = {bytes, offsets, usearch_scalar_u8_k};
+        write_output_tape(bytes, offsets, usearch_scalar_u8_k, *sequences);
         return status_t::success_k;
     }
 

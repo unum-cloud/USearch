@@ -241,7 +241,7 @@ static bool reject_bytes(usearch_tape_view_t tape, usearch_outcome_t* outcome) {
 
 /** Entry @p entry of a tape, as the bytes its offsets bound. */
 static bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
-    std::size_t const begin = tape.offsets[entry], end = tape.offsets[entry + 1];
+    std::size_t const begin = offset_at(tape, entry), end = offset_at(tape, entry + 1);
     return bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
 }
 
@@ -260,7 +260,7 @@ static bool copy_entries(sequence_index_t const& index, std::span<std::size_t co
         std::copy(payload.begin(), payload.end(), bytes + offsets[found]);
         offsets[found + 1] = offsets[found] + payload.size();
     }
-    tape = {bytes, offsets, usearch_scalar_u8_k};
+    write_output_tape(bytes, offsets, usearch_scalar_u8_k, tape);
     return true;
 }
 
@@ -596,6 +596,13 @@ void usearch_sequence_load_ram_buffer(usearch_sequence_load_ram_buffer_t* argume
     });
 }
 
+void usearch_sequence_load_vram_buffer(usearch_sequence_load_vram_buffer_t* arguments) {
+    if (through_executor<usearch_sequence_load_vram_buffer>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
 void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
@@ -761,7 +768,7 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
     if (reject_bytes(queries, outcome)) return;
     if (reject_traversal(arguments->traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                      {queries.data, queries.offsets}, outcome);
+                                                      {queries.data, offsets_address(queries)}, outcome);
     matches_outputs_t outputs {};
     if (!arena || !carve_ranked(*arena, count, arguments->wanted, outputs, outcome)) return;
 

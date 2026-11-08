@@ -81,7 +81,7 @@ static std::size_t expect_gets(handle<dense_verbs_t>& index, std::size_t count) 
         usearch_dense_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
         get.key = key_of_offset(index.session->seed, offset);
-        get.vectors = &vectors, get.written = &written, get.arena = index.session->arena;
+        get.vectors = &vectors, get.written = &written, get.arena = index.arena();
         get.outputs_scalar = usearch_scalar_f32_k;
         usearch_dense_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
@@ -116,7 +116,7 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     usearch_dense_search_t search {};
     search.index = index.get(), search.executor = index.executor(), search.outcome = &outcome;
     search.count = dense_queries_k, search.queries = rows, search.matches = &matches;
-    search.arena = index.session->arena, search.wanted = cell_wanted_k, search.expansion_factor = dense_expansion_k;
+    search.arena = index.arena(), search.wanted = cell_wanted_k, search.expansion_factor = dense_expansion_k;
     search.predicate = {admit_listed, &admitted, usearch_predicate_cost_cheap_k};
     usearch_dense_search(&search);
     if (index.residency == usearch_residency_vram_k) return check(outcome.status == usearch_status_unsupported_k);

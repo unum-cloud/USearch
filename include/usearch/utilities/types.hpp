@@ -122,6 +122,19 @@ namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
+
+/** The base Linux adds to syscall numbers on MIPS and Alpha, so mirrored numbers add it too. */
+#if defined(_MIPS_SIM) && _MIPS_SIM == _ABIO32
+inline constexpr long linux_syscall_offset_k = 4000;
+#elif defined(_MIPS_SIM) && _MIPS_SIM == _ABI64
+inline constexpr long linux_syscall_offset_k = 5000;
+#elif defined(_MIPS_SIM) && _MIPS_SIM == _ABIN32
+inline constexpr long linux_syscall_offset_k = 6000;
+#elif defined(__alpha__)
+inline constexpr long linux_syscall_offset_k = 110;
+#else
+inline constexpr long linux_syscall_offset_k = 0;
+#endif
 } // namespace unum::usearch
 
 namespace unum::usearch::utilities {
@@ -1611,89 +1624,6 @@ struct serial_executor_t {
     }
 };
 
-/** The CPU families USearch ships tuned variants for - our own vocabulary, never an
- *  alias of a sister library's feature bits. Each class bundles the compute features,
- *  wait instruction, and atomics its silicon generation guarantees; explicit helpers
- *  lower a class onto NumKong, ForkUnion & StringZilla capability masks where those
- *  libraries are linked. */
-enum class cpu_class_t : u32_t {
-
-    /** No class detected yet, or none of the classes below. */
-    unknown_k = 0,
-
-    // Portable floor
-    /** The portable floor: no SIMD assumptions, standard yields. */
-    serial_k,
-
-    // x86 classes
-    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
-    intel_haswell_k,
-
-    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
-     *  successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
-    intel_sierra_k,
-
-    /** Skylake-class x86: the AVX-512 foundation tier. */
-    intel_skylake_k,
-
-    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
-    intel_icelake_k,
-
-    /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
-    amd_genoa_k,
-
-    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
-     *  AMX-INT8 tiles. */
-    intel_sapphire_k,
-
-    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
-    intel_granite_k,
-
-    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions and
-     *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
-    intel_diamond_k,
-
-    // Arm classes
-
-    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones fall
-     *  here too. */
-    aws_g2_k,
-
-    /** Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for
-     *  Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
-    apple_m2_k,
-
-    /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
-     *  @c BMOPA among them, without plain SVE. */
-    apple_m4_k,
-
-    /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with waits that
-     *  monitor through @c WFE instead of spinning; no build compiles it yet. */
-    aws_g5_k,
-
-    /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
-    nvidia_vera_k,
-
-    // RISC-V classes
-    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
-     *  @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
-    alibaba_c930_k,
-
-    // WebAssembly classes
-    /** WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width @c simd128
-     *  tier, so it runs on WebKit and in a page served without cross-origin isolation. */
-    wasm32_v128_k,
-
-    /** WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
-     *  bundled because every engine that ships one ships the other two. */
-    wasm64_extended_k,
-
-    // Monoversioned builds
-    /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
-     *  preset vouches for, as the libraries compiled them. */
-    monoversioned_k,
-};
-
 /** The GPU vendors USearch drives, each through a runtime loaded on first use, so one binary
  *  addresses every vendor's cards at once and loads where none is installed. */
 enum class gpu_vendor_t : u32_t {
@@ -1707,57 +1637,6 @@ enum class gpu_vendor_t : u32_t {
 
     /** Apple, through Metal and kernels compiled from embedded source at first use. */
     apple_k,
-};
-
-/** The GPU families USearch ships tuned variants for, the device twin of @c cpu_class_t: one
- *  class per generation of kernel kits, each compiled for its own architecture alone. A class
- *  implies its vendor, and within a vendor an unknown newer device takes the newest class it
- *  satisfies. */
-enum class gpu_class_t : u32_t {
-
-    /** No class detected yet, or none of the classes below. */
-    unknown_k = 0,
-
-    // NVIDIA classes
-    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
-    nvidia_ampere_k,
-
-    /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
-    nvidia_ada_k,
-
-    /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
-    nvidia_hopper_k,
-
-    /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA @c gather4 scattered fetches
-     *  and @c tcgen05 tensor-core GEMMs. */
-    nvidia_blackwell_k,
-
-    /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's conversions
-     *  without @c tcgen05. */
-    nvidia_blackwellrtx_k,
-
-    /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
-    nvidia_rubin_k,
-
-    // AMD classes
-    /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
-    amd_cdna3_k,
-
-    /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
-    amd_cdna4_k,
-
-    /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
-    amd_cdna5_k,
-
-    // Apple classes
-    /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
-    apple_metal7_k,
-
-    /** Apple9-family GPUs - M3 & M4. */
-    apple_metal9_k,
-
-    /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
-    apple_metal10_k,
 };
 
 /** One GPU as its vendor's driver reports it - the vendor, that vendor's own ordinal and its raw

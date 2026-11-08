@@ -55,6 +55,21 @@ __device__ __forceinline__ vram_grid_warp_t vram_grid_warp() noexcept {
             gridDim.x * blockDim.x / warp_type_::width_k};
 }
 
+/** Whether @p bitset - a reachability audit's reached set or frontier, a sweep's changed nodes -
+ *  holds @p position. Every access is relaxed: the launch boundary orders the marks before any
+ *  later launch or host copy reads them. */
+template <typename warp_type_>
+__device__ __forceinline__ bool vram_bitset_contains(vram_bitset_t bitset, u32_t position) noexcept {
+    return (warp_type_::load_relaxed(bitset.words[position >> 5]) >> (position & 31u)) & 1u;
+}
+
+/** Sets the bit at @p position, answering whether this call was the one that set it. */
+template <typename warp_type_>
+__device__ __forceinline__ bool vram_bitset_insert(vram_bitset_t bitset, u32_t position) noexcept {
+    u32_t const bit = 1u << (position & 31u);
+    return !(warp_type_::fetch_or_relaxed(bitset.words[position >> 5], bit) & bit);
+}
+
 /** Hands @p callback every neighbor of @p node the calling lane owns - its lane-strided slots, past
  *  sentinels, self-loops and IDs at or past @p nodes_count. */
 template <typename warp_type_, typename node_id_type_, typename callback_type_>

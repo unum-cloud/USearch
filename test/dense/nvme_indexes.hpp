@@ -42,13 +42,13 @@ namespace unum::usearch::test::dense {
 
 /** The dense NVMe view over the kits the ladders pick for @p dtype_ under @p caps_, as @c src/
  *  spells them for a CPU class. */
-template <typename key_type_, nk_dtype_t dtype_, nk_capability_t caps_, typename engine_type_ = default_io_engine_t>
-using nvme_indexes_for =
-    nvme_indexes<key_type_, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                 typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                 typename elementwise_ladder<caps_>::kit_t,
-                 typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
-                 typename visits_hash_set_ladder<caps_>::kit_t, engine_type_>;
+template <typename key_type_, nk_dtype_t dtype_, nk_capability_t caps_,
+          typename engine_type_ = default_io_engine<fu::standard_yield_t>>
+using nvme_indexes_for = nvme_indexes<
+    key_type_, typename quads_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+    typename tiles_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t, typename elementwise_ladder<caps_>::kit_t,
+    typename rmscast_ladder<typename nk::type_for<dtype_>::type, caps_>::kit_t,
+    typename visits_hash_set_ladder<caps_>::kit_t, engine_type_, fu::standard_atomic_ref, fu::standard_yield_t>;
 
 /** Whether a sharded index reads its parts from storage: the NVMe residency. */
 template <typename indexes_type_>
@@ -2101,8 +2101,8 @@ std::size_t test_nvme_configuration(char const* name, u64_t seed) {
  */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span<std::string_view const> nvme_paths) {
-    using files_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, blocking_files_engine<>>;
-    using spdk_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, linux_spdk_engine<>>;
+    using files_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, blocking_files_engine<fu::standard_yield_t>>;
+    using spdk_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, linux_spdk_engine<fu::standard_yield_t>>;
     using key_t = typename files_t::key_t;
     using scalar_t = typename files_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;

@@ -252,6 +252,10 @@ struct specialized_index {
 
     static constexpr bool viewed_k = is_nvme_index<index_type_>;
 
+    /** Whether the engine sizes a pass's tiles from @c memory_limit; Apple's holds twice the
+     *  neighbors' bytes instead, so it refuses a limit. */
+    static constexpr bool limits_memory_k = vendored_residency_of<executor_t> != vendored_residency_t::vram_apple_k;
+
     static index_t& of(void* index) noexcept { return *static_cast<index_t*>(index); }
     static index_t const& of(void const* index) noexcept { return *static_cast<index_t const*>(index); }
 
@@ -276,6 +280,7 @@ struct specialized_index {
     static typename engine_type_::refine_config_t refine_config_of(::refine_config_t refine) noexcept {
         typename engine_type_::refine_config_t config {};
         config.expansion_factor = refine.expansion_factor;
+        config.memory_limit = refine.memory_limit;
         return config;
     }
 
@@ -319,10 +324,9 @@ struct specialized_index {
     static void bound_shards(void* index, std::size_t nodes) noexcept {
         if constexpr (!viewed_k) of(index).bound_shards(nodes);
     }
-    static status_t emplace(void* index, arena_residency_t residency) noexcept {
+    static status_t emplace(void* index, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
-        else if constexpr (is_ram_index<index_type_>)
-            return of(index).emplace(static_cast<fu_memory_domain_id_t>(residency.numa_domain));
+        else if constexpr (is_ram_index<index_type_>) return of(index).emplace(memory_domain);
         else {
             // Init names devices and no executor yet, so a stream opened for the shard alone
             // names the device.
@@ -338,11 +342,7 @@ struct specialized_index {
             executor_t* const engines = executor ? std::get_if<executor_t>(&executor->executor) : nullptr;
             if (ram && !engines) return status_t::invalid_argument_k;
             if (status_t const viewed = of(index).view(path, paths); failed(viewed) || !ram) return viewed;
-            // The key table takes the first named domain, or the process's own without one.
-            fu_memory_domain_id_t const domain = ram->memory_domains_count && ram->memory_domains
-                                                     ? static_cast<fu_memory_domain_id_t>(ram->memory_domains[0])
-                                                     : no_memory_domain_k;
-            return of(index).hold_keys(forkunion_allocator_t {domain}, ram->memory_limit, *engines);
+            return of(index).hold_keys(forkunion_allocator_t {tables_domain(*ram)}, ram->memory_limit, *engines);
         }
         else return status_t::unsupported_k;
     }
@@ -424,6 +424,7 @@ struct specialized_index {
     static expected<refine_report_t> refine(void* index, ::refine_config_t config, executor_t& executor,
                                             progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        else if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
         else
             return of(index).refine(
                 refine_config_of(config), executor,
@@ -433,6 +434,7 @@ struct specialized_index {
     static expected<refine_report_t> absorb(void* index, std::span<void*> donors, ::refine_config_t config,
                                             executor_t& executor, progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        else if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
         else {
             growing_buffer<index_t*> typed {global_allocator};
             if (failed(typed.reserve_exactly(donors.size()))) return {{}, status_t::bad_alloc_k};
@@ -473,6 +475,7 @@ struct specialized_index {
     static expected<refine_report_t> split(void* index, variants_view_t receivers, ::split_config_t config,
                                            executor_t& executor, progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        else if (!limits_memory_k && config.refine.memory_limit) return {{}, status_t::unsupported_k};
         else {
             growing_buffer<index_t*> typed = indexes_of(receivers);
             if (typed.size() != receivers.size()) return {{}, status_t::bad_alloc_k};
@@ -485,6 +488,7 @@ struct specialized_index {
     static expected<void*> refinement_init(void* index, variants_view_t donors, variants_view_t receivers,
                                            ::split_config_t config, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
+        else if (!limits_memory_k && config.refine.memory_limit) return {nullptr, status_t::unsupported_k};
         else {
             variants_view_t const others = receivers.empty() ? donors : receivers;
             growing_buffer<index_t*> typed = indexes_of(others);
@@ -584,10 +588,12 @@ struct specialized_index {
     }
 
     /** Keeps the largest products of each left row on the tape; any predicate is asked a quad at a
-     *  time. */
+     *  time, and a GPU index answers @c unsupported_k for a scan. */
     static expected<traversal_stats_t> multiply(void* index, rows_view_t left, products_tape_t products,
                                                 std::span<std::size_t> scored, ::search_config_t search,
                                                 predicate_t predicate, executor_t& executor) noexcept {
+        if constexpr (is_vram_index<index_type_>)
+            if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
         search_config_t const config = search_config_of(search, executor);
@@ -647,9 +653,13 @@ struct specialized_index {
         });
     }
 
+    /** Attends the queries over their walks' neighbors; a GPU index answers @c unsupported_k for a
+     *  scan. */
     static expected<traversal_stats_t> attend(void* index, rows_view_t queries, attention_arguments_t attention,
                                               ::search_config_t search, predicate_t predicate,
                                               executor_t& executor) noexcept {
+        if constexpr (is_vram_index<index_type_>)
+            if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
         search_config_t const config = search_config_of(search, executor);

@@ -34,6 +34,7 @@
 #include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - a bounce and its host offsets
 #include "usearch/utilities/ram_device.hpp"         // `forkunion_allocator_t` - the host keys' placement
 #include "usearch/utilities/ram_tables.hpp"         // `keyed_nodes` - every node's key and every key's nodes
+#include "usearch/utilities/safegraphs_format.hpp"  // `safegraphs_saved_columns` - a load's saved columns
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_t` - the kernels a rung names
 #include "usearch/utilities/vram_nvidia_device.hpp" // `cuda_traversal_context` & the rungs
 #include "usearch/utilities/vram_walks.hpp"         // `gpu_arena_shape_t`, `gpu_candidate_slots`, `vram_bitset_t`
@@ -81,6 +82,12 @@ struct vram_build {
     node_id_type_* link_next = nullptr;
     node_id_type_* touched_ids = nullptr;
     u32_t* touched_count = nullptr;
+    vram_bitset_t changed {};
+    u32_t const* incoming_offsets = nullptr;
+    node_id_type_ const* back_links = nullptr;
+    u32_t tape_size = 0;
+    node_id_type_ walked_first = 0;
+    node_id_type_ walked_bound = 0;
 };
 
 /** One walking launch and where it writes its outputs, mirroring the shared search view. */
@@ -106,16 +113,30 @@ struct vram_search {
     u32_t count = 0;
 };
 
+/** The record the two load kernels read: one run of a load's saved values at @c saved, their
+ *  element prefix sums at @c saved_offsets, their planned tape starts at @c stored_offsets, one
+ *  past each of @c count nodes, the @c tape they go into, and the plan's @c span_bytes word. */
+template <typename node_id_type_>
+struct vram_load {
+    byte_t const* saved = nullptr;
+    u64_t const* saved_offsets = nullptr;
+    u64_t const* stored_offsets = nullptr;
+    byte_t* tape = nullptr;
+    u64_t* span_bytes = nullptr;
+    u32_t count = 0;
+};
+
 /** The one argument every NVIDIA basic kernel takes, each reading the record its kernel names. */
 template <typename node_id_type_>
 struct vram_arguments {
     vram_build<node_id_type_> build;
     vram_search<node_id_type_> search;
+    vram_load<node_id_type_> load;
 };
 
 /** One launch over the neighbors matrix alone, reading no value: the rebase of nodes a donor gave
- *  up, the reachability audit and the reconnection healing it, and a split's partition and the
- *  scatter moving its nodes, whose values travel as opaque bytes. */
+ *  up, the reachability audit and the reconnection healing it, a sweep tile's count and scatter,
+ *  and a split's partition and the scatter moving its nodes, whose values pass as opaque bytes. */
 template <typename node_id_type_>
 struct vram_graph {
     node_id_type_* neighbors = nullptr;
@@ -136,6 +157,9 @@ struct vram_graph {
     u32_t islands_count = 0;
     u32_t* in_links = nullptr;
     u32_t* reconnected = nullptr;
+
+    /** The sweep tile a count, an offset or a scatter launch works on. */
+    vram_sweep_t sweep {};
 
     /** A split's part of each node, then its slot once the parts are ordered, the round's
      *  proposals, and per part its size, its round count and its root. */
@@ -162,6 +186,13 @@ struct vram_graph {
     u32_t listed_count = 0;
     byte_t* gathered_values = nullptr;
     u64_t* gathered_offsets = nullptr;
+
+    /** A load's saved neighbors: fixed rows of @c degree IDs, or a run of IDs @c saved_offsets
+     *  index; and the word an ID past the nodes or an overfull row sets. */
+    node_id_type_ const* saved_neighbors = nullptr;
+    u64_t const* saved_offsets = nullptr;
+    u32_t degree = 0;
+    u64_t* malformed = nullptr;
 };
 
 /** Blocks of @p kernel on its @p slots rung resident per multiprocessor - the register budget its
@@ -177,12 +208,15 @@ constexpr u32_t cuda_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept
     case vram_kernel_t::rebase_links_k:
     case vram_kernel_t::reachability_sweep_k:
     case vram_kernel_t::reached_in_links_k:
+    case vram_kernel_t::count_back_links_k:
+    case vram_kernel_t::scatter_back_links_k:
     case vram_kernel_t::partition_propose_k:
     case vram_kernel_t::partition_count_k:
     case vram_kernel_t::partition_accept_k:
     case vram_kernel_t::partition_picked_k:
     case vram_kernel_t::split_links_k:
-    case vram_kernel_t::split_tape_k: return 8;
+    case vram_kernel_t::split_tape_k:
+    case vram_kernel_t::widen_links_k: return 8;
     default: return 2;
     }
 }
@@ -196,13 +230,16 @@ struct cuda_rung_t {
 
 /** Every instantiation each rung of a modality's kits exports. */
 inline constexpr cuda_rung_t cuda_rungs[] = {
-    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},    {vram_kernel_t::insert_k, 4},
-    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16},   {vram_kernel_t::refine_k, 0},
-    {vram_kernel_t::refine_k, 2},  {vram_kernel_t::refine_k, 4},    {vram_kernel_t::refine_k, 8},
-    {vram_kernel_t::refine_k, 16}, {vram_kernel_t::back_link_k, 0}, {vram_kernel_t::search_k, 0},
-    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},    {vram_kernel_t::search_k, 8},
-    {vram_kernel_t::search_k, 16},
+    {vram_kernel_t::insert_k, 0},  {vram_kernel_t::insert_k, 2},           {vram_kernel_t::insert_k, 4},
+    {vram_kernel_t::insert_k, 8},  {vram_kernel_t::insert_k, 16},          {vram_kernel_t::refine_k, 0},
+    {vram_kernel_t::refine_k, 2},  {vram_kernel_t::refine_k, 4},           {vram_kernel_t::refine_k, 8},
+    {vram_kernel_t::refine_k, 16}, {vram_kernel_t::back_link_k, 0},        {vram_kernel_t::search_k, 0},
+    {vram_kernel_t::search_k, 2},  {vram_kernel_t::search_k, 4},           {vram_kernel_t::search_k, 8},
+    {vram_kernel_t::search_k, 16}, {vram_kernel_t::merge_back_links_k, 0},
 };
+
+/** The kernels a load queues, which each kit exports once, on its first rung. */
+inline constexpr vram_kernel_t cuda_load_kernels[] = {vram_kernel_t::load_values_k, vram_kernel_t::size_spans_k};
 
 /** Every kernel of the unit all NVIDIA basic faces share, over the neighbors matrix alone, so one
  *  instantiation per node-ID type serves every modality. */
@@ -212,7 +249,8 @@ inline constexpr vram_kernel_t cuda_graph_kernels[] = {
     vram_kernel_t::partition_roots_k,      vram_kernel_t::partition_propose_k, vram_kernel_t::partition_count_k,
     vram_kernel_t::partition_accept_k,     vram_kernel_t::partition_fill_k,    vram_kernel_t::partition_islands_k,
     vram_kernel_t::partition_picked_k,     vram_kernel_t::split_links_k,       vram_kernel_t::split_tape_k,
-    vram_kernel_t::gather_tape_k,
+    vram_kernel_t::gather_tape_k,          vram_kernel_t::count_back_links_k,  vram_kernel_t::offset_back_links_k,
+    vram_kernel_t::scatter_back_links_k,   vram_kernel_t::widen_links_k,
 };
 
 /** The fatbin of @ref cuda_graph_kernels over 32-bit node IDs, defined beside them in
@@ -276,7 +314,37 @@ struct cuda_kits_kernel_speller_t {
     static constexpr bool required(std::size_t position) noexcept {
         for (cuda_rung_t const rung : cuda_rungs)
             if (index(0, rung.kernel, rung.slots) == position % positions_per_kit_rung_k) return true;
+        for (vram_kernel_t const kernel : cuda_load_kernels)
+            if (index(0, kernel, 0) == position) return true;
         return false;
+    }
+};
+
+/** One run of a load as the kits' hooks queue its work: the run's saved values on the device, where
+ *  its first stored value goes in the tape, and the record the kits' load kernels read. */
+template <typename node_id_type_>
+struct vram_load_step {
+    vram_arguments<node_id_type_> arguments {};
+    bytes_view_t saved;
+    byte_t* stored = nullptr;
+    cuda_api_t const* api = nullptr;
+    cuda_kernel_table_t const* kits = nullptr;
+    cuda_stream_handle_t stream = nullptr;
+    u32_t multiprocessors = 0;
+
+    /** Copies the run's saved values into the tape as they are, for kits storing them so. */
+    status_t copy_values() const noexcept {
+        if (saved.empty()) return status_t::success_k;
+        return cuda_copy_async(*api, stored, saved.data(), saved.size(), stream) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    }
+
+    /** Launches the kits' @p kernel over the run's nodes on the stream, a grid-striding pass. */
+    status_t launch_kits(vram_kernel_t kernel) const noexcept {
+        return cuda_launch(*api, kits->functions[cuda_kits_kernel_speller_t::index(0, kernel, 0)],
+                           multiprocessors * cuda_resident_blocks(kernel, 0), vram_warps_per_block_k * 32, 0, stream,
+                           cuda_overlap_t::serialized_k, arguments);
     }
 };
 
@@ -303,11 +371,13 @@ struct cuda_kits_kernel_speller_t {
  *  another answers @c contended_k meanwhile, while searches on other streams keep running
  *  throughout.
  *
- *  A refinement re-selects nodes the same way over the whole graph, and an absorb appends other
- *  indexes' nodes on the device before refining. Both, and the reachability audit, launch kernels
- *  that read the neighbors matrix alone, which one unit shares across every modality. Saves and
- *  loads cross the snapshot columns of the basic RAM index through a pinned bounce, values through
- *  the kits' codec. Plans close the claim word, or claim their nodes, for their whole lives.
+ *  A refinement re-selects nodes over the whole graph, each merging its picks into its row at once,
+ *  then sweeps tiles of target nodes sized from its limit, merging the nodes linking to each one,
+ *  and an absorb appends other indexes' nodes on the device before refining. Both, and the
+ *  reachability audit, launch kernels that read the neighbors matrix alone, which one unit shares
+ *  across every modality. Saves and loads cross the snapshot columns of the basic RAM index through
+ *  a pinned bounce, values through the kits' codec. Plans close the claim word, or claim their
+ *  nodes, for their whole lives.
  *
  *  A modality's face owns one as a member and forwards its verbs, so no modality derives from it.
  *  It stands alone as the RAM index does, under either node-ID width and any hashable key, which it
@@ -321,11 +391,12 @@ struct cuda_kits_kernel_speller_t {
  *  @tparam kits_type_ The modality's kits, held as a member, whose @c rungs_k kit rungs its kernels
  *      cover, narrowest first, and whose members read them: @c rung_serving_ nodes of a length, or
  *      @c rungs_k past the widest, @c lanes_per_entry_ of a rung, the @c span_bytes_ one value
- *      prepares into on every rung alike, the @c fatbin_ holding its kernels and the
- *      @c spell_kits_kernel_ naming each, and the @c parameters_ its kits read on the device, which
- *      @c upload_parameters_ places there; its codec, @c saved_bytes_ and
- *      @c save_value_ turning a stored node into the bytes the RAM codec saves, and
- *      @c stored_bytes_ and @c load_value_ back.
+ *      prepares into on every rung alike, and the bound on it any loaded value of a length takes,
+ *      the @c fatbin_ holding its kernels and the @c spell_kits_kernel_ naming each, and the
+ *      @c parameters_ its kits read on the device, which @c upload_parameters_ places there; its
+ *      codec, @c saved_bytes_ and @c save_value_ turning a stored node into the bytes the RAM codec
+ *      saves, @c stored_bytes_ sizing a stored node from its saved length, and
+ *      @c queue_load_values_ storing and sizing a load's values on the device, never the host.
  *  @tparam key_type_ The caller-visible identity of every node, trivially copyable.
  *  @tparam key_hash_type_ The key map's hash of a key.
  */
@@ -1084,6 +1155,11 @@ struct vram_ragged_graph {
 
         /** How many candidates a re-selection walk keeps, as an insertion's. */
         candidates_count_t expansion_factor = 0;
+
+        /** Bytes the whole pass may hold on the device beyond the index: the audit, the heal's
+         *  buffers, a bit per node and the walks' arena, then tiles of nodes at 4 B per neighbor
+         *  slot plus 4 B each, as many as fit. Zero takes every walked node in one tile. */
+        std::size_t memory_limit = 0;
     };
 
     using refine_report_t = basic::refine_report_t;
@@ -1100,9 +1176,9 @@ struct vram_ragged_graph {
     /** Device scratch an audit carves over the nodes it judges: the reached set and two frontiers,
      *  then the levels that expanded anything and the nodes the last two sweeps expanded, by the
      *  sweep number's parity, then the unreached and reconnected counters an audit copies together,
-     *  and for a refine the unreached nodes' IDs and their in-link counts, @b [nodes] each. Sweeps
-     *  run until one expands nothing: every node enters one frontier at most, so the nodes bound
-     *  them. */
+     *  the nodes and links a sweep's tile kept, and for a refine the unreached nodes' IDs and their
+     *  in-link counts, @b [nodes] each, and the changed bits. Sweeps run until one expands nothing:
+     *  every node enters one frontier at most, so the nodes bound them. */
     struct audit_scratch_t {
         typename traversal_context_t::bytes_ptr_t bytes;
         vram_bitset_t reached, frontier, next_frontier;
@@ -1110,8 +1186,10 @@ struct vram_ragged_graph {
         u32_t* expanded = nullptr;
         u32_t* unreached = nullptr;
         u32_t* reconnected = nullptr;
+        u32_t* swept = nullptr;
         u32_t* island_ids = nullptr;
         u32_t* in_links = nullptr;
+        vram_bitset_t changed {};
         std::size_t words = 0;
     };
 
@@ -1119,14 +1197,15 @@ struct vram_ragged_graph {
      *  heal. */
     enum class audit_use_t : u8_t { health_k, refine_k };
 
-    /** The counters an audit copies into page-locked memory, in the order of the device's: the
-     *  levels that expanded, the last sweep's count, which only a sweep short of convergence leaves
-     *  nonzero, then the unreached and reconnected counters. */
+    /** The counters an audit copies into page-locked memory, in the device's order: the levels that
+     *  expanded, the last sweep's count, nonzero only for a sweep short of convergence, then the
+     *  unreached and reconnected counters, and the nodes and links a sweep's tile kept. */
     struct audit_counters_t {
         u32_t levels;
         u32_t last_expanded;
         u32_t unreached;
         u32_t reconnected;
+        u32_t swept[2];
     };
 
     /** Gives an audit's counters back to the stream's pinned slots they came from. */
@@ -1199,9 +1278,11 @@ struct vram_ragged_graph {
      *  @brief One refinement in flight on this index's device: @ref queue a phase, @ref wait for
      *      it, @ref advance past it, and @ref finish once no phase follows.
      *
-     *  The phases re-select every node of the planned range in one walk launch and the back-link
-     *  launch behind it, then audit reachability, then heal round by round while the islands
-     *  shrink, reconnecting each unreached node into a reached pick or the landmark covering it.
+     *  The phases re-select every node of the planned range in one walk launch, each merging its
+     *  picks into its row, then sweep tiles of target nodes, sized from @c refine_config_t, each by
+     *  a count, a scatter onto a tape and a merge of every target's run into its row, then audit
+     *  reachability, then heal round by round while the islands shrink, reconnecting each unreached
+     *  node into a reached pick or the landmark covering it.
      *  Planning made every allocation and closed the claim word, which the plan's death reopens, so
      *  batches answer @c contended_k meanwhile while searches on other streams run throughout. A
      *  phase only queues, and only a device fault fails one; a stopped sequence of phases leaves
@@ -1222,6 +1303,7 @@ struct vram_ragged_graph {
             : scratch_(std::move(other.scratch_)), split_(std::move(other.split_)),
               index_(std::exchange(other.index_, nullptr)), counters_(std::move(other.counters_)),
               config_(other.config_), nodes_(other.nodes_), islands_(other.islands_), next_sweep_(other.next_sweep_),
+              sweep_(other.sweep_), tile_rows_(other.tile_rows_), swept_links_(other.swept_links_),
               phase_(other.phase_), status_(other.status_), tally_(other.tally_) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
@@ -1255,7 +1337,21 @@ struct vram_ragged_graph {
             case phase_t::partition_k: status_ = split_.donor->queue_rounds_(*graph_kernels, split_, stream); break;
             case phase_t::picking_k: status_ = split_.donor->queue_picked_(*graph_kernels, split_, stream); break;
             case phase_t::scatter_k: status_ = split_.donor->queue_scatter_(*graph_kernels, split_, stream); break;
-            case phase_t::reselect_k: status_ = index_->reselect_(context, config_, nodes_, index_->size()); break;
+            case phase_t::reselect_k:
+                status_ = index_->reselect_(context, scratch_, config_, nodes_, index_->size());
+                break;
+            case phase_t::count_back_links_k:
+                status_ = index_->queue_count_back_links_(*graph_kernels, context, scratch_, counters_.get(), nodes_,
+                                                          sweep_, tile_rows_);
+                break;
+            case phase_t::scatter_back_links_k:
+                status_ = index_->queue_scatter_back_links_(*graph_kernels, context, scratch_, nodes_, sweep_,
+                                                            tile_rows_, swept_links_);
+                break;
+            case phase_t::merge_back_links_k:
+                status_ = index_->queue_merge_back_links_(context, scratch_, config_, nodes_, sweep_, tile_rows_,
+                                                          swept_links_);
+                break;
             case phase_t::audit_k: status_ = queue_sweeps_(*graph_kernels, stream); break;
             case phase_t::heal_k:
                 // Only island nodes gain links, and no reached node points at one, so the audit
@@ -1297,12 +1393,28 @@ struct vram_ragged_graph {
                 bind_receiver_();
                 return phase_ != phase_t::done_k;
             }
+            audit_counters_t const& counters = *counters_;
             if (phase_ == phase_t::reselect_k) {
                 tally_.reselected_nodes += nodes_.size();
-                phase_ = phase_t::audit_k;
+                open_sweep_(0);
                 return true;
             }
-            audit_counters_t const& counters = *counters_;
+            if (phase_ == phase_t::count_back_links_k) {
+                sweep_.bound = static_cast<node_id_t>(sweep_.first + counters.swept[0]);
+                swept_links_ = counters.swept[1];
+                tally_.swept_links += swept_links_;
+                phase_ = phase_t::scatter_back_links_k;
+                return true;
+            }
+            if (phase_ == phase_t::scatter_back_links_k) {
+                phase_ = phase_t::merge_back_links_k;
+                return true;
+            }
+            if (phase_ == phase_t::merge_back_links_k) {
+                if (sweep_.bound < index_->size()) open_sweep_(sweep_.bound);
+                else phase_ = phase_t::audit_k;
+                return true;
+            }
             // A last sweep that still expanded leaves nodes unjudged, so the phase sweeps on.
             if (counters.last_expanded) return true;
             next_sweep_ = 0;
@@ -1320,10 +1432,11 @@ struct vram_ragged_graph {
         }
 
         /** Skips the re-selection when it has not been queued yet, so the next phase audits and
-         *  heals, and a split's later receivers skip theirs too; a no-op in any other phase, a
-         *  split's partition and scatter included. */
+         *  heals, and a split's later receivers skip theirs too; a sweep under way finishes, and it
+         *  is a no-op in any other phase, a split's partition and scatter included. */
         void stop() noexcept {
             if (phase_ == phase_t::reselect_k) phase_ = phase_t::audit_k, split_.rounds = 0;
+            else if (sweeping_()) split_.rounds = 0;
         }
 
         /** Whether the current phase re-selects the planned range - the phase a caller's
@@ -1375,7 +1488,31 @@ struct vram_ragged_graph {
 
       private:
         friend struct vram_ragged_graph;
-        enum class phase_t : u8_t { partition_k, picking_k, scatter_k, reselect_k, audit_k, heal_k, done_k };
+        enum class phase_t : u8_t {
+            partition_k,
+            picking_k,
+            scatter_k,
+            reselect_k,
+            audit_k,
+            count_back_links_k,
+            scatter_back_links_k,
+            merge_back_links_k,
+            heal_k,
+            done_k
+        };
+
+        /** Whether the current phase runs a kernel of a sweep's tile. */
+        bool sweeping_() const noexcept {
+            return phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k ||
+                   phase_ == phase_t::merge_back_links_k;
+        }
+
+        /** Opens the sweep's tile of target nodes from @p first, up to @c tile_rows_ of them. */
+        void open_sweep_(node_id_t first) noexcept {
+            sweep_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, index_->size()))};
+            ++tally_.swept_tiles;
+            phase_ = phase_t::count_back_links_k;
+        }
 
         /** Assigns every donor node its slot in place in the pinned host bytes, each part's picked
          *  nodes first and both runs in ID order, and lays out the receivers' offsets columns. */
@@ -1487,6 +1624,11 @@ struct vram_ragged_graph {
         /** The audit sweep the next batch queues from, zero before an audit starts. */
         u32_t next_sweep_ = 0;
 
+        /** The open sweep tile's targets, the most nodes a tile takes, and the links it kept. */
+        iota_view<node_id_t> sweep_;
+        std::size_t tile_rows_ = 0;
+        u32_t swept_links_ = 0;
+
         /** Queues the audit's next batch of sweeps through @p graph_kernels, its seeds first when
          *  it starts. */
         status_t queue_sweeps_(kernel_table_t const& graph_kernels, cuda_stream_handle_t stream) noexcept {
@@ -1514,6 +1656,8 @@ struct vram_ragged_graph {
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
+     *  - @c bad_alloc_k The scratch, the arena or a tile cannot be placed, or the limit holds not
+     *    even one tile row past the carried state.
      *  - @c unsupported_k The shared kernels lack this node-ID type.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk.
      *  - @c contended_k A batch, a load or another plan in flight.
@@ -1810,13 +1954,10 @@ struct vram_ragged_graph {
     std::size_t traversal_memory_usage(refine_config_t config, std::size_t nodes) const noexcept {
         if (!connectivity() || !device_.multiprocessor_count) return 0;
         std::size_t const rung = kits_.rung_serving_(longest_value_);
-        gpu_arena_shape_t const arena_shape =
-            build_shape_(config.expansion_factor, static_cast<u32_t>(span_bytes_), rung).arena_shape;
-        std::size_t const slices = std::size_t {device_.multiprocessor_count} *
-                                   cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
-        return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) +
-               aligned_(slices * arena_shape.template slice_bytes<node_id_t>()) +
-               aligned_(build_staging_bytes_(nodes, nodes)) + aligned_(audit_bytes_(audit_use_t::refine_k, nodes));
+        std::size_t const arena_bytes = refine_arena_bytes_(config, static_cast<u32_t>(span_bytes_), rung);
+        return aligned_(sizeof(vram_telemetry_block_t)) + 2 * aligned_(sizeof(u32_t)) + aligned_(arena_bytes) +
+               aligned_(refine_tile_bytes_(refine_tile_rows_(nodes, nodes, config, arena_bytes))) +
+               aligned_(audit_bytes_(audit_use_t::refine_k, nodes));
     }
 
     /** The bytes an executor's run must hold before a context carved over it can split @p nodes
@@ -2117,16 +2258,16 @@ struct vram_ragged_graph {
 
     /**
      *  @brief One load in flight: the nodes it appends past every claimed one, the storage grown to
-     *      hold them, and the bounce they cross.
+     *      hold them, and the device staging slots their saved columns are read into.
      *
-     *  A call stages nodes on the host half a bounce at a time - each neighbor row shifted onto the
-     *  appended IDs and padded to the connectivity with sentinels, a node with none pointing at
-     *  itself, each value through the face's codec, which may pack it - and copies the half to the
-     *  device while the host stages the other, refilling a half only once its event says the copies
-     *  out of it finished, and assigns each node its key on the host. @c finish is the one full
-     *  wait, files the keys and turns the watermark over the nodes. Holds the claim for its whole
-     *  life, so nothing else claims nodes while it runs; a plan that dies before @c finish gives
-     *  its claim back and leaves the storage grown, its nodes unfilled.
+     *  Planning sizes every stored value from its saved length alone. A call reads a run of nodes'
+     *  saved neighbors, offsets and values into a slot, through cuFile or a driver copy, while the
+     *  other slot's work runs, copies their planned tape starts beside them, widens their neighbor
+     *  rows on the device, and hands the kits the run to store its values. Keys go into the host
+     *  key column. @c finish is the one full wait: it reads back whether a neighbor row was
+     *  malformed and the widest span, files the keys and turns the watermark over the nodes. Holds
+     *  the claim for its whole life; a plan that dies before @c finish gives its claim back and
+     *  leaves the storage grown, its nodes unfilled.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -2138,89 +2279,122 @@ struct vram_ragged_graph {
 
         load_plan_t() noexcept = default;
 
-        /** Pins its bounce through @p api and births its events on the current device. */
-        explicit load_plan_t(cuda_api_t const& api) noexcept
-            : bounce_ {cuda_pinned_allocator_t {api}}, crossed_ {cuda_event_t {api}, cuda_event_t {api}} {}
+        /** Births its events through @p api on the current device. */
+        explicit load_plan_t(cuda_api_t const& api) noexcept : drained_ {cuda_event_t {api}, cuda_event_t {api}} {}
         load_plan_t(load_plan_t&& other) noexcept
-            : base(other.base), entries(std::exchange(other.entries, 0)), keys_(other.keys_),
-              neighbor_offsets_(other.neighbor_offsets_), neighbor_ids_(other.neighbor_ids_),
-              value_offsets_(other.value_offsets_), values_(other.values_),
-              stored_offsets_(std::move(other.stored_offsets_)), bounce_(std::move(other.bounce_)),
-              crossed_ {std::move(other.crossed_[0]), std::move(other.crossed_[1])}, stream_(other.stream_),
-              half_nodes_(other.half_nodes_), half_bytes_(other.half_bytes_), neighbors_bytes_(other.neighbors_bytes_),
-              offsets_bytes_(other.offsets_bytes_), tape_first_(other.tape_first_), longest_(other.longest_),
+            : base(other.base), entries(std::exchange(other.entries, 0)), saved_(other.saved_),
+              stored_offsets_(std::move(other.stored_offsets_)),
+              drained_ {std::move(other.drained_[0]), std::move(other.drained_[1])},
+              device_words_(std::move(other.device_words_)), staging_(std::move(other.staging_)),
+              slot_bytes_(other.slot_bytes_), holder_(std::exchange(other.holder_, nullptr)), stream_(other.stream_),
+              graph_kernels_(other.graph_kernels_), kits_kernels_(other.kits_kernels_), longest_(other.longest_),
               span_bytes_(other.span_bytes_), chunks_(other.chunks_), covered_(other.covered_),
               index_(std::exchange(other.index_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
 
-        /** An unfinished plan awaits every copy it queued, so the next grow fills its nodes again,
-         *  and gives its claim back. */
+        /** An unfinished plan awaits every slot's work, so the next grow fills its nodes again, and
+         *  gives its claim back. */
         ~load_plan_t() noexcept {
+            if (holder_) [[maybe_unused]]
+                cufile_error_t const deregistered = holder_->file.api().buffer_deregister(staging_.get());
             if (!index_) return;
             if (chunks_) {
-                [[maybe_unused]] status_t const first_drained = crossed_[0].wait();
-                [[maybe_unused]] status_t const second_drained = crossed_[1].wait();
+                [[maybe_unused]] status_t const first_drained = drained_[0].wait();
+                [[maybe_unused]] status_t const second_drained = drained_[1].wait();
             }
             index_->filled_nodes_ = min_of(index_->filled_nodes_, static_cast<std::size_t>(base));
             index_->unclaim_(base, entries);
         }
 
         /**
-         *  Stages and copies the columns' nodes @p range, counted from the columns' first node,
-         *  half a bounce at a time; the last half is still copying when it returns.
+         *  @brief Reads, widens and stores the saved nodes @p range, counted from the columns'
+         *      first node, one staging slot at a time, and returns while the last slot's work runs.
+         *
+         *  Driver copies fill a slot in stream order; cuFile, writing from the host, refills one
+         *  only once the work out of it finished.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The @p range passes the plan, or a saved value does not fit the
-         *    bytes the plan stored it in.
+         *  - @c config_mismatch_k The @p range passes the plan.
+         *  - @c io_k A read through cuFile ended short, which never restarts on the host.
          */
         status_t load(iota_view<node_id_t> range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (range.bound < range.first || range.bound > entries) return status_t::config_mismatch_k;
-            std::size_t const connectivity = index_->connectivity();
-            std::size_t const row_bytes = connectivity * sizeof(node_id_t);
+            cuda_api_t const& api = index_->api();
+            std::size_t const key_bytes = dtype_bytes(saved_.key_dtype);
             for (node_id_t first = range.first; first != range.bound;) {
-                node_id_t const bound = crossing_end_(to_span(stored_offsets_), first, range.bound, half_nodes_,
-                                                      half_bytes_);
-                std::size_t const half = chunks_++ % 2;
-                // The host refills a half only once the copies out of it finished, while the other
-                // half's copies run.
-                if (chunks_ > 2 && failed(crossed_[half].wait())) return status_t::device_error_k;
-                byte_t* const staged = bounce_.data() + half * (neighbors_bytes_ + offsets_bytes_ + half_bytes_);
-                node_id_t* const neighbors = reinterpret_cast<node_id_t*>(staged);
-                u64_t* const offsets = reinterpret_cast<u64_t*>(staged + neighbors_bytes_);
-                byte_t* const values = staged + neighbors_bytes_ + offsets_bytes_;
-                for (node_id_t node = first; node != bound; ++node) {
-                    index_->keyed_.assign(static_cast<node_id_t>(base + node), keys_[node]);
-                    node_id_t* const slots = neighbors + (node - first) * connectivity;
-                    std::size_t kept = 0;
-                    for (u64_t link = neighbor_offsets_[node]; link != neighbor_offsets_[node + 1]; ++link)
-                        slots[kept++] = static_cast<node_id_t>(neighbor_ids_[link] + base);
-                    // A node with no neighbor points at itself, which reads as published and empty.
-                    if (!kept) slots[kept++] = static_cast<node_id_t>(base + node);
-                    for (; kept != connectivity; ++kept) slots[kept] = std::numeric_limits<node_id_t>::max();
-                    offsets[node - first] = tape_first_ + stored_offsets_[node];
-                    bytes_span_t const stored {values + stored_offsets_[node] - stored_offsets_[first],
-                                               stored_offsets_[node + 1] - stored_offsets_[node]};
-                    bytes_view_t const saved = values_.subspan(value_offsets_[node],
-                                                               value_offsets_[node + 1] - value_offsets_[node]);
-                    if (status_t const loaded = index_->kits_.load_value_(saved, stored); failed(loaded)) return loaded;
-                    span_bytes_ = max_of(span_bytes_, index_->kits_.span_bytes_(stored.data(), stored.size()));
+                node_id_t const bound = staged_end_(first, range.bound);
+                std::size_t const slot = chunks_++ % 2;
+                if (holder_ && chunks_ > 2 && failed(drained_[slot].wait())) return status_t::device_error_k;
+                std::size_t into = slot * slot_bytes_;
+                auto const read = [&](bytes_view_t extent) noexcept -> expected<bytes_view_t> {
+                    if (holder_)
+                        return holder_->file.read(static_cast<std::size_t>(extent.data() - holder_->part.data()),
+                                                  extent.size(), staging_.get(), into);
+                    byte_t* const staged = staging_.get() + into;
+                    into += staged_bytes_(extent.size());
+                    if (cuda_copy_async(api, staged, extent.data(), extent.size(), stream_) != cuda_success_k)
+                        return {{}, status_t::device_error_k};
+                    return {bytes_view_t {staged, extent.size()}, status_t::success_k};
+                };
+                auto const [neighbors, neighbors_status] = read(neighbor_extent_(first, bound));
+                if (failed(neighbors_status)) return neighbors_status;
+                bytes_view_t neighbor_offsets, value_offsets;
+                if (!saved_.degree) {
+                    auto const [offsets, status] = read(
+                        std::as_bytes(saved_.neighbor_offsets.subspan(first, bound - first + 1)));
+                    if (failed(status)) return status;
+                    neighbor_offsets = offsets;
                 }
-                offsets[bound - first] = tape_first_ + stored_offsets_[bound];
-                std::size_t const into = base + first;
-                u64_t const bytes = stored_offsets_[bound] - stored_offsets_[first];
-                cuda_api_t const& api = index_->api();
-                if (cuda_copy_async(api, index_->neighbors_matrix_.base() + into * row_bytes, neighbors,
-                                    (bound - first) * row_bytes, stream_) != cuda_success_k ||
-                    cuda_copy_async(api, index_->offsets_column_.base() + into * sizeof(u64_t), offsets,
-                                    (bound - first + 1) * sizeof(u64_t), stream_) != cuda_success_k ||
-                    (bytes && cuda_copy_async(api, index_->values_tape_.base() + tape_first_ + stored_offsets_[first],
-                                              values, bytes, stream_) != cuda_success_k) ||
-                    failed(crossed_[half].record(stream_)))
+                if (!saved_.value_width) {
+                    auto const [offsets,
+                                status] = read(std::as_bytes(saved_.value_offsets.subspan(first, bound - first + 1)));
+                    if (failed(status)) return status;
+                    value_offsets = offsets;
+                }
+                std::size_t const values_first = saved_.value_first(first);
+                auto const [values, values_status] = read(
+                    saved_.values.subspan(values_first, saved_.value_first(bound) - values_first));
+                if (failed(values_status)) return values_status;
+
+                vram_graph<node_id_t> graph;
+                graph.neighbors = reinterpret_cast<node_id_t*>(index_->neighbors_matrix_.base());
+                graph.connectivity = static_cast<u32_t>(index_->connectivity());
+                graph.first_id = static_cast<node_id_t>(base + first);
+                graph.nodes_count = static_cast<u32_t>(bound - first);
+                graph.shift = base;
+                graph.source_bound = static_cast<node_id_t>(entries);
+                graph.saved_neighbors = reinterpret_cast<node_id_t const*>(neighbors.data());
+                graph.saved_offsets = reinterpret_cast<u64_t const*>(neighbor_offsets.data());
+                graph.degree = static_cast<u32_t>(saved_.degree);
+                graph.malformed = device_words_.get();
+                vram_load_step<node_id_t> step;
+                step.arguments.load = {values.data(),
+                                       reinterpret_cast<u64_t const*>(value_offsets.data()),
+                                       reinterpret_cast<u64_t const*>(index_->offsets_column_.base()) + base + first,
+                                       index_->values_tape_.base(),
+                                       device_words_.get() + 1,
+                                       static_cast<u32_t>(bound - first)};
+                step.saved = values;
+                step.stored = index_->values_tape_.base() + stored_offsets_[first];
+                step.api = &api, step.kits = kits_kernels_, step.stream = stream_;
+                step.multiprocessors = index_->device_.multiprocessor_count;
+                // The planned tape starts cross per run, 8 bytes a node, from the host's plan.
+                if (cuda_copy_async(api, index_->offsets_column_.base() + (base + first) * sizeof(u64_t),
+                                    stored_offsets_.data() + first, (bound - first + 1) * sizeof(u64_t),
+                                    stream_) != cuda_success_k ||
+                    failed(index_->launch_graph_(*graph_kernels_, vram_kernel_t::widen_links_k,
+                                                 index_->graph_blocks_(vram_kernel_t::widen_links_k), graph,
+                                                 stream_)) ||
+                    failed(index_->kits_.queue_load_values_(step)) || failed(drained_[slot].record(stream_)))
                     return status_t::device_error_k;
+                for (node_id_t node = first; node != bound; ++node)
+                    index_->keyed_.assign(
+                        static_cast<node_id_t>(base + node),
+                        safegraphs_widened_key<key_t>(saved_.keys.data() + node * key_bytes, saved_.key_dtype));
                 covered_ += bound - first, first = bound;
             }
             return status_t::success_k;
@@ -2232,20 +2406,26 @@ struct vram_ragged_graph {
          *      and the watermark turns, which lifts the claim.
          *
          *  A success spends the plan; a refusal leaves it whole, so the missing nodes can still be
-         *  copied over later.
+         *  copied over later, or its death gives the claim back.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k Some nodes were never copied.
+         *  - @c malformed_k A saved neighbor named no node of the columns, or a row kept more
+         *    neighbors than the connectivity.
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (covered_ != entries) return status_t::config_mismatch_k;
-            if (failed(crossed_[0].wait()) || failed(crossed_[1].wait())) return status_t::device_error_k;
+            if (failed(drained_[0].wait()) || failed(drained_[1].wait())) return status_t::device_error_k;
+            u64_t words[2] = {0, 0};
+            if (entries && cuda_copy(index_->api(), words, device_words_.get(), sizeof(words)) != cuda_success_k)
+                return status_t::device_error_k;
+            if (words[0]) return status_t::malformed_k;
             vram_ragged_graph& index = *std::exchange(index_, nullptr);
-            index.tape_bytes_ = tape_first_ + stored_offsets_[entries];
+            index.tape_bytes_ = stored_offsets_[entries];
             index.longest_value_ = max_of(index.longest_value_, longest_);
-            index.span_bytes_ = max_of(index.span_bytes_, span_bytes_);
+            index.span_bytes_ = max_of(index.span_bytes_, max_of(span_bytes_, static_cast<std::size_t>(words[1])));
             index.publish_keys_({base, static_cast<node_id_t>(base + entries)});
             fu::standard_atomic_ref<std::size_t>(index.last_visible_id_)
                 .store(base + entries, std::memory_order_release);
@@ -2255,34 +2435,70 @@ struct vram_ragged_graph {
       private:
         friend struct vram_ragged_graph;
 
-        /** The vetted columns. */
-        std::span<key_t const> keys_;
-        std::span<u64_t const> neighbor_offsets_;
-        std::span<node_id_t const> neighbor_ids_;
-        std::span<u64_t const> value_offsets_;
-        bytes_view_t values_;
+        /** Bytes a read of @p bytes takes in a slot: whole blocks, and one more for its lead. */
+        static std::size_t staged_bytes_(std::size_t bytes) noexcept {
+            return round_up_to_multiple(bytes + linux_cufile_file_t::block_bytes_k, linux_cufile_file_t::block_bytes_k);
+        }
 
-        /** Each node's start among the stored values the plan appends, from zero, @b [nodes+1]. */
+        /** The saved neighbor IDs of nodes @b [first,bound): fixed rows, or their run of IDs. */
+        bytes_view_t neighbor_extent_(std::size_t first, std::size_t bound) const noexcept {
+            std::span<node_id_t const> const ids =
+                saved_.degree
+                    ? saved_.neighbor_ids.subspan(first * saved_.degree, (bound - first) * saved_.degree)
+                    : saved_.neighbor_ids.subspan(saved_.neighbor_offsets[first],
+                                                  saved_.neighbor_offsets[bound] - saved_.neighbor_offsets[first]);
+            return std::as_bytes(ids);
+        }
+
+        /** Slot bytes the saved columns of nodes @b [first,bound) take. */
+        std::size_t run_bytes_(std::size_t first, std::size_t bound) const noexcept {
+            std::size_t const sums_bytes = (bound - first + 1) * sizeof(u64_t);
+            return staged_bytes_(neighbor_extent_(first, bound).size()) +
+                   (saved_.degree ? 0 : staged_bytes_(sums_bytes)) +
+                   (saved_.value_width ? 0 : staged_bytes_(sums_bytes)) +
+                   staged_bytes_(saved_.value_first(bound) - saved_.value_first(first));
+        }
+
+        /** The end of the run from @p first toward @p bound whose saved columns fit one slot, one
+         *  node at least, which planning sized every slot for. */
+        node_id_t staged_end_(node_id_t first, node_id_t bound) const noexcept {
+            node_id_t end = static_cast<node_id_t>(first + 1);
+            while (end != bound && run_bytes_(first, end + 1) <= slot_bytes_) ++end;
+            return end;
+        }
+
+        /** The saved columns, read in place from the mapping or the lent buffer. */
+        safegraphs_saved_columns<node_id_t> saved_;
+
+        /** Each node's start in the tape, from the plan's first, @b [nodes+1]. */
         growing_buffer<u64_t> stored_offsets_ {global_allocator};
 
-        /** Page-locked host bytes in two halves: @c half_nodes_ padded neighbor rows, their tape
-         *  starts and the one past them, then @c half_bytes_ of stored values. */
-        growing_buffer<byte_t, cuda_pinned_allocator_t> bounce_ {cuda_pinned_allocator_t {}};
+        /** Marks the last work out of each staging slot, born with the plan on its device. */
+        cuda_event_t drained_[2];
 
-        /** Marks the last copies out of each half of the bounce, born with the plan on its
-         *  device. */
-        cuda_event_t crossed_[2];
+        /** On the device: the malformed word, nonzero once a neighbor row is, then the widest span
+         *  the kits counted. */
+        cuda_unique_ptr<u64_t> device_words_;
+
+        /** The slots runs cross, alternating, back to back, and the bytes each holds. */
+        cuda_unique_ptr<byte_t> staging_;
+        std::size_t slot_bytes_ = 0;
+
+        /** The registered part the columns are read from by cuFile, whose entries registered the
+         *  staging; null where they cross by driver copies. */
+        cuda_part_source_t const* holder_ = nullptr;
+
         cuda_stream_handle_t stream_ = nullptr;
-        std::size_t half_nodes_ = 0, half_bytes_ = 0, neighbors_bytes_ = 0, offsets_bytes_ = 0;
 
-        /** Where the first appended value goes in the tape: its extent at planning. */
-        std::size_t tape_first_ = 0;
+        /** The shared and the kits' kernels on the plan's stream, which outlive the plan there. */
+        kernel_table_t const* graph_kernels_ = nullptr;
+        kernel_table_t const* kits_kernels_ = nullptr;
 
-        /** The longest appended node and the widest span one prepares into. */
+        /** The longest appended node and the widest span its length bounds. */
         std::size_t longest_ = 0;
         std::size_t span_bytes_ = 0;
 
-        /** Halves staged so far, and nodes copied. */
+        /** Runs staged so far, and nodes copied. */
         std::size_t chunks_ = 0;
         std::size_t covered_ = 0;
 
@@ -2292,62 +2508,70 @@ struct vram_ragged_graph {
     };
 
     /**
-     *  @brief Opens a load of @p columns past every claimed node on @p context 's stream: vets the
-     *      columns in full, sizes every stored value, claims the nodes, grows the storage and pins
-     *      the bounce.
+     *  @brief Opens a load of the @p saved columns past every claimed node on @p context 's stream:
+     *      vets their offsets columns, sizes every stored value from its saved length, claims the
+     *      nodes, grows the storage and opens the staging slots on @p context 's stream.
      *
-     *  The key column's length names the node count, and the keys go at @c base on beside the
-     *  nodes. Every neighbor ID must name a node of the columns, and no node may keep more
-     *  neighbors than the connectivity, both @c malformed_k otherwise.
+     *  The keys name the node count and go at @c base on, beside the nodes. Only the offsets
+     *  columns are read on the host: the device checks every neighbor ID, and @c finish refuses a
+     *  load where one names no node of the columns, or where a fixed row keeps more neighbors than
+     *  its connectivity allows.
      *
-     *  @param[in] columns The five columns a save filled, by this face or another residency's.
-     *  @param[in,out] context The stream every copy queues on.
+     *  @param[in] saved The columns as the file holds them, saved by this face or any residency.
+     *  @param[in,out] context The stream every copy and kernel queues on.
+     *  @param[in] sources The mapped parts the columns are read from, empty for a lent buffer.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
      *  - @c config_mismatch_k The @p context rides another device or cannot walk.
-     *  - @c malformed_k The offsets columns are not one longer than the nodes, their sums pass
-     *    their columns, a node keeps more neighbors than the connectivity or names no node of the
-     *    columns, or a saved value does not parse.
+     *  - @c malformed_k An offsets column is not one longer than the nodes, its sums pass its
+     *    column, a ragged node keeps more neighbors than the connectivity, or a saved value does
+     *    not parse.
      *  - @c unsupported_k A value past every rung of the face's kits.
      *  - @c overflow_k The nodes pass the ceiling or the reserved range, or their values the
      *    reserved tape.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    expected<load_plan_t> plan_load(columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                                    traversal_context_t& context) noexcept {
+    expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context,
+                                    std::span<cuda_part_source_t const> sources = {}) noexcept {
         if (cuda_set_device(api(), device_.ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
         load_plan_t plan {api()};
-        std::size_t const connectivity = this->connectivity(), entries = columns.keys.size();
+        std::size_t const connectivity = this->connectivity(), entries = saved.nodes();
         if (!connectivity) return {std::move(plan), status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {std::move(plan), kept};
-        if (columns.neighbor_offsets.size() != entries + 1 || columns.value_offsets.size() != entries + 1)
-            return {std::move(plan), status_t::malformed_k};
-        for (status_t const vetted : {vetted_sums_(columns.neighbor_offsets, columns.neighbor_ids.size()),
-                                      vetted_sums_(columns.value_offsets, columns.values.size())})
-            if (failed(vetted)) return {std::move(plan), vetted};
-        for (std::size_t node = 0; node != entries; ++node)
-            if (columns.neighbor_offsets[node + 1] - columns.neighbor_offsets[node] > connectivity)
+        bool const neighbors_vetted = saved.degree ? saved.neighbor_ids.size() == entries * saved.degree
+                                                   : saved.neighbor_offsets.size() == entries + 1 &&
+                                                         succeeded(vetted_sums_(saved.neighbor_offsets,
+                                                                                saved.neighbor_ids.size()));
+        bool const values_vetted = saved.value_width
+                                       ? saved.values.size() == entries * saved.value_width
+                                       : saved.element_bytes && saved.value_offsets.size() == entries + 1 &&
+                                             succeeded(vetted_sums_(saved.value_offsets,
+                                                                    saved.values.size() / saved.element_bytes));
+        if (!neighbors_vetted || !values_vetted) return {std::move(plan), status_t::malformed_k};
+        for (std::size_t node = 0; !saved.degree && node != entries; ++node)
+            if (saved.neighbor_offsets[node + 1] - saved.neighbor_offsets[node] > connectivity)
                 return {std::move(plan), status_t::malformed_k};
-        for (node_id_t const neighbor : columns.neighbor_ids.first(columns.neighbor_offsets[entries]))
-            if (static_cast<std::size_t>(neighbor) >= entries) return {std::move(plan), status_t::malformed_k};
 
-        // Every stored value's size up front, so the tape and the steps' halves are known before
-        // the claim.
+        // Every stored value's size up front, from its saved length alone, so the tape and the
+        // runs are known before the claim.
         if (failed(plan.stored_offsets_.resize_uninitialized(entries + 1)))
             return {std::move(plan), status_t::bad_alloc_k};
         plan.stored_offsets_[0] = 0;
         for (std::size_t node = 0; node != entries; ++node) {
-            bytes_view_t const saved = columns.values.subspan(
-                columns.value_offsets[node], columns.value_offsets[node + 1] - columns.value_offsets[node]);
-            auto const [stored_bytes, stored_status] = kits_.stored_bytes_(saved);
+            auto const [stored_bytes,
+                        stored_status] = kits_.stored_bytes_(saved.value_first(node + 1) - saved.value_first(node));
             if (failed(stored_status)) return {std::move(plan), stored_status};
             plan.stored_offsets_[node + 1] = plan.stored_offsets_[node] + stored_bytes;
             plan.longest_ = max_of<std::size_t>(plan.longest_, stored_bytes);
         }
         if (entries && kits_.rung_serving_(max_of(plan.longest_, longest_value_)) == kits_type_::rungs_k)
             return {std::move(plan), status_t::unsupported_k};
+        auto const [graph_kernels, graph_status] = graph_kernels_(context);
+        if (failed(graph_status)) return {std::move(plan), graph_status};
+        auto const [kits_kernels, kits_status] = kits_kernels_(context);
+        if (failed(kits_status)) return {std::move(plan), kits_status};
 
         auto const [base, claim_status] = claim_(entries);
         if (failed(claim_status)) return {std::move(plan), claim_status};
@@ -2357,40 +2581,50 @@ struct vram_ragged_graph {
         if (status_t const grown = grow_nodes_(base + entries, stream); failed(grown)) return {std::move(plan), grown};
         if (status_t const mapped = values_tape_.commit(tape_bytes_ + stored_total + tape_margin_k); failed(mapped))
             return {std::move(plan), mapped};
-        plan.stream_ = stream;
-        plan.tape_first_ = tape_bytes_;
-        plan.half_nodes_ = min_of(entries, power_of_two<std::size_t>(crossing_nodes_log2_k));
-        plan.half_bytes_ = crossing_bytes_(stored_total, plan.longest_, entries, plan.half_nodes_);
-        plan.neighbors_bytes_ = aligned_(plan.half_nodes_ * connectivity * sizeof(node_id_t));
-        plan.offsets_bytes_ = aligned_((plan.half_nodes_ + 1) * sizeof(u64_t));
-        if (entries && failed(plan.bounce_.resize_uninitialized(
-                           2 * (plan.neighbors_bytes_ + plan.offsets_bytes_ + plan.half_bytes_))))
-            return {std::move(plan), status_t::bad_alloc_k};
-        plan.keys_ = columns.keys;
-        plan.neighbor_offsets_ = columns.neighbor_offsets, plan.neighbor_ids_ = columns.neighbor_ids;
-        plan.value_offsets_ = columns.value_offsets, plan.values_ = columns.values;
+        for (u64_t& offset : plan.stored_offsets_) offset += tape_bytes_;
+        plan.saved_ = saved, plan.stream_ = stream;
+        plan.graph_kernels_ = graph_kernels, plan.kits_kernels_ = kits_kernels;
+        plan.span_bytes_ = kits_.span_bytes_(plan.longest_);
+        if (!entries) return {std::move(plan), status_t::success_k};
+
+        // A slot fits the run a save's crossing carries, and at least the widest node; a second
+        // slot opens only for a second run.
+        plan.slot_bytes_ = plan.run_bytes_(0, min_of(entries, power_of_two<std::size_t>(crossing_nodes_log2_k)));
+        for (std::size_t node = 0; node != entries; ++node)
+            plan.slot_bytes_ = max_of(plan.slot_bytes_, plan.run_bytes_(node, node + 1));
+        std::size_t const staging_bytes = (plan.run_bytes_(0, entries) > plan.slot_bytes_ ? 2 : 1) * plan.slot_bytes_;
+        plan.staging_ = cuda_make_unique(cuda_device_allocator_t {context.allocator()}, staging_bytes);
+        if (!plan.staging_) return {std::move(plan), status_t::bad_alloc_k};
+        plan.holder_ = cufile_holder(sources, std::as_bytes(saved.neighbor_ids));
+        // cuFile writes from the host, so the stream's allocation must finish first.
+        if (plan.holder_ && (failed(plan.drained_[0].record(stream)) || failed(plan.drained_[0].wait())))
+            return {std::move(plan), status_t::device_error_k};
+        if (plan.holder_) [[maybe_unused]]
+            cufile_error_t const registered = plan.holder_->file.api().buffer_register(plan.staging_.get(),
+                                                                                       staging_bytes, 0);
+        plan.device_words_ = cuda_make_unique(cuda_device_allocator<u64_t> {api()}, 2);
+        if (!plan.device_words_) return {std::move(plan), status_t::bad_alloc_k};
+        if (cuda_fill_async(api(), plan.device_words_.get(), 0, 2 * sizeof(u64_t), stream) != cuda_success_k)
+            return {std::move(plan), status_t::device_error_k};
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  Loads @p columns past every claimed node on the calling thread - the one-shot over
-     *  @ref plan_load.
+     *  @brief Loads the @p saved columns past every claimed node on the calling thread - the
+     *      one-shot over @ref plan_load.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No @c reserve froze the connectivity yet.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or a saved
-     *    value does not fit the bytes the plan stored it in.
-     *  - @c malformed_k The offsets columns are not one longer than the nodes, their sums pass
-     *    their columns, a node keeps more neighbors than the connectivity or names no node of the
-     *    columns, or a saved value does not parse.
+     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c malformed_k An offsets column is out of shape, a saved value does not parse, a neighbor
+     *    names no node of the columns, or a row keeps more neighbors than the connectivity.
      *  - @c unsupported_k A value past every rung of the face's kits.
      *  - @c overflow_k The nodes pass the ceiling or the reserved range, or their values the
      *    reserved tape.
      *  - @c contended_k A batch, a load or a plan in flight.
      */
-    status_t load(columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                  traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_load(columns, context);
+    status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_load(saved, context);
         if (failed(status)) return status;
         if (status_t const loaded = plan.load({0, static_cast<node_id_t>(plan.entries)}); failed(loaded)) return loaded;
         return plan.finish();
@@ -2819,11 +3053,40 @@ struct vram_ragged_graph {
         return refine_plan_t {unbound_scratch_(context)};
     }
 
-    /** Bytes of an audit's scratch over @p nodes nodes, its heal's buffers too for a refine. */
+    /** Bytes of an audit's scratch over @p nodes nodes, its heal's buffers and the changed bits too
+     *  for a refine. */
     static std::size_t audit_bytes_(audit_use_t use, std::size_t nodes) noexcept {
         std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
-        std::size_t const heal_words = use == audit_use_t::refine_k ? 2 * nodes : 0;
-        return (words * 3 + 5 + heal_words) * sizeof(u32_t);
+        std::size_t const heal_words = use == audit_use_t::refine_k ? 2 * nodes + words : 0;
+        return (words * 3 + 7 + heal_words) * sizeof(u32_t);
+    }
+
+    /** Bytes of a sweep tile of @p tile_rows rows: a run offset per row, and a row's worth of links
+     *  on its tape per row. */
+    std::size_t refine_tile_bytes_(std::size_t tile_rows) const noexcept {
+        return tile_rows * (connectivity() + 1) * sizeof(node_id_t);
+    }
+
+    /** Bytes of the arena a refine walk preparing into @p span_bytes on the kit rung @p rung takes
+     *  under @p config. */
+    std::size_t refine_arena_bytes_(refine_config_t config, u32_t span_bytes, std::size_t rung) const noexcept {
+        std::size_t const slices = std::size_t {device_.multiprocessor_count} *
+                                   cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
+        return slices *
+               build_shape_(config.expansion_factor, span_bytes, rung).arena_shape.template slice_bytes<node_id_t>();
+    }
+
+    /** Rows one sweep tile of a pass over @p nodes nodes re-selecting @p forward_rows of them takes
+     *  under @p config: as many as its limit holds past the audit's scratch and the @p arena_bytes
+     *  arena, every one without a limit; never more than the tape's offsets count, and zero when
+     *  the limit holds not one. */
+    std::size_t refine_tile_rows_(std::size_t forward_rows, std::size_t nodes, refine_config_t config,
+                                  std::size_t arena_bytes) const noexcept {
+        std::size_t const row_bytes = refine_tile_bytes_(1);
+        std::size_t const capped = min_of<std::size_t>(forward_rows, node_id_limits<u32_t>::unknown_k / connectivity());
+        if (!config.memory_limit) return capped;
+        std::size_t const carried = audit_bytes_(audit_use_t::refine_k, nodes) + arena_bytes;
+        return config.memory_limit > carried ? min_of((config.memory_limit - carried) / row_bytes, capped) : 0;
     }
 
     /** An empty audit scratch over @p context 's allocator. */
@@ -2848,9 +3111,11 @@ struct vram_ragged_graph {
         scratch.expanded = scratch.levels + 1;
         scratch.unreached = scratch.expanded + 2;
         scratch.reconnected = scratch.unreached + 1;
+        scratch.swept = scratch.reconnected + 1;
         if (use == audit_use_t::refine_k) {
-            scratch.island_ids = scratch.reconnected + 1;
+            scratch.island_ids = scratch.swept + 2;
             scratch.in_links = scratch.island_ids + nodes;
+            scratch.changed.words = scratch.in_links + nodes;
         }
         return cuda_fill_async(context.api(), scratch.reconnected, 0, sizeof(u32_t), context.stream()) == cuda_success_k
                    ? status_t::success_k
@@ -2870,23 +3135,22 @@ struct vram_ragged_graph {
         return {nodes, nodes - counters.unreached, std::size_t {counters.levels} + 1};
     }
 
-    /** Binds @p plan, whose claim word the caller closed, to a refinement of @p nodes over @p nodes
-     *  nodes of @p longest bytes at most, preparing into @p span_bytes: carves the audit's scratch,
-     *  grows the context's arena and staging for the walk, so no phase allocates, and takes a taken
-     *  last, which marks the plan bound. */
+    /** Binds @p plan, whose claim word the caller closed, to a refinement of @p nodes over
+     *  @p entries nodes of @p longest bytes at most, preparing into @p span_bytes: carves the
+     *  audit's scratch, grows the context's arena for the walk and its staging for a sweep tile, so
+     *  no phase allocates, and takes the counters last, which marks the plan bound. */
     status_t open_refine_(refine_plan_t& plan, iota_view<node_id_t> nodes, std::size_t entries, std::size_t longest,
                           std::size_t span_bytes, traversal_context_t& context, refine_config_t config) noexcept {
         using phase_t = typename refine_plan_t::phase_t;
         if (status_t const carved = carve_audit_(plan.scratch_, context, audit_use_t::refine_k, entries);
             failed(carved))
             return carved;
-        gpu_arena_shape_t const arena_shape = build_shape_(config.expansion_factor, static_cast<u32_t>(span_bytes),
-                                                           kits_.rung_serving_(longest))
-                                                  .arena_shape;
-        std::size_t const slices = std::size_t {device_.multiprocessor_count} *
-                                   cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
-        if (!context.ensure_arena(slices * arena_shape.template slice_bytes<node_id_t>()) ||
-            !context.ensure_staging(build_staging_bytes_(nodes.size(), entries)))
+        std::size_t const arena_bytes = refine_arena_bytes_(config, static_cast<u32_t>(span_bytes),
+                                                            kits_.rung_serving_(longest));
+        if (!context.ensure_arena(arena_bytes)) return status_t::bad_alloc_k;
+        plan.tile_rows_ = refine_tile_rows_(nodes.size(), entries, config, arena_bytes);
+        if ((!nodes.empty() && !plan.tile_rows_) ||
+            (plan.tile_rows_ && !context.ensure_staging(refine_tile_bytes_(plan.tile_rows_))))
             return status_t::bad_alloc_k;
         // Zeroed once, so every phase adds up, and copied with every phase.
         if (cuda_fill_async(api(), context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
@@ -2900,11 +3164,11 @@ struct vram_ragged_graph {
         return status_t::success_k;
     }
 
-    /** Queues one re-selection of every node in @p nodes over the @p nodes published nodes,
-     *  walks and back-links as an insertion wave's second half, on the arena and staging the
-     *  plan grew. */
-    status_t reselect_(traversal_context_t& context, refine_config_t config, iota_view<node_id_t> nodes,
-                       std::size_t entries) noexcept {
+    /** Queues one re-selection of every node in @p nodes over the @p entries published nodes, each
+     *  merging its picks into its row, on the arena the plan grew; a launch cache holds a walk's
+     *  candidates or a merge round's, whichever are more. */
+    status_t reselect_(traversal_context_t& context, audit_scratch_t const& scratch, refine_config_t config,
+                       iota_view<node_id_t> nodes, std::size_t entries) noexcept {
         auto const [kits, kits_status] = kits_kernels_(context);
         if (failed(kits_status)) return kits_status;
         cuda_stream_handle_t const stream = context.stream();
@@ -2915,8 +3179,7 @@ struct vram_ragged_graph {
                                    cuda_resident_blocks(vram_kernel_t::refine_k, 0) * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(slices * shape.arena_shape.template slice_bytes<node_id_t>());
-        byte_t* const staging = context.ensure_staging(build_staging_bytes_(walked, entries));
-        if (!arena || !staging) return status_t::bad_alloc_k;
+        if (!arena) return status_t::bad_alloc_k;
         auto const [epoch_base, epochs_status] = context.take_epochs(walked, arena_bytes_before);
         if (failed(epochs_status)) return epochs_status;
 
@@ -2933,30 +3196,118 @@ struct vram_ragged_graph {
         build.epoch_base = epoch_base;
         build.telemetry = context.telemetry_.get();
         build.assigned_nodes = context.assigned_nodes_.get();
-        build.link_heads = reinterpret_cast<node_id_t*>(staging + offsets_bytes_(walked));
-        build.link_next = build.link_heads + entries;
-        build.touched_ids = build.link_next + walked * connectivity();
-        build.touched_count = reinterpret_cast<u32_t*>(build.touched_ids + walked * connectivity());
-        if (cuda_fill_async(api(), build.link_heads, 0xFF, entries * sizeof(node_id_t), stream) != cuda_success_k ||
-            cuda_fill_async(api(), build.touched_count, 0, sizeof(u32_t), stream) != cuda_success_k)
+        build.changed = scratch.changed;
+        build.selection_nodes = max_of(shape.walk_selection_nodes, shape.reselection_nodes);
+        build.scratch_bytes_per_warp = max_of(shape.walk_scratch_bytes, shape.back_link_scratch_bytes);
+        if (cuda_fill_async(api(), scratch.changed.words, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_fill_async(api(), build.assigned_nodes, 0, sizeof(u32_t), stream) != cuda_success_k)
             return status_t::device_error_k;
         u32_t const blocks = device_.multiprocessor_count *
                              cuda_resident_blocks(vram_kernel_t::refine_k, shape.candidate_slots);
-        for (cuda_rung_t const launch : {cuda_rung_t {vram_kernel_t::refine_k, shape.candidate_slots},
-                                         cuda_rung_t {vram_kernel_t::back_link_k, 0}}) {
-            bool const walks = launch.kernel == vram_kernel_t::refine_k;
-            build.selection_nodes = walks ? shape.walk_selection_nodes : shape.reselection_nodes;
-            build.scratch_bytes_per_warp = walks ? shape.walk_scratch_bytes : shape.back_link_scratch_bytes;
-            if (cuda_fill_async(api(), build.assigned_nodes, 0, sizeof(u32_t), stream) != cuda_success_k)
-                return status_t::device_error_k;
-            if (status_t const launched = cuda_launch(
-                    api(), kits_function_at_(*kits, rung, launch.kernel, launch.slots), blocks, block_threads_k,
-                    walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream, cuda_overlap_t::serialized_k,
-                    arguments);
-                failed(launched))
-                return launched;
-        }
-        return status_t::success_k;
+        return cuda_launch(api(), kits_function_at_(*kits, rung, vram_kernel_t::refine_k, shape.candidate_slots),
+                           blocks, block_threads_k, walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream,
+                           cuda_overlap_t::serialized_k, arguments);
+    }
+
+    /** The launch record of a sweep's tile of @p targets over the links of @p sources: its run
+     *  offsets lead the staging the plan grew for @p tile_rows rows, and the tape follows them,
+     *  holding @p tape_capacity links. */
+    vram_sweep_t sweep_record_(traversal_context_t& context, audit_scratch_t const& scratch,
+                               iota_view<node_id_t> sources, iota_view<node_id_t> targets, std::size_t tile_rows,
+                               std::size_t tape_capacity) const noexcept {
+        u32_t* const offsets = reinterpret_cast<u32_t*>(context.staging_.get());
+        return {reinterpret_cast<u32_t const*>(neighbors_matrix_.base()),
+                static_cast<u32_t>(connectivity()),
+                static_cast<u32_t>(size()),
+                static_cast<u32_t>(sources.first),
+                static_cast<u32_t>(sources.bound),
+                static_cast<u32_t>(targets.first),
+                static_cast<u32_t>(targets.bound),
+                offsets,
+                offsets + tile_rows,
+                static_cast<u32_t>(tape_capacity),
+                scratch.swept};
+    }
+
+    /** Queues the count of every link @p sources hold into the tile of @p targets, none counted
+     *  yet, the offset kernel, which keeps as many rows as a tile's tape of @p tile_rows rows of
+     *  links holds, and the copy of what it kept into @p counters. */
+    status_t queue_count_back_links_(kernel_table_t const& graph_kernels, traversal_context_t& context,
+                                     audit_scratch_t const& scratch, audit_counters_t* counters,
+                                     iota_view<node_id_t> sources, iota_view<node_id_t> targets,
+                                     std::size_t tile_rows) noexcept {
+        cuda_stream_handle_t const stream = context.stream();
+        vram_graph<node_id_t> graph {};
+        graph.sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tile_rows * connectivity());
+        if (cuda_fill_async(api(), graph.sweep.incoming_offsets, 0, targets.size() * sizeof(u32_t), stream) !=
+            cuda_success_k)
+            return status_t::device_error_k;
+        if (status_t const counted = launch_graph_(graph_kernels, vram_kernel_t::count_back_links_k,
+                                                   graph_blocks_(vram_kernel_t::count_back_links_k), graph, stream);
+            failed(counted))
+            return counted;
+        if (status_t const offset = launch_graph_(graph_kernels, vram_kernel_t::offset_back_links_k, 1, graph, stream);
+            failed(offset))
+            return offset;
+        return cuda_copy_async(api(), counters->swept, scratch.swept, sizeof(counters->swept), stream) == cuda_success_k
+                   ? status_t::success_k
+                   : status_t::device_error_k;
+    }
+
+    /** Queues the scatter of every link @p sources hold into the tile of @p targets onto the first
+     *  @p tape_size slots of its tape. */
+    status_t queue_scatter_back_links_(kernel_table_t const& graph_kernels, traversal_context_t& context,
+                                       audit_scratch_t const& scratch, iota_view<node_id_t> sources,
+                                       iota_view<node_id_t> targets, std::size_t tile_rows, u32_t tape_size) noexcept {
+        vram_graph<node_id_t> graph {};
+        graph.sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tape_size);
+        return launch_graph_(graph_kernels, vram_kernel_t::scatter_back_links_k,
+                             graph_blocks_(vram_kernel_t::scatter_back_links_k), graph, context.stream());
+    }
+
+    /** Queues the merge of each node of the tile of @p targets with its run of the @p tape_size
+     *  links on its tape, on the walk's grid and arena, and counts a node of @p sources that gained
+     *  a member as changed. */
+    status_t queue_merge_back_links_(traversal_context_t& context, audit_scratch_t const& scratch,
+                                     refine_config_t config, iota_view<node_id_t> sources, iota_view<node_id_t> targets,
+                                     std::size_t tile_rows, u32_t tape_size) noexcept {
+        auto const [kits, kits_status] = kits_kernels_(context);
+        if (failed(kits_status)) return kits_status;
+        cuda_stream_handle_t const stream = context.stream();
+        std::size_t const rung = kits_.rung_serving_(longest_value_);
+        u32_t const span_bytes = static_cast<u32_t>(span_bytes_);
+        build_shape_t const shape = build_shape_(config.expansion_factor, span_bytes, rung);
+        byte_t* const arena = context.ensure_arena(refine_arena_bytes_(config, span_bytes, rung));
+        if (!arena) return status_t::bad_alloc_k;
+        vram_sweep_t const sweep = sweep_record_(context, scratch, sources, targets, tile_rows, tape_size);
+        vram_arguments<node_id_t> arguments {};
+        vram_build<node_id_t>& build = arguments.build;
+        build.storage = storage();
+        build.first_id = targets.first;
+        build.end_id = targets.bound;
+        build.sampling_bound = static_cast<node_id_t>(size());
+        build.span_bytes = span_bytes;
+        build.arena = arena;
+        build.arena_shape = shape.arena_shape;
+        build.expansion = shape.expansion;
+        build.telemetry = context.telemetry_.get();
+        build.assigned_nodes = context.assigned_nodes_.get();
+        build.selection_nodes = shape.reselection_nodes;
+        build.scratch_bytes_per_warp = shape.back_link_scratch_bytes;
+        build.changed = scratch.changed;
+        build.incoming_offsets = sweep.incoming_offsets;
+        build.back_links = reinterpret_cast<node_id_t const*>(sweep.back_links);
+        build.tape_size = tape_size;
+        build.walked_first = sources.first;
+        build.walked_bound = sources.bound;
+        if (cuda_fill_async(api(), build.assigned_nodes, 0, sizeof(u32_t), stream) != cuda_success_k)
+            return status_t::device_error_k;
+        static_assert(cuda_resident_blocks(vram_kernel_t::merge_back_links_k, 0) ==
+                      cuda_resident_blocks(vram_kernel_t::refine_k, 0));
+        return cuda_launch(api(), kits_function_at_(*kits, rung, vram_kernel_t::merge_back_links_k, 0),
+                           device_.multiprocessor_count * cuda_resident_blocks(vram_kernel_t::refine_k, 0),
+                           block_threads_k, walkers_per_block_(rung) * build.scratch_bytes_per_warp, stream,
+                           cuda_overlap_t::serialized_k, arguments);
     }
 
     /** Queues a reachability audit over @p nodes nodes from as many stride-spread landmarks as one

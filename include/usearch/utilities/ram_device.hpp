@@ -17,8 +17,8 @@
 #include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
-#include <forkunion/forkunion.h>    // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
-#include <forkunion/allocators.hpp> // `fu::linux_numa_allocator_t`, `fu::page_size_1g_k` - the payload pages
+#include <forkunion/forkunion.h>    // `fu_pool_spawn`, `fu_pool_spawn_near_memory_domain`, `fu_local_memory_of`
+#include <forkunion/allocators.hpp> // `fu::domain_allocator_t`, `fu::page_size_1g_k` - the payload pages
 #include <forkunion/types.hpp>      // `fu::spin_mutex_t` - the hold, `fu::is_cache_hints_functor` - the line tags
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
@@ -49,8 +49,8 @@ inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
 
 /** Allocates on one ForkUnion memory domain, so storage is placed beside the threads that walk
  *  it; @c no_memory_domain_k means the plain heap, which also serves every block under a page, as
- *  per-entry packs and neighbor lists are. On Linux a block of 1 GiB or more claims 1 GiB pages
- *  while the host's pool covers it, and every other block the largest page that fits it. */
+ *  per-entry packs and neighbor lists are. It claims 1 GiB pages for blocks of a GiB or more while
+ *  the pool covers them, and base pages otherwise. */
 template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
@@ -76,10 +76,10 @@ struct forkunion_allocator {
         std::size_t const bytes = aligned_bytes_(count);
         if (heap_serves_(bytes)) return static_cast<value_type_*>(std::aligned_alloc(default_alignment_k, bytes));
         if constexpr (places_by_mmap_k) {
-            fu::linux_numa_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
+            fu::domain_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
             char* memory = nullptr;
             if (bytes >= fu::page_size_1g_k) memory = pages.allocate_at_least(bytes, fu::page_size_1g_k).ptr;
-            if (!memory) memory = pages.allocate(mapped_bytes_(bytes));
+            if (!memory) memory = pages.allocate(mapped_bytes_(bytes), fu::ram_page_size());
             return reinterpret_cast<value_type_*>(memory);
         }
         void* memory = nullptr;
@@ -90,7 +90,7 @@ struct forkunion_allocator {
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
         if (heap_serves_(aligned_bytes_(count))) return std::free(pointer);
         if constexpr (places_by_mmap_k)
-            return fu::linux_numa_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
+            return fu::domain_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
                 reinterpret_cast<char*>(pointer), mapped_bytes_(aligned_bytes_(count)));
         fu_free_on_domain_id(memory_domain, pointer, aligned_bytes_(count));
     }
@@ -99,8 +99,11 @@ struct forkunion_allocator {
 
   private:
 
-    /** Whether ForkUnion places domains with Linux @c mmap, where the page size is ours to pick. */
-    inline static constexpr bool places_by_mmap_k = std::is_same_v<fu::domain_allocator_t, fu::linux_numa_allocator_t>;
+    /** Whether ForkUnion places domains with Linux or FreeBSD @c mmap, where the page size is ours
+     *  to pick. */
+    inline static constexpr bool places_by_mmap_k =
+        std::is_same_v<fu::domain_allocator_t, fu::linux_numa_allocator_t> ||
+        std::is_same_v<fu::domain_allocator_t, fu::freebsd_numa_allocator_t>;
 
     /** Whether the heap places a block of @p bytes: a domain maps a page and a syscall apiece, so
      *  a small block taking it costs a whole page and a page-splitting @c munmap to free. */
@@ -113,8 +116,8 @@ struct forkunion_allocator {
         return divide_round_up<std::size_t>(count * sizeof(value_type_), default_alignment_k) * default_alignment_k;
     }
 
-    /** The length a block of @p bytes maps on Linux. The base-page fallback maps the same rounded
-     *  length, as @c munmap refuses part of a 1 GiB page and release cannot tell which it got. */
+    /** The length a block of @p bytes maps. The base-page fallback maps the same rounded length,
+     *  as @c munmap refuses part of a 1 GiB page and release cannot tell which it got. */
     static std::size_t mapped_bytes_(std::size_t bytes) noexcept {
         return bytes < fu::page_size_1g_k ? bytes : round_up_to_multiple<std::size_t>(bytes, fu::page_size_1g_k);
     }
@@ -141,7 +144,7 @@ struct forkunion_executor_t {
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
     /** The label the pool's threads carry in the OS. */
-    inline static constexpr char const pool_name_k[] = "usearch";
+    inline static constexpr char const executor_name_k[] = "usearch";
 
     /** One core in this many stays idle on a zero ask, for the ordered publication path. */
     inline static constexpr std::size_t idle_cores_denominator_k = 8;
@@ -251,11 +254,35 @@ struct forkunion_executor_t {
         // A flat pool, unlike a distributed one, never pins the caller's own thread.
         if (exclusivity == fu_caller_inclusive_k)
             allowed = static_cast<fu_capabilities_t>(allowed & ~fu_capability_place_memory_on_domain_k);
-        fu_pool_t pool = nullptr;
-        if (fu_pool_new(pool_name_k, allowed, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
-        if (fu_pool_spawn(topology, pool, threads, exclusivity) != fu_success_k)
-            return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
-        return acquire(topology, pool);
+        fu_pool_t created = nullptr;
+        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        if (fu_pool_spawn(topology, created, threads, exclusivity) != fu_success_k)
+            return fu_pool_delete(created), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
+        return acquire(topology, created);
+    }
+
+    /**
+     *  @brief Spawns @p threads over the compute domains local to @p memory_domain, the caller
+     *      outside the pool, using only the ForkUnion facilities @p allowed names; zero means
+     *      @ref default_threads.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k A build without OS threads, or placement masked off on a machine of
+     *    several memory domains.
+     *  - @c invalid_argument_k No compute domain is local to @p memory_domain.
+     *  - @c contended_k The fresh pool is running another dispatch.
+     */
+    static expected<forkunion_executor_t> spawn_near(fu_topology_t topology, fu_memory_domain_id_t memory_domain,
+                                                     std::size_t threads, fu_capabilities_t allowed) noexcept {
+        auto const [count, count_status] = threads ? expected<std::size_t> {threads, status_t::success_k}
+                                                   : default_threads(topology);
+        if (failed(count_status)) return {{}, count_status};
+        fu_pool_t created = nullptr;
+        if (fu_pool_new(executor_name_k, allowed, &created) != fu_success_k) return {{}, status_t::bad_alloc_k};
+        status_t const spawned = dispatch_status_(
+            fu_pool_spawn_near_memory_domain(topology, created, memory_domain, count, fu_caller_exclusive_k));
+        if (failed(spawned)) return fu_pool_delete(created), expected<forkunion_executor_t> {{}, spawned};
+        return acquire(topology, created);
     }
 
     /**
@@ -350,6 +377,7 @@ struct forkunion_executor_t {
         case fu_contended_k: return status_t::contended_k;
         case fu_not_spawned_k: return status_t::uninitialized_k;
         case fu_invalid_argument_k: return status_t::invalid_argument_k;
+        case fu_unsupported_k: return status_t::unsupported_k;
         default: return status_t::internal_k;
         }
     }

@@ -431,6 +431,18 @@ struct vram_nvidia_indexes {
         executor_t* executor = nullptr;
         reserve_capacity_t reservation {};
 
+        /** One source per mapped part of a load from a path, in part order; a file cuFile refuses
+         *  leaves its source copying. */
+        growing_buffer<cuda_part_source_t, forkunion_allocator_t> sources {forkunion_allocator_t {}};
+
+        /** Opens a source per mapped part, cuFile-registered where the file takes O_DIRECT. */
+        status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
+            if (failed(sources.resize(mappings.size()))) return status_t::bad_alloc_k;
+            for (std::size_t part = 0; part != mappings.size(); ++part)
+                sources[part] = {linux_cufile_file_t::open(executor->api(), mappings[part]), mappings[part].view()};
+            return status_t::success_k;
+        }
+
         template <typename codec_type_>
         expected<columns_extents_t> columns_extents(shards_t& shards, std::size_t shard, codec_type_ const&) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
@@ -448,12 +460,11 @@ struct vram_nvidia_indexes {
             return shards[shard].index->plan_save(columns, context);
         }
         expected<typename index_t::load_plan_t> open_shard_load(
-            shards_t& shards, std::size_t shard,
-            columns<key_t const, node_id_t const, byte_t const, u64_t const> columns) noexcept {
+            shards_t& shards, std::size_t shard, safegraphs_saved_columns<node_id_t> const& saved) noexcept {
             typename executor_t::stream_t* const stream = stream_(shards, shard);
             if (!stream) return {{}, status_t::config_mismatch_k};
             traversal_context_t context {typename traversal_context_t::allocator_t {stream->arena, *stream}};
-            return shards[shard].index->plan_load(columns, context);
+            return shards[shard].index->plan_load(saved, context, to_span(sources));
         }
         expected<std::size_t> reserve(shards_t& shards, std::size_t shard, std::size_t entries) noexcept {
             reserve_capacity_t config = reservation;
@@ -524,9 +535,9 @@ struct vram_nvidia_indexes {
     }
 
     /**
-     *  Reads the checkpoint at @p path into the placed, empty shards through @ref load_shards, one
-     *  part per shard, opened past the placed ones where the parts outnumber them, reserving each
-     *  at @p connectivity, which the checkpoint froze.
+     *  @brief Reads @p checkpoint, a path or the bytes of one in host memory, into the placed,
+     *      empty shards through @ref load_shards, one part per shard, opened past the placed ones
+     *      where parts outnumber them, reserving each at the @p connectivity the checkpoint froze.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index has no shards, or no reserve froze the connectivity.
@@ -541,17 +552,19 @@ struct vram_nvidia_indexes {
      *    not parse.
      *  - @c overflow_k The nodes pass a shard's node IDs or host keys.
      *  - @c unsupported_k An entry past every rung of the face's kits.
+     *  - @c io_k A read through cuFile ended short.
      */
-    template <typename codec_type_, typename progress_type_ = dummy_progress_t>
-    status_t load(std::string_view path, codec_type_ const& codec, executor_t& executor, load_config_t const& config,
-                  connectivity_t connectivity, progress_type_&& progress = {}) noexcept {
+    template <typename checkpoint_type_, typename codec_type_, typename progress_type_ = dummy_progress_t>
+    status_t load(checkpoint_type_ checkpoint, codec_type_ const& codec, executor_t& executor,
+                  load_config_t const& config, connectivity_t connectivity, progress_type_&& progress = {}) noexcept {
         if (status_t const paired = fanout_t::pairs_with(shards_, executor); failed(paired)) return paired;
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         checkpoint_residency_t residency {this, &executor};
         residency.reservation.connectivity = connectivity;
         serial_executor_t in_order;
-        return load_shards(shards_, residency, path, codec, in_order, config, std::forward<progress_type_>(progress));
+        return load_shards(shards_, std::move(residency), checkpoint, codec, in_order, config,
+                           std::forward<progress_type_>(progress));
     }
 
 #pragma endregion Checkpoints
@@ -818,7 +831,7 @@ struct vram_nvidia_indexes {
         }
 
         /** Whether donor @p donor gave its nodes up, which every donor did once the plan exists. */
-        bool consumed(std::size_t donor) const noexcept { return owner_ && donor < donors_count_; }
+        bool consumed(std::size_t donor) const noexcept { return donor < donors_count_; }
 
         /** The entries the re-selection walks, the progress callback's total. */
         std::size_t population() const noexcept { return population_; }

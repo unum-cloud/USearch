@@ -16,6 +16,20 @@ usearch_setup_target(usearch_test_header_only_witness HOST)
 target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
+# The dependency-free core: `basic/ram_index.hpp` and its `utilities/` suppliers compile with no sibling on the
+# include path, so a stray include fails here instead of hiding behind the suites' links.
+add_library(usearch_test_header_core OBJECT header_core.cpp)
+target_compile_features(usearch_test_header_core PRIVATE cxx_std_20)
+target_include_directories(usearch_test_header_core PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/c)
+
+# The Linux kernel ABI mirrors match the kernel's own spelling, checked at compile time against the build's headers.
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(usearch_test_kernel_abi OBJECT kernel_abi.cpp)
+    target_compile_features(usearch_test_kernel_abi PRIVATE cxx_std_20)
+    target_include_directories(usearch_test_kernel_abi PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/c)
+    target_link_libraries(usearch_test_kernel_abi PRIVATE forkunion::header numkong::header)
+endif ()
+
 # The VRAM cells compile once per vendor, so each unit sees the SDK facts of the one vendor it composes over: the dense
 # rung cells and, for the vendors that have them, the modalities' units after `SOURCES`, each instantiated for the
 # executor of @p vendor_ alone, whose `USEARCH_ARCH_<VENDOR>_` is @p architecture_macro_ and the others' are zero, with
@@ -29,7 +43,9 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
     set(entry_ ${CMAKE_CURRENT_SOURCE_DIR}/${arg_ENTRY})
     add_library(${target_} OBJECT dense/vram_indexes.cpp ${arg_SOURCES} ${entry_})
     usearch_setup_target(${target_} HOST)
-    target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
+    target_include_directories(
+        ${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools ${PROJECT_SOURCE_DIR}/src
+    )
     foreach (macro_ IN ITEMS USEARCH_ARCH_CUDA_ USEARCH_ARCH_ROCM_ USEARCH_ARCH_METAL_)
         if (macro_ STREQUAL architecture_macro_)
             target_compile_definitions(${target_} PRIVATE ${macro_}=1)
@@ -129,3 +145,11 @@ target_link_libraries(
             ${CMAKE_DL_LIBS}
 )
 add_test(NAME usearch_test COMMAND usearch_test)
+
+# The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`, round-tripping
+# a checkpoint of every modality through the C interface, and the slots of a file standing as a raw drive.
+add_executable(usearch_test_tools tools.cpp)
+usearch_setup_target(usearch_test_tools HOST)
+target_include_directories(usearch_test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)
+target_link_libraries(usearch_test_tools PRIVATE fmt::fmt yyjson forkunion::static ${USEARCH_PUNNED_LIBRARIES})
+add_test(NAME usearch_test_tools COMMAND usearch_test_tools)

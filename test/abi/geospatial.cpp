@@ -65,7 +65,7 @@ static std::size_t expect_gets(handle<geospatial_verbs_t>& index, std::size_t co
         usearch_geospatial_get_t get {};
         get.index = index.get(), get.executor = index.executor(), get.outcome = &outcome;
         get.key = key_of_offset(index.session->seed, offset);
-        get.observations = &observations, get.written = &written, get.arena = index.session->arena;
+        get.observations = &observations, get.written = &written, get.arena = index.arena();
         usearch_geospatial_get(&get);
         misread += outcome.status != usearch_status_success_k || written != 1;
     }
@@ -94,7 +94,7 @@ static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_q
     usearch_geospatial_within_t within {};
     within.index = index.get(), within.executor = index.executor(), within.outcome = &outcome;
     within.count = geospatial_queries_k, within.queries = queries.observations, within.relation = queries.relation;
-    within.tolerance = {radius_metres, 0}, within.matches = &matches, within.arena = index.session->arena;
+    within.tolerance = {radius_metres, 0}, within.matches = &matches, within.arena = index.arena();
     usearch_geospatial_within(&within);
     failures += check(outcome);
     if (failures) return failures;
@@ -140,8 +140,7 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     if (failures) return failures;
     failures += expect_gets(index, geospatial_entries_k);
     failures += expect_walk_recall(index, queries, geospatial_queries_k, geospatial_expansion_k, 0.8);
-    failures += expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k,
-                               usearch_status_unsupported_k);
+    failures += expect_refined(index, queries, geospatial_queries_k, geospatial_expansion_k, usearch_status_success_k);
     failures += expect_within(index, queries);
     failures += expect_health(index, geospatial_entries_k);
     failures += expect_cursor(index, geospatial_entries_k);
@@ -152,10 +151,10 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     failures += expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k,
                                    0.8, stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, points.data(), geospatial_entries_k, usearch_status_unsupported_k);
+    failures += expect_refinement(index, points.data(), geospatial_entries_k, usearch_status_success_k);
     failures += expect_absorbed(index, donated.data(), geospatial_donor_entries_k, geospatial_entries_k,
-                                usearch_status_unsupported_k);
-    failures += expect_split(index, usearch_status_unsupported_k);
+                                usearch_status_success_k);
+    failures += expect_split(index, usearch_status_success_k);
     return failures + expect_cleared(index, points.data());
 }
 

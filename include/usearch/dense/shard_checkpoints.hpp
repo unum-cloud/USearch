@@ -15,7 +15,10 @@
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part goes to, placed or
  *    opened;
  *  - <tt>open_shard_load(shards, shard, rows)</tt>, one shard's own load at its watermark;
- *  - <tt>end_save(shards)</tt>, once a save finished or died.
+ *  - <tt>end_save(shards)</tt>, once a save finished or died;
+ *  - where a residency reads files itself, @c sources and <tt>open_sources(mappings)</tt>, which
+ *    opens one source per mapped part before its shards open, so its plans read a step's host
+ *    bytes from the part that holds them.
  *
  *  Every shard keeps its own keys: a save reads them through the shard's <tt>keys()</tt>, and a
  *  load copies them with each step's rows through its shard plan's <tt>load</tt>, files them
@@ -679,6 +682,9 @@ struct [[nodiscard]] shard_load_plan {
                                                        shards.allocator());
             failed(listed))
             return {{}, listed};
+        if constexpr (requires { plan.residency_.sources; })
+            if (status_t const opened = plan.residency_.open_sources(to_writable_span(plan.mappings_)); failed(opened))
+                return {{}, opened};
         if (status_t const opened = plan.open_shards_(config); failed(opened)) return {{}, opened};
         return {std::move(plan), status_t::success_k};
     }
@@ -780,10 +786,10 @@ struct [[nodiscard]] shard_load_plan {
      *      rows' keys, widened to the shards' key type, through the shard's own plan.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The plan is empty or spent, or on NVIDIA or AMD its bounce was never
-     *    pinned.
+     *  - @c uninitialized_k The plan is empty or spent.
      *  - @c config_mismatch_k The step names no shard or part, holds no rows, or the columns
      *    cannot hold them, or its IDs rebase past the plan.
+     *  - @c io_k On NVIDIA, a read through cuFile ended short, which never restarts on the host.
      */
     status_t load(step_t const& step) noexcept {
         if (!shards_) return status_t::uninitialized_k;

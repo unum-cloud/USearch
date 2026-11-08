@@ -17,7 +17,10 @@
  *    whose @c finish files the keys as the shard's one writer before its watermark moves;
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part goes to, placed or
  *    opened;
- *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load.
+ *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load;
+ *  - where a residency reads files itself, @c sources and <tt>open_sources(mappings)</tt>, which opens one
+ *    source per mapped part before its shards open, so its plans read the parts' bytes from the
+ *    part that holds them.
  *
  *  A residency whose plans copy nodes in order is driven through
  *  @ref unum::usearch::utilities::serial_executor_t. A checkpoint in one buffer leads with the
@@ -164,9 +167,17 @@ struct shard_columns {
      *  - @c uninitialized_k On NVIDIA, no reserve froze the connectivity yet.
      *  - @c unsupported_k On NVIDIA, an entry past every rung of the face's kits.
      *  - @c contended_k A mutator, a batch, a load or a plan holds the shard.
-     *  - @c malformed_k On RAM, a prefix-sum column or a neighbor ID is out of shape.
+     *  - @c malformed_k On RAM, a prefix-sum column or a neighbor ID is out of shape; on NVIDIA,
+     *    an offsets column.
+     *
+     *  Takes the staged snapshot columns on RAM, or the saved ones where the residency's shards
+     *  convert them on their device.
      */
-    expected<load_plan_t> plan_load(columns_view_t columns) noexcept {
+    template <typename columns_type_>
+        requires requires(residency_type_& residency, shards_type_& shards, columns_type_ const& columns) {
+            residency.open_shard_load(shards, std::size_t {}, columns);
+        }
+    expected<load_plan_t> plan_load(columns_type_ const& columns) noexcept {
         auto [plan, status] = residency.open_shard_load(shards, shard, columns);
         if (failed(status)) return {{}, status};
         return {load_plan_t {std::move(plan), this}, status_t::success_k};
@@ -383,6 +394,8 @@ status_t load_shards(shards_type_& shards, residency_type_ residency, std::strin
     if (status_t const listed = safegraphs_catalog(path, mappings, parts, extra_columns, shards.allocator());
         failed(listed))
         return listed;
+    if constexpr (requires { residency.sources; })
+        if (status_t const opened = residency.open_sources(to_writable_span(mappings)); failed(opened)) return opened;
     return load_parts_(shards, residency, to_span(parts), codec, executor, config, progress);
 }
 

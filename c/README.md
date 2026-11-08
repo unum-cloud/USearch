@@ -665,7 +665,7 @@ usearch_dense_health(&(usearch_dense_health_t) {
 ## Sequence Indexes
 
 A sequence index searches byte strings, UTF-8 text, DNA, RNA and proteins under edit distances and alignments, in RAM only.
-Variable-length entries travel as Apache Arrow tapes, `usearch_tape_view_t`: the elements end to end, and `count + 1` offsets around them, so sequences are bytes with byte offsets:
+Variable-length entries travel as Apache Arrow tapes, `usearch_tape_view_t`: the elements end to end, and `count + 1` offsets around them, 32-bit or 64-bit as its `layout` says, so sequences are bytes with byte offsets:
 
 ```c
 usearch_sequence_index_t sequences = NULL;
@@ -673,21 +673,27 @@ usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {
     .index = &sequences, .outcome = &outcome, .metric = usearch_sequence_metric_levenshtein_utf8_k});
 
 char const tape[] = "kittensittingmitten";
-size_t const offsets[4] = {0, 6, 13, 19};
+uint64_t const offsets[4] = {0, 6, 13, 19};
 usearch_key_t words[3] = {{.bytes[15] = 1}, {.bytes[15] = 2}, {.bytes[15] = 3}};
 usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = sequences,
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .count = 3,
                                                       .keys = {words, sizeof(usearch_key_t)},
-                                                      .sequences = {tape, offsets, usearch_scalar_u8_k}});
+                                                      .sequences = {.data = tape,
+                                                                    .layout = usearch_tape_u64_k,
+                                                                    .offsets = {.u64 = offsets},
+                                                                    .scalar = usearch_scalar_u8_k}});
 
-size_t const query_offsets[2] = {0, 6};
+uint64_t const query_offsets[2] = {0, 6};
 usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .count = 1,
-                                                      .queries = {"sitten", query_offsets, usearch_scalar_u8_k},
+                                                      .queries = {.data = "sitten",
+                                                                  .layout = usearch_tape_u64_k,
+                                                                  .offsets = {.u64 = query_offsets},
+                                                                  .scalar = usearch_scalar_u8_k},
                                                       .matches = &matches,
                                                       .arena = arena,
                                                       .wanted = 3});
@@ -713,13 +719,16 @@ usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &conformers,
                                                       .quantization = usearch_scalar_f16_k});
 
 float const atoms[5][3] = {{0, 0, 0}, {1.1f, 0, 0}, {0, 0, 0}, {1.5f, 0, 0}, {0, 1.5f, 0}};
-size_t const point_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
+uint64_t const point_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
 usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = conformers,
                                                   .executor = executor,
                                                   .outcome = &outcome,
                                                   .count = 2,
                                                   .keys = {molecules, sizeof(usearch_key_t)},
-                                                  .shapes = {atoms, point_offsets, usearch_scalar_f32_k}});
+                                                  .shapes = {.data = atoms,
+                                                             .layout = usearch_tape_u64_k,
+                                                             .offsets = {.u64 = point_offsets},
+                                                             .scalar = usearch_scalar_f32_k}});
 ```
 
 Chamfer and Hausdorff pair every point with its nearest partner after aligning the principal axes under all eight sign flips, keeping the best.

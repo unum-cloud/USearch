@@ -53,6 +53,9 @@ struct vram_nvidia_kits {
     /** Bytes the position at @p data takes once prepared. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
 
+    /** Bytes a loaded observation takes once prepared: none, however long. */
+    static std::size_t span_bytes_(std::size_t) noexcept { return 0; }
+
     /** Bytes the @p stored observation saves into: its own 32, as the RAM codec saves it. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept {
         return {stored.size(), status_t::success_k};
@@ -66,19 +69,17 @@ struct vram_nvidia_kits {
      */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept { return copy_bytes(saved, stored); }
 
-    /** Bytes the @p saved observation stores into: its own, @c malformed_k unless one whole. */
-    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept {
-        if (saved.size() != sizeof(earth_observation_t)) return {0, status_t::malformed_k};
-        return {saved.size(), status_t::success_k};
+    /** Bytes an observation of @p saved bytes stores into, its own; @c malformed_k unless whole. */
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept {
+        if (saved != sizeof(earth_observation_t)) return {0, status_t::malformed_k};
+        return {saved, status_t::success_k};
     }
 
-    /**
-     *  Stores the @p saved observation into @p stored as it is.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The two differ in size.
-     */
-    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept { return copy_bytes(stored, saved); }
+    /** Stores a step's observations as saved, one copy of their run into the tape; an observation
+     *  prepares into no span. */
+    status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept {
+        return step.copy_values();
+    }
 
     /** The fatbin holding the kits' kernels. */
     static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
@@ -209,13 +210,12 @@ struct vram_nvidia_index {
     status_t save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         return graph_.save(columns, context);
     }
-    expected<load_plan_t> plan_load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                                    traversal_context_t& context) noexcept {
-        return graph_.plan_load(columns, context);
+    expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context,
+                                    std::span<cuda_part_source_t const> sources = {}) noexcept {
+        return graph_.plan_load(saved, context, sources);
     }
-    status_t load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                  traversal_context_t& context) noexcept {
-        return graph_.load(columns, context);
+    status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
+        return graph_.load(saved, context);
     }
 
     keyed_t const& keys() const noexcept { return graph_.keys(); }

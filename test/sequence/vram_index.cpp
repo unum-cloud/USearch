@@ -16,6 +16,8 @@
  *  tapes start past their own first byte, as an Arrow slice's do, so the later batches walk graphs
  *  whose reverse links earlier batches merged.
  */
+#include <cstdio> // `std::remove` - a reloaded checkpoint's files
+
 #include <algorithm> // `std::min`, `std::nth_element`
 #include <array>     // `std::array` - the templates
 #include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
@@ -173,7 +175,8 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
                                                   std::size_t length, std::size_t queries_count,
                                                   recall_reference_t reference = recall_reference_t::ram_index_k) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<metric_, node_id_type_, sz_cap_cuda_k, sequence_nvidia_fatbin<metric_>>;
+    using vram_index_t = vram_nvidia_index<static_cast<vram_sequence_metric_t>(metric_), node_id_type_, sz_cap_cuda_k,
+                                           sequence_nvidia_fatbin<metric_>>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
 
@@ -301,7 +304,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
 /** Builds the byte Levenshtein shards of a sharded index, unreserved, on the device it names. */
 struct sequence_vram_shards_t {
-    using index_t = vram_nvidia_index<usearch_sequence_metric_levenshtein_bytes_k, u32_t, sz_cap_cuda_k,
+    using index_t = vram_nvidia_index<vram_sequence_metric_t::levenshtein_bytes_k, u32_t, sz_cap_cuda_k,
                                       sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
     std::unique_ptr<index_t> operator()(int device) const noexcept {
@@ -309,6 +312,46 @@ struct sequence_vram_shards_t {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t {allocator});
     }
 };
+
+/** A checkpoint of @p saved loads back from its files through the staging slots, its neighbors and
+ *  values converted on the device, keeps every key, and saves again byte for byte. */
+template <typename indexes_type_>
+static std::size_t check_sequence_vram_reloaded(indexes_type_& saved, std::size_t shard_capacity,
+                                                cuda_executor_t& executor, u64_t seed) {
+    std::size_t failures = 0;
+    std::string const first_path = fmt::format("/tmp/usearch-sequence-{:016x}-saved.safegraphs", seed);
+    std::string const second_path = fmt::format("/tmp/usearch-sequence-{:016x}-resaved.safegraphs", seed);
+    save_config_t config;
+    config.synchronization = synchronization_t::immutable_k;
+    failures += expect_eq(saved.save(first_path, codec_t {}, executor, config, "levenshtein"), status_t::success_k);
+    indexes_type_ loaded {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
+    loaded.bound_shards(shard_capacity);
+    failures += expect_eq(loaded.emplace(executor.stream(0).device), status_t::success_k);
+    failures += expect_eq(
+        loaded.load(std::string_view {first_path}, codec_t {}, executor, load_config_t {}, connectivity_32_k),
+        status_t::success_k);
+    failures += expect_eq(loaded.size(), saved.size());
+    failures += expect_eq(loaded.save(second_path, codec_t {}, executor, config, "levenshtein"), status_t::success_k);
+    std::size_t const parts = saved.shards_count();
+    growing_buffer<char> first_part {global_allocator}, second_part {global_allocator};
+    for (std::size_t part = 0; part != parts; ++part) {
+        auto const [first_named, first_status] = safegraphs_part_path(first_part, safegraphs_stem(first_path), part,
+                                                                      parts);
+        auto const [second_named, second_status] = safegraphs_part_path(second_part, safegraphs_stem(second_path), part,
+                                                                        parts);
+        std::string const first_name {parts == 1 ? std::string_view {first_path} : first_named};
+        std::string const second_name {parts == 1 ? std::string_view {second_path} : second_named};
+        auto const [first_mapping, first_map_status] = mapped_file_t::read(first_name);
+        auto const [second_mapping, second_map_status] = mapped_file_t::read(second_name);
+        bytes_view_t const first_bytes = first_mapping.view(), second_bytes = second_mapping.view();
+        failures += expect(succeeded(first_map_status) && succeeded(second_map_status) &&
+                           first_bytes.size() == second_bytes.size() &&
+                           std::memcmp(first_bytes.data(), second_bytes.data(), first_bytes.size()) == 0);
+        std::remove(first_name.c_str()), std::remove(second_name.c_str());
+    }
+    std::remove(first_path.c_str()), std::remove(second_path.c_str());
+    return failures;
+}
 
 /** Two shards on one device bounded at 1000 entries take 5000 sequences in one batch, which opens
  *  two more generations of two: every key counts once across the six shards, and the merged recall
@@ -401,6 +444,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
         single_matched += matched_count(found, exact[query], wanted_k);
     }
     failures += expect(sharded_matched * 20 + queries_k * wanted_k >= single_matched * 20);
+    failures += check_sequence_vram_reloaded(indexes, shard_capacity_k, executor, seed);
     return failures;
 }
 
@@ -486,7 +530,7 @@ static std::size_t check_sequence_vram_get(u64_t seed, std::int32_t ordinal) {
     insert.outcome = &outcome;
     insert.count = entries_k;
     insert.keys = {keys.data(), sizeof(usearch_key_t)};
-    insert.sequences = {tape.data(), offsets.data(), usearch_scalar_u8_k};
+    insert.sequences = tools::tape_of(tape.data(), offsets.data(), usearch_scalar_u8_k);
     if (!failures) usearch_sequence_insert(&insert);
     failures += expect(!outcome.message);
 
@@ -505,9 +549,10 @@ static std::size_t check_sequence_vram_get(u64_t seed, std::int32_t ordinal) {
         failures += expect(!outcome.message);
         if (outcome.message) break;
         failures += expect_eq(written, std::size_t {1});
-        failures += expect(written == 1 && got.offsets[1] - got.offsets[0] == strings[entry].size() &&
-                           std::memcmp(static_cast<char const*>(got.data) + got.offsets[0], strings[entry].data(),
-                                       strings[entry].size()) == 0);
+        failures += expect(written == 1 &&
+                           tools::tape_offset(got, 1) - tools::tape_offset(got, 0) == strings[entry].size() &&
+                           std::memcmp(static_cast<char const*>(got.data) + tools::tape_offset(got, 0),
+                                       strings[entry].data(), strings[entry].size()) == 0);
     }
 
     usearch_sequence_free(index);

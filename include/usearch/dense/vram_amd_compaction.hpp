@@ -177,7 +177,7 @@ struct [[nodiscard]] vram_amd_compact_plan {
         if (status_t const copied = copy_pending_(*target, device_executor, host_executor); failed(copied))
             return copied;
         // The fold linked every bin, so each target shard's pass only heals, which `finish` runs.
-        if (refining_.shard_plans_.empty()) return refining_.open_shards_();
+        if (refining_.shard_plans_.empty()) return refining_.open_shards_(host_executor.size());
         return status_t::success_k;
     }
 
@@ -363,7 +363,8 @@ struct [[nodiscard]] vram_amd_compact_plan {
             failed(sized))
             return {{}, sized};
         std::size_t const shards = refining.part_offsets_.size() - 1;
-        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)))
+        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)) ||
+            failed(refining.stitched_parts_.resize(shards)))
             return {{}, status_t::bad_alloc_k};
         if (status_t const binned = plan.cut_bins_(shards); failed(binned)) return {{}, binned};
         if (status_t const opened = plan.open_folds_(device_executor, *shaped); failed(opened)) return {{}, opened};

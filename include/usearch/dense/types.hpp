@@ -222,7 +222,7 @@ struct refine_config_t {
     /** Bytes the whole pass may hold beyond the index: the audit and a bit per row carried across
      *  tiles, then tiles of contiguous rows at 8 B per neighbor slot plus 4 B each, as many rows as
      *  fit, or on VRAM at 4 B per slot past the walks' arena too. Zero walks one storage chunk per
-     *  tile, or on VRAM as many rows as half the device's free bytes hold. */
+     *  tile, or on VRAM every walked row in one tile. */
     std::size_t memory_limit = 0;
 };
 
@@ -716,5 +716,22 @@ class maxsim_reducer {
     growing_buffer<f64_t, allocator_type_> row_best_;
     std::size_t rows_per_query_ = 0;
 };
+
+/**
+ *  @brief Why @p keys and @p scores cannot hold @p queries rankings in contiguous rows.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The row counts are not @p queries, or the widths differ.
+ *  - @c unsupported_layout_k A row of keys or scores is not contiguous.
+ */
+template <typename key_type_, typename score_type_>
+status_t rankings_refusal(std::size_t queries, nk::matrix_span<key_type_> keys,
+                          nk::matrix_span<score_type_> scores) noexcept {
+    if (keys.extent(0) != queries || scores.extent(0) != queries || scores.extent(1) != keys.extent(1))
+        return status_t::config_mismatch_k;
+    if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
+        return status_t::unsupported_layout_k;
+    return status_t::success_k;
+}
 
 } // namespace unum::usearch::dense

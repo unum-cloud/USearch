@@ -48,6 +48,9 @@ struct vram_nvidia_kits {
     /** Bytes the @p bytes long pack at @p data takes once prepared, a multiple of 16. */
     static std::size_t span_bytes_(byte_t const* data, std::size_t bytes) noexcept;
 
+    /** Bytes any loaded pack of up to @p longest bytes takes once prepared. */
+    static std::size_t span_bytes_(std::size_t longest) noexcept { return span_bytes_(nullptr, longest); }
+
     /** Bytes the @p stored pack saves into: its cloud unpacked, @b [points,3] scalars, as the RAM
      *  codec saves a cloud. */
     static expected<std::size_t> saved_bytes_(bytes_view_t stored) noexcept;
@@ -60,19 +63,15 @@ struct vram_nvidia_kits {
      */
     static status_t save_value_(bytes_view_t stored, bytes_span_t saved) noexcept;
 
-    /** Bytes the @p saved cloud stores into once packed; @c malformed_k unless it holds whole
-     *  points. */
-    static expected<std::size_t> stored_bytes_(bytes_view_t saved) noexcept;
+    /** Bytes a cloud of @p saved bytes stores into once packed; @c malformed_k unless it holds
+     *  whole points. */
+    static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept;
 
-    /**
-     *  Packs the @p saved cloud into @p stored, as an insertion packs one on the host.
-     *
-     *  @par Statuses:
-     *  - @c malformed_k The @p saved cloud is not a whole number of points.
-     *  - @c overflow_k The @p stored bytes are shorter than the cloud's points.
-     *  - @c config_mismatch_k The cloud holds fewer points than @p stored reserves.
-     */
-    static status_t load_value_(bytes_view_t saved, bytes_span_t stored) noexcept;
+    /** Packs a step's clouds on the device, a warp per cloud: the one kit whose stored bytes
+     *  differ from the saved ones, and whose spans follow from length, sized at planning. */
+    status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept {
+        return step.launch_kits(vram_kernel_t::load_values_k);
+    }
 
     /** The fatbin holding the kits' kernels. */
     static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
@@ -198,13 +197,12 @@ struct vram_nvidia_index {
     status_t save(basic::columns<key_t, node_id_t, byte_t, u64_t> columns, traversal_context_t& context) noexcept {
         return graph_.save(columns, context);
     }
-    expected<load_plan_t> plan_load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                                    traversal_context_t& context) noexcept {
-        return graph_.plan_load(columns, context);
+    expected<load_plan_t> plan_load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context,
+                                    std::span<cuda_part_source_t const> sources = {}) noexcept {
+        return graph_.plan_load(saved, context, sources);
     }
-    status_t load(basic::columns<key_t const, node_id_t const, byte_t const, u64_t const> columns,
-                  traversal_context_t& context) noexcept {
-        return graph_.load(columns, context);
+    status_t load(safegraphs_saved_columns<node_id_t> const& saved, traversal_context_t& context) noexcept {
+        return graph_.load(saved, context);
     }
 
     keyed_t const& keys() const noexcept { return graph_.keys(); }

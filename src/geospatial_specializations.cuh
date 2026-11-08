@@ -217,8 +217,8 @@ struct geospatial_ram_variant {
         std::size_t const breadth = config.expansion_factor
                                         ? config.expansion_factor
                                         : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_absorb(donors, {breadth}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
-                                 planning);
+        return index.plan_absorb(donors, {breadth, config.memory_limit},
+                                 us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
     }
 
     /** Opens a refinement of every live shard in place, its walks as wide as @p expansion or the
@@ -228,7 +228,8 @@ struct geospatial_ram_variant {
         std::size_t const breadth = config.expansion_factor
                                         ? config.expansion_factor
                                         : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_refine({breadth}, us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
+        return index.plan_refine({breadth, config.memory_limit},
+                                 us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
     }
 
     /** Opens a split of every live shard into the same shard of each of @p receivers, its part
@@ -239,7 +240,7 @@ struct geospatial_ram_variant {
         std::size_t const breadth = config.refine.expansion_factor
                                         ? config.refine.expansion_factor
                                         : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_split(receivers, {{breadth}, config.seed},
+        return index.plan_split(receivers, {{breadth, config.refine.memory_limit}, config.seed},
                                 us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
     }
 
@@ -1222,6 +1223,10 @@ struct geospatial_vram_nvidia_variant {
     cuda_unique_ptr<f32_t> device_heights;
     cuda_unique_ptr<byte_t> device_terrain_pack;
 
+    /** The largest stored deviation in whole metres, raised through a reference; it widens every
+     *  radius walk. */
+    u32_t largest_deviation_metres = 0;
+
     /** The index's fatbin, loaded once more for the kernel judging the walks' candidates, and that
      *  kernel. */
     cuda_module_t admit_module;
@@ -1285,8 +1290,9 @@ struct geospatial_vram_nvidia_variant {
                                        search_config_t search, growing_arena<forkunion_allocator_t>& pages,
                                        executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** Reports every observation the relation and tolerance admit among each query's walk at the
-     *  call's breadth, every shard counting then writing its admitted candidates on the device,
+    /** Reports every observation the relation and tolerance admit, doubling the walks' breadth from
+     *  the call's until each query's farthest candidate passes the radius the cone graph's spanner
+     *  bound widens, every shard counting then writing its admitted candidates on the device,
      *  appended shard by shard into @p outputs on @p pages; an exact scan answers
      *  @c unsupported_k, and a device walk takes no host predicate. */
     expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
@@ -1306,15 +1312,49 @@ struct geospatial_vram_nvidia_variant {
                                 executor, ticks);
     }
 
-    /** Reads a checkpoint any residency wrote into the placed shards, one part per shard. */
-    status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        return index.load(path, us::geospatial::earth_observation_codec_t {}, executor, load_config_t {},
-                          static_cast<connectivity_t>(geometry.connectivity), ticks);
+    /** Reads a checkpoint any residency wrote, at a path or in host memory, into the placed shards,
+     *  one part per shard. */
+    template <typename checkpoint_type_>
+    status_t load(checkpoint_type_ checkpoint, executor_t& executor, progress_ticks_t& ticks) noexcept {
+        if (status_t const loaded = index.load(checkpoint, us::geospatial::earth_observation_codec_t {}, executor,
+                                               load_config_t {}, static_cast<connectivity_t>(geometry.connectivity),
+                                               ticks);
+            failed(loaded))
+            return loaded;
+        // The observations went straight to the device, so their deviations come back once.
+        growing_buffer<value_t, forkunion_allocator_t> stored {forkunion_allocator_t {no_memory_domain_k}};
+        for (face_t const& shard : index.live_shards()) {
+            if (failed(stored.resize_uninitialized(shard.size()))) return status_t::bad_alloc_k;
+            if (stored.empty()) continue;
+            if (cuda_copy(shard.api(), stored.data(), shard.storage().values, stored.size() * sizeof(value_t)) !=
+                cuda_success_k)
+                return status_t::device_error_k;
+            for (value_t const& value : stored)
+                raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {value.deviation_metres});
+        }
+        return status_t::success_k;
     }
 
-    /** Empties the index, retiring every shard behind a fresh shard generation on the same
-     *  devices. */
-    status_t clear() noexcept { return index.clear(); }
+    /** Empties the index and its largest deviation, retiring every shard behind a fresh shard
+     *  generation on the same devices. */
+    status_t clear() noexcept {
+        status_t const cleared = index.clear();
+        if (succeeded(cleared))
+            fu::standard_atomic_ref<u32_t>(largest_deviation_metres).store(0, std::memory_order_relaxed);
+        return cleared;
+    }
+
+    /** Widens the largest deviation to a consumed @p donor 's, whose nodes this index now holds. */
+    void count_absorbed_donor(geospatial_vram_nvidia_variant const& donor) noexcept {
+        raise_to<fu::standard_atomic_ref>(
+            largest_deviation_metres,
+            fu::standard_atomic_ref<u32_t const>(donor.largest_deviation_metres).load(std::memory_order_relaxed));
+    }
+
+    /** Bounds the deviation of the part @p receiver now holds by this index's, which held it. */
+    void count_split_receiver(geospatial_vram_nvidia_variant& receiver) const noexcept {
+        receiver.count_absorbed_donor(*this);
+    }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
     expected<sample_result_t> sample(basic_sample_inputs_t, basic_sample_outputs_t, sample_config_t,
@@ -1374,7 +1414,13 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::insert(usearc
     growing_arena<forkunion_allocator_t> staging {forkunion_allocator_t {no_memory_domain_k}};
     auto const [entries, encode_status] = encode_(observations.data(), count, staging);
     if (failed(encode_status)) return {{}, encode_status};
-    return vram_nvidia_insert(index, keys, entries, geometry.connectivity, config.expansion_factor, ticks, executor);
+    expected<traversal_stats_t> const inserted = vram_nvidia_insert(index, keys, entries, geometry.connectivity,
+                                                                    config.expansion_factor, ticks, executor);
+    if (failed(inserted.status)) return inserted;
+    value_t const* const values = reinterpret_cast<value_t const*>(entries.elements);
+    for (std::size_t entry = 0; entry != count; ++entry)
+        raise_to<fu::standard_atomic_ref>(largest_deviation_metres, u32_t {values[entry].deviation_metres});
+    return inserted;
 }
 
 inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::search(
@@ -1475,87 +1521,124 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::within(
     if (!count || !shards) return {{}, status_t::success_k};
     auto const [queries, encode_status] = encode_(query_batch.observations.data(), count, pages);
     if (failed(encode_status)) return {{}, encode_status};
-    std::size_t const breadth = search.expansion_factor ? search.expansion_factor
-                                                        : default_expansion_factor(geometry.connectivity);
-    face_t::search_config_t const config {static_cast<u32_t>(breadth), static_cast<u32_t>(breadth)};
-
-    // Each shard's run comes back whole: its offsets from zero, then the IDs and metres they span,
-    // at most a breadth per query; the shard is remembered to resolve its IDs into keys.
-    std::size_t const listed_count = count * breadth;
-    u64_t* const runs_offsets = carve<u64_t>(pages, shards * (count + 1));
-    node_id_t* const runs_ids = carve<node_id_t>(pages, shards * listed_count);
-    f64_t* const runs_metres = carve<f64_t>(pages, shards * listed_count);
-    face_t const** const runs_faces = carve<face_t const*>(pages, shards);
-    if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces) return {{}, status_t::bad_alloc_k};
-    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
-    std::size_t const judging_bytes = aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) +
-                                      aligned((count + 1) * sizeof(u64_t)) + aligned(listed_count * sizeof(node_id_t)) +
-                                      aligned(listed_count * sizeof(f32_t)) +
-                                      aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f64_t));
-    std::size_t walked = 0;
+    // The squared chord each query's candidates must pass, the walk's reach as the RAM variants
+    // take it, widened by the cone graph's spanner bound.
+    f64_t* const covering_chords = carve<f64_t>(pages, count);
+    if (!covering_chords) return {{}, status_t::bad_alloc_k};
+    value_t const* const encoded = reinterpret_cast<value_t const*>(queries.elements);
+    f64_t const largest_deviation =
+        fu::standard_atomic_ref<u32_t>(largest_deviation_metres).load(std::memory_order_relaxed);
+    for (std::size_t query = 0; query != count; ++query) {
+        f64_t const query_deviation = encoded[query].deviation_metres;
+        f64_t const deviations = std::sqrt(query_deviation * query_deviation + largest_deviation * largest_deviation);
+        f64_t const reach = std::ceil((query_batch.tolerance.metres + 3 * deviations) *
+                                      us::geospatial::centimetres_per_metre_k);
+        f64_t const widened = reach * (1.0 + 2.0 * us::geospatial::cone_graph_stretch_k);
+        covering_chords[query] = widened * widened;
+    }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
     us::utilities::uuid_t* const unused_keys = carve<us::utilities::uuid_t>(pages, count);
     f64_t* const unused_scores = carve<f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
     if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_t::bad_alloc_k};
-    auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<f64_t>,
-                     std::span<std::size_t> host_counts, face_t::traversal_context_t& context,
-                     std::size_t) noexcept -> status_t {
-        for (std::size_t& counted : host_counts) counted = 0;
-        if (face.device_specs().ordinal != device) return status_t::unsupported_k;
-        std::size_t const run = walked++;
-        runs_faces[run] = &face;
-        u64_t* const run_offsets = runs_offsets + run * (count + 1);
-        face_t::traversal_context_t::allocator_t const allocator = context.allocator();
-        value_t* const device_queries = cuda_arena_allocator<value_t>(allocator).allocate(count);
-        u64_t* const matched_counts = cuda_arena_allocator<u64_t>(allocator).allocate(count);
-        u64_t* const matched_offsets = cuda_arena_allocator<u64_t>(allocator).allocate(count + 1);
-        node_id_t* const candidate_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-        f32_t* const candidate_distances = cuda_arena_allocator<f32_t>(allocator).allocate(listed_count);
-        node_id_t* const matched_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
-        f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(listed_count);
-        if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
-            !matched_ids || !matched_metres)
-            return status_t::bad_alloc_k;
-        us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
-        admitting.queries = device_queries;
-        admitting.candidate_ids = candidate_ids;
-        admitting.queries_count = static_cast<u32_t>(count);
-        admitting.candidates_count = static_cast<u32_t>(breadth);
-        admitting.matched_ids = matched_ids;
-        admitting.matched_metres = matched_metres;
-        admitting.matched_counts = matched_counts;
-        admitting.matched_offsets = matched_offsets;
-        cuda_api_t const& api = face.api();
-        run_offsets[0] = 0;
-        if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
-                cuda_success_k ||
-            cuda_copy_async(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream()) != cuda_success_k)
-            return status_t::device_error_k;
-        if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
-                                                  {candidate_distances, {count, breadth}}, config, context)
-                                          .status;
-            failed(searched))
-            return searched;
-        if (status_t const counted = face.launch_within_count_(admitting, context); failed(counted)) return counted;
-        if (status_t const written = face.launch_within_write_(admitting, context); failed(written)) return written;
-        if (cuda_copy_async(api, run_offsets, matched_offsets, (count + 1) * sizeof(u64_t), context.stream()) !=
-            cuda_success_k)
-            return status_t::device_error_k;
-        if (status_t const waited = context.wait(); failed(waited)) return waited;
-        std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
-        if (cuda_copy_async(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
-                            context.stream()) != cuda_success_k ||
-            cuda_copy_async(api, runs_metres + run * listed_count, matched_metres, admitted * sizeof(f64_t),
-                            context.stream()) != cuda_success_k)
-            return status_t::device_error_k;
-        return context.wait();
-    };
-    auto const [found, status] = index.search_every_shard(
-        count, executor, judge, nk::matrix_span<us::utilities::uuid_t> {unused_keys, count, 1},
-        nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
-        config, judging_bytes);
-    if (failed(status)) return {{}, status};
+    auto const aligned = [](std::size_t bytes) noexcept { return round_up_to_multiple(bytes, default_alignment_k); };
+    std::size_t const published = index.size();
+    std::size_t breadth = search.expansion_factor ? search.expansion_factor
+                                                  : default_expansion_factor(geometry.connectivity);
+    std::size_t listed_count = 0, walked = 0;
+    u64_t* runs_offsets = nullptr;
+    node_id_t* runs_ids = nullptr;
+    f64_t* runs_metres = nullptr;
+    face_t const** runs_faces = nullptr;
+    traversal_stats_t stats;
+    for (;; breadth = min_of(breadth * 2, published)) {
+        face_t::search_config_t const config {static_cast<u32_t>(breadth), static_cast<u32_t>(breadth)};
+        // Each shard's run comes back whole: its offsets from zero, then the IDs and metres they
+        // span, at most a breadth per query; the shard is remembered to resolve its IDs into keys.
+        listed_count = count * breadth;
+        walked = 0;
+        runs_offsets = carve<u64_t>(pages, shards * (count + 1));
+        runs_ids = carve<node_id_t>(pages, shards * listed_count);
+        runs_metres = carve<f64_t>(pages, shards * listed_count);
+        runs_faces = carve<face_t const*>(pages, shards);
+        f32_t* const runs_distances = carve<f32_t>(pages, shards * listed_count);
+        if (!runs_offsets || !runs_ids || !runs_metres || !runs_faces || !runs_distances)
+            return {{}, status_t::bad_alloc_k};
+        std::size_t const judging_bytes =
+            aligned(count * sizeof(value_t)) + aligned(count * sizeof(u64_t)) + aligned((count + 1) * sizeof(u64_t)) +
+            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f32_t)) +
+            aligned(listed_count * sizeof(node_id_t)) + aligned(listed_count * sizeof(f64_t));
+        auto judge = [&](face_t& face, nk::matrix_span<node_id_t>, nk::matrix_span<f64_t>,
+                         std::span<std::size_t> host_counts, face_t::traversal_context_t& context,
+                         std::size_t) noexcept -> status_t {
+            for (std::size_t& counted : host_counts) counted = 0;
+            if (face.device_specs().ordinal != device) return status_t::unsupported_k;
+            std::size_t const run = walked++;
+            runs_faces[run] = &face;
+            u64_t* const run_offsets = runs_offsets + run * (count + 1);
+            face_t::traversal_context_t::allocator_t const allocator = context.allocator();
+            value_t* const device_queries = cuda_arena_allocator<value_t>(allocator).allocate(count);
+            u64_t* const matched_counts = cuda_arena_allocator<u64_t>(allocator).allocate(count);
+            u64_t* const matched_offsets = cuda_arena_allocator<u64_t>(allocator).allocate(count + 1);
+            node_id_t* const candidate_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            f32_t* const candidate_distances = cuda_arena_allocator<f32_t>(allocator).allocate(listed_count);
+            node_id_t* const matched_ids = cuda_arena_allocator<node_id_t>(allocator).allocate(listed_count);
+            f64_t* const matched_metres = cuda_arena_allocator<f64_t>(allocator).allocate(listed_count);
+            if (!device_queries || !matched_counts || !matched_offsets || !candidate_ids || !candidate_distances ||
+                !matched_ids || !matched_metres)
+                return status_t::bad_alloc_k;
+            us::geospatial::cuda_admit_arguments<node_id_t> admitting = admitting_(face, query_batch);
+            admitting.queries = device_queries;
+            admitting.candidate_ids = candidate_ids;
+            admitting.queries_count = static_cast<u32_t>(count);
+            admitting.candidates_count = static_cast<u32_t>(breadth);
+            admitting.matched_ids = matched_ids;
+            admitting.matched_metres = matched_metres;
+            admitting.matched_counts = matched_counts;
+            admitting.matched_offsets = matched_offsets;
+            cuda_api_t const& api = face.api();
+            run_offsets[0] = 0;
+            if (cuda_copy_async(api, device_queries, queries.elements, count * sizeof(value_t), context.stream()) !=
+                    cuda_success_k ||
+                cuda_copy_async(api, matched_offsets, run_offsets, sizeof(u64_t), context.stream()) != cuda_success_k)
+                return status_t::device_error_k;
+            if (status_t const searched = face.search(queries, {candidate_ids, {count, breadth}},
+                                                      {candidate_distances, {count, breadth}}, config, context)
+                                              .status;
+                failed(searched))
+                return searched;
+            if (status_t const counted = face.launch_within_count_(admitting, context); failed(counted)) return counted;
+            if (status_t const written = face.launch_within_write_(admitting, context); failed(written)) return written;
+            if (cuda_copy_async(api, run_offsets, matched_offsets, (count + 1) * sizeof(u64_t), context.stream()) !=
+                    cuda_success_k ||
+                cuda_copy_async(api, runs_distances + run * listed_count, candidate_distances,
+                                listed_count * sizeof(f32_t), context.stream()) != cuda_success_k)
+                return status_t::device_error_k;
+            if (status_t const waited = context.wait(); failed(waited)) return waited;
+            std::size_t const admitted = static_cast<std::size_t>(run_offsets[count]);
+            if (cuda_copy_async(api, runs_ids + run * listed_count, matched_ids, admitted * sizeof(node_id_t),
+                                context.stream()) != cuda_success_k ||
+                cuda_copy_async(api, runs_metres + run * listed_count, matched_metres, admitted * sizeof(f64_t),
+                                context.stream()) != cuda_success_k)
+                return status_t::device_error_k;
+            return context.wait();
+        };
+        auto const [found, status] = index.search_every_shard(
+            count, executor, judge, nk::matrix_span<us::utilities::uuid_t> {unused_keys, count, 1},
+            nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
+            config, judging_bytes);
+        if (failed(status)) return {{}, status};
+        stats.computed_distances += found.computed_distances;
+        stats.visited_members += found.visited_members;
+        stats.restarts += found.restarts;
+        // A candidate past the walk's end ranks infinitely far, as nothing else can be reached.
+        bool covered = true;
+        for (std::size_t run = 0; run != walked; ++run)
+            for (std::size_t query = 0; query != count; ++query)
+                covered = covered &&
+                          runs_distances[run * listed_count + query * breadth + breadth - 1] > covering_chords[query];
+        if (covered || breadth >= published) break;
+    }
 
     // Each query's matches append shard by shard, as the RAM variants append each shard's ball.
     for (std::size_t run = 0; run != walked; ++run)
@@ -1578,10 +1661,7 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::within(
         }
     outputs = {{keys, scores, offsets}, total};
     [[maybe_unused]] continuation_t const heard = ticks(count - 1);
-    return {{.computed_distances = found.computed_distances,
-             .visited_members = found.visited_members,
-             .restarts = found.restarts},
-            status_t::success_k};
+    return {stats, status_t::success_k};
 }
 
 #endif

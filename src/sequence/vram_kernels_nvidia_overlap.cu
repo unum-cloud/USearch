@@ -10,5 +10,5 @@
 #include "sequence_specializations.cuh"
 #include "usearch/sequence/vram_nvidia_metric.cuh"
 
-template __device__ void
-us::sequence::cuda_instantiate<sequence_nvidia_capabilities_k, usearch_sequence_metric_overlap_k, u32_t>();
+template __device__ void us::sequence::cuda_instantiate<sequence_nvidia_capabilities_k,
+                                                        us::sequence::vram_sequence_metric_t::overlap_k, u32_t>();

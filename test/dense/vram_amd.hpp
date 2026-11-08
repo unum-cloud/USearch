@@ -38,8 +38,8 @@ struct dense_amd_code_object_t {
  *  collection, built over the stream of the executor the ROCm entry opened. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
-    using index_t = vram_amd_index<dtype_, dense_amd_code_object_t, dummy_cache_hints_t, counting_hip_allocator_t,
-                                   counting_hip_allocator_t, hip_device_allocator_t>;
+    using index_t = vram_amd_index<dtype_, dense_amd_code_object_t, fu::standard_yield_t, dummy_cache_hints_t,
+                                   counting_hip_allocator_t, counting_hip_allocator_t, hip_device_allocator_t>;
     using indexes_t = vram_amd_indexes<uuid_t, dtype_, dense_amd_code_object_t>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
 

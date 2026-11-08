@@ -19,6 +19,7 @@
 
 #include <array>       // `std::array` - the devices a GPU executor spans
 #include <charconv>    // `std::to_chars`, `std::from_chars` - the metadata a checkpoint records as text
+#include <limits>      // `std::numeric_limits` - the widths of a tape's offsets
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view` - entries, tokens and paths
 #include <type_traits> // `std::type_identity_t`
@@ -38,23 +39,58 @@ inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) noexce
     return key;
 }
 
-/** Entry @p entry of a byte tape, as the view every string type converts from. */
-inline std::string_view chars_at(usearch_tape_view_t tape, std::size_t entry) noexcept {
-    return {static_cast<char const*>(tape.data) + tape.offsets[entry], tape.offsets[entry + 1] - tape.offsets[entry]};
-}
-
-/** The @p count entries of the caller's byte tape @p tape, as the engines read tapes. */
-inline tape_view<byte_t const> bytes_tape_of(usearch_tape_view_t tape, std::size_t count) noexcept {
-    return {static_cast<byte_t const*>(tape.data), {tape.offsets, count + 1}};
-}
-
-/** Whether a tape's @p count + 1 offsets never fall; they may start anywhere, as an Arrow slice's
- *  do. */
-inline bool monotone_offsets(usearch_tape_view_t tape, std::size_t count) noexcept {
-    if (!tape.offsets) return false;
+/** Whether @p count + 1 offsets never fall; they may start anywhere, as an Arrow slice's do. */
+template <typename offset_type_>
+bool monotone_offsets(offset_type_ const* offsets, std::size_t count) noexcept {
+    if (!offsets) return false;
     for (std::size_t entry = 0; entry != count; ++entry)
-        if (tape.offsets[entry + 1] < tape.offsets[entry]) return false;
+        if (offsets[entry + 1] < offsets[entry]) return false;
     return true;
+}
+
+/** Whether a tape's @p count + 1 offsets never fall, in the width they arrive in. */
+inline bool monotone_offsets(usearch_tape_view_t const& tape, std::size_t count) noexcept {
+    return tape.layout == usearch_tape_u64_k ? monotone_offsets(tape.offsets.u64, count)
+                                             : monotone_offsets(tape.offsets.u32, count);
+}
+
+/** Whether @p layout names a width of offsets. */
+inline bool known_layout(usearch_tape_layout_t layout) noexcept {
+    return layout == usearch_tape_u32_k || layout == usearch_tape_u64_k;
+}
+
+/** Copies the offsets at @p source into @p widened, refusing one past what @c std::size_t holds. */
+template <typename offset_type_>
+status_t widen_offsets(offset_type_ const* source, std::span<std::size_t> widened) noexcept {
+    for (std::size_t& offset : widened) {
+        if (*source > std::numeric_limits<std::size_t>::max()) return status_t::overflow_k;
+        offset = static_cast<std::size_t>(*source++);
+    }
+    return status_t::success_k;
+}
+
+/** The @p count + 1 offsets of the caller's @p tape as the engines read them: a u64 tape's in place
+ *  where @c std::size_t matches it, and any other widened onto @p pages. */
+inline expected<std::span<std::size_t const>> offsets_of(usearch_tape_view_t const& tape, std::size_t count,
+                                                         growing_arena<forkunion_allocator_t>& pages) noexcept {
+    if constexpr (sizeof(std::size_t) == sizeof(u64_t))
+        if (tape.layout == usearch_tape_u64_k)
+            return {{reinterpret_cast<std::size_t const*>(tape.offsets.u64), count + 1}, status_t::success_k};
+    std::size_t* const widened = carve<std::size_t>(pages, count + 1);
+    if (!widened) return {{}, status_t::bad_alloc_k};
+    std::span<std::size_t> const offsets {widened, count + 1};
+    status_t const status = tape.layout == usearch_tape_u64_k ? widen_offsets(tape.offsets.u64, offsets)
+                                                              : widen_offsets(tape.offsets.u32, offsets);
+    return {offsets, status};
+}
+
+/** Lays the @p offsets a get wrote out as @p tape 's over @p data of @p scalar, in place, as wide
+ *  as @c std::size_t. */
+inline void write_output_tape(void const* data, std::size_t const* offsets, usearch_scalar_t scalar,
+                              usearch_tape_view_t& tape) noexcept {
+    tape = {data, usearch_tape_u64_k, {}, scalar};
+    if constexpr (sizeof(std::size_t) == sizeof(u64_t)) tape.offsets.u64 = reinterpret_cast<u64_t const*>(offsets);
+    else tape.layout = usearch_tape_u32_k, tape.offsets.u32 = reinterpret_cast<u32_t const*>(offsets);
 }
 
 /** Raises @p word to @p value, if it is larger, from any thread, through the CPU class's reference;
@@ -82,12 +118,48 @@ inline std::size_t decimal_in(std::string_view text) noexcept {
 
 #pragma region Variant Tables
 
-/** @c count entries of a caller's tape, as its C view holds them: bytes, or points in its
- *  scalar. */
+/** A caller's tape as every variant reads it, bytes or points in its scalar around the offsets
+ *  @ref offsets_of lowered once. */
 struct counted_tape_t {
+    void const* elements = nullptr;
+    std::span<std::size_t const> offsets;
+    usearch_scalar_t scalar = usearch_scalar_unknown_k;
+
+    /** Entries the tape holds, one fewer than its offsets. */
+    std::size_t count() const noexcept { return offsets.size() - 1; }
+};
+
+/** A caller's tape of @c count entries as its C view holds them, which an insertion lowers into its
+ *  executor's scratch after the one rewind. */
+struct caller_tape_t {
     usearch_tape_view_t tape {};
     std::size_t count = 0;
 };
+
+/** The elements a caller's @p tape spans, from its first offset to its last. */
+inline std::size_t elements_in(caller_tape_t const& tape) noexcept {
+    return tape.tape.layout == usearch_tape_u64_k
+               ? static_cast<std::size_t>(tape.tape.offsets.u64[tape.count] - tape.tape.offsets.u64[0])
+               : tape.tape.offsets.u32[tape.count] - tape.tape.offsets.u32[0];
+}
+
+/** Lowers the @p count entries of the caller's @p tape, widening its offsets onto @p pages. */
+inline expected<counted_tape_t> counted_tape_of(usearch_tape_view_t const& tape, std::size_t count,
+                                                growing_arena<forkunion_allocator_t>& pages) noexcept {
+    auto const [offsets, status] = offsets_of(tape, count, pages);
+    return {{tape.data, offsets, tape.scalar}, status};
+}
+
+/** Entry @p entry of a byte tape, as the view every string type converts from. */
+inline std::string_view chars_at(counted_tape_t const& tape, std::size_t entry) noexcept {
+    return {static_cast<char const*>(tape.elements) + tape.offsets[entry],
+            tape.offsets[entry + 1] - tape.offsets[entry]};
+}
+
+/** The entries of the caller's byte tape @p tape, as the engines read tapes. */
+inline tape_view<byte_t const> bytes_tape_of(counted_tape_t const& tape) noexcept {
+    return {static_cast<byte_t const*>(tape.elements), tape.offsets};
+}
 
 /** Where a radius walk writes: a tape of matches per query in the arena, and how many it wrote. */
 struct within_outputs_t {
@@ -142,15 +214,15 @@ struct basic_verbs {
 
     // Lifetime
 
-    /** Builds an unplaced variant of @p geometry, which adopts @p adopted: a host one over the
-     *  heap's domain, a device one on @p residency 's device. */
+    /** Builds an unplaced variant of @p geometry, which adopts @p adopted: a host one keeping its
+     *  tables through @p tables, a device one on @p residency 's device. */
     expected<void*> (*create)(geometry_t geometry, typename traits_type_::geometry_extras_t const& adopted,
-                              arena_residency_t residency) noexcept;
+                              arena_residency_t residency, forkunion_allocator_t tables) noexcept;
     void (*destroy)(void* variant) noexcept;
     void (*bound_shards)(void* variant, std::size_t nodes) noexcept;
 
-    /** Appends one shard on a host memory domain or a device. */
-    status_t (*emplace)(void* variant, arena_residency_t residency) noexcept;
+    /** Appends one shard on a device, or on RAM on @p memory_domain. */
+    status_t (*emplace)(void* variant, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
 
     /** Serves a checkpoint in place, an NVMe view through @p executor, which a host variant does
      *  without. */
@@ -356,6 +428,8 @@ struct sequence_geometry_t {
 /** Whether @p sequences holds @p count byte strings; false once @p outcome records why not. */
 inline bool accepts_sequences(usearch_tape_view_t const& sequences, std::size_t count,
                               usearch_outcome_t* outcome) noexcept {
+    if (!known_layout(sequences.layout))
+        return propagate_error(usearch_status_unsupported_layout_k, outcome, "Unknown width of a tape's offsets");
     if (!sequences.data || !monotone_offsets(sequences, count))
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The sequences need data and non-decreasing offsets");
@@ -379,7 +453,7 @@ struct sequence_traits_t {
     using key_stats_t = usearch_sequence_key_stats_t;
 
     /** The strings an insertion writes and a search ranks. */
-    using values_t = counted_tape_t;
+    using values_t = caller_tape_t;
     using queries_t = counted_tape_t;
 
     /** No radius walk serves strings. */
@@ -492,8 +566,9 @@ struct sequence_traits_t {
     static values_t values_of(usearch_sequence_insert_t const& arguments) noexcept {
         return {arguments.sequences, arguments.count};
     }
-    static queries_t queries_of(usearch_sequence_search_t const& arguments) noexcept {
-        return {arguments.queries, arguments.count};
+    static expected<queries_t> queries_of(usearch_sequence_search_t const& arguments,
+                                          growing_arena<forkunion_allocator_t>& pages) noexcept {
+        return counted_tape_of(arguments.queries, arguments.count, pages);
     }
     static reserve_capacity_t capacity_of(usearch_sequence_reserve_t const& arguments) noexcept {
         return {arguments.entries, arguments.payload_bytes, 0};
@@ -551,6 +626,8 @@ struct shapes_geometry_t {
 /** Whether @p shapes holds @p count entries of points in a scalar the variants cast from, its
  *  offsets counting points; false once @p outcome records why not. */
 inline bool accepts_shapes(usearch_tape_view_t const& shapes, std::size_t count, usearch_outcome_t* outcome) noexcept {
+    if (!known_layout(shapes.layout))
+        return propagate_error(usearch_status_unsupported_layout_k, outcome, "Unknown width of a tape's offsets");
     if (!shapes.data || !monotone_offsets(shapes, count))
         return propagate_error(usearch_status_invalid_argument_k, outcome,
                                "The shapes need data and non-decreasing offsets");
@@ -580,7 +657,7 @@ struct shapes_traits_t {
     using key_stats_t = usearch_shapes_key_stats_t;
 
     /** The clouds an insertion writes and a search ranks. */
-    using values_t = counted_tape_t;
+    using values_t = caller_tape_t;
     using queries_t = counted_tape_t;
 
     /** No radius walk serves clouds. */
@@ -669,8 +746,9 @@ struct shapes_traits_t {
     static values_t values_of(usearch_shapes_insert_t const& arguments) noexcept {
         return {arguments.shapes, arguments.count};
     }
-    static queries_t queries_of(usearch_shapes_search_t const& arguments) noexcept {
-        return {arguments.queries, arguments.count};
+    static expected<queries_t> queries_of(usearch_shapes_search_t const& arguments,
+                                          growing_arena<forkunion_allocator_t>& pages) noexcept {
+        return counted_tape_of(arguments.queries, arguments.count, pages);
     }
     static reserve_capacity_t capacity_of(usearch_shapes_reserve_t const& arguments) noexcept {
         return {arguments.entries, 0, arguments.points};
@@ -853,8 +931,9 @@ struct geospatial_traits_t {
         return {arguments.observations, arguments.count};
     }
     template <typename arguments_type_>
-    static queries_t queries_of(arguments_type_ const& arguments) noexcept {
-        return {{arguments.queries, arguments.count}, arguments.relation, arguments.tolerance};
+    static expected<queries_t> queries_of(arguments_type_ const& arguments,
+                                          growing_arena<forkunion_allocator_t>&) noexcept {
+        return {{{arguments.queries, arguments.count}, arguments.relation, arguments.tolerance}, status_t::success_k};
     }
     static reserve_capacity_t capacity_of(usearch_geospatial_reserve_t const& arguments) noexcept {
         return {arguments.entries, 0, 0};

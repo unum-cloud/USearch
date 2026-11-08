@@ -28,10 +28,10 @@
 
 namespace unum::usearch::dense {
 
-template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
           typename key_type_, typename key_hash_type_>
-bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
                       neighbors_allocator_type_, traversals_allocator_type_, key_type_,
                       key_hash_type_>::walk_scratch_fits(core_t const& core, std::size_t fold_bytes) const noexcept {
     using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
@@ -44,10 +44,10 @@ bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_a
            core.device_.shared_memory_per_block_bytes;
 }
 
-template <nk_dtype_t vector_dtype_, typename kernels_type_, typename cache_hints_type_,
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
           typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
           typename key_type_, typename key_hash_type_>
-bool vram_amd_kernels<vector_dtype_, kernels_type_, cache_hints_type_, vectors_allocator_type_,
+bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
                       neighbors_allocator_type_, traversals_allocator_type_, key_type_,
                       key_hash_type_>::build_scratch_fits(core_t const& core,
                                                           u32_t scratch_bytes_per_warp) const noexcept {
@@ -114,7 +114,10 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
     else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
         vram_reconnect_island<warp_t>(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count,
                                       graph.reached, graph.rows_count, graph.seed_count, graph.in_links,
-                                      graph.reconnected, graph.reaches_back, graph.shadow_neighbors);
+                                      graph.reconnected, graph.reaches_back);
+    else if constexpr (kernel_ == vram_kernel_t::count_back_links_k) vram_count_back_links<warp_t>(arguments.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::offset_back_links_k) vram_offset_back_links<warp_t>(arguments.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k) vram_scatter_back_links<warp_t>(arguments.sweep);
     else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, warp_t>(graph);
     else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<warp_t>(arguments.gather);
     else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)

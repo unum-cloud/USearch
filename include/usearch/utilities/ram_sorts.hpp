@@ -16,8 +16,6 @@
 #include <type_traits> // `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`
 
-#include <numkong/tensor.hpp> // `nk::matrix_span` - the rankings a batched read writes
-
 #include "usearch/utilities/types.hpp" // `u32_t`
 
 namespace unum::usearch::utilities {
@@ -98,23 +96,6 @@ void partial_sort(std::span<value_type_> values, std::size_t count, comparator_t
         std::swap(values[0], values[--size]);
         sift_down(0, size);
     }
-}
-
-/**
- *  Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows.
- *
- *  @par Statuses:
- *  - @c config_mismatch_k The row counts are not @p rows, or the widths differ.
- *  - @c unsupported_layout_k A row of keys or scores is not contiguous.
- */
-template <typename key_type_, typename score_type_>
-status_t rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
-                          nk::matrix_span<score_type_> scores) noexcept {
-    if (keys.extent(0) != rows || scores.extent(0) != rows || scores.extent(1) != keys.extent(1))
-        return status_t::config_mismatch_k;
-    if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
-        return status_t::unsupported_layout_k;
-    return status_t::success_k;
 }
 
 } // namespace unum::usearch::utilities

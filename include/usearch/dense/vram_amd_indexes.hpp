@@ -85,9 +85,9 @@ struct vram_amd_indexes {
     using cursor_t = vram_amd_indexes_cursor<vram_amd_indexes>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t =
-        vram_amd_index<vector_dtype_, kernels_type_, cache_hints_type_, hip_virtual_memory_allocator<byte_t>,
-                       hip_virtual_memory_allocator<byte_t>, hip_arena_allocator_t, key_type_, key_hash_type_>;
+    using index_t = vram_amd_index<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_,
+                                   hip_virtual_memory_allocator<byte_t>, hip_virtual_memory_allocator<byte_t>,
+                                   hip_arena_allocator_t, key_type_, key_hash_type_>;
 
     /** The caller-visible identity of every entry, which each shard files beside its own nodes. */
     using key_t = key_type_;
@@ -1811,10 +1811,6 @@ struct vram_amd_indexes {
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
         typename executor_t::claim_t streams;
 
-        /** The device a load's columns sit on, or @c host_device_k when they cross from host
-         *  memory. */
-        int source_device = host_device_k;
-
         /**
          *  Opens shard @p shard 's save into @p columns on the stream of its device.
          *
@@ -1832,9 +1828,8 @@ struct vram_amd_indexes {
         }
 
         /**
-         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, pinning its
-         *      bounce only when the parts' columns cross from host memory; device columns copy
-         *      device to device.
+         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, whose steps
+         *      copy the parts' columns from host or device memory.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The shard was never reserved, or its @c status keeps it.
@@ -1847,11 +1842,8 @@ struct vram_amd_indexes {
         expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
                                                                 std::size_t rows) noexcept {
             if (status_t const entered = fanout_t::enter(shards, shard); failed(entered)) return {{}, entered};
-            auto [plan, status] = shards[shard].index->plan_load(
-                rows, executor->stream(fanout_t::stream_of(shards, *executor, shard)));
-            if (failed(status) || source_device != host_device_k) return {std::move(plan), status};
-            status_t const pinned = plan.pin_bounce();
-            return {std::move(plan), pinned};
+            return shards[shard].index->plan_load(rows,
+                                                  executor->stream(fanout_t::stream_of(shards, *executor, shard)));
         }
 
         void end_save(shards_t& shards) noexcept { shards.reopen(); }
@@ -2025,7 +2017,6 @@ struct vram_amd_indexes {
                                     executor_t& executor) noexcept {
         auto [residency, status] = gate_load_(executor);
         if (failed(status)) return {{}, status};
-        residency.source_device = source.device;
         hip_api_t const& api = shards_[0].index->api();
         auto copy = [&api, device = source.device](bytes_span_t host, bytes_view_t bytes) noexcept {
             return hip_set_device(api, device) == hip_success_k &&

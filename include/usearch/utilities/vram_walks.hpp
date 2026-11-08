@@ -96,4 +96,20 @@ struct vram_bitset_t {
     u32_t* words = nullptr;
 };
 
+/** One tile of a refinement's sweep over a neighbors matrix, whatever the graph's values: the rows
+ *  whose links it reads, its target rows, each row's run offset, the tape the runs share, how many
+ *  links the tape holds, and the two words its offset kernel leaves, the rows that it kept and the
+ *  links they take. */
+struct vram_sweep_t {
+    u32_t const* neighbors = nullptr;
+    u32_t connectivity = 0;
+    u32_t rows_count = 0;
+    u32_t sources_first = 0, sources_bound = 0;
+    u32_t targets_first = 0, targets_bound = 0;
+    u32_t* incoming_offsets = nullptr;
+    u32_t* back_links = nullptr;
+    u32_t tape_capacity = 0;
+    u32_t* swept = nullptr;
+};
+
 } // namespace unum::usearch::utilities

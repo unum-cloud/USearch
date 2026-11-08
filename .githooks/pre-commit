@@ -15,6 +15,13 @@
 # Bypass knowingly, which you almost never should, with: git commit --no-verify
 
 set -u
+
+# CITATION.cff cites the concept DOI, which spans every release, so it never carries a version.
+if git show :CITATION.cff 2> /dev/null | grep -q '^version:'; then
+    echo "pre-commit: CITATION.cff carries no version; the concept DOI spans every release." >&2
+    exit 1
+fi
+
 export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
 unset FORCE_COLOR CLICOLOR_FORCE # Plain tool output, since the checks parse it by its colons
 
@@ -2003,7 +2010,8 @@ check_proper_names_capitalized() {
 # fires, so touching a line never forces a rename the commit is not about. A path HEAD lacks, whether new or a
 # rename git cannot pair, is weighed against every name in HEAD's headers, as it reuses the library's types.
 # A capitalized macro the file does not define, like the kernel's `RISCV_HWPROBE_EXT_ZABHA`, belongs to another
-# project and never fires, as do literal contents and names under `third_party_identifier_prefixes`.
+# project and never fires, as do literal contents, names the standard qualifies as `std::align_val_t`, and names
+# under `third_party_identifier_prefixes`.
 check_abbreviations_spelled_out() {
     local abbreviated previous_text
     previous_text=$(git show "HEAD:$staged_path" 2> /dev/null) ||
@@ -2038,11 +2046,12 @@ check_abbreviations_spelled_out() {
         FILENAME == ARGV[3] { original[FNR] = substr($0, 2); next }
         {
             prose = ($0 ~ /^\+[[:space:]]*(\*([[:space:]]|$)|\/\*|\/\/)/)
-            line = substr($0, 2)
+            line = substr($0, 2); previous = ""
             if (prose) { gsub(/"[^"]*"/, "", line); gsub(/`[^`]*`/, "", line); gsub(/<\/tt>/, "\001", line); gsub(/<tt>[^\001]*\001/, "", line); gsub(/@[pc][[:space:]]+[^[:space:]]+/, "", line) }
             while (match(line, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(line, RSTART, RLENGTH); accessor = substr(line, 1, RSTART - 1); line = substr(line, RSTART + RLENGTH)
-                if (!has_banned_segment(token) || accessor ~ /(\.|->)$/ || is_third_party(token)) continue
+                standard = accessor == "::" && previous == "std"; previous = token
+                if (!has_banned_segment(token) || accessor ~ /(\.|->)$/ || standard || is_third_party(token)) continue
                 if (token == toupper(token) && !(token in defined)) continue
                 if (prose && (token in declared || token == toupper(token))) continue
                 if ((prose && token !~ /_/) || !(token in existing)) { print "    " token ": " original[FNR]; break }
@@ -2804,6 +2813,13 @@ check_single_space_between_sentences() {
 # region Shared Dispatch
 
 # Routes one staged file through every shared check its extension calls for, reading the `staged_*` globals.
+# Whether @p 1 is written in a language with C comments, which the comment blanking and the shared C checks read.
+speaks_c_comments() {
+    case "$1" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.pml) return 0 ;;
+    esac
+    return 1
+}
 run_shared_checks() {
     case "$staged_path" in
     CMakeLists.txt | */CMakeLists.txt | *.cmake)
@@ -2811,8 +2827,7 @@ run_shared_checks() {
             rejection_count=$((rejection_count + 1))
         ;;
     esac
-    case "$staged_path" in
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal | *.pml)
+    if speaks_c_comments "$staged_path"; then
         check_docblock_documents_a_declaration
         check_file_header_tag_order
         check_enumerators_documented_individually
@@ -2868,8 +2883,7 @@ run_shared_checks() {
             check_parameter_references_use_p
             check_docblock_without_backticks
         fi
-        ;;
-    esac
+    fi
     case "$staged_path" in
     *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
         check_boolean_parameters
@@ -3446,16 +3460,28 @@ check_namespace_reopened() {
         "$staged_path reopens namespace ${reopened##*namespace }; keep includes in the preamble and open each namespace once:"
 }
 
-# Utilities sit below every design: a header under `include/usearch/utilities/` includes, embeds or
-# names nothing from `dense/`, `basic/` or a modality's directory, whose headers include utilities,
-# never the reverse. Whatever a utility needs from a design moves down into utilities, or the design
-# keeps it and the utility takes it as an argument.
-check_utilities_layering() {
-    local reaching
-    reaching=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*"usearch/[a-z_]+/' "$staged_text_path" |
-        grep -vE '"usearch/utilities/' || true)
+# The Layers section of CONTRIBUTING.md: what each layer of include/ and tools/ may include or embed.
+# Utilities sit below every design, basic and dense stay apart, a modality reaches neither dense nor
+# a C header, and a tool reaches only the utilities.
+check_layer_includes() {
+    local own allowed reaching layered='[a-z_]+/'
+    own=${staged_path#include/usearch/}
+    own=${own%%/*}
+    case "$staged_path" in
+    include/usearch/utilities/*) allowed='utilities/' ;;
+    include/usearch/basic/* | include/usearch/dense/*) allowed="(utilities|$own)/" ;;
+    include/usearch/sequence/* | include/usearch/shapes/* | include/usearch/geospatial/*)
+        allowed="(utilities|basic|$own)/"
+        layered='([a-z_]+/|[a-z_]+_index\.h")'
+        ;;
+    # Tools reach the utilities for drives, files and our own format; engines stay behind the C ABI.
+    tools/*) allowed='utilities/' ;;
+    *) return 0 ;;
+    esac
+    reaching=$(grep -nE "^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*\"usearch/$layered" "$staged_text_path" |
+        grep -vE "\"usearch/${allowed}" || true)
     [ -z "$reaching" ] || reject_with_reason "$reaching" \
-        "$staged_path reaches above utilities; a utility includes or embeds only utilities, never a design or a modality:"
+        "$staged_path reaches past its layer; see Layers in CONTRIBUTING.md:"
 }
 
 # Function-like ALL_CAPS macros: every macro here is object-like, include guards, config flags and
@@ -3733,7 +3759,7 @@ check_vendor_neutral() {
 check_residency_branches() {
     local branching
     branching=$(printf '%s\n' "$staged_added_text" |
-        grep -E 'is_(ram|vram|nvme)_index|gpu_vendor_of_index|gpu_vendor_t::|vendor_k|(home|residency)_[[:space:]]*==|(home|residency)_of<|(if|while)[[:space:]]*(constexpr[[:space:]]*)?\([^)]*packs_on_device_k|packs_on_device_k[[:space:]]*(==|!=|\?|&&|\|\|)|(==|!=|!|&&|\|\|)[[:space:]]*[A-Za-z_:<>]*packs_on_device_k' || true)
+        grep -E 'is_(ram|vram|nvme)_index|gpu_vendor_of_index|gpu_vendor_t::|vendor_k|(home|residency)_[[:space:]]*==|residency[[:space:]]*!=[[:space:]]*ram_residency_k|(home|residency)_of<|(if|while)[[:space:]]*(constexpr[[:space:]]*)?\([^)]*packs_on_device_k|packs_on_device_k[[:space:]]*(==|!=|\?|&&|\|\|)|(==|!=|!|&&|\|\|)[[:space:]]*[A-Za-z_:<>]*packs_on_device_k' || true)
     [ -z "$branching" ] || reject_with_reason "$branching" \
         "$staged_path branches a C verb on residency or vendor; the face serves the verb or answers unsupported_k:"
 }
@@ -3997,11 +4023,11 @@ check_standard_atomics() {
 
 # An engine never sleeps or yields on its own schedule: how a thread waits, spinning, yielding or
 # parking, is the caller's choice, so it waits through the waiter or pause src/ passes, and src/
-# alone spells the sleep.
+# alone spells the sleep, a yielding waiter included, whether called or defaulted.
 check_library_sleeps() {
     local sleeps
     sleeps=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
-        grep -E '(^|[^A-Za-z0-9_])(nanosleep|usleep|sleep|sched_yield)[[:space:]]*\(|\bsleep_(for|until)\b|\bstd::this_thread\b' ||
+        grep -E '(^|[^A-Za-z0-9_])(nanosleep|usleep|sleep|sched_yield)[[:space:]]*\(|\bsleep_(for|until)\b|\bstd::this_thread\b|standard_yield_t[[:space:]]*\{[[:space:]]*\}|=[[:space:]]*(fu::)?standard_yield_t\b' ||
         true)
     [ -z "$sleeps" ] || reject_with_reason "$sleeps" \
         "$staged_path sleeps or yields in an engine; wait through the waiter or pause src/ passes:"
@@ -4019,10 +4045,10 @@ check_capability_masks_in_engines() {
 }
 
 # Engines take kits, and `src/` alone picks them per class: nothing under `include/usearch/` names a
-# class enum or a class unit.
+# class enum or a class unit, anywhere in the file, since the enums live in `src/lib.hpp`.
 check_classes_out_of_engines() {
     local named
-    named=$(printf '%s\n' "$staged_added_text" | grep -E '(cpu|gpu)_class_t|_variants_' || true)
+    named=$(grep -nE '(^|[^A-Za-z0-9_])(cpu|gpu)_class_t|_variants_' "$staged_code_path" || true)
     [ -z "$named" ] || reject_with_reason "$named" \
         "$staged_path names a CPU or GPU class under include/; an engine takes the kits src/ picks per class:"
 }
@@ -4201,6 +4227,7 @@ check_identifier_words() {
             line = substr($0, 2); rest = line
             while (match(rest, /[A-Za-z_][A-Za-z0-9_]*/)) {
                 token = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+                if (token ~ /^fu_pool_/) continue # the ForkUnion C API spells its thread pools so
                 total = split(tolower(token), parts, "_")
                 for (part = 1; part <= total; ++part) {
                     if (!(parts[part] in banned)) continue
@@ -4458,7 +4485,7 @@ run_project_checks() {
     *" $staged_path "*) check_dependency_free_core ;;
     esac
     case "$staged_path" in
-    include/usearch/utilities/*) check_utilities_layering ;;
+    include/usearch/* | tools/*) check_layer_includes ;;
     esac
     case "$staged_path" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
@@ -4504,8 +4531,8 @@ run_project_checks() {
         ;;
     esac
     case "$staged_path" in
-    include/usearch/utilities/vram_shards.hpp | include/usearch/utilities/vram_device.hpp | \
-        include/usearch/dense/vram_index.hpp | include/usearch/dense/vram_index.cuh | include/usearch/basic/vram_index.cuh)
+    include/usearch/utilities/vram_shards.hpp | include/usearch/dense/vram_index.hpp | \
+        include/usearch/dense/vram_index.cuh | include/usearch/basic/vram_index.cuh)
         check_vendor_neutral
         ;;
     esac
@@ -4741,8 +4768,7 @@ load_path_files() {
     staged_added_text=$(< "$results_directory/$ordinal.added")
     staged_added_unquoted_path=$results_directory/$ordinal.added
     staged_file_text=$(< "$staged_text_path")
-    case "$staged_path" in
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal)
+    if speaks_c_comments "$staged_path"; then
         staged_code_path=$results_directory/$ordinal.code
         staged_added_code_path=$results_directory/$ordinal.added-code
         staged_added_unquoted_path=$results_directory/$ordinal.added-unquoted
@@ -4750,8 +4776,7 @@ load_path_files() {
         scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' "$staged_code_path" > "$staged_added_code_path"
         blank_c_comments_preserving_columns literals < "$staged_text_path" |
             scan_staged_file_marking_added_lines 'FNR in added { print "+" $0 }' - > "$staged_added_unquoted_path"
-        ;;
-    esac
+    fi
 }
 
 # `--all-lines <path>...` judges whole working-tree files as though every line outside a function body were

@@ -49,7 +49,7 @@
 #include <type_traits> // `std::is_same_v`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref`
-#include <forkunion/types.hpp>   // `fu::standard_yield_t`
+#include <forkunion/types.hpp>   // `fu::limited_array`
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -119,9 +119,9 @@ struct nvme_part_t {
 template <                                                                    //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
-    typename engine_type_ = default_io_engine_t,                              //
+    typename engine_type_ = default_io_engine<dummy_waiter_t>,                //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
-    typename wait_type_ = fu::standard_yield_t                                //
+    typename wait_type_ = dummy_waiter_t                                      //
     >
 struct nvme_index {
 

@@ -13,6 +13,7 @@
 
 #include "usearch/types.h"
 
+#include "usearch/arrow.h"
 #include "usearch/dense_index.h"
 #include "usearch/geospatial_index.h"
 #include "usearch/shapes_index.h"

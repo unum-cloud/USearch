@@ -273,7 +273,11 @@ struct seekable_file_t {
     /** Where offset zero sits in the file, which a mapping starts at. */
     u64_t byte_base() const noexcept { return byte_base_; }
 
+    /** The descriptor, still owned here, for a driver that registers the file. */
+    descriptor_t descriptor() const noexcept { return descriptor_; }
+
   private:
+    friend class mapped_file_t;
 
     /** Opens @p path under @p mode for a part starting @p byte_base bytes in, answering
      *  @c closed_k on failure. */
@@ -610,6 +614,24 @@ class mapped_file_t {
 
     /** Bytes the mapping spans. */
     std::size_t size() const noexcept { return bytes_; }
+
+    /** The mapped regular file opened again, read-only and @c O_DIRECT, beside the mapping; empty
+     *  for a device node, a mapping short of its whole file, a filesystem refusing it, or a
+     *  platform without it. */
+    seekable_file_t open_direct() const noexcept {
+        seekable_file_t file;
+#if USEARCH_OS_LINUX_
+        char path[32] = "/proc/self/fd/";
+        *std::to_chars(path + 14, path + sizeof(path) - 1, descriptor_).ptr = '\0';
+        file.descriptor_ = ::open(path, O_RDONLY | O_DIRECT | O_CLOEXEC);
+        struct stat description;
+        // A mapping shorter than its file starts past byte zero, which offsets into it would miss.
+        if (file && (::fstat(file.descriptor_, &description) != 0 || !S_ISREG(description.st_mode) ||
+                     static_cast<std::size_t>(description.st_size) != bytes_))
+            return seekable_file_t {};
+#endif
+        return file;
+    }
 
     /**
      *  Maps the whole of @p path read-only.

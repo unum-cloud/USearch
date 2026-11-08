@@ -4763,14 +4763,14 @@ std::size_t test_basic_nvme_configuration(fixture_type_ const& fixture, std::str
 template <typename fixture_type_>
 std::size_t test_basic_nvme_engines(fixture_type_ const& fixture, std::string_view modality, u64_t seed) {
     std::size_t failures = 0;
-    failures += test_basic_nvme_configuration<blocking_files_engine<>>(fixture,
-                                                                       fmt::format("{} nvme blocking", modality), seed);
+    failures += test_basic_nvme_configuration<blocking_files_engine<fu::standard_yield_t>>(
+        fixture, fmt::format("{} nvme blocking", modality), seed);
 #if USEARCH_WITH_LINUX_AIO
-    failures += test_basic_nvme_configuration<linux_aio_files_engine<>>(
+    failures += test_basic_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>>(
         fixture, fmt::format("{} nvme linux-aio", modality), seed);
 #endif
 #if USEARCH_WITH_LINUX_URING
-    failures += test_basic_nvme_configuration<linux_uring_files_engine<>>(
+    failures += test_basic_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>>(
         fixture, fmt::format("{} nvme linux-uring", modality), seed);
 #endif
     return failures;

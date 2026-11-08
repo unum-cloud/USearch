@@ -15,10 +15,11 @@
 #include <span>    // `std::span` - the caller's rankings & the shards' staging
 #include <utility> // `std::move`
 
+#include <numkong/tensor.hpp> // `nk::matrix_span` - the rankings a batch writes
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the batch's contexts & staging
 #include "usearch/utilities/ram_device.hpp"  // `forkunion_allocator` - where the staging lives
-#include "usearch/utilities/ram_sorts.hpp"   // `rankings_refusal` - the batch's output layout
 
 namespace unum::usearch::utilities {
 
@@ -129,8 +130,12 @@ struct vram_shard_fanout {
                             nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> scores,
                             std::span<std::size_t const> counts) noexcept {
         if (status_t const paired = pairs_with(shards, executor); failed(paired)) return paired;
-        if (counts.size() != queries) return status_t::config_mismatch_k;
-        return rankings_refusal(queries, keys, scores);
+        if (counts.size() != queries || keys.extent(0) != queries || scores.extent(0) != queries ||
+            scores.extent(1) != keys.extent(1))
+            return status_t::config_mismatch_k;
+        if (keys.stride_bytes(1) != sizeof(key_t) || scores.stride_bytes(1) != sizeof(score_type_))
+            return status_t::unsupported_layout_k;
+        return status_t::success_k;
     }
 
 #pragma endregion Pairing

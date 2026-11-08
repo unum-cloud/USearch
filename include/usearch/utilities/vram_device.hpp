@@ -336,6 +336,31 @@ enum class vram_kernel_t : u32_t {
     /** Writes each query's entries within its radius from its scanned offset. */
     within_write_k,
 
+    // Reverse Sweep
+
+    /** Counts the links the walked rows hold into each target row of a sweep tile. */
+    count_back_links_k,
+
+    /** Turns a tile's counts into its rows' run starts, ending the tile where the tape does. */
+    offset_back_links_k,
+
+    /** Places the rows linking into a tile on its tape, each on its target's run. */
+    scatter_back_links_k,
+
+    /** Merges each target row of a tile with its run, on a basic graph. */
+    merge_back_links_k,
+
+    // Loads
+
+    /** Widens a load's saved neighbors into padded rows of a basic graph, checking every ID. */
+    widen_links_k,
+
+    /** Stores a load's saved values into a basic graph's tape where a kit converts them. */
+    load_values_k,
+
+    /** Raises a load's span word to the widest span its stored values prepare into. */
+    size_spans_k,
+
     /** The number of kernels, sizing the tables of loaded kernels. */
     count_k,
 };

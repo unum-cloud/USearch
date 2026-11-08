@@ -467,6 +467,57 @@ typedef struct usearch_shapes_load_vram_t {
  */
 USEARCH_EXPORT void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments);
 
+/** The arguments of @c usearch_shapes_load_vram_buffer. */
+typedef struct usearch_shapes_load_vram_buffer_t {
+
+    /** Output for the new index, written by the time the call is final. */
+    usearch_shapes_index_t* index;
+
+    /** The executor the upload runs on, one stream per device. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Source holding one serialized monolith, or the manifest of several parts leading them, in
+     *  host memory. */
+    usearch_bytes_view_t buffer;
+
+    /** The devices to place the parts on. */
+    usearch_vram_options_t vram;
+
+    /** Upper bound on entries sharing one key, which no checkpoint records; zero is unbounded. */
+    size_t values_per_key;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_t progress;
+} usearch_shapes_load_vram_buffer_t;
+
+/**
+ *  @brief Copies a checkpoint from a memory buffer into a new, mutable index in device memory,
+ *      reporting and cancelling like @c usearch_shapes_load_vram.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k An empty @c buffer.
+ *  - @c usearch_status_malformed_k The manifest lists no part, or a part, its header, columns or
+ *    sums do not parse.
+ *  - @c usearch_status_unknown_kind_k A checkpoint of an unknown metric.
+ *  - @c usearch_status_unsupported_k A @c buffer in device memory, a checkpoint of a kind other
+ *    than Chamfer or Hausdorff or storing points other than @c f16 or @c f32, a @c values_per_key
+ *    bound, or devices that do not run the pinned class.
+ *  - @c usearch_status_config_mismatch_k Devices of two classes, the executor driving no stream on
+ *    some shard's device, or the checkpoint's columns differing from the shards' in dtype, shape
+ *    or key width.
+ *  - @c usearch_status_device_k An ordinal past the listing, devices this build carries no kernels
+ *    for, a build without GPU kernels, or an executor that is not a VRAM executor.
+ *  - @c usearch_status_contended_k Another call holds the executor.
+ *  - @c usearch_status_overflow_k A part passes a shard's bound or its key multimap.
+ */
+USEARCH_EXPORT void usearch_shapes_load_vram_buffer(usearch_shapes_load_vram_buffer_t* arguments);
+
 /** The arguments of @c usearch_shapes_view_ram. */
 typedef struct usearch_shapes_view_ram_t {
 
@@ -681,8 +732,8 @@ typedef struct usearch_shapes_refine_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the re-selection pass. */
+    usearch_refine_options_t refine;
 
     /** The @b optional handler, called with entries re-selected; a cancel stops the re-selection,
      *  still heals, and answers @c usearch_status_cancelled_k. */
@@ -698,8 +749,8 @@ typedef struct usearch_shapes_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_shapes_insert. It pays most in this
- *  modality, where one comparison scores a whole shape against another.
+ *  @c refine.expansion_factor belongs here rather than in @c usearch_shapes_insert. It pays most in
+ *  this modality, where one comparison scores a whole shape against another.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
@@ -970,11 +1021,11 @@ typedef struct usearch_shapes_absorb_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refine's walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refine. */
+    usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with entries the closing refine re-selected; a cancel stops
-     *  it as it stops @c usearch_shapes_refine, never a move. */
+    /** The @b optional handler, called with donor entries stitched so far and their total; a cancel
+     *  stops the stitching walks as it stops @c usearch_shapes_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1038,8 +1089,8 @@ typedef struct usearch_shapes_split_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth of the candidates of the closing refines' walks; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of the closing refines. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
     uint64_t seed;
@@ -1118,8 +1169,8 @@ typedef struct usearch_shapes_refinement_init_t {
      *  @c usearch_shapes_refinement_finish frees it. */
     usearch_shapes_refinement_t* refinement;
 
-    /** The @b optional breadth of the candidates the re-selection walk explores; zero derives. */
-    size_t expansion_factor;
+    /** The @b optional breadth and bytes of every pass the refinement steps. */
+    usearch_refine_options_t refine;
 
     /** Picks the part roots when @c receivers are named, as in @c usearch_shapes_split. */
     uint64_t seed;

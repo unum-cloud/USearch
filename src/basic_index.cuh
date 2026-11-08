@@ -145,11 +145,11 @@ status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned
     punned.verbs.bound_shards(punned.variant, ram.shard_capacity);
     if (!ram.memory_domains || !ram.memory_domains_count)
         return emplace_on_every_domain([&](fu_memory_domain_id_t domain) noexcept {
-            return punned.verbs.emplace(punned.variant, ram_residency(domain));
+            return punned.verbs.emplace(punned.variant, ram_residency_k, domain);
         });
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
         if (status_t const placed = punned.verbs.emplace(
-                punned.variant, ram_residency(static_cast<fu_memory_domain_id_t>(ram.memory_domains[position])));
+                punned.variant, ram_residency_k, static_cast<fu_memory_domain_id_t>(ram.memory_domains[position]));
             failed(placed))
             return placed;
     return status_t::success_k;
@@ -211,7 +211,7 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
         return propagate_error(usearch_status_unsupported_k, outcome, "No compiled variant serves the geometry"),
                nullptr;
     auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
-                                                        ram_residency_k);
+                                                        ram_residency_k, host_allocator_of(ram));
     if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
     handle_type_* const handle = new (std::nothrow) handle_type_ {{verbs, created}};
     if (!handle)
@@ -277,7 +277,7 @@ status_t place_shards(punned_basic_index<traits_type_, residency_> const& punned
     std::span<gpu_device_t const> const devices = gpu_devices();
     for (std::size_t shard = 0; shard != named_count(vram); ++shard)
         if (status_t const placed = punned.verbs.emplace(
-                punned.variant, vram_residency(devices[named_ordinal(vram, shard)].vendor_ordinal));
+                punned.variant, vram_residency(devices[named_ordinal(vram, shard)].vendor_ordinal), no_memory_domain_k);
             failed(placed))
             return placed;
     return status_t::success_k;
@@ -321,7 +321,8 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
         return propagate_error(usearch_status_device_k, outcome, "This build carries no kernels for the device"),
                nullptr;
     auto const [created, create_status] = verbs->create(std::move(geometry), traits_t::geometry_extras_of(arguments),
-                                                        vram_residency(device->vendor_ordinal));
+                                                        vram_residency(device->vendor_ordinal),
+                                                        host_allocator_of(vram));
     if (failed(create_status)) return propagate_error(create_status, outcome), nullptr;
     handle_type_* const index = new (std::nothrow) handle_type_ {{verbs, created}};
     if (!index)
@@ -375,19 +376,34 @@ void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noe
     if (index) *arguments->index = index;
 }
 
-/** Loads a checkpoint onto the devices the arguments name, as the GPU variant's face answers. */
-template <auto verb_, typename arguments_type_>
-void basic_load_vram(arguments_type_* arguments) noexcept {
+/** Whether the checkpoint @p bytes sit on the host, where a basic GPU variant reads one; false once
+ *  @p outcome records why not. */
+inline bool accepts_host_checkpoint(bytes_view_t bytes, usearch_outcome_t* outcome) noexcept {
+    if (checkpoint_source_of(bytes).device == host_device_k) return true;
+    return propagate_error(usearch_status_unsupported_k, outcome, "A basic checkpoint loads from host memory");
+}
+
+/** Whether a path, which only a host names, is a host checkpoint. */
+inline bool accepts_host_checkpoint(std::string_view, usearch_outcome_t*) noexcept { return true; }
+
+/** Loads @p checkpoint, a path or the bytes of one in host memory, onto the devices the arguments
+ *  name, as the GPU variant's face answers. */
+template <auto verb_, typename arguments_type_, typename checkpoint_type_>
+void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_type_ checkpoint) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
 #if USEARCH_ARCH_CUDA_
     using handle_t = handle_of<arguments_type_>;
-    std::string_view const path = as_text(arguments->path);
+    if (checkpoint.empty())
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
+    if (!accepts_host_checkpoint(checkpoint, outcome)) return;
     typename handle_t::traits_t::geometry_t geometry;
-    if (status_t const recalled = handle_t::traits_t::recall(path, geometry); failed(recalled))
+    if (status_t const recalled = handle_t::traits_t::recall(checkpoint, geometry); failed(recalled))
         return propagate_error(recalled, outcome), void();
-    auto load = [&](auto const& punned) noexcept { return basic_load_variant(punned, path, *arguments, outcome); };
+    auto load = [&](auto const& punned) noexcept {
+        return basic_load_variant(punned, checkpoint, *arguments, outcome);
+    };
     handle_t* const index = make_basic_vram_handle<handle_t>(geometry, *arguments, outcome, load);
     if (index) *arguments->index = index;
 #else
@@ -590,20 +606,23 @@ void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** 
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, seed};
+        split_config_t const config {refine_config_of(arguments->refine), seed};
         void* const refinement = basic_open_refinement(arguments->index, punned, donors, count, receivers,
                                                        receivers_count, config, *executor, outcome);
         if (!refinement) return;
         std::unique_ptr<void, void (*)(void*) noexcept> const owned {refinement, punned.verbs.refinement_free};
         progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refinement)};
         status_t const ran = punned.verbs.refinement_next(punned.variant, refinement, *executor, ticks);
+        if (failed(ran) && ran != status_t::cancelled_k) {
+            basic_free_consumed(punned, refinement, donors, count);
+            basic_count_split_receivers(punned, refinement, receivers, receivers_count);
+            return propagate_error(ran, outcome), void();
+        }
+        // A stopped pass still moves every donor in and heals, so it reports alongside the cancel.
+        status_t const finished = basic_finish_refinement(punned, refinement, *arguments, *executor);
         basic_free_consumed(punned, refinement, donors, count);
         basic_count_split_receivers(punned, refinement, receivers, receivers_count);
-        if (failed(ran) && ran != status_t::cancelled_k) return propagate_error(ran, outcome), void();
-        // A stopped pass still heals, so its report stands beside the cancel.
-        if (status_t const finished = basic_finish_refinement(punned, refinement, *arguments, *executor);
-            failed(finished))
-            return propagate_error(finished, outcome), void();
+        if (failed(finished)) return propagate_error(finished, outcome), void();
         propagate_error(ran, outcome);
     });
 }
@@ -642,7 +661,7 @@ void basic_refinement_init(arguments_type_* arguments) noexcept {
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        split_config_t const config {refine_config_of(arguments->refine), arguments->seed};
         void* const refinement = basic_open_refinement(arguments->index, punned, arguments->donors, arguments->count,
                                                        arguments->receivers, arguments->receivers_count, config,
                                                        *executor, outcome);
@@ -811,15 +830,14 @@ void basic_search(arguments_type_* arguments) noexcept {
         if (arguments->traversal == usearch_traversal_scan_k && residency != ram_residency_k)
             return propagate_error(usearch_status_unsupported_k, outcome, "No device scan serves this modality"),
                    void();
-        // Matches land on host pages, which a device arena takes over and a host one keeps.
-        bool const host_arena = arguments->arena && arguments->arena->residency == ram_residency_k;
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                          host_arena ? ram_residency_k : residency,
+                                                          staging_residency(arguments->arena, residency),
                                                           {address_of(arguments->queries)}, outcome);
         if (!arena) return;
         if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
         if (!traits_t::accepts(*arguments, outcome)) return;
-        typename traits_t::queries_t const queries = traits_t::queries_of(*arguments);
+        auto const [queries, queries_status] = traits_t::queries_of(*arguments, arena->memory);
+        if (failed(queries_status)) return propagate_error(queries_status, outcome), void();
         if (status_t const admitted = punned.verbs.serves_search(punned.variant, queries); failed(admitted))
             return propagate_error(admitted, outcome), void();
         auto [outputs, carve_status] = carve_matches(arena->memory, count, wanted);
@@ -865,7 +883,8 @@ void basic_within(arguments_type_* arguments) noexcept {
         if (!accepts_traversal(punned.verbs.residency(punned.variant), arguments->traversal, arguments->predicate,
                                outcome))
             return;
-        typename traits_t::within_queries_t const queries = traits_t::queries_of(*arguments);
+        auto const [queries, queries_status] = traits_t::queries_of(*arguments, arena->memory);
+        if (failed(queries_status)) return propagate_error(queries_status, outcome), void();
         predicate_t const predicate = predicate_of(arguments->predicate);
         if (status_t const admitted = punned.verbs.serves_within(punned.variant, queries, predicate); failed(admitted))
             return propagate_error(admitted, outcome), void();
@@ -953,26 +972,33 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
                void();
     if (fu::standard_atomic_ref<u32_t>(cursor.busy).fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull holds the cursor"), void();
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      ram_residency_k, {}, outcome);
-    if (arena)
-        visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-            usearch_executor_handle_t call_executor;
-            typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
-                                                                            outcome);
-            if (!executor) return;
-            links_outputs_t links {arena->memory};
-            if (arguments->links && failed(links.open()))
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-            auto const [keys, status] = punned.verbs.cursor_next(punned.variant, cursor.cursor,
-                                                                 arguments->links ? &links : nullptr, arguments->wanted,
-                                                                 arena->memory, *executor);
-            if (failed(status)) return propagate_error(status, outcome), void();
-            if (arguments->links) *arguments->links = links.tape();
-            *arguments->keys = {keys.data(), sizeof(usearch_key_t)};
-            *arguments->written = keys.size();
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        });
+    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
+        usearch_arena_handle_t* const arena = claim_arena(
+            arguments->arena, arguments->outcome, arguments->executor,
+            staging_residency(arguments->arena, punned.verbs.residency(punned.variant)), {}, outcome);
+        if (!arena) return;
+        usearch_executor_handle_t call_executor;
+        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
+                                                                        outcome);
+        if (!executor) return;
+        links_outputs_t links {arena->memory};
+        if (arguments->links && failed(links.open()))
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+        auto const [keys, status] = punned.verbs.cursor_next(punned.variant, cursor.cursor,
+                                                             arguments->links ? &links : nullptr, arguments->wanted,
+                                                             arena->memory, *executor);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        auto const [published_keys, published_keys_status] = publish(*arena, keys.data(), keys.size());
+        auto const [published_links, published_links_status] = publish_links(*arena, links);
+        if (status_t const drained_status = drained(*arena,
+                                                    first_failure({published_keys_status, published_links_status}));
+            failed(drained_status))
+            return propagate_error(drained_status, outcome, "Failed to upload the keys to the device"), void();
+        if (arguments->links) *arguments->links = published_links;
+        *arguments->keys = {published_keys, sizeof(usearch_key_t)};
+        *arguments->written = keys.size();
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
     fu::standard_atomic_ref<u32_t>(cursor.busy).clear_bits(1, std::memory_order_release);
 }
 

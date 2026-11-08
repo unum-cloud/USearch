@@ -88,7 +88,7 @@ template <                                                                    //
     typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
     typename rmscast_kit_type_ = no_rmscast_kit_t,                            //
     typename visits_kit_type_ = serial_visits_hash_set_kit_t,                 //
-    typename wait_type_ = fu::standard_yield_t,                               //
+    typename wait_type_ = dummy_waiter_t,                                     //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
     typename cache_hints_type_ = dummy_cache_hints_t,                         //
     typename key_hash_type_ = std::hash<key_type_>                            //

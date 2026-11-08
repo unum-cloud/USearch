@@ -146,7 +146,8 @@ using widened_index_t =
     ram_index<embedding_t, uuid_t, u32_t, f32_t, dummy_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 
 /** A UUID-keyed view of the embeddings on storage. */
-using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, uuid_t, u32_t, f32_t, blocking_files_engine<>>;
+using widened_view_t =
+    us::basic::nvme_indexes<embedding_codec_t, uuid_t, u32_t, f32_t, blocking_files_engine<fu::standard_yield_t>>;
 
 /**
  *  @brief A monolith of @p fixture_type_ 's keys widens into UUID keys on every reader.

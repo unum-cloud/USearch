@@ -42,7 +42,10 @@ USEARCH_EXPORT void usearch_sequence_load_ram_buffer(usearch_sequence_load_ram_b
     basic_load_ram<usearch_sequence_load_ram_buffer>(arguments, as_bytes(arguments->buffer));
 }
 USEARCH_EXPORT void usearch_sequence_load_vram(usearch_sequence_load_vram_t* arguments) {
-    basic_load_vram<usearch_sequence_load_vram>(arguments);
+    basic_load_vram<usearch_sequence_load_vram>(arguments, as_text(arguments->path));
+}
+USEARCH_EXPORT void usearch_sequence_load_vram_buffer(usearch_sequence_load_vram_buffer_t* arguments) {
+    basic_load_vram<usearch_sequence_load_vram_buffer>(arguments, as_bytes(arguments->buffer));
 }
 USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) { basic_view_ram(arguments); }
 USEARCH_EXPORT void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {

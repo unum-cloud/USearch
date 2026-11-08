@@ -506,6 +506,13 @@ void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
+void usearch_geospatial_load_vram_buffer(usearch_geospatial_load_vram_buffer_t* arguments) {
+    if (through_executor<usearch_geospatial_load_vram_buffer>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
 void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;

@@ -363,7 +363,6 @@ struct [[nodiscard]] nvme_compact_plan {
                                                                bytes_span_t, compact_config_t const&,
                                                                save_config_t const&) noexcept;
 
-    using node_id_t = dense::node_id_t;
     template <typename word_type_>
     using atomic_ref = typename indexes_t::template atomic_ref<word_type_>;
     using wait_t = typename indexes_t::wait_t;

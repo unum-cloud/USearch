@@ -730,8 +730,8 @@ std::size_t expect_cursor(handle<verbs_type_>& index, std::size_t count) {
         while (true) {
             usearch_keys_view_t keys {};
             usearch_keys_tape_view_t links {};
-            verbs_type_::cursor_next(index.get(), index.executor(), index.session->arena, cursor, cell_batch_k, &keys,
-                                     &links, &written, &outcome);
+            verbs_type_::cursor_next(index.get(), index.executor(), index.arena(), cursor, cell_batch_k, &keys, &links,
+                                     &written, &outcome);
             failures += check(outcome);
             if (outcome.status != usearch_status_success_k || !written) break;
             std::vector<usearch_key_t> batch(written);
@@ -769,8 +769,8 @@ std::size_t expect_sample(handle<verbs_type_>& index, std::size_t count) {
     for (std::vector<usearch_key_t>& keys : drawn) {
         usearch_outcome_t outcome {};
         sample_outputs_view_t outputs {};
-        verbs_type_::sample(index.get(), index.executor(), index.session->arena, {}, {}, {}, wanted,
-                            index.session->seed, outputs, &outcome);
+        verbs_type_::sample(index.get(), index.executor(), index.arena(), {}, {}, {}, wanted, index.session->seed,
+                            outputs, &outcome);
         if (index.residency == usearch_residency_vram_k)
             return check(outcome.status == usearch_status_unsupported_k && outcome.message);
         if (check(outcome)) return failures + 1;
@@ -853,7 +853,7 @@ std::size_t expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_
                                                                                   : usearch_status_success_k;
     usearch_outcome_t outcome {};
     usearch_bytes_view_t monolith {};
-    verbs_type_::save_buffer(index.get(), index.executor(), index.session->arena, &monolith, &outcome);
+    verbs_type_::save_buffer(index.get(), index.executor(), index.arena(), &monolith, &outcome);
     if (wanted != usearch_status_success_k) return check(outcome.status == wanted && outcome.message);
     std::size_t failures = check(outcome);
     if (failures) return failures;
@@ -864,7 +864,7 @@ std::size_t expect_buffer_round_trip(handle<verbs_type_>& index, typename verbs_
     failures += check(outcome) + check(metadata.connectivity != 0);
     std::vector<std::int32_t> placement;
     typename verbs_type_::index_t copy = nullptr;
-    verbs_type_::load_ram_buffer(&copy, index.session->executor, bytes_view(bytes),
+    verbs_type_::load_ram_buffer(&copy, index.session->executor_for(usearch_residency_ram_k), bytes_view(bytes),
                                  index.session->ram_options(0, placement), index.geometry, &outcome);
     failures += check(outcome);
     handle<verbs_type_> reloaded {copy, *index.session, usearch_residency_ram_k, index.geometry};
@@ -939,9 +939,9 @@ std::size_t expect_persistence(sweep_cell_t const& cell, handle<verbs_type_>& in
 
 /** Two refinements settle: each changes no more entries than it re-selected, the second no more
  *  than the first, and a walk at @p expansion keeps as much of the exact scan's top ten over the
- *  first @p count queries of @p queries, so the scan and the walk that judge it must both succeed;
- *  a VRAM index whose tower still declares its refinement answers @p on_device instead and is left
- *  out of the judging. */
+ *  first @p count queries of @p queries, so the scan and the walk that judge it must both succeed,
+ *  where the residency serves a scan; a VRAM index whose tower still declares its refinement
+ *  answers @p on_device instead and is left out of the judging. */
 template <typename verbs_type_>
 std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::queries_t queries, std::size_t count,
                            std::size_t expansion, usearch_status_t on_device) {
@@ -949,7 +949,8 @@ std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::que
     double recall_before = 0, recall_after = 0;
     char const* refused = nullptr;
     usearch_outcome_t oracle_outcome = scan_oracle(index, queries, count, cell_wanted_k, cell_batch_k, oracle);
-    if (oracle_outcome.status != usearch_status_success_k) refused = "scan_oracle";
+    usearch_status_t const scanned = oracle_outcome.status;
+    if (scanned != usearch_status_success_k) refused = "scan_oracle";
     else if (oracle_outcome = walk_recall(index, queries, count, expansion, oracle, recall_before);
              oracle_outcome.status != usearch_status_success_k)
         refused = "walk_recall";
@@ -963,6 +964,7 @@ std::size_t expect_refined(handle<verbs_type_>& index, typename verbs_type_::que
         failures += check(outcome) + check(report.changed <= report.reselected);
     }
     failures += check(reports[1].changed <= reports[0].changed);
+    if (scanned == usearch_status_unsupported_k) return failures;
     if (refused) {
         fmt::println(stderr, "  the recall oracle's {} refused with {}: {}", refused,
                      usearch_status_name(oracle_outcome.status),
@@ -1048,7 +1050,7 @@ std::size_t expect_cleared(handle<verbs_type_>& index, typename verbs_type_::val
     if (!cursor) return failures + 1;
     usearch_keys_view_t keys {};
     std::size_t written = 0;
-    verbs_type_::cursor_next(index.get(), index.executor(), index.session->arena, cursor, cell_batch_k, &keys, nullptr,
+    verbs_type_::cursor_next(index.get(), index.executor(), index.arena(), cursor, cell_batch_k, &keys, nullptr,
                              &written, &outcome);
     verbs_type_::cursor_free(cursor);
     return failures + check(outcome.status == usearch_status_contended_k && written == 0);

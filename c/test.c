@@ -38,6 +38,7 @@
 #include <unistd.h>   // `STDERR_FILENO`
 #endif
 
+#include "usearch/arrow.h"
 #include "usearch/dense_index.h"
 #include "usearch/geospatial_index.h"
 #include "usearch/sequence_index.h"
@@ -175,6 +176,20 @@ usearch_arena_t create_arena(usearch_executor_t const executor) {
     expect(!outcome.message, outcome.message);
     expect(arena != NULL, "Arena initialization returned no handle");
     return arena;
+}
+
+/** A tape over @p offsets as a caller holding @c size_t offsets lends them, in their own width. */
+usearch_tape_view_t tape_of(void const* data, size_t const* offsets, usearch_scalar_t scalar) {
+    usearch_tape_view_t tape = {.data = data, .scalar = scalar};
+    if (sizeof(size_t) == sizeof(uint64_t))
+        tape.layout = usearch_tape_u64_k, tape.offsets.u64 = (uint64_t const*)offsets;
+    else tape.offsets.u32 = (uint32_t const*)offsets;
+    return tape;
+}
+
+/** The offsets of an output @p tape, which the library writes as wide as @c size_t. */
+size_t const* offsets_of(usearch_tape_view_t tape) {
+    return sizeof(size_t) == sizeof(uint64_t) ? (size_t const*)tape.offsets.u64 : (size_t const*)tape.offsets.u32;
 }
 
 /** Admits the keys whose integer identity is even, recording in @p state the widest batch it was
@@ -759,7 +774,8 @@ void test_absorb(size_t const dimensions) {
         if (!cancelled) break;
     } while (pulls != rows_count);
     expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total >= rows_count, "The handler must hear the walks over every row");
+    expect(reports.calls > 0 && reports.total >= rows_per_index,
+           "The handler must hear the walks over every donor row");
     expect(reports.ascending, "Every pull must count on from where the last stopped");
 
     usearch_refine_report_t finished = {0};
@@ -845,14 +861,14 @@ void test_sequence_absorb(void) {
                                                                   .connectivity = 8});
         expect(!outcome.message, outcome.message);
         // Eight candidates wire a deliberately weak graph, which the refinement then improves.
-        usearch_sequence_insert(
-            &(usearch_sequence_insert_t) {.index = indexes[which],
-                                          .executor = executor,
-                                          .outcome = &outcome,
-                                          .count = reads_per_index,
-                                          .keys = {keys + which * reads_per_index, sizeof(usearch_key_t)},
-                                          .sequences = {bytes, offsets + which * reads_per_index, usearch_scalar_u8_k},
-                                          .expansion_factor = 8});
+        usearch_sequence_insert(&(usearch_sequence_insert_t) {
+            .index = indexes[which],
+            .executor = executor,
+            .outcome = &outcome,
+            .count = reads_per_index,
+            .keys = {keys + which * reads_per_index, sizeof(usearch_key_t)},
+            .sequences = tape_of(bytes, offsets + which * reads_per_index, usearch_scalar_u8_k),
+            .expansion_factor = 8});
         expect(!outcome.message, outcome.message);
     }
 
@@ -888,7 +904,7 @@ void test_sequence_absorb(void) {
                                                           .outcome = &outcome,
                                                           .count = 1,
                                                           .keys = {&late_key, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     expect_eq(outcome.status, usearch_status_contended_k, "A refinement must hold its index closed");
 
     progress_reports_t reports = {0, 0, 0, true};
@@ -918,7 +934,8 @@ void test_sequence_absorb(void) {
         if (!cancelled) break;
     } while (pulls != reads_count);
     expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total >= reads_count, "The handler must hear the walks over every read");
+    expect(reports.calls > 0 && reports.total >= reads_per_index,
+           "The handler must hear the walks over every donor read");
     expect(reports.ascending, "Every pull must count on from where the last stopped");
 
     usearch_refine_report_t finished = {0};
@@ -1215,6 +1232,35 @@ void test_arenas(size_t const dimensions) {
     usearch_dense_search(&search);
     expect(!outcome.message, outcome.message);
     expect_eq(matches.counts[0], 2, "An arena of host pages serves a call on the calling thread");
+
+    usearch_arena_description_t description = {usearch_residency_unknown_k, 1};
+    usearch_arena_describe(
+        &(usearch_arena_describe_t) {.arena = local, .outcome = &outcome, .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.residency == usearch_residency_ram_k && description.device == 0,
+           "An arena made without an executor is host pages");
+    usearch_arena_describe(
+        &(usearch_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &description});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "Describing a NULL arena is refused");
+
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    int32_t const devices[1] = {0};
+    usearch_executor_t device_executor = NULL;
+    if (devices_count)
+        usearch_executor_for_vram(&(usearch_executor_for_vram_t) {.executor = &device_executor,
+                                                                  .outcome = &outcome,
+                                                                  .vram = {.devices = devices, .devices_count = 1}});
+    if (device_executor) {
+        usearch_arena_t const device_arena = create_arena(device_executor);
+        usearch_arena_describe(
+            &(usearch_arena_describe_t) {.arena = device_arena, .outcome = &outcome, .description = &description});
+        expect(!outcome.message, outcome.message);
+        expect(description.residency == usearch_residency_vram_k && description.device == 0,
+               "An arena made by a device executor lives on its first device");
+        usearch_arena_free(device_arena);
+        usearch_executor_free(device_executor);
+    }
 
     usearch_arena_free(local);
     usearch_arena_free(placed);
@@ -1693,15 +1739,16 @@ void test_sequence_round_trip(void) {
                                                           .outcome = &outcome,
                                                           .count = 4,
                                                           .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     expect(!outcome.message, outcome.message);
     size_t const falling_offsets[] = {0, 6, 3};
-    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
-                                                          .executor = executor,
-                                                          .outcome = &outcome,
-                                                          .count = 2,
-                                                          .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, falling_offsets, usearch_scalar_u8_k}});
+    usearch_sequence_insert(
+        &(usearch_sequence_insert_t) {.index = index,
+                                      .executor = executor,
+                                      .outcome = &outcome,
+                                      .count = 2,
+                                      .keys = {keys, sizeof(usearch_key_t)},
+                                      .sequences = tape_of(bytes, falling_offsets, usearch_scalar_u8_k)});
     expect_eq(outcome.status, usearch_status_invalid_argument_k, "Falling offsets are refused before any insert");
 
     char const path[] = "usearch-test-c-sequence.safegraphs";
@@ -1712,7 +1759,7 @@ void test_sequence_round_trip(void) {
                                                               .executor = executor,
                                                               .outcome = &outcome,
                                                               .count = 1,
-                                                              .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                              .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                               .matches = &matches,
                                                               .arena = arena,
                                                               .wanted = 2});
@@ -1731,8 +1778,8 @@ void test_sequence_round_trip(void) {
                                                         .written = &written,
                                                         .arena = arena});
         expect(!outcome.message, outcome.message);
-        expect(written == 1 && got.offsets[1] - got.offsets[0] == 7 &&
-                   memcmp((uint8_t const*)got.data + got.offsets[0], "sitting", 7) == 0,
+        expect(written == 1 && offsets_of(got)[1] - offsets_of(got)[0] == 7 &&
+                   memcmp((uint8_t const*)got.data + offsets_of(got)[0], "sitting", 7) == 0,
                "Get hands the stored bytes back");
         if (reloaded) break;
 
@@ -1772,7 +1819,7 @@ void test_sequence_round_trip(void) {
                                                               .executor = storage,
                                                               .outcome = &outcome,
                                                               .count = 1,
-                                                              .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                              .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                               .matches = &viewed_matches,
                                                               .arena = arena,
                                                               .wanted = 1});
@@ -1798,8 +1845,8 @@ void test_sequence_round_trip(void) {
                                                         .written = &viewed_written,
                                                         .arena = arena});
         expect(!outcome.message, outcome.message);
-        expect(viewed_written == 1 && viewed_got.offsets[1] - viewed_got.offsets[0] == 7 &&
-                   memcmp((uint8_t const*)viewed_got.data + viewed_got.offsets[0], "sitting", 7) == 0,
+        expect(viewed_written == 1 && offsets_of(viewed_got)[1] - offsets_of(viewed_got)[0] == 7 &&
+                   memcmp((uint8_t const*)viewed_got.data + offsets_of(viewed_got)[0], "sitting", 7) == 0,
                "A view from storage hands the stored bytes back");
         usearch_sequence_refine(
             &(usearch_sequence_refine_t) {.index = viewed, .executor = storage, .outcome = &outcome});
@@ -1827,12 +1874,13 @@ void test_sequence_round_trip(void) {
         }
         expect(pulled[1] == 1, "A cursor over storage stops at the last row");
         usearch_sequence_cursor_free(cursor);
-        usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = viewed,
-                                                              .executor = storage,
-                                                              .outcome = &outcome,
-                                                              .count = 1,
-                                                              .keys = {keys, sizeof(usearch_key_t)},
-                                                              .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+        usearch_sequence_insert(
+            &(usearch_sequence_insert_t) {.index = viewed,
+                                          .executor = storage,
+                                          .outcome = &outcome,
+                                          .count = 1,
+                                          .keys = {keys, sizeof(usearch_key_t)},
+                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
         expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
         usearch_sequence_save(
             &(usearch_sequence_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
@@ -1934,7 +1982,7 @@ void test_sequence_shards(void) {
                                                           .outcome = &outcome,
                                                           .count = reads_count,
                                                           .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     expect(!outcome.message, outcome.message);
     usearch_sequence_index_description_t description = {0};
     usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
@@ -1960,7 +2008,7 @@ void test_sequence_shards(void) {
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = reads_count,
-                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                           .matches = &matches,
                                                           .arena = arena,
                                                           .wanted = 1});
@@ -2026,7 +2074,7 @@ void test_sequence_shards(void) {
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = reads_count,
-                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                           .matches = &matches,
                                                           .arena = arena,
                                                           .wanted = 1});
@@ -2099,10 +2147,10 @@ void test_sequence_vram(void) {
                                                           .outcome = &outcome,
                                                           .count = 4,
                                                           .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     expect(!outcome.message, outcome.message);
     usearch_sequence_refine(&(usearch_sequence_refine_t) {.index = index, .executor = executor, .outcome = &outcome});
-    expect_eq(outcome.status, usearch_status_unsupported_k, "A GPU index refines nothing yet");
+    expect(!outcome.message, outcome.message);
     usearch_sequence_index_description_t description = {0};
     usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
                                                               .executor = executor,
@@ -2119,7 +2167,7 @@ void test_sequence_vram(void) {
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 4,
-                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                           .matches = &matches,
                                                           .arena = arena,
                                                           .wanted = 2});
@@ -2141,7 +2189,7 @@ void test_sequence_vram(void) {
                                                           .outcome = &outcome,
                                                           .count = 4,
                                                           .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
     expect(!outcome.message, outcome.message);
     usearch_arena_t const host_arena = create_arena(NULL);
     usearch_matches_view_t overlaps = {0};
@@ -2149,7 +2197,7 @@ void test_sequence_vram(void) {
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 1,
-                                                          .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                          .queries = tape_of(bytes, offsets, usearch_scalar_u8_k),
                                                           .matches = &overlaps,
                                                           .arena = host_arena,
                                                           .wanted = 2});
@@ -2175,22 +2223,24 @@ void test_sequence_vram(void) {
                                                                 .weights = &weights,
                                                                 .vram = vram});
     expect(!outcome.message, outcome.message);
-    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = aligned,
-                                                          .executor = executor,
-                                                          .outcome = &outcome,
-                                                          .count = 4,
-                                                          .keys = {keys, sizeof(usearch_key_t)},
-                                                          .sequences = {packed, packed_offsets, usearch_scalar_u8_k}});
+    usearch_sequence_insert(
+        &(usearch_sequence_insert_t) {.index = aligned,
+                                      .executor = executor,
+                                      .outcome = &outcome,
+                                      .count = 4,
+                                      .keys = {keys, sizeof(usearch_key_t)},
+                                      .sequences = tape_of(packed, packed_offsets, usearch_scalar_u8_k)});
     expect(!outcome.message, outcome.message);
     usearch_matches_view_t alignments = {0};
-    usearch_sequence_search(&(usearch_sequence_search_t) {.index = aligned,
-                                                          .executor = executor,
-                                                          .outcome = &outcome,
-                                                          .count = 1,
-                                                          .queries = {packed, packed_offsets, usearch_scalar_u8_k},
-                                                          .matches = &alignments,
-                                                          .arena = host_arena,
-                                                          .wanted = 4});
+    usearch_sequence_search(
+        &(usearch_sequence_search_t) {.index = aligned,
+                                      .executor = executor,
+                                      .outcome = &outcome,
+                                      .count = 1,
+                                      .queries = tape_of(packed, packed_offsets, usearch_scalar_u8_k),
+                                      .matches = &alignments,
+                                      .arena = host_arena,
+                                      .wanted = 4});
     expect(!outcome.message, outcome.message);
     expect(alignments.counts[0] == 4 && value_of(alignments.keys[0]) == 0 && alignments.scores[0] == 0,
            "A stored alignment query finds itself first");
@@ -2254,22 +2304,23 @@ void test_shapes_round_trip(void) {
                                                       .outcome = &outcome,
                                                       .count = 1,
                                                       .keys = {keys, sizeof(usearch_key_t)},
-                                                      .shapes = {points, short_offsets, usearch_scalar_f32_k}});
+                                                      .shapes = tape_of(points, short_offsets, usearch_scalar_f32_k)});
     expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A frozen point count refuses any other");
     size_t const falling_offsets[] = {0, 4, 2};
-    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .count = 2,
-                                                      .keys = {keys, sizeof(usearch_key_t)},
-                                                      .shapes = {points, falling_offsets, usearch_scalar_f32_k}});
+    usearch_shapes_insert(
+        &(usearch_shapes_insert_t) {.index = index,
+                                    .executor = executor,
+                                    .outcome = &outcome,
+                                    .count = 2,
+                                    .keys = {keys, sizeof(usearch_key_t)},
+                                    .shapes = tape_of(points, falling_offsets, usearch_scalar_f32_k)});
     expect_eq(outcome.status, usearch_status_invalid_argument_k, "Falling offsets are refused before any insert");
     usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .count = 3,
                                                       .keys = {keys, sizeof(usearch_key_t)},
-                                                      .shapes = {points, offsets, usearch_scalar_f32_k}});
+                                                      .shapes = tape_of(points, offsets, usearch_scalar_f32_k)});
     expect(!outcome.message, outcome.message);
 
     char const path[] = "usearch-test-c-shapes.safegraphs";
@@ -2280,7 +2331,7 @@ void test_shapes_round_trip(void) {
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 1,
-                                                          .queries = {points, offsets, usearch_scalar_f32_k},
+                                                          .queries = tape_of(points, offsets, usearch_scalar_f32_k),
                                                           .matches = &matches,
                                                           .arena = arena,
                                                           .wanted = 1});
@@ -2299,8 +2350,8 @@ void test_shapes_round_trip(void) {
                                                     .arena = arena,
                                                     .outputs_scalar = usearch_scalar_f32_k});
         expect(!outcome.message, outcome.message);
-        expect(written == 1 && got.offsets[1] - got.offsets[0] == 4, "Get hands every point back");
-        float const* const exported = (float const*)got.data + got.offsets[0] * 3;
+        expect(written == 1 && offsets_of(got)[1] - offsets_of(got)[0] == 4, "Get hands every point back");
+        float const* const exported = (float const*)got.data + offsets_of(got)[0] * 3;
         for (size_t coordinate = 0; coordinate != 12; ++coordinate)
             expect(fabsf(exported[coordinate] - points[24 + coordinate]) < 1e-6f, "Get hands the stored pose back");
         if (reloaded) break;
@@ -2339,7 +2390,7 @@ void test_shapes_round_trip(void) {
                                                           .executor = storage,
                                                           .outcome = &outcome,
                                                           .count = 1,
-                                                          .queries = {points, offsets, usearch_scalar_f32_k},
+                                                          .queries = tape_of(points, offsets, usearch_scalar_f32_k),
                                                           .matches = &viewed_matches,
                                                           .arena = arena,
                                                           .wanted = 1});
@@ -2367,9 +2418,9 @@ void test_shapes_round_trip(void) {
                                                     .arena = arena,
                                                     .outputs_scalar = usearch_scalar_f32_k});
         expect(!outcome.message, outcome.message);
-        expect(viewed_written == 1 && viewed_got.offsets[1] - viewed_got.offsets[0] == 4,
+        expect(viewed_written == 1 && offsets_of(viewed_got)[1] - offsets_of(viewed_got)[0] == 4,
                "A view from storage hands every point back");
-        float const* const viewed_points = (float const*)viewed_got.data + viewed_got.offsets[0] * 3;
+        float const* const viewed_points = (float const*)viewed_got.data + offsets_of(viewed_got)[0] * 3;
         for (size_t coordinate = 0; coordinate != 12; ++coordinate)
             expect(fabsf(viewed_points[coordinate] - points[24 + coordinate]) < 1e-6f,
                    "A view from storage hands the stored pose back");
@@ -2397,7 +2448,7 @@ void test_shapes_round_trip(void) {
                                                           .outcome = &outcome,
                                                           .count = 1,
                                                           .keys = {keys, sizeof(usearch_key_t)},
-                                                          .shapes = {points, offsets, usearch_scalar_f32_k}});
+                                                          .shapes = tape_of(points, offsets, usearch_scalar_f32_k)});
         expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
         usearch_shapes_save(
             &(usearch_shapes_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
@@ -2464,7 +2515,7 @@ void test_shapes_vram(void) {
                                                       .outcome = &outcome,
                                                       .count = 3,
                                                       .keys = {keys, sizeof(usearch_key_t)},
-                                                      .shapes = {points, offsets, usearch_scalar_f32_k}});
+                                                      .shapes = tape_of(points, offsets, usearch_scalar_f32_k)});
     expect(!outcome.message, outcome.message);
     usearch_shapes_index_description_t description = {0};
     usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = index,
@@ -2483,7 +2534,7 @@ void test_shapes_vram(void) {
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .count = 3,
-                                                      .queries = {points, offsets, usearch_scalar_f32_k},
+                                                      .queries = tape_of(points, offsets, usearch_scalar_f32_k),
                                                       .matches = &matches,
                                                       .arena = arena,
                                                       .wanted = 2});
@@ -2799,7 +2850,7 @@ void test_shapes_and_geospatial_absorb(void) {
             .outcome = &outcome,
             .count = entries_per_index,
             .keys = {keys + which * entries_per_index, sizeof(usearch_key_t)},
-            .shapes = {points + which * entries_per_index * points_per_shape * 3, offsets, usearch_scalar_f32_k},
+            .shapes = tape_of(points + which * entries_per_index * points_per_shape * 3, offsets, usearch_scalar_f32_k),
             .expansion_factor = 4});
         expect(!outcome.message, outcome.message);
     }
@@ -4351,6 +4402,401 @@ void test_vram_scan(size_t const collection_size, size_t const dimensions) {
     printf("Test: VRAM Scan - PASSED\n");
 }
 
+static void release_schema_of_test(struct ArrowSchema* schema) { schema->release = NULL; }
+
+static void release_array_of_test(struct ArrowArray* array) { array->release = NULL; }
+
+/** Releases an exported column, the schema first, as its consumer may. */
+static void release_column(struct ArrowSchema* schema, struct ArrowDeviceArray* array) {
+    schema->release(schema);
+    array->array.release(&array->array);
+    expect(!schema->release && !array->array.release, "A release marks its structure released");
+}
+
+/** An index of four short strings, then a long one a get lands in an arena as an output would. */
+static usearch_sequence_index_t create_strings(usearch_executor_t executor) {
+    usearch_outcome_t outcome = {0};
+    char const bytes[536] = "kittensittingmittenflask";
+    size_t const offsets[] = {0, 6, 13, 19, 24, 536};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3), key_of(4)};
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 5,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
+    expect(!outcome.message, outcome.message);
+    return index;
+}
+
+/** Rewinds @p arena and answers the 512 bytes a get wrote there, which any export may name. */
+static uint8_t* bytes_in_arena(usearch_sequence_index_t index, usearch_executor_t executor, usearch_arena_t arena) {
+    usearch_outcome_t outcome = {0};
+    usearch_tape_view_t got = {0};
+    size_t written = 0;
+    usearch_sequence_get(&(usearch_sequence_get_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .key = key_of(4),
+                                                    .sequences = &got,
+                                                    .written = &written,
+                                                    .arena = arena});
+    expect(!outcome.message, outcome.message);
+    expect_eq(written, 1, "A get finds the long string");
+    return (uint8_t*)got.data;
+}
+
+void test_arrow_rows_and_keys(void) {
+    printf("Test: Arrow Rows and Keys\n");
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_sequence_index_t const index = create_strings(executor);
+    uint8_t const* const bytes = bytes_in_arena(index, executor, arena);
+
+    struct {
+        usearch_scalar_t scalar;
+        size_t columns;
+        size_t row_bytes;
+        char const* format;
+        char const* element;
+    } const cases[] = {
+        {usearch_scalar_f64_k, 4, 32, "+w:4", "g"},   {usearch_scalar_f32_k, 4, 16, "+w:4", "f"},
+        {usearch_scalar_f16_k, 4, 8, "+w:4", "e"},    {usearch_scalar_bf16_k, 4, 8, "+w:4", "S"},
+        {usearch_scalar_e5m2_k, 4, 4, "+w:4", "C"},   {usearch_scalar_e4m3_k, 4, 4, "+w:4", "C"},
+        {usearch_scalar_e3m2_k, 4, 4, "+w:4", "C"},   {usearch_scalar_e2m3_k, 4, 4, "+w:4", "C"},
+        {usearch_scalar_i8_k, 4, 4, "+w:4", "c"},     {usearch_scalar_u8_k, 4, 4, "+w:4", "C"},
+        {usearch_scalar_i32_k, 4, 16, "+w:4", "i"},   {usearch_scalar_i4x2_k, 4, 2, "+w:2", "C"},
+        {usearch_scalar_u4x2_k, 4, 2, "+w:2", "C"},   {usearch_scalar_u1x8_k, 16, 2, "w:2", NULL},
+        {usearch_scalar_f64_k, 11, 88, "+w:11", "g"},
+    };
+    for (size_t index_of_case = 0; index_of_case != sizeof(cases) / sizeof(cases[0]); ++index_of_case) {
+        struct ArrowSchema schema = {0};
+        struct ArrowDeviceArray array = {0};
+        usearch_rows_view_t const rows = {bytes, cases[index_of_case].row_bytes, cases[index_of_case].columns,
+                                          cases[index_of_case].scalar};
+        expect_eq(usearch_rows_view_to_arrow(rows, 3, arena, &schema, &array), usearch_status_success_k,
+                  "Every scalar exports");
+        expect(!strcmp(schema.format, cases[index_of_case].format), "A row's format spells its width");
+        expect(!cases[index_of_case].element || !strcmp(schema.children[0]->format, cases[index_of_case].element),
+               "An element's format spells its scalar");
+        expect(array.device_type == ARROW_DEVICE_CPU && array.array.length == 3, "Host rows export as host rows");
+
+        usearch_rows_view_t viewed = {0};
+        size_t viewed_count = 0;
+        expect_eq(usearch_rows_view_from_arrow(&schema, &array.array, &viewed, &viewed_count), usearch_status_success_k,
+                  "Every scalar imports");
+        expect(viewed.data == (void const*)bytes && viewed.stride == rows.stride && viewed.columns == rows.columns &&
+                   viewed.scalar == rows.scalar && viewed_count == 3,
+               "An import views the very rows an export named");
+
+        array.array.offset = 1, array.array.length = 2;
+        expect_eq(usearch_rows_view_from_arrow(&schema, &array.array, &viewed, &viewed_count), usearch_status_success_k,
+                  "A slice imports");
+        expect(viewed.data == (void const*)(bytes + rows.stride) && viewed_count == 2, "A slice applies its offset");
+        release_column(&schema, &array);
+    }
+
+    struct ArrowSchema schema = {0};
+    struct ArrowDeviceArray array = {0};
+    usearch_rows_view_t const uneven = {bytes, 2, 3, usearch_scalar_u4x2_k};
+    expect_eq(usearch_rows_view_to_arrow(uneven, 1, arena, &schema, &array), usearch_status_unsupported_layout_k,
+              "Sub-byte rows fill whole bytes");
+
+    usearch_keys_view_t const keys = {(usearch_key_t const*)bytes, sizeof(usearch_key_t)};
+    expect_eq(usearch_keys_view_to_arrow(keys, 3, arena, &schema, &array), usearch_status_success_k, "Keys export");
+    expect(!strcmp(schema.format, "w:16") && schema.metadata != NULL, "Keys export as tagged 16-byte values");
+    usearch_keys_view_t viewed_keys = {0};
+    size_t viewed_count = 0;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array.array, &viewed_keys, &viewed_count),
+              usearch_status_success_k, "Keys import");
+    expect(viewed_keys.data == keys.data && viewed_keys.stride == sizeof(usearch_key_t) && viewed_count == 3,
+           "An import views the very keys an export named");
+    release_column(&schema, &array);
+
+    usearch_keys_view_t const strided = {(usearch_key_t const*)bytes, 2 * sizeof(usearch_key_t)};
+    expect_eq(usearch_keys_view_to_arrow(strided, 2, arena, &schema, &array), usearch_status_unsupported_layout_k,
+              "An export takes packed keys alone");
+    usearch_key_t const outside[2] = {key_of(1), key_of(2)};
+    usearch_keys_view_t const foreign = {outside, sizeof(usearch_key_t)};
+    expect_eq(usearch_keys_view_to_arrow(foreign, 2, arena, &schema, &array), usearch_status_invalid_argument_k,
+              "An export takes the arena's own outputs alone");
+
+    usearch_sequence_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+}
+
+void test_arrow_refusals(void) {
+    printf("Test: Arrow Refusals\n");
+    uint8_t const bytes[32] = {0};
+    uint8_t const validity = 0xFF;
+    void const* buffers[2] = {NULL, bytes};
+    struct ArrowSchema schema = {.format = "w:16", .release = &release_schema_of_test};
+    struct ArrowArray array = {.length = 2, .n_buffers = 2, .buffers = buffers, .release = &release_array_of_test};
+    usearch_keys_view_t keys = {0};
+    usearch_rows_view_t rows = {0};
+    usearch_tape_view_t tape = {0};
+    size_t count = 0;
+
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_success_k,
+              "A column with no validity buffer holds no null");
+    array.null_count = -1;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_success_k,
+              "An unknown count of nulls without a validity buffer rules them out");
+    array.null_count = 1;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_invalid_argument_k,
+              "A counted null is refused");
+    buffers[0] = &validity, array.null_count = -1;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_invalid_argument_k,
+              "An unknown count of nulls beside a validity buffer is refused");
+    buffers[0] = NULL, array.null_count = 0;
+
+    array.length = -1;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_malformed_k,
+              "A negative length is malformed");
+    array.length = 2;
+    schema.dictionary = &schema;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_unsupported_layout_k,
+              "A dictionary is refused");
+    schema.dictionary = NULL;
+    schema.format = "w:8";
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_unsupported_layout_k,
+              "Keys are 16 bytes wide");
+    expect_eq(usearch_rows_view_from_arrow(&schema, &array, &rows, &count), usearch_status_unsupported_layout_k,
+              "An untagged fixed-size column holds no rows");
+    expect_eq(usearch_tape_view_from_arrow(&schema, &array, &tape, &count), usearch_status_unsupported_layout_k,
+              "A fixed-size column is no tape");
+    schema.format = "w:16", schema.release = NULL;
+    expect_eq(usearch_keys_view_from_arrow(&schema, &array, &keys, &count), usearch_status_invalid_argument_k,
+              "A released schema is refused");
+    schema.release = &release_schema_of_test;
+
+    void const* list_buffers[1] = {NULL};
+    struct ArrowSchema element = {.format = "b", .release = &release_schema_of_test};
+    struct ArrowSchema* element_pointer = &element;
+    struct ArrowArray values = {.length = 8, .n_buffers = 2, .buffers = buffers, .release = &release_array_of_test};
+    struct ArrowArray* values_pointer = &values;
+    struct ArrowSchema list_schema = {.format = "+w:4",
+                                      .n_children = 1,
+                                      .children = &element_pointer,
+                                      .release = &release_schema_of_test};
+    struct ArrowArray list = {.length = 2,
+                              .n_buffers = 1,
+                              .n_children = 1,
+                              .buffers = list_buffers,
+                              .children = &values_pointer,
+                              .release = &release_array_of_test};
+    expect_eq(usearch_rows_view_from_arrow(&list_schema, &list, &rows, &count), usearch_status_unsupported_layout_k,
+              "A list of bools is refused");
+    element.format = "f";
+    expect_eq(usearch_rows_view_from_arrow(&list_schema, &list, &rows, &count), usearch_status_success_k,
+              "A list of floats imports");
+    values.null_count = 1;
+    expect_eq(usearch_rows_view_from_arrow(&list_schema, &list, &rows, &count), usearch_status_invalid_argument_k,
+              "A null among a row's elements is refused");
+    values.null_count = 0, values.length = 7;
+    expect_eq(usearch_rows_view_from_arrow(&list_schema, &list, &rows, &count), usearch_status_malformed_k,
+              "Rows past their child's values are malformed");
+}
+
+void test_arrow_tapes(void) {
+    printf("Test: Arrow Tapes\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+
+    // Both widths of an input reach the same entries, and a slice's offsets start anywhere
+    char const bytes[] = "kittensittingmittenflask";
+    uint32_t const narrow[] = {0, 6, 13, 19, 24};
+    uint64_t const wide[] = {0, 6, 13, 19, 24};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3)};
+    for (int layout = 0; layout != 2; ++layout) {
+        usearch_tape_view_t tape = {.data = bytes, .scalar = usearch_scalar_u8_k};
+        if (layout) tape.layout = usearch_tape_u64_k, tape.offsets.u64 = wide;
+        else tape.layout = usearch_tape_u32_k, tape.offsets.u32 = narrow;
+        usearch_sequence_index_t index = NULL;
+        usearch_sequence_init_ram(
+            &(usearch_sequence_init_ram_t) {.index = &index,
+                                            .outcome = &outcome,
+                                            .metric = usearch_sequence_metric_levenshtein_bytes_k});
+        expect(!outcome.message, outcome.message);
+        usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 4,
+                                                              .keys = {keys, sizeof(usearch_key_t)},
+                                                              .sequences = tape});
+        expect(!outcome.message, outcome.message);
+        usearch_matches_view_t matches = {0};
+        usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 4,
+                                                              .queries = tape,
+                                                              .matches = &matches,
+                                                              .arena = arena,
+                                                              .wanted = 1});
+        expect(!outcome.message, outcome.message);
+        for (size_t query = 0; query != 4; ++query)
+            expect(value_of(matches.keys[query]) == query && matches.scores[query] == 0,
+                   "Either width of offsets finds every stored string");
+        usearch_sequence_free(index);
+    }
+    usearch_tape_view_t unknown = {.data = bytes, .layout = (usearch_tape_layout_t)7, .scalar = usearch_scalar_u8_k};
+    unknown.offsets.u32 = narrow;
+    usearch_sequence_index_t const index = create_strings(executor);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = unknown});
+    expect_eq(outcome.status, usearch_status_unsupported_layout_k, "An unknown width of offsets is refused");
+
+    // Text imports as the bytes it is laid out as, at either width
+    void const* narrow_buffers[3] = {NULL, narrow, bytes};
+    void const* wide_buffers[3] = {NULL, wide, bytes};
+    char const* const formats[] = {"z", "u", "Z", "U"};
+    for (size_t format = 0; format != 4; ++format) {
+        bool const large = format >= 2;
+        struct ArrowSchema schema = {.format = formats[format], .release = &release_schema_of_test};
+        struct ArrowArray array = {.length = 3,
+                                   .offset = 1,
+                                   .n_buffers = 3,
+                                   .buffers = large ? wide_buffers : narrow_buffers,
+                                   .release = &release_array_of_test};
+        usearch_tape_view_t tape = {0};
+        size_t count = 0;
+        expect_eq(usearch_tape_view_from_arrow(&schema, &array, &tape, &count), usearch_status_success_k,
+                  "Bytes and text import");
+        expect(tape.data == (void const*)bytes && tape.scalar == usearch_scalar_u8_k && count == 3 &&
+                   tape.layout == (large ? usearch_tape_u64_k : usearch_tape_u32_k),
+               "A tape keeps its column's bytes and width");
+        expect(large ? tape.offsets.u64 == wide + 1 : tape.offsets.u32 == narrow + 1,
+               "A slice skips its first offsets");
+    }
+
+    // A get's strings leave as a column and come back in place
+    usearch_tape_view_t got = {0};
+    size_t written = 0;
+    usearch_sequence_get(&(usearch_sequence_get_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .key = key_of(2),
+                                                    .sequences = &got,
+                                                    .written = &written,
+                                                    .arena = arena});
+    expect(!outcome.message, outcome.message);
+    bool const wide_outputs = sizeof(size_t) == sizeof(uint64_t);
+    expect(got.layout == (wide_outputs ? usearch_tape_u64_k : usearch_tape_u32_k) && written == 1,
+           "Outputs carry offsets as wide as size_t");
+    struct ArrowSchema schema = {0};
+    struct ArrowDeviceArray array = {0};
+    expect_eq(usearch_tape_view_to_arrow(got, written, arena, &schema, &array), usearch_status_success_k,
+              "Strings export");
+    expect(!strcmp(schema.format, wide_outputs ? "Z" : "z") && array.array.n_buffers == 3 &&
+               array.array.buffers[1] == (void const*)offsets_of(got),
+           "Strings export in place, at their width");
+    usearch_tape_view_t viewed = {0};
+    size_t viewed_count = 0;
+    expect_eq(usearch_tape_view_from_arrow(&schema, &array.array, &viewed, &viewed_count), usearch_status_success_k,
+              "Strings import");
+    expect(viewed.data == got.data && offsets_of(viewed) == offsets_of(got) && viewed_count == 1,
+           "An import views the very tape an export named");
+    release_column(&schema, &array);
+
+    // Shapes do the same as lists of points, at the width of their offsets
+    float const points[] = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2, 2};
+    size_t const point_offsets[] = {0, 2, 5};
+    usearch_key_t const shape_keys[] = {key_of(0), key_of(1)};
+    usearch_shapes_index_t shapes = NULL;
+    usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &shapes,
+                                                          .outcome = &outcome,
+                                                          .metric = usearch_shapes_metric_chamfer_k,
+                                                          .quantization = usearch_scalar_f32_k});
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = shapes,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 2,
+                                                      .keys = {shape_keys, sizeof(usearch_key_t)},
+                                                      .shapes = tape_of(points, point_offsets, usearch_scalar_f32_k)});
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_get(&(usearch_shapes_get_t) {.index = shapes,
+                                                .executor = executor,
+                                                .outcome = &outcome,
+                                                .key = key_of(1),
+                                                .shapes = &got,
+                                                .outputs_scalar = usearch_scalar_f32_k,
+                                                .written = &written,
+                                                .arena = arena});
+    expect(!outcome.message, outcome.message);
+    expect_eq(usearch_tape_view_to_arrow(got, written, arena, &schema, &array), usearch_status_success_k,
+              "Shapes export");
+    expect(!strcmp(schema.format, wide_outputs ? "+L" : "+l") && !strcmp(schema.children[0]->format, "+w:3") &&
+               !strcmp(schema.children[0]->children[0]->format, "f"),
+           "Shapes export as lists of points");
+    expect(array.array.children[0]->length == 3 && array.array.children[0]->children[0]->length == 9,
+           "A list's children count points and scalars");
+    expect_eq(usearch_tape_view_from_arrow(&schema, &array.array, &viewed, &viewed_count), usearch_status_success_k,
+              "Shapes import");
+    expect(viewed.data == got.data && viewed.scalar == usearch_scalar_f32_k && viewed_count == 1 &&
+               offsets_of(viewed)[1] - offsets_of(viewed)[0] == 3,
+           "An import views the very points an export named");
+    release_column(&schema, &array);
+
+    usearch_shapes_free(shapes);
+    usearch_sequence_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+}
+
+void test_arrow_matches(void) {
+    printf("Test: Arrow Matches\n");
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_sequence_index_t const index = create_strings(executor);
+    struct ArrowSchema schema = {0};
+    struct ArrowDeviceArray array = {0};
+
+    // A consumer may move a child out and release its parent first
+    uint8_t* const bytes = bytes_in_arena(index, executor, arena);
+    size_t* const tape_offsets = (size_t*)bytes;
+    tape_offsets[0] = 0, tape_offsets[1] = 1, tape_offsets[2] = 3;
+    usearch_key_t const* const tape_keys = (usearch_key_t const*)(bytes + 64);
+    usearch_distance_t const* const tape_scores = (usearch_distance_t const*)(bytes + 128);
+    usearch_matches_tape_view_t const ragged = {tape_keys, tape_scores, tape_offsets};
+    expect_eq(usearch_matches_tape_view_to_arrow(ragged, 2, arena, &schema, &array), usearch_status_success_k,
+              "A tape of matches exports");
+    expect(!strcmp(schema.format, "+L") && !strcmp(schema.children[0]->format, "+s") &&
+               array.array.children[0]->length == 3,
+           "A tape of matches exports as a large list of structs");
+    struct ArrowArray moved = *array.array.children[0];
+    array.array.children[0]->release = NULL;
+    array.array.release(&array.array);
+    expect(moved.length == 3 && moved.children[0]->buffers[1] == (void const*)tape_keys,
+           "A moved child outlives its released parent");
+    moved.release(&moved);
+    schema.release(&schema);
+
+    usearch_keys_tape_view_t const links = {tape_keys, tape_offsets};
+    expect_eq(usearch_keys_tape_view_to_arrow(links, 2, arena, &schema, &array), usearch_status_success_k,
+              "A tape of keys exports");
+    expect(!strcmp(schema.format, "+L") && !strcmp(schema.children[0]->format, "w:16") &&
+               array.array.children[0]->length == 3,
+           "A tape of keys exports as a large list of them");
+    release_column(&schema, &array);
+
+    usearch_sequence_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+}
+
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
@@ -4414,6 +4860,10 @@ int main(int argc, char* argv[]) {
     if (selected("free_finishes_deferred")) test_free_finishes_deferred();
     if (selected("blocking_runs_after_earlier")) test_blocking_runs_after_earlier();
     if (selected("deferred_holds_arena")) test_deferred_holds_arena();
+    if (selected("arrow_rows_and_keys")) test_arrow_rows_and_keys();
+    if (selected("arrow_refusals")) test_arrow_refusals();
+    if (selected("arrow_tapes")) test_arrow_tapes();
+    if (selected("arrow_matches")) test_arrow_matches();
 
     printf("All tests passed!\n");
     return 0;

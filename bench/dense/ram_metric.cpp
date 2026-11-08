@@ -524,7 +524,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
 
     for ([[maybe_unused]] std::size_t call : loop) {
         if (tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k, dim, stride,
-                                     queries_k * sizeof(raw_dot_t), nullptr) != nk_success_k)
+                                     queries_k * sizeof(raw_dot_t), nullptr, 0, nullptr) != nk_success_k)
             return loop.skip("streaming failed");
         for (std::size_t row = 0; row != rows_k; ++row) {
             lanes_t row_lanes;

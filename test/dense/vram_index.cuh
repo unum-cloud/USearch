@@ -132,7 +132,9 @@ std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_
 /** Plants a one-way node in a built graph: the last node keeps the in-links the build gave it but
  *  points only at itself, so the landmarks reach it while it reaches none back. The audit must not
  *  count it, the refine must find it among its islands and heal it, and a second refine must find
- *  nothing left to heal. */
+ *  nothing left to heal. On kernels that sweep, a refine of the first half of the rows, in tiles as
+ *  wide as the walked rows, must carry a walked row's link back into a row of a later tile no walk
+ *  reaches, its twin, which no merge may judge away. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t test_dense_vram_one_way_islands(make_index_type_ const& make_index, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -184,6 +186,39 @@ std::size_t test_dense_vram_one_way_islands(make_index_type_ const& make_index, 
             auto const [settled, settled_status] = planted.refine({}, {}, {}, context);
             failures += expect(succeeded(settled_status));
             failures += expect_eq(settled.islands_found, 0u);
+        }
+        if constexpr (kernel_ != nk_kernel_dot_k &&
+                      requires(typename index_type_::refine_config_t config) { config.memory_limit; }) {
+            node_id_t const walker = 0, twin = static_cast<node_id_t>(nodes_count - 2);
+            std::size_t const vector_bytes = dense_rows_bytes(saved_vectors.view(), 1);
+            bytes_span_t const stored_vectors = dense_matrix_bytes(saved_vectors);
+            std::memcpy(stored_vectors.data() + twin * vector_bytes, stored_vectors.data() + walker * vector_bytes,
+                        vector_bytes);
+            auto twin_neighbors = saved_neighbors.span().row(twin).as_vector();
+            std::size_t kept = 0;
+            for (std::size_t slot = 0; slot != connectivity; ++slot)
+                if (node_id_t const member = twin_neighbors[slot]; member != walker) twin_neighbors[kept++] = member;
+            for (; kept != connectivity; ++kept) twin_neighbors[kept] = node_id_unknown_k;
+            saved_neighbors(walker, 0) = twin;
+
+            std::unique_ptr<index_type_> const tiled_ptr = make_index(ledger, {dimensions, connectivity_16_k});
+            index_type_& tiled = *tiled_ptr;
+            failures += expect(tiled.reserve({nodes_count}).status == status_t::success_k);
+            failures += expect_eq(
+                dense_load(tiled, make_index,
+                           {dense_matrix_bytes(saved_vectors.view()), dense_matrix_bytes(saved_neighbors.view())},
+                           to_span(keys), nodes_count, {0, static_cast<node_id_t>(nodes_count)}),
+                status_t::success_k);
+            auto const [swept, swept_status] = tiled.refine({0, static_cast<node_id_t>(nodes_count / 2)}, {}, {},
+                                                            context);
+            failures += expect(succeeded(swept_status) && swept.swept_tiles >= 2);
+            failures += expect_eq(
+                dense_save(tiled, make_index, {dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
+                           synchronization_t::exclusive_k),
+                status_t::success_k);
+            bool linked_back = false;
+            for (std::size_t slot = 0; slot != connectivity; ++slot) linked_back |= twin_neighbors[slot] == walker;
+            failures += expect(linked_back);
         }
     }
     return failures + expect_eq(ledger.live_bytes, 0);

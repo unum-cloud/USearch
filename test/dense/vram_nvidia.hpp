@@ -16,11 +16,12 @@
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 
 #include "dense.cuh"
+#include "lib.hpp" // `gpu_class_t`, `nvidia_class_of` - the class the library picks a unit by
 
 /** The bounds of every dtype's fatbin of one NVIDIA class, in pairs in the library's dtype ladder,
  *  defined in that class's @c src/dense/vram_variants_nvidia_<class>.cpp unit; an unnamed class's
  *  bundles are empty. */
-template <us::utilities::gpu_class_t gpu_class_>
+template <gpu_class_t gpu_class_>
 std::span<us::utilities::byte_t const* const> bundle_bounds() noexcept;
 
 namespace unum::usearch::test::dense {
@@ -67,7 +68,7 @@ static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
  *  collection, built over the stream of the executor the CUDA entry opened. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
-    using index_t = vram_nvidia_index<dtype_, dense_nvidia_fatbin<dtype_>, dummy_cache_hints_t,
+    using index_t = vram_nvidia_index<dtype_, dense_nvidia_fatbin<dtype_>, fu::standard_yield_t, dummy_cache_hints_t,
                                       counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
     using indexes_t = vram_nvidia_indexes<uuid_t, dtype_, dense_nvidia_fatbin<dtype_>>;
     inline static constexpr char const* vendor_prefix_k = "cuda";

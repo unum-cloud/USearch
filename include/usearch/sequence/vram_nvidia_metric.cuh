@@ -25,7 +25,6 @@
 
 #include <cstring> // `std::memcpy` - lane zero's prepared overlap query, a word at a time
 
-#include <bit>         // `std::bit_ceil`, `std::popcount` - a sequence's distinct pages and bytes
 #include <iterator>    // `std::size` - every rung's kernels
 #include <limits>      // `std::numeric_limits` - the widths and rows a `u32_t` states
 #include <span>        // `std::span` - the overlap kind's window widths
@@ -62,14 +61,16 @@ constexpr sz_levenshtein_group_lanes_t cuda_levenshtein_lanes_per_row_ampere(u32
  *  touch, then a mask row per class at the walk stride of the sequence's own words, one class per
  *  distinct symbol and one more. */
 template <sz_levenshtein_symbol_t symbol_>
-std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t bytes) noexcept {
+__host__ __device__ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t bytes) noexcept {
     if constexpr (symbol_ == sz_levenshtein_runes_k) {
         // Distinct pages in a bitset over every page, distinct runes in an open table twice the
         // widest rung's runes wide, cleared only as wide as this sequence needs.
         constexpr std::size_t table_slots_k = 2 * vram_levenshtein_widest_bytes_k;
         u64_t pages[sz_levenshtein_utf8_pages_k / 64] = {};
         u32_t table[table_slots_k];
-        std::size_t const slots = min_of<std::size_t>(std::bit_ceil(2 * bytes + 2), table_slots_k);
+        // Doubled by hand: `std::bit_ceil` evaluates wrong in device code under relaxed constexpr.
+        std::size_t slots = 1;
+        while (slots < 2 * bytes + 2 && slots < table_slots_k) slots *= 2;
         for (std::size_t slot = 0; slot != slots; ++slot) table[slot] = ~0u;
         sz_size_t runes = 0, rows = 1, classes = 1;
         for (sz_size_t position = 0; position < bytes; ++runes) {
@@ -89,7 +90,7 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
         return round_up_to_multiple<std::size_t>(
             sz_levenshtein_utf8_span_header_k + sz_levenshtein_utf8_pages_k * sizeof(u16_t) +
                 rows * 256 * sizeof(u32_t) +
-                classes * sz_levenshtein_walk_stride(sz_levenshtein_query_words(runes)) * sizeof(u64_t),
+                (classes + 1) * sz_levenshtein_walk_stride(sz_levenshtein_query_words(runes)) * sizeof(u64_t),
             16);
     }
     u64_t present[4] = {};
@@ -97,13 +98,38 @@ std::size_t cuda_levenshtein_span_bytes_ampere(byte_t const* data, std::size_t b
         u8_t const value = static_cast<u8_t>(data[position]);
         present[value >> 6] |= u64_t {1} << (value & 63u);
     }
-    std::size_t const distinct = std::popcount(present[0]) + std::popcount(present[1]) + std::popcount(present[2]) +
-                                 std::popcount(present[3]);
+    // Counted by hand: `std::popcount` evaluates to zero in device code under relaxed constexpr.
+    std::size_t distinct = 0;
+    for (u64_t word : present)
+        for (; word; word &= word - 1) ++distinct;
     std::size_t const classes = min_of<std::size_t>(distinct + 1, sz_levenshtein_byte_classes_k);
     return round_up_to_multiple<std::size_t>(
         sz_levenshtein_byte_classes_k +
-            classes * sz_levenshtein_walk_stride(sz_levenshtein_query_words(bytes)) * sizeof(u64_t),
+            (classes + 1) * sz_levenshtein_walk_stride(sz_levenshtein_query_words(bytes)) * sizeof(u64_t),
         16);
+}
+
+/** Raises @p load 's span word to the widest its stored sequences prepare into over @p symbol_,
+ *  a lane per sequence, each warp folding its lanes' spans before one compare-exchange. */
+template <sz_levenshtein_symbol_t symbol_, typename node_id_type_>
+__device__ __forceinline__ void cuda_levenshtein_size_spans_ampere(
+    basic::vram_load<node_id_type_> const& load) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
+    u32_t const threads = warp.count * cuda_warp_t::width_k;
+    for (u32_t first = warp.index * cuda_warp_t::width_k; first < load.count; first += threads) { // Warp-uniform.
+        u32_t const node = first + warp.lane;
+        u64_t span = 0;
+        if (node < load.count)
+            span = cuda_levenshtein_span_bytes_ampere<symbol_>(
+                load.tape + load.stored_offsets[node],
+                static_cast<std::size_t>(load.stored_offsets[node + 1] - load.stored_offsets[node]));
+        for (u32_t mask = cuda_warp_t::width_k / 2; mask; mask /= 2)
+            span = max_of(span, cuda_warp_t::shuffle_xor(span, mask));
+        if (warp.lane != 0) continue;
+        u64_t widest = cuda_warp_t::load_relaxed(*load.span_bytes);
+        while (widest < span && !cuda_warp_t::compare_exchange_relaxed(*load.span_bytes, widest, span))
+            widest = cuda_warp_t::load_relaxed(*load.span_bytes);
+    }
 }
 
 /** Lays @p sequence out as a query over @p symbol_ in @p span, every lane of the warp taking
@@ -219,6 +245,12 @@ struct u8_ampere_levenshtein_kit_t {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_bytes_k>(data, bytes);
     }
 
+    /** Counts a load's spans on the device, from each sequence's distinct bytes. */
+    template <typename node_id_type_>
+    static __device__ __forceinline__ void size_spans(basic::vram_load<node_id_type_> const& load) noexcept {
+        cuda_levenshtein_size_spans_ampere<sz_levenshtein_bytes_k>(load);
+    }
+
     static __device__ __forceinline__ query_t prepare(basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
         return cuda_levenshtein_prepare_ampere<sz_levenshtein_bytes_k>(sequence, span, lane);
     }
@@ -251,6 +283,12 @@ struct utf8_ampere_levenshtein_kit_t {
     }
     static std::size_t span_bytes(byte_t const* data, std::size_t bytes) noexcept {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_runes_k>(data, bytes);
+    }
+
+    /** Counts a load's spans on the device, from each sequence's pages and distinct runes. */
+    template <typename node_id_type_>
+    static __device__ __forceinline__ void size_spans(basic::vram_load<node_id_type_> const& load) noexcept {
+        cuda_levenshtein_size_spans_ampere<sz_levenshtein_runes_k>(load);
     }
 
     static __device__ __forceinline__ query_t prepare(basic::vram_entry_t sequence, byte_t* span, u32_t lane) noexcept {
@@ -551,13 +589,18 @@ struct packed_ampere_needleman_wunsch_kit_t {
                                 : codes <= std::size_t {rows} * warp_t::width_k;
     }
 
-    /** Bytes the packed @p bytes long sequence at @p data takes once prepared: its profile stripes,
-     *  and a boundary row per warp of a block when it takes more than one. */
-    static std::size_t span_bytes(u32_t code_bits, byte_t const* data, std::size_t bytes) noexcept {
-        u32_t const stripes = cuda_needleman_wunsch_stripes(packed_codes_count(data, bytes, code_bits));
+    /** Bytes a query of @p codes codes takes once prepared: its profile stripes, and a boundary
+     *  row per warp of a block when it takes more than one. */
+    static std::size_t span_bytes_of_codes(std::size_t codes) noexcept {
+        u32_t const stripes = cuda_needleman_wunsch_stripes(codes);
         std::size_t const boundaries =
             stripes > 1 ? vram_warps_per_block_k * (cuda_needleman_wunsch_widest_codes_k + 1) * sizeof(u32_t) : 0;
         return stripes * cuda_needleman_wunsch_stripe_bytes_k + boundaries;
+    }
+
+    /** Bytes the packed @p bytes long sequence at @p data takes once prepared. */
+    static std::size_t span_bytes(u32_t code_bits, byte_t const* data, std::size_t bytes) noexcept {
+        return span_bytes_of_codes(packed_codes_count(data, bytes, code_bits));
     }
 
     static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_entry_t sequence,
@@ -589,24 +632,23 @@ struct needleman_wunsch_ladder<caps_> {
 
 /** The kit scoring the sequence kind @p metric_ under @p caps_: the overlap or Needleman-Wunsch
  *  ladder's, or the Levenshtein ladder's over the kind's symbols. */
-template <usearch_sequence_metric_t metric_, sz_capability_t caps_>
+template <vram_sequence_metric_t metric_, sz_capability_t caps_>
 using vram_sequence_kit = std::conditional_t<
-    metric_ == usearch_sequence_metric_needleman_wunsch_k, typename needleman_wunsch_ladder<caps_>::kit_t,
+    metric_ == vram_sequence_metric_t::needleman_wunsch_k, typename needleman_wunsch_ladder<caps_>::kit_t,
     std::conditional_t<
-        metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<caps_>::kit_t,
-        typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
-                                                                                          : sz_levenshtein_bytes_k,
+        metric_ == vram_sequence_metric_t::overlap_k, typename overlap_ladder<caps_>::kit_t,
+        typename levenshtein_ladder<metric_ == vram_sequence_metric_t::levenshtein_runes_k ? sz_levenshtein_runes_k
+                                                                                           : sz_levenshtein_bytes_k,
                                     caps_>::kit_t>>;
 
 #pragma endregion Kits
 
 #pragma region Face
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::window_widths(
     std::span<std::size_t const> widths) noexcept {
-    if ((metric_ == usearch_sequence_metric_overlap_k) == widths.empty()) return status_t::config_mismatch_k;
+    if ((metric_ == vram_sequence_metric_t::overlap_k) == widths.empty()) return status_t::config_mismatch_k;
     if (widths.empty()) return status_t::success_k;
     // The count leads, as the kit reads the parameters.
     if (status_t const reserved = host_parameters_.reserve_exactly(widths.size() + 1); failed(reserved))
@@ -620,11 +662,10 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::w
     return status_t::success_k;
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::costs(
     needleman_wunsch_costs_t const& costs) noexcept {
-    if ((metric_ == usearch_sequence_metric_needleman_wunsch_k) != (costs.code_bits != 0))
+    if ((metric_ == vram_sequence_metric_t::needleman_wunsch_k) != (costs.code_bits != 0))
         return status_t::config_mismatch_k;
     if (!costs.code_bits) return status_t::success_k;
     if (status_t const sized = host_parameters_.resize(divide_round_up(sizeof(costs), sizeof(u32_t))); failed(sized))
@@ -633,20 +674,19 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::c
     return status_t::success_k;
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::rung_serving_(
     std::size_t longest) const noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
     // A Needleman-Wunsch rung serves codes, the most a sequence of these bytes packs.
-    if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k) {
+    if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k) {
         if (host_parameters_.empty()) return rungs_k;
         longest = longest ? (longest - 1) * 8 / costs_().code_bits : 0;
     }
     std::size_t rung = 0;
     while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
-    if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
+    if constexpr (metric_ == vram_sequence_metric_t::overlap_k) {
         // Lanes past the longest sequence's widest windows would roll none of their own.
         u32_t widest = 0;
         for (std::size_t index = 1; index < host_parameters_.size(); ++index)
@@ -656,8 +696,7 @@ std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>
     return rung;
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_entry_(
     std::size_t rung) noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
@@ -665,20 +704,30 @@ u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lane
     return kit_t::lanes_per_row(rungs[rung]);
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
     byte_t const* data, std::size_t bytes) const noexcept {
     using kit_t = vram_sequence_kit<metric_, capability_>;
-    if constexpr (metric_ == usearch_sequence_metric_overlap_k)
+    if constexpr (metric_ == vram_sequence_metric_t::overlap_k)
         return kit_t::span_bytes(to_span(host_parameters_).subspan(1), bytes);
-    else if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
+    else if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k)
         return kit_t::span_bytes(costs_().code_bits, data, bytes);
     else return kit_t::span_bytes(data, bytes);
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
+std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
+    std::size_t longest) const noexcept {
+    using kit_t = vram_sequence_kit<metric_, capability_>;
+    if constexpr (metric_ == vram_sequence_metric_t::overlap_k)
+        return kit_t::span_bytes(to_span(host_parameters_).subspan(1), longest);
+    else if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k)
+        // A pack of these bytes holds at most this many codes past its one-byte header.
+        return kit_t::span_bytes_of_codes(longest ? (longest - 1) * 8 / costs_().code_bits : 0);
+    else return 0;
+}
+
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 void vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
     vram_kernel_symbol_t& symbol, std::size_t rung, basic::cuda_rung_t instantiated) noexcept {
     constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
@@ -687,12 +736,11 @@ void vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::spell
                        instantiated.slots);
 }
 
-template <usearch_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_,
-          typename kernels_type_>
+template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
 status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::upload_parameters_(
     cuda_api_t const& api) noexcept {
-    bool const parametrized = metric_ == usearch_sequence_metric_overlap_k ||
-                              metric_ == usearch_sequence_metric_needleman_wunsch_k;
+    bool const parametrized = metric_ == vram_sequence_metric_t::overlap_k ||
+                              metric_ == vram_sequence_metric_t::needleman_wunsch_k;
     if (parametrized && host_parameters_.empty()) return status_t::uninitialized_k;
     if (host_parameters_.empty()) return status_t::success_k;
     device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {api}, host_parameters_.size());
@@ -710,7 +758,7 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::u
 /** Every NVIDIA sequence kernel: @p kernel_ picks the walk, @p capability_ and @p metric_ the kit
  *  through its ladder, @p rung_ its rung, Myers words or lanes per sequence, @p node_id_type_ the
  *  IDs of the records, and @p slots_ the register rung. */
-template <vram_kernel_t kernel_, sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t rung_,
+template <vram_kernel_t kernel_, sz_capability_t capability_, vram_sequence_metric_t metric_, u32_t rung_,
           typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
@@ -718,7 +766,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resid
     basic::cuda_kernel_body<kernel_, kit_t, rung_, slots_>(arguments);
 }
 
-template <sz_capability_t capability_, usearch_sequence_metric_t metric_, u32_t rung_, typename node_id_type_,
+template <sz_capability_t capability_, vram_sequence_metric_t metric_, u32_t rung_, typename node_id_type_,
           std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
     (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, metric_, rung_, node_id_type_,
@@ -727,12 +775,12 @@ __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept 
 }
 
 /** The rung at @p index of the kit of @p metric, as a template argument in device code. */
-constexpr u32_t vram_sequence_rung(usearch_sequence_metric_t metric, std::size_t index) noexcept {
+constexpr u32_t vram_sequence_rung(vram_sequence_metric_t metric, std::size_t index) noexcept {
     std::span<u32_t const> const rungs = vram_sequence_rungs(metric);
     return rungs[index];
 }
 
-template <sz_capability_t capability_, usearch_sequence_metric_t metric_, typename node_id_type_, std::size_t... words_>
+template <sz_capability_t capability_, vram_sequence_metric_t metric_, typename node_id_type_, std::size_t... words_>
 __device__ void cuda_instantiate_words(std::index_sequence<words_...>) noexcept {
     (cuda_instantiate_rungs<capability_, metric_, vram_sequence_rung(metric_, words_), node_id_type_>(
          std::make_index_sequence<std::size(basic::cuda_rungs)> {}),
@@ -743,10 +791,13 @@ __device__ void cuda_instantiate_words(std::index_sequence<words_...>) noexcept 
  *  @p node_id_type_ IDs; the unit compiling the fatbin names it once per kind and node-ID type.
  *  Taking the kernels' addresses in device code makes NVCC emit them, while a host-only pass emits
  *  no launch stub. */
-template <sz_capability_t capability_, usearch_sequence_metric_t metric_, typename node_id_type_>
+template <sz_capability_t capability_, vram_sequence_metric_t metric_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
     cuda_instantiate_words<capability_, metric_, node_id_type_>(
         std::make_index_sequence<vram_sequence_rungs(metric_).size()> {});
+    constexpr u32_t first_rung = vram_sequence_rung(metric_, 0);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, metric_, first_rung, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, metric_, first_rung, node_id_type_, 0>);
 }
 
 #pragma endregion Kernels

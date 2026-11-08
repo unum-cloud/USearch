@@ -32,7 +32,7 @@
 #include <utility>      // `std::exchange`, `std::forward`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the published words
-#include <forkunion/types.hpp>   // `fu::standard_yield_t` - the watermark's turn
+#include <forkunion/types.hpp>   // `fu::wait_capped_t` - the watermark's turn
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t`
 #include <numkong/tensor.hpp>     // `nk::matrix_span`, `nk::range`
@@ -210,10 +210,12 @@ enum class metal_output_t : bool { distances_k, products_k };
  *  before the watermark turns, as the storage is shared memory the walks read in place. Attention
  *  is refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and walks
  *  past the widest register rung take the arena frontier, as on NVIDIA and AMD.
+ *  A batch waits through @p wait_type_ for the batches before it to publish.
  */
 template <                                                          //
     nk_dtype_t vector_dtype_ = nk_i8_k,                             //
     nk_capability_t capability_ = nk_cap_metal_k,                   //
+    typename wait_type_ = dummy_waiter_t,                           //
     typename vectors_allocator_type_ = metal_shared_allocator_t,    //
     typename neighbors_allocator_type_ = metal_shared_allocator_t,  //
     typename traversals_allocator_type_ = metal_shared_allocator_t, //
@@ -224,6 +226,7 @@ struct vram_apple_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
+    using wait_t = wait_type_;
     using vectors_allocator_t = vectors_allocator_type_;
     using neighbors_allocator_t = neighbors_allocator_type_;
     using traversals_allocator_t = traversals_allocator_type_;
@@ -2792,7 +2795,7 @@ struct vram_apple_index {
     status_t publish_(std::size_t first, std::size_t rows) noexcept {
         for (std::size_t watermark = size(); watermark != first; watermark = size()) {
             if (status_t const kept = status(); failed(kept)) return kept;
-            fu::standard_yield_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
+            wait_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
         }
         fu::standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
         return status_t::success_k;

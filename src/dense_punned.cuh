@@ -106,8 +106,8 @@ struct dense_verbs {
     void (*destroy)(void* index) noexcept;
     void (*bound_shards)(void* index, std::size_t nodes) noexcept;
 
-    /** Appends one shard on a host memory domain or a device. */
-    status_t (*emplace)(void* index, arena_residency_t residency) noexcept;
+    /** Appends one shard on a device, or on RAM on @p memory_domain. */
+    status_t (*emplace)(void* index, arena_residency_t residency, fu_memory_domain_id_t memory_domain) noexcept;
 
     /** Opens a checkpoint in place, with @p ram a key table in its limit filled on @p executor. */
     status_t (*view)(void* index, std::string_view path, std::span<std::string_view const> paths,

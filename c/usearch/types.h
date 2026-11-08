@@ -75,6 +75,7 @@
  *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views
  *    into it. Any verb may reuse any arena of its residency, one call at a time.
  *  - Blocking calls borrow the arena; deferred calls hold it until final.
+ *  - An Arrow export reads the arena's outputs until the arena's next call.
  *
  *  Outputs are views the call writes, so none carries a capacity or a stride for the caller to
  *  pick, and an arena keeps its high-water mark, so a steady loop allocates once. The library
@@ -273,7 +274,11 @@ typedef enum usearch_status_t {
  *  carrying the detail the status cannot. Messages are static and @b don't need to be
  *  deallocated, and are @c NULL exactly when the status is @c usearch_status_success_k. */
 typedef struct usearch_outcome_t {
+
+    /** What happened, for the caller to branch on. */
     usearch_status_t status;
+
+    /** The static detail behind a failing @c status, @c NULL on success. */
     char const* message;
 } usearch_outcome_t;
 
@@ -392,22 +397,42 @@ typedef struct usearch_matrix_view_t {
     usearch_scalar_t scalar;
 } usearch_matrix_view_t;
 
+/** How wide a tape's offsets are, naming the member of its @c offsets union to read. */
+typedef enum usearch_tape_layout_t {
+
+    /** Apache Arrow @c Binary or @c List, with 32-bit offsets. */
+    usearch_tape_u32_k = 0,
+
+    /** Apache Arrow @c LargeBinary or @c LargeList, the same with 64-bit offsets. */
+    usearch_tape_u64_k = 1,
+} usearch_tape_layout_t;
+
 /**
  *  @brief A ragged batch as Apache Arrow lays one out: elements end to end, and one more offset
  *      than entries around them, borrowed as an input or written into an arena as an output.
  *
  *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1], so the last offset closes the
  *  final entry. What an element is belongs to the modality: a byte of a sequence, a point of a
- *  shape or of a geospatial set.
+ *  shape or of a geospatial set. As an output the call writes offsets as wide as @c size_t.
  */
 typedef struct usearch_tape_view_t {
 
     /** First element of the tape, which every offset counts from. */
     void const* data;
 
+    /** Which member of @c offsets the tape spells them in. */
+    usearch_tape_layout_t layout;
+
     /** Entries + 1 non-decreasing offsets, in elements: the call's @c count + 1 for an input, its
      *  @c written + 1 for an output. */
-    size_t const* offsets;
+    union {
+
+        /** The offsets of a @c usearch_tape_u32_k tape. */
+        uint32_t const* u32;
+
+        /** The offsets of a @c usearch_tape_u64_k tape. */
+        uint64_t const* u64;
+    } offsets;
 
     /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial
      *  inputs, and any kind for shape points, converted on the way in where it differs from
@@ -740,6 +765,16 @@ typedef struct usearch_refine_report_t {
     usearch_reachability_t reachability;
 } usearch_refine_report_t;
 
+/** How a pass over the graph may spend, shared by every verb that refines. */
+typedef struct usearch_refine_options_t {
+
+    /** The @b optional breadth of the candidates a re-selection walk explores; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional bytes the pass may hold beyond the index; zero derives. */
+    size_t memory_limit;
+} usearch_refine_options_t;
+
 /**
  *  @brief The host memory domains a RAM-resident index places its shards in - one shard per
  *      named NUMA node, so a dual-socket box names two and gets two graphs whose traversals
@@ -768,7 +803,8 @@ typedef struct usearch_ram_options_t {
      *  holds; @c usearch_cpu_class_unknown_k derives the CPU's own. */
     usearch_cpu_class_t cpu_class;
 
-    /** Bytes an NVMe view's key tables may hold on each named domain; zero sets no ceiling. */
+    /** Bytes an NVMe view's key table may hold, on the first named domain or the heap without one;
+     *  zero sets no ceiling. */
     size_t memory_limit;
 } usearch_ram_options_t;
 
@@ -1150,7 +1186,8 @@ typedef enum usearch_nvme_class_t {
     /** io_uring reads on files and block devices. */
     usearch_nvme_class_linux_uring_k,
 
-    /** io_uring NVMe passthrough on namespace character devices, such as @c /dev/ng0n1. */
+    /** io_uring NVMe passthrough on namespace character devices, such as @c /dev/ng0n1, over the
+     *  128-byte entries Linux 5.19 introduced. */
     usearch_nvme_class_linux_uring_passthrough_k,
 
     /** The SPDK user-space driver, over namespaces named by transport identifiers. */
@@ -1322,6 +1359,38 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
  *  rule @ref usearch_arena_t notes.
  */
 USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
+
+/** Where an arena's outputs live. */
+typedef struct usearch_arena_description_t {
+
+    /** RAM for host pages, VRAM for one device's memory. */
+    usearch_residency_t residency;
+
+    /** The device's position in @c usearch_gpu_devices, on VRAM; 0 for host pages. */
+    size_t device;
+} usearch_arena_description_t;
+
+/** The arguments of @c usearch_arena_describe. */
+typedef struct usearch_arena_describe_t {
+
+    /** The arena to describe. */
+    usearch_arena_t arena;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Output for where the arena's outputs live. */
+    usearch_arena_description_t* description;
+} usearch_arena_describe_t;
+
+/**
+ *  @brief Reports where an arena's outputs live, as the executor that made it decided, so a caller
+ *      reads them as host memory or hands them to device code without remembering that executor.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL arena or description.
+ */
+USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments);
 
 /**
  *  @brief The canonical lowercase, dash-separated spelling of each closed set's enumerators,

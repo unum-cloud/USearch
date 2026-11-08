@@ -29,8 +29,8 @@
  *  length, a medium ID, a buffer ID and an opaque context; completions return the buffer, a signed
  *  result and the context. The buffer is the cookie every kernel interface echoes, and an engine
  *  keeps each buffer's context beside it. No pointers cross the contract in either direction.
- *  Building the Linux ring engines assumes kernel headers 6.1 or newer, while runtime degrades
- *  gracefully on older kernels through setup fallbacks.
+ *  The Linux ring engines mirror the kernel ABI they use, so they build against any headers, while
+ *  runtime degrades gracefully on older kernels through setup fallbacks.
  *
  *  @section nvme_device_alignment Platform Alignment
  *
@@ -108,7 +108,7 @@
 
 #include <forkunion/forkunion.h> // `fu_pool_new`, `fu_pool_spawn`, `fu_pool_delete`
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the SPDK claim word
-#include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_t`, `fu::spin_mutex_t`
+#include <forkunion/types.hpp>   // `fu::wait_capped_t`, `fu::spin_mutex_t`
 
 #include "usearch/utilities/blocking_files.hpp" // `NOMINMAX` ahead of `<windows.h>`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`
@@ -118,11 +118,11 @@
 /** Whether the io_uring engines build. Every capability below derives from the platform identity in
  *  @c utilities/types.hpp and takes a @c -D override. */
 #if !defined(USEARCH_WITH_LINUX_URING)
-#if USEARCH_OS_LINUX_ && __has_include(<linux/io_uring.h>)
+#if USEARCH_OS_LINUX_
 #define USEARCH_WITH_LINUX_URING 1
 #else
 #define USEARCH_WITH_LINUX_URING 0
-#endif // USEARCH_OS_LINUX_ && __has_include(<linux/io_uring.h>)
+#endif // USEARCH_OS_LINUX_
 #endif // !defined(USEARCH_WITH_LINUX_URING)
 
 /** Whether the Linux AIO engine builds. */
@@ -162,21 +162,16 @@
 #endif
 
 #if USEARCH_OS_LINUX_
-#include <dirent.h>           // `fdopendir`, `readdir`, for a disk's hardware queues and an ng node's namespaces
-#include <linux/nvme_ioctl.h> // `struct nvme_passthru_cmd`, `struct nvme_uring_cmd`, `NVME_IOCTL_ID`
-#include <sys/ioctl.h>        // `ioctl`
-#include <sys/syscall.h>      // `SYS_io_setup`, `SYS_io_uring_setup` and their siblings
-#include <sys/sysmacros.h>    // `major`, `minor`
+#include <dirent.h>        // `fdopendir`, `readdir`, for a disk's hardware queues and an ng node's namespaces
+#include <sys/ioctl.h>     // `ioctl`, `_IO`, `_IOWR`
+#include <sys/mman.h>      // `mmap`, `munmap`
+#include <sys/syscall.h>   // `SYS_io_setup`, `SYS_statx`
+#include <sys/sysmacros.h> // `major`, `minor`
+#include <sys/uio.h>       // `struct iovec`
 #endif
 
 #if USEARCH_WITH_LINUX_AIO
 #include <linux/aio_abi.h> // `aio_context_t`, `struct iocb`, `struct io_event`, `IOCB_CMD_PREAD`
-#endif
-
-#if USEARCH_WITH_LINUX_URING
-#include <linux/io_uring.h> // `struct io_uring_sqe`, `struct io_uring_params`, `IORING_OP_READ_FIXED`
-#include <sys/mman.h>       // `mmap`, `munmap`
-#include <sys/uio.h>        // `struct iovec`
 #endif
 
 #if USEARCH_WITH_WINDOWS_IORING
@@ -280,7 +275,7 @@ enum class io_transport_t : u32_t {
     /** io_uring reads on files and block devices. */
     linux_uring_k,
 
-    /** io_uring NVMe passthrough on namespace character devices. */
+    /** io_uring NVMe passthrough on namespace character devices, from Linux 5.19. */
     linux_uring_nvme_k,
 
     /** The SPDK user-space driver, over controllers named by transport IDs. */
@@ -475,21 +470,199 @@ inline file_medium_t::~file_medium_t() noexcept {
 
 #endif
 
-#if USEARCH_OS_LINUX_ && defined(STATX_DIOALIGN)
+#if USEARCH_OS_LINUX_
+
+#pragma region Kernel
+
+/** @c IOSQE_FIXED_FILE: an entry's @c fd indexes the registered file table. */
+enum linux_uring_entry_flag_t : u8_t {
+    linux_uring_entry_fixed_file_k = 1u << 0,
+};
+
+/** @c io_sqring_offsets: where the submission ring's words sit in its mapping. */
+struct linux_uring_submission_offsets_t {
+    u32_t head_offset;
+    u32_t tail_offset;
+    u32_t ring_mask_offset;
+    u32_t ring_entries_offset;
+    u32_t flags_offset;
+    u32_t dropped_offset;
+    u32_t array_offset;
+    u32_t reserved;
+    u64_t reserved2;
+};
+
+/** @c io_cqring_offsets: where the completion ring's words sit in its mapping. */
+struct linux_uring_completion_offsets_t {
+    u32_t head_offset;
+    u32_t tail_offset;
+    u32_t ring_mask_offset;
+    u32_t ring_entries_offset;
+    u32_t overflow_offset;
+    u32_t cqes_offset;
+    u32_t flags_offset;
+    u32_t reserved;
+    u64_t reserved2;
+};
+
+/** @c io_uring_params: what setup is asked for and what the kernel answers. */
+struct linux_uring_params_t {
+    u32_t sq_entries;
+    u32_t cq_entries;
+    u32_t setup_flags;
+    u32_t sq_thread_cpu;
+    u32_t sq_thread_idle;
+    u32_t features;
+    u32_t wq_fd;
+    u32_t reserved[3];
+    linux_uring_submission_offsets_t sq_off;
+    linux_uring_completion_offsets_t cq_off;
+};
+static_assert(sizeof(linux_uring_params_t) == 120, "the kernel reads a 120-byte io_uring_params");
+
+/** @c io_uring_sqe in its 64-byte form, the one a block-layer read takes. */
+struct linux_uring_sqe_t {
+    u8_t opcode;
+    u8_t entry_flags;
+    u16_t ioprio;
+    i32_t fd;
+    u64_t offset;
+    u64_t addr;
+    u32_t length;
+    u32_t rw_flags;
+    u64_t user_data;
+    u16_t buf_index;
+    u16_t personality;
+    i32_t file_index;
+    u64_t addr3;
+    u64_t padding2;
+};
+static_assert(sizeof(linux_uring_sqe_t) == 64, "the kernel reads 64-byte entries from a plain ring");
+
+/** @c io_uring_sqe in its 128-byte form, the one an NVMe passthrough ring takes, whose command
+ *  fills the last 80 bytes. */
+struct linux_uring_sqe128_t {
+    u8_t opcode;
+    u8_t entry_flags;
+    u16_t ioprio;
+    i32_t fd;
+    u32_t cmd_op;
+    u32_t padding;
+    u64_t addr;
+    u32_t length;
+    u32_t uring_cmd_flags;
+    u64_t user_data;
+    u16_t buf_index;
+    u16_t personality;
+    i32_t file_index;
+    u8_t cmd[80];
+};
+static_assert(sizeof(linux_uring_sqe128_t) == 128, "the kernel reads 128-byte entries from an SQE128 ring");
+
+/** @c io_uring_cqe in its 16-byte form; a CQE32 ring pads each to 32. */
+struct linux_uring_cqe_t {
+    u64_t user_data;
+    i32_t res;
+    u32_t completion_flags;
+};
+static_assert(sizeof(linux_uring_cqe_t) == 16, "the kernel writes 16-byte completions to a plain ring");
+
+/** @c io_uring_rsrc_update: one slot of a registration update. */
+struct linux_uring_rsrc_update_t {
+    u32_t offset;
+    u32_t reserved;
+    u64_t update_value;
+};
+static_assert(sizeof(linux_uring_rsrc_update_t) == 16, "the kernel reads a 16-byte io_uring_rsrc_update");
+
+/** @c nvme_passthru_cmd: the NVMe command the @c NVME_IOCTL_IO_CMD ioctl takes. */
+struct linux_nvme_passthru_cmd_t {
+    u8_t opcode;
+    u8_t command_flags;
+    u16_t reserved;
+    u32_t nsid;
+    u32_t cdw2, cdw3;
+    u64_t metadata;
+    u64_t addr;
+    u32_t metadata_length;
+    u32_t data_length;
+    u32_t cdw10, cdw11, cdw12, cdw13, cdw14, cdw15;
+    u32_t timeout_ms;
+    u32_t result;
+};
+static_assert(sizeof(linux_nvme_passthru_cmd_t) == 72, "the kernel reads a 72-byte NVMe ioctl command");
+
+/** @c nvme_uring_cmd: the NVMe command an @c IORING_OP_URING_CMD entry carries in @c cmd, from
+ *  Linux 5.19. */
+struct linux_nvme_uring_cmd_t {
+    u8_t opcode;
+    u8_t command_flags;
+    u16_t reserved;
+    u32_t nsid;
+    u32_t cdw2, cdw3;
+    u64_t metadata;
+    u64_t addr;
+    u32_t metadata_length;
+    u32_t data_length;
+    u32_t cdw10, cdw11, cdw12, cdw13, cdw14, cdw15;
+    u32_t timeout_ms;
+    u32_t reserved2;
+};
+static_assert(sizeof(linux_nvme_uring_cmd_t) == 72, "the kernel reads a 72-byte NVMe passthrough command");
+
+/** @c NVME_IOCTL_ID: the ioctl answering a namespace node's NSID. */
+enum linux_nvme_ioctl_t : unsigned long {
+    linux_nvme_ioctl_id_k = _IO('N', 0x40),
+};
+
+/** @c statx_timestamp. */
+struct linux_statx_timestamp_t {
+    i64_t tv_sec;
+    u32_t tv_nsec;
+    i32_t reserved;
+};
+
+/** @c statx, with the unbuffered-read alignments Linux 6.1 added. */
+struct linux_statx_t {
+    u32_t mask;
+    u32_t blksize;
+    u64_t attributes;
+    u32_t nlink;
+    u32_t uid;
+    u32_t gid;
+    u16_t mode;
+    u16_t spare0;
+    u64_t ino;
+    u64_t size;
+    u64_t blocks;
+    u64_t attributes_mask;
+    linux_statx_timestamp_t atime;
+    linux_statx_timestamp_t btime;
+    linux_statx_timestamp_t ctime;
+    linux_statx_timestamp_t mtime;
+    u32_t rdev_major;
+    u32_t rdev_minor;
+    u32_t dev_major;
+    u32_t dev_minor;
+    u64_t mnt_id;
+    u32_t dio_mem_align;
+    u32_t dio_offset_align;
+    u64_t spare3[12];
+};
+static_assert(sizeof(linux_statx_t) == 256, "the kernel writes a 256-byte statx");
+
+#pragma endregion Kernel
 
 /** The direct-I/O offset alignment the filesystem reports for @p descriptor, zero when it reports
- *  none. */
+ *  none, as kernels before 6.1 do. */
 inline u32_t direct_offset_alignment_(int descriptor) noexcept {
-    struct statx description {};
-    if (::statx(descriptor, "", AT_EMPTY_PATH, STATX_DIOALIGN, &description) != 0) return 0;
-    return description.stx_mask & STATX_DIOALIGN ? description.stx_dio_offset_align : 0;
+    u32_t const dioalign = 0x2000; // STATX_DIOALIGN
+    linux_statx_t description {};
+    if (::syscall(SYS_statx, descriptor, "", AT_EMPTY_PATH, dioalign, &description) != 0) return 0;
+    return description.mask & dioalign ? description.dio_offset_align : 0;
 }
 
-#elif USEARCH_OS_LINUX_
-
-inline u32_t direct_offset_alignment_(int) noexcept { return 0; }
-
-#endif
+#endif // USEARCH_OS_LINUX_
 
 #if USEARCH_OS_LINUX_
 
@@ -536,7 +709,7 @@ inline u32_t sysfs_hardware_queues_(int disk) noexcept {
 /** The sysfs directory of the namespace disk behind the generic char node @p descriptor, whose
  *  controller directory is @p controller: the entry whose @c nsid matches @c NVME_IOCTL_ID. */
 inline int sysfs_namespace_disk_(int descriptor, int controller) noexcept {
-    int const identifier = ::ioctl(descriptor, NVME_IOCTL_ID);
+    int const identifier = ::ioctl(descriptor, linux_nvme_ioctl_id_k);
     if (identifier <= 0) return -1;
     // The listing takes a descriptor of its own, which `closedir` closes.
     int const listed = ::fcntl(controller, F_DUPFD_CLOEXEC, 0);
@@ -633,19 +806,20 @@ inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
 /** Reads @p destination at @p offset of the namespace behind the generic char node @p descriptor,
  *  one NVMe Read per memory page, which every controller's MDTS covers at least twice. */
 inline i32_t nvme_namespace_read_(int descriptor, bytes_span_t destination, u64_t offset, u32_t block_bytes) noexcept {
-    int const identifier = ::ioctl(descriptor, NVME_IOCTL_ID);
+    unsigned long const io_cmd = _IOWR('N', 0x43, linux_nvme_passthru_cmd_t); // NVME_IOCTL_IO_CMD
+    int const identifier = ::ioctl(descriptor, linux_nvme_ioctl_id_k);
     if (identifier < 0) return -EINVAL;
     u32_t const step = max_of<u32_t>(static_cast<u32_t>(io_alignment_k), block_bytes);
     u32_t const length = static_cast<u32_t>(destination.size());
     for (u32_t moved = 0; moved != length;) {
         u32_t const bytes = min_of(step, length - moved);
         u64_t const first_block = (offset + moved) / block_bytes;
-        struct nvme_passthru_cmd command {};
+        linux_nvme_passthru_cmd_t command {};
         command.opcode = nvme_read_opcode_k, command.nsid = static_cast<u32_t>(identifier);
-        command.addr = reinterpret_cast<std::uintptr_t>(destination.data() + moved), command.data_len = bytes;
+        command.addr = reinterpret_cast<std::uintptr_t>(destination.data() + moved), command.data_length = bytes;
         command.cdw10 = static_cast<u32_t>(first_block), command.cdw11 = static_cast<u32_t>(first_block >> 32);
         command.cdw12 = bytes / block_bytes - 1;
-        if (::ioctl(descriptor, NVME_IOCTL_IO_CMD, &command) != 0) return -EIO;
+        if (::ioctl(descriptor, io_cmd, &command) != 0) return -EIO;
         moved += bytes;
     }
     return static_cast<i32_t>(length);
@@ -1387,7 +1561,7 @@ inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const n
  *  @c O_DIRECT: unaligned I/O silently falls back to the buffered path, and resident pages are
  *  still served from cache.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class blocking_files_engine {
   public:
     using wait_t = wait_type_;
@@ -1540,7 +1714,7 @@ struct linux_aio_context_t {
  *  only on the @c O_DIRECT path, since buffered submissions can block inside @c io_submit; that
  *  costs this design nothing, as every read is already block-aligned.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class linux_aio_files_engine {
   public:
     using wait_t = wait_type_;
@@ -1753,8 +1927,8 @@ struct linux_uring_mapping_t {
 /** Everything the submission side of one ring needs: the kernel-shared head &
  *  tail words, the index-order array, the wrap mask, and the SQE array. */
 struct linux_uring_submissions_t {
-    u32_t* head = nullptr;
-    u32_t* tail = nullptr;
+    u32_t* head_word = nullptr;
+    u32_t* tail_word = nullptr;
     u32_t* order = nullptr;
     u32_t mask = 0;
     byte_t* entries = nullptr;
@@ -1763,8 +1937,8 @@ struct linux_uring_submissions_t {
 
 /** The completion-side mirror: head & tail words, wrap mask, and CQE array. */
 struct linux_uring_completions_t {
-    u32_t* head = nullptr;
-    u32_t* tail = nullptr;
+    u32_t* head_word = nullptr;
+    u32_t* tail_word = nullptr;
     u32_t mask = 0;
     byte_t* entries = nullptr;
     std::size_t stride = 0;
@@ -1829,58 +2003,72 @@ class linux_uring_ring_t {
      *  @param[in] form SQE & CQE strides: compact, or doubled for NVMe passthrough.
      *  @param[in] reaping Interrupt-driven completions, or device-queue polling, which a refused
      *      IOPOLL ring trades for interrupts.
+     *
+     *  SQE128 and CQE32 need Linux 5.19, SINGLE_ISSUER 6.0 and DEFER_TASKRUN 6.1.
      */
     status_t setup(std::size_t queue_depth, linux_uring_form_t form, linux_uring_reaping_t reaping) noexcept {
-        struct io_uring_params params;
-        u32_t const interrupted_flags = form == linux_uring_form_t::nvme_k ? IORING_SETUP_SQE128 | IORING_SETUP_CQE32
-                                                                           : 0u;
-        u32_t const shape_flags = interrupted_flags |
-                                  (reaping == linux_uring_reaping_t::polled_k ? IORING_SETUP_IOPOLL : 0u);
-        u32_t const deferred_flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+        long const setup_syscall = 425 + linux_syscall_offset_k; // __NR_io_uring_setup
+
+        u32_t const iopoll = 1u << 0;                   // IORING_SETUP_IOPOLL
+        u32_t const sqe128 = 1u << 10;                  // IORING_SETUP_SQE128
+        u32_t const cqe32 = 1u << 11;                   // IORING_SETUP_CQE32
+        u32_t const single_issuer = 1u << 12;           // IORING_SETUP_SINGLE_ISSUER
+        u32_t const defer_taskrun = 1u << 13;           // IORING_SETUP_DEFER_TASKRUN
+        u32_t const single_mmap = 1u << 0;              // IORING_FEAT_SINGLE_MMAP
+        u64_t const submission_ring = 0ull;             // IORING_OFF_SQ_RING
+        u64_t const completion_ring = 0x8000000ull;     // IORING_OFF_CQ_RING
+        u64_t const submission_entries = 0x10000000ull; // IORING_OFF_SQES
+        linux_uring_params_t params;
+        u32_t const interrupted_flags = form == linux_uring_form_t::nvme_k ? sqe128 | cqe32 : 0u;
+        u32_t const shape_flags = interrupted_flags | (reaping == linux_uring_reaping_t::polled_k ? iopoll : 0u);
+        u32_t const deferred_flags = single_issuer | defer_taskrun;
         // A refused IOPOLL ring falls to interrupts, as a refused deferred task-run does to plain.
         for (u32_t const flags :
              {shape_flags | deferred_flags, shape_flags, interrupted_flags | deferred_flags, interrupted_flags}) {
-            params = io_uring_params {};
-            params.flags = flags;
-            long const ring_descriptor = syscall(SYS_io_uring_setup, static_cast<unsigned>(queue_depth), &params);
+            params = linux_uring_params_t {};
+            params.setup_flags = flags;
+            long const ring_descriptor = syscall(setup_syscall, static_cast<unsigned>(queue_depth), &params);
             if (ring_descriptor >= 0) {
                 ring_descriptor_ = static_cast<int>(ring_descriptor);
                 break;
             }
-            if (flags == interrupted_flags) return status_t::io_k;
+            // Kernels before 5.19 have no 128-byte entries, so they leave passthrough unsupported.
+            if (flags == interrupted_flags)
+                return form == linux_uring_form_t::nvme_k ? status_t::unsupported_k : status_t::io_k;
         }
-        reaping_ = params.flags & IORING_SETUP_IOPOLL ? linux_uring_reaping_t::polled_k
-                                                      : linux_uring_reaping_t::interrupted_k;
-        posting_ = params.flags & IORING_SETUP_DEFER_TASKRUN ? linux_uring_posting_t::deferred_k
-                                                             : linux_uring_posting_t::immediate_k;
-        submissions_.stride = form == linux_uring_form_t::nvme_k ? 128 : sizeof(struct io_uring_sqe);
-        completions_.stride = form == linux_uring_form_t::nvme_k ? 32 : sizeof(struct io_uring_cqe);
+        reaping_ = params.setup_flags & iopoll ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
+        posting_ = params.setup_flags & defer_taskrun ? linux_uring_posting_t::deferred_k
+                                                      : linux_uring_posting_t::immediate_k;
+        submissions_.stride = form == linux_uring_form_t::nvme_k ? sizeof(linux_uring_sqe128_t)
+                                                                 : sizeof(linux_uring_sqe_t);
+        completions_.stride = form == linux_uring_form_t::nvme_k ? 2 * sizeof(linux_uring_cqe_t)
+                                                                 : sizeof(linux_uring_cqe_t);
 
         // Map the two rings & the SQE array. Modern kernels serve SQ & CQ from one mapping.
-        std::size_t submission_bytes = params.sq_off.array + params.sq_entries * sizeof(u32_t);
-        std::size_t const completion_bytes = params.cq_off.cqes + params.cq_entries * completions_.stride;
-        bool const single_mapping = params.features & IORING_FEAT_SINGLE_MMAP;
+        std::size_t submission_bytes = params.sq_off.array_offset + params.sq_entries * sizeof(u32_t);
+        std::size_t const completion_bytes = params.cq_off.cqes_offset + params.cq_entries * completions_.stride;
+        bool const single_mapping = params.features & single_mmap;
         if (single_mapping) submission_bytes = max_of(submission_bytes, completion_bytes);
-        status_t mapped = submission_mapping_.map(ring_descriptor_, submission_bytes, IORING_OFF_SQ_RING);
+        status_t mapped = submission_mapping_.map(ring_descriptor_, submission_bytes, submission_ring);
         if (failed(mapped)) return mapped;
         linux_uring_mapping_t const& completion_mapping = single_mapping ? submission_mapping_ : completion_mapping_;
         if (!single_mapping) {
-            mapped = completion_mapping_.map(ring_descriptor_, completion_bytes, IORING_OFF_CQ_RING);
+            mapped = completion_mapping_.map(ring_descriptor_, completion_bytes, completion_ring);
             if (failed(mapped)) return mapped;
         }
-        mapped = entries_mapping_.map(ring_descriptor_, params.sq_entries * submissions_.stride, IORING_OFF_SQES);
+        mapped = entries_mapping_.map(ring_descriptor_, params.sq_entries * submissions_.stride, submission_entries);
         if (failed(mapped)) return mapped;
 
-        submissions_.head = submission_mapping_.word(params.sq_off.head);
-        submissions_.tail = submission_mapping_.word(params.sq_off.tail);
-        submissions_.order = submission_mapping_.word(params.sq_off.array);
-        submissions_.mask = *submission_mapping_.word(params.sq_off.ring_mask);
+        submissions_.head_word = submission_mapping_.word(params.sq_off.head_offset);
+        submissions_.tail_word = submission_mapping_.word(params.sq_off.tail_offset);
+        submissions_.order = submission_mapping_.word(params.sq_off.array_offset);
+        submissions_.mask = *submission_mapping_.word(params.sq_off.ring_mask_offset);
         submissions_.entries = static_cast<byte_t*>(entries_mapping_.base);
-        completions_.head = completion_mapping.word(params.cq_off.head);
-        completions_.tail = completion_mapping.word(params.cq_off.tail);
-        completions_.mask = *completion_mapping.word(params.cq_off.ring_mask);
-        completions_.entries = static_cast<byte_t*>(completion_mapping.base) + params.cq_off.cqes;
-        pending_tail_ = *submissions_.tail;
+        completions_.head_word = completion_mapping.word(params.cq_off.head_offset);
+        completions_.tail_word = completion_mapping.word(params.cq_off.tail_offset);
+        completions_.mask = *completion_mapping.word(params.cq_off.ring_mask_offset);
+        completions_.entries = static_cast<byte_t*>(completion_mapping.base) + params.cq_off.cqes_offset;
+        pending_tail_ = *submissions_.tail_word;
         queue_depth_ = queue_depth;
         register_ring_descriptor_();
         return status_t::success_k;
@@ -1889,8 +2077,8 @@ class linux_uring_ring_t {
     /** Pins @p regions into the ring's registered-buffer table, so @c READ_FIXED skips per-read
      *  pinning. */
     status_t register_buffers(std::span<struct iovec const> regions) noexcept {
-        long const registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_BUFFERS,
-                                        regions.data(), static_cast<unsigned>(regions.size()));
+        u32_t const buffers = 0; // IORING_REGISTER_BUFFERS
+        long const registered = register_(buffers, regions.data(), static_cast<unsigned>(regions.size()));
         if (registered < 0) return status_t::io_k;
         registered_regions_ = static_cast<u32_t>(regions.size());
         return status_t::success_k;
@@ -1899,37 +2087,37 @@ class linux_uring_ring_t {
     /** Unpins the registered regions; a ring holding none asks the kernel nothing. */
     void unregister_buffers() noexcept {
         if (!registered_regions_) return;
-        [[maybe_unused]] long const unregistered = syscall(SYS_io_uring_register, ring_descriptor_,
-                                                           IORING_UNREGISTER_BUFFERS, nullptr, 0u);
+        u32_t const unregister = 1; // IORING_UNREGISTER_BUFFERS
+        [[maybe_unused]] long const unregistered = register_(unregister, nullptr, 0u);
         registered_regions_ = 0;
     }
 
     /** Registers @p descriptors as the ring's fixed-file table, addressed by
      *  @ref io_request_t::medium, removing per-read descriptor refcounting. */
     status_t register_files(std::span<int const> descriptors) noexcept {
-        long const registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_FILES,
-                                        descriptors.data(), static_cast<unsigned>(descriptors.size()));
+        u32_t const files = 2; // IORING_REGISTER_FILES
+        long const registered = register_(files, descriptors.data(), static_cast<unsigned>(descriptors.size()));
         return registered < 0 ? status_t::io_k : status_t::success_k;
     }
 
     void unregister_files() noexcept {
-        [[maybe_unused]] long const unregistered = syscall(SYS_io_uring_register, ring_descriptor_,
-                                                           IORING_UNREGISTER_FILES, nullptr, 0u);
+        u32_t const unregister = 3; // IORING_UNREGISTER_FILES
+        [[maybe_unused]] long const unregistered = register_(unregister, nullptr, 0u);
     }
 
     /** Claims the next SQE slot, or returns null when the ring is full or holds its queue depth of
      *  reads. The caller fills the returned entry in place; @ref submit publishes it. The claim
      *  cursor is @c pending_tail_ rather than the kernel-visible tail, so a batch of claims arrives
      *  in consecutive slots before one publication. */
-    struct io_uring_sqe* next_submission() noexcept {
+    linux_uring_sqe_t* next_submission() noexcept {
         if (outstanding_ == queue_depth_) return nullptr;
-        u32_t const head = fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
-        if (pending_tail_ - head == submissions_.mask + 1) return nullptr;
+        u32_t const consumed = fu::standard_atomic_ref<u32_t>(*submissions_.head_word).load(std::memory_order_acquire);
+        if (pending_tail_ - consumed == submissions_.mask + 1) return nullptr;
         u32_t const index = pending_tail_ & submissions_.mask;
         submissions_.order[index] = index;
         pending_tail_++;
         ++outstanding_;
-        return reinterpret_cast<struct io_uring_sqe*>(submissions_.entries + index * submissions_.stride);
+        return reinterpret_cast<linux_uring_sqe_t*>(submissions_.entries + index * submissions_.stride);
     }
 
     /** The full submit-and-wait discipline shared by every ring engine: nonblocking submits &
@@ -1950,58 +2138,69 @@ class linux_uring_ring_t {
      *  decoding is the caller's job, since this layer only surfaces the primary result word. */
     std::size_t poll_completions(std::span<io_completion_t> completions,
                                  std::span<u64_t const> request_contexts) noexcept {
-        u32_t head = *completions_.head;
-        u32_t const tail = completion_tail_seen_();
+        u32_t reaped = *completions_.head_word;
+        u32_t const tail = completion_tail_();
         std::size_t polled = 0;
-        for (; head != tail && polled != completions.size(); ++head, ++polled) {
-            struct io_uring_cqe const* const entry = reinterpret_cast<struct io_uring_cqe const*>(
-                completions_.entries + (head & completions_.mask) * completions_.stride);
+        for (; reaped != tail && polled != completions.size(); ++reaped, ++polled) {
+            linux_uring_cqe_t const* const entry = reinterpret_cast<linux_uring_cqe_t const*>(
+                completions_.entries + (reaped & completions_.mask) * completions_.stride);
             io_buffer_id_t const buffer = static_cast<io_buffer_id_t>(entry->user_data);
             completions[polled] = io_completion_t {buffer, entry->res, request_contexts[buffer]};
         }
-        fu::standard_atomic_ref<u32_t>(*completions_.head).store(head, std::memory_order_release);
+        fu::standard_atomic_ref<u32_t>(*completions_.head_word).store(reaped, std::memory_order_release);
         outstanding_ -= polled;
         return polled;
     }
 
   private:
 
-    /** Publishes claimed SQEs & performs one @c io_uring_enter with the given
-     *  completion demand; @p min_complete of zero submits without blocking. */
+    /** Publishes claimed SQEs & performs one @c io_uring_enter with the given completion demand;
+     *  @p min_complete of zero submits without blocking. A registered ring, from Linux 5.18, is
+     *  addressed by its index. */
     status_t enter_(u32_t min_complete) noexcept {
-        if (pending_tail_ != *submissions_.tail)
-            fu::standard_atomic_ref<u32_t>(*submissions_.tail).store(pending_tail_, std::memory_order_release);
+        if (pending_tail_ != *submissions_.tail_word)
+            fu::standard_atomic_ref<u32_t>(*submissions_.tail_word).store(pending_tail_, std::memory_order_release);
         // Everything the kernel has not consumed, so a short or refused enter resubmits it next
         // time.
         u32_t const to_submit = pending_tail_ -
-                                fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
+                                fu::standard_atomic_ref<u32_t>(*submissions_.head_word).load(std::memory_order_acquire);
         // Polled rings only harvest device completions inside the syscall, and deferred task-run
         // rings only post them there, so both must ask for events every time.
         bool const getevents = min_complete || posting_ == linux_uring_posting_t::deferred_k ||
                                reaping_ == linux_uring_reaping_t::polled_k;
         if (!to_submit && !getevents) return status_t::success_k;
-        u32_t enter_flags = getevents ? IORING_ENTER_GETEVENTS : 0u;
+        long const enter_syscall = 426 + linux_syscall_offset_k; // __NR_io_uring_enter
+
+        u32_t const getevents_flag = 1u << 0;  // IORING_ENTER_GETEVENTS
+        u32_t const registered_ring = 1u << 4; // IORING_ENTER_REGISTERED_RING
+        u32_t enter_flags = getevents ? getevents_flag : 0u;
         int enter_descriptor = ring_descriptor_;
         if (registered_ring_index_ != unregistered_ring_k) {
-            enter_flags |= IORING_ENTER_REGISTERED_RING;
+            enter_flags |= registered_ring;
             enter_descriptor = static_cast<int>(registered_ring_index_);
         }
-        long const entered = syscall(SYS_io_uring_enter, enter_descriptor, to_submit, min_complete, enter_flags,
-                                     nullptr, 0ull);
+        long const entered = syscall(enter_syscall, enter_descriptor, to_submit, min_complete, enter_flags, nullptr,
+                                     0ull);
         if (entered < 0 && errno != EINTR && errno != EBUSY && errno != EAGAIN) return status_t::io_k;
         return status_t::success_k;
+    }
+
+    /** One @c io_uring_register of @p opcode over @p count @p arguments. */
+    long register_(u32_t opcode, void const* arguments, unsigned count) const noexcept {
+        long const register_syscall = 427 + linux_syscall_offset_k; // __NR_io_uring_register
+        return syscall(register_syscall, ring_descriptor_, opcode, arguments, count);
     }
 
     /** The body of @ref submit, before a refusal abandons the reads. */
     template <typename wait_type_>
     status_t enter_and_wait_(io_wait_t wait) noexcept {
         if (!outstanding_) return status_t::success_k;
-        if (wait == io_wait_t::nonblocking_k || completion_tail_seen_() != *completions_.head) return enter_(0);
+        if (wait == io_wait_t::nonblocking_k || completion_tail_() != *completions_.head_word) return enter_(0);
         if (reaps_asynchronously_()) {
             if (status_t const submitted = enter_(0); failed(submitted)) return submitted;
-            u32_t const seen = completion_tail_seen_();
-            wait_type_ {}(completions_.tail, seen, 0u, fu::wait_capped_t {});
-            if (completion_tail_seen_() != seen) return status_t::success_k;
+            u32_t const observed = completion_tail_();
+            wait_type_ {}(completions_.tail_word, observed, 0u, fu::wait_capped_t {});
+            if (completion_tail_() != observed) return status_t::success_k;
         }
         return enter_(1);
     }
@@ -2009,22 +2208,22 @@ class linux_uring_ring_t {
     /** Withdraws the SQEs the kernel never consumed, waits out the reads it did, and drops every
      *  CQE; the outstanding count keeps only the reads the kernel refused to wait for. */
     void abandon_() noexcept {
-        u32_t const consumed = fu::standard_atomic_ref<u32_t>(*submissions_.head).load(std::memory_order_acquire);
+        u32_t const consumed = fu::standard_atomic_ref<u32_t>(*submissions_.head_word).load(std::memory_order_acquire);
         // Without SQPOLL the kernel reads the tail only inside `io_uring_enter`, so it may move
         // back.
         outstanding_ -= pending_tail_ - consumed;
         pending_tail_ = consumed;
-        fu::standard_atomic_ref<u32_t>(*submissions_.tail).store(consumed, std::memory_order_release);
+        fu::standard_atomic_ref<u32_t>(*submissions_.tail_word).store(consumed, std::memory_order_release);
         for (;;) {
-            u32_t const tail = completion_tail_seen_();
-            outstanding_ -= tail - *completions_.head;
-            fu::standard_atomic_ref<u32_t>(*completions_.head).store(tail, std::memory_order_release);
+            u32_t const tail = completion_tail_();
+            outstanding_ -= tail - *completions_.head_word;
+            fu::standard_atomic_ref<u32_t>(*completions_.head_word).store(tail, std::memory_order_release);
             if (!outstanding_ || failed(enter_(static_cast<u32_t>(outstanding_)))) return;
         }
     }
 
-    u32_t completion_tail_seen_() const noexcept {
-        return fu::standard_atomic_ref<u32_t>(*completions_.tail).load(std::memory_order_acquire);
+    u32_t completion_tail_() const noexcept {
+        return fu::standard_atomic_ref<u32_t>(*completions_.tail_word).load(std::memory_order_acquire);
     }
 
     /** True only when CQEs arrive in shared memory between syscalls: immediate posting under
@@ -2039,11 +2238,11 @@ class linux_uring_ring_t {
      *  skipping the per-syscall descriptor-table lookup. Silent no-op fallback on
      *  pre-5.18 kernels, where the registration opcode is simply rejected. */
     void register_ring_descriptor_() noexcept {
-        struct io_uring_rsrc_update ring_update {};
-        ring_update.data = static_cast<u64_t>(ring_descriptor_);
+        linux_uring_rsrc_update_t ring_update {};
+        ring_update.update_value = static_cast<u64_t>(ring_descriptor_);
         ring_update.offset = unregistered_ring_k; // The kernel assigns the index.
-        long const registered = syscall(SYS_io_uring_register, ring_descriptor_, IORING_REGISTER_RING_FDS, &ring_update,
-                                        1u);
+        u32_t const ring_fds = 20;                // IORING_REGISTER_RING_FDS
+        long const registered = register_(ring_fds, &ring_update, 1u);
         if (registered >= 0) registered_ring_index_ = ring_update.offset;
     }
 
@@ -2100,7 +2299,7 @@ status_t reserve_uring_buffers_(linux_uring_ring_t& ring, io_buffers<allocator_t
  *  poll, since the CQ is drained entirely in user space. Under @c DEFER_TASKRUN the spin is
  *  skipped, since completions only post inside @c io_uring_enter by design.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class linux_uring_files_engine {
   public:
     using wait_t = wait_type_;
@@ -2149,20 +2348,22 @@ class linux_uring_files_engine {
     }
 
     status_t enqueue_read(io_request_t request) noexcept {
+        u8_t const read = 22;      // IORING_OP_READ
+        u8_t const read_fixed = 4; // IORING_OP_READ_FIXED
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
-        struct io_uring_sqe* const entry = ring_.next_submission();
+        linux_uring_sqe_t* const entry = ring_.next_submission();
         if (!entry) return status_t::overflow_k;
-        *entry = io_uring_sqe {};
-        entry->opcode = IORING_OP_READ;
-        entry->flags = IOSQE_FIXED_FILE;
+        *entry = linux_uring_sqe_t {};
+        entry->opcode = read;
+        entry->entry_flags = linux_uring_entry_fixed_file_k;
         // A fixed-file index, not a descriptor: the request's medium ID picks the file.
         entry->fd = static_cast<i32_t>(request.medium);
         entry->addr = reinterpret_cast<std::uintptr_t>(buffers_.buffer(request.buffer));
-        entry->len = request.length;
-        entry->off = request.offset;
+        entry->length = request.length;
+        entry->offset = request.offset;
         entry->user_data = request.buffer;
         // Every buffer lies in the one registered region, so `buf_index` stays zero.
-        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k) entry->opcode = IORING_OP_READ_FIXED;
+        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k) entry->opcode = read_fixed;
         request_contexts_[request.buffer] = request.context;
         return status_t::success_k;
     }
@@ -2199,7 +2400,8 @@ class linux_uring_files_engine {
  *      ~20-30% IOPS per core over the block path.
  *
  *  Kernel floor 6.2 for unprivileged reads gated on the device node's file mode; a udev rule
- *  granting the service user read access to @c /dev/ng* suffices, no @c CAP_SYS_ADMIN.
+ *  granting the service user read access to @c /dev/ng* suffices, no @c CAP_SYS_ADMIN. URING_CMD
+ *  arrived in Linux 5.19 and its registered-buffer form, @c IORING_URING_CMD_FIXED, in 6.1.
  *
  *  The payload must live on the namespace directly: offsets translate to LBAs by a plain shift of
  *  each medium's @c block_bytes, so open the media with the namespace's LBA size in mind. Discover
@@ -2216,7 +2418,7 @@ class linux_uring_files_engine {
  *  @c poll_completions folds both failure families into negative results and successes into the
  *  bytes read.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class linux_uring_nvme_engine {
   public:
     using wait_t = wait_type_;
@@ -2273,7 +2475,7 @@ class linux_uring_nvme_engine {
             struct stat description;
             if (::fstat(file.descriptor, &description) != 0 || !S_ISCHR(description.st_mode))
                 return descriptors_.clear(), namespaces_.clear(), status_t::config_mismatch_k;
-            int const identifier = ::ioctl(file.descriptor, NVME_IOCTL_ID);
+            int const identifier = ::ioctl(file.descriptor, linux_nvme_ioctl_id_k);
             if (identifier < 0 || !file.block_bytes) return descriptors_.clear(), namespaces_.clear(), status_t::io_k;
             namespaces_.push_back_reserved(nvme_namespace_t {static_cast<u32_t>(identifier),
                                                              static_cast<u32_t>(std::countr_zero(file.block_bytes))});
@@ -2291,24 +2493,27 @@ class linux_uring_nvme_engine {
     }
 
     status_t enqueue_read(io_request_t request) noexcept {
+        u8_t const uring_cmd = 46;                                           // IORING_OP_URING_CMD
+        u32_t const uring_cmd_io = _IOWR('N', 0x80, linux_nvme_uring_cmd_t); // NVME_URING_CMD_IO
+        u32_t const fixed = 1u << 0;                                         // IORING_URING_CMD_FIXED
         if (status_t const vetted = io_request_vet_(request, descriptors_.size()); failed(vetted)) return vetted;
-        struct io_uring_sqe* const entry = ring_.next_submission();
+        // A passthrough ring's slots are the 128-byte form.
+        linux_uring_sqe128_t* const entry = reinterpret_cast<linux_uring_sqe128_t*>(ring_.next_submission());
         if (!entry) return status_t::overflow_k;
-        std::memset(static_cast<void*>(entry), 0, 128);
-        entry->opcode = IORING_OP_URING_CMD;
-        entry->flags = IOSQE_FIXED_FILE;
+        *entry = linux_uring_sqe128_t {};
+        entry->opcode = uring_cmd;
+        entry->entry_flags = linux_uring_entry_fixed_file_k;
         entry->fd = static_cast<i32_t>(request.medium);
-        entry->cmd_op = NVME_URING_CMD_IO;
+        entry->cmd_op = uring_cmd_io;
         entry->user_data = request.buffer;
         // Every buffer lies in the one registered region, so `buf_index` stays zero.
-        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k)
-            entry->uring_cmd_flags = IORING_URING_CMD_FIXED;
+        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k) entry->uring_cmd_flags = fixed;
         nvme_namespace_t const& name_space = namespaces_[request.medium];
-        struct nvme_uring_cmd* const command = reinterpret_cast<struct nvme_uring_cmd*>(entry->cmd);
+        linux_nvme_uring_cmd_t* const command = reinterpret_cast<linux_nvme_uring_cmd_t*>(entry->cmd);
         command->opcode = nvme_read_opcode_k;
         command->nsid = name_space.identifier;
         command->addr = reinterpret_cast<std::uintptr_t>(buffers_.buffer(request.buffer));
-        command->data_len = request.length;
+        command->data_length = request.length;
         u64_t const first_block = request.offset >> name_space.lba_shift;
         u32_t const block_count = request.length >> name_space.lba_shift;
         command->cdw10 = static_cast<u32_t>(first_block);
@@ -2385,7 +2590,7 @@ class linux_uring_nvme_engine {
  *  for this engine's testing: its storage arrives via a paravirtual SCSI path, so neither IoRing
  *  nor NVMe character devices exist there; only native Windows exercises this code.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class windows_ioring_files_engine {
   public:
     using wait_t = wait_type_;
@@ -2561,7 +2766,7 @@ struct linux_spdk_dma_allocator {
  *  queued with delayed doorbells, so @c enqueue_read only encodes and the next poll rings once per
  *  batch.
  */
-template <typename wait_type_ = fu::standard_yield_t, typename allocator_type_ = forkunion_allocator_t>
+template <typename wait_type_, typename allocator_type_ = forkunion_allocator_t>
 class linux_spdk_engine {
   public:
     using wait_t = wait_type_;
@@ -2933,22 +3138,23 @@ using any_io_engine =
     std::conditional_t<sizeof...(engine_types_) == 1, std::variant_alternative_t<0, std::variant<engine_types_...>>,
                        io_engine_variant<engine_types_...>>;
 
-/** Every engine this build admits, in the order a kernel path tries them; blocking reads close
- *  every list, and passthrough opens only when named. */
-using default_io_engine_t = any_io_engine<
+/** Every engine this build admits, each waiting through @p wait_type_, in the order a kernel path
+ *  tries them; blocking reads close every list, and passthrough opens only when named. */
+template <typename wait_type_>
+using default_io_engine = any_io_engine<
 #if USEARCH_WITH_LINUX_URING
-    linux_uring_nvme_engine<>, linux_uring_files_engine<>,
+    linux_uring_nvme_engine<wait_type_>, linux_uring_files_engine<wait_type_>,
 #endif
 #if USEARCH_WITH_LINUX_AIO
-    linux_aio_files_engine<>,
+    linux_aio_files_engine<wait_type_>,
 #endif
 #if USEARCH_WITH_LINUX_SPDK
-    linux_spdk_engine<>,
+    linux_spdk_engine<wait_type_>,
 #endif
 #if USEARCH_WITH_WINDOWS_IORING
-    windows_ioring_files_engine<>,
+    windows_ioring_files_engine<wait_type_>,
 #endif
-    blocking_files_engine<>>;
+    blocking_files_engine<wait_type_>>;
 
 #pragma endregion Engine Sets
 
@@ -2962,7 +3168,7 @@ using default_io_engine_t = any_io_engine<
  *  it. A call attaches a view's media to every engine for its own duration and detaches on return,
  *  so no state outlives a call and any executor serves any view.
  */
-template <typename engine_type_ = default_io_engine_t>
+template <typename engine_type_>
 class nvme_executor {
   public:
     using engine_t = engine_type_;
@@ -3232,9 +3438,6 @@ class nvme_executor {
      *  first. */
     growing_buffer<engine_t> engines_ {global_allocator};
 };
-
-/** The executor over every engine this build admits, each thread's transport picked at spawn. */
-using nvme_executor_t = nvme_executor<default_io_engine_t>;
 
 #pragma endregion Executor
 

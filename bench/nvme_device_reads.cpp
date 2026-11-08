@@ -41,6 +41,9 @@
 namespace unum::usearch::bench {
 using namespace unum::usearch::tools;
 
+/** The executor over every engine the build admits, yielding between polls as the library does. */
+using nvme_executor_t = nvme_executor<default_io_engine<fu::standard_yield_t>>;
+
 /** What one table row reads: the column's rows on the medium, the block reads round to, and the
  *  depth and count of reads the threads share. */
 struct reads_plan_t {

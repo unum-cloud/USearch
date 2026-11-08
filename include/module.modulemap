@@ -3,6 +3,7 @@
 // shared vocabulary they all include.
 module USearchC {
     header "usearch/types.h"
+    header "usearch/arrow.h"
     header "usearch/dense_index.h"
     header "usearch/sequence_index.h"
     header "usearch/shapes_index.h"

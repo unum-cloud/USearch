@@ -153,7 +153,7 @@ static bool known_metric(usearch_shapes_metric_t metric) {
 
 /** Widens entry @p entry of a tape into doubles, sized by its own point count. */
 static void read_shape(usearch_tape_view_t tape, std::size_t entry, std::vector<double>& values) {
-    std::size_t const first_point = tape.offsets[entry], point_count = tape.offsets[entry + 1] - first_point;
+    std::size_t const first_point = offset_at(tape, entry), point_count = offset_at(tape, entry + 1) - first_point;
     values.resize(point_count * coordinates_k);
     std::size_t const point_bytes = row_extent(tape.scalar, coordinates_k);
     for (std::size_t point = 0; point != point_count; ++point)
@@ -182,7 +182,7 @@ static bool copy_entries(shapes_index_t const& index, std::span<std::size_t cons
                       std::span<double const>(entry.payload).subspan(point * coordinates_k, coordinates_k));
         offsets[found + 1] = offsets[found] + points;
     }
-    tape = {written, offsets, scalar_kind};
+    write_output_tape(written, offsets, scalar_kind, tape);
     return true;
 }
 
@@ -454,6 +454,13 @@ void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
+void usearch_shapes_load_vram_buffer(usearch_shapes_load_vram_buffer_t* arguments) {
+    if (through_executor<usearch_shapes_load_vram_buffer>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
 void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
@@ -546,7 +553,7 @@ void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     if (reject_tape(shapes, count, outcome)) return;
     if (index.options.points)
         for (std::size_t offset = 0; offset != count; ++offset)
-            if (reject_if(shapes.offsets[offset + 1] - shapes.offsets[offset] != index.options.points,
+            if (reject_if(offset_at(shapes, offset + 1) - offset_at(shapes, offset) != index.options.points,
                           usearch_status_shape_mismatch_k, "The index froze a point count this entry does not match",
                           outcome))
                 return;
@@ -624,7 +631,7 @@ void usearch_shapes_search(usearch_shapes_search_t* arguments) {
     if (reject_tape(queries, count, outcome)) return;
     if (reject_traversal(arguments->traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                      {queries.data, queries.offsets}, outcome);
+                                                      {queries.data, offsets_address(queries)}, outcome);
     matches_outputs_t outputs {};
     if (!arena || !carve_ranked(*arena, count, arguments->wanted, outputs, outcome)) return;
 

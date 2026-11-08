@@ -103,7 +103,7 @@ template <vendored_residency_t residency_>
 static status_t place_shards(punned_dense_index<residency_> const& punned, usearch_ram_options_t const& ram) noexcept {
     punned.verbs.bound_shards(punned.index, ram.shard_capacity);
     auto const emplace = [&](fu_memory_domain_id_t domain) noexcept {
-        return punned.verbs.emplace(punned.index, ram_residency(domain));
+        return punned.verbs.emplace(punned.index, ram_residency_k, domain);
     };
     if (!ram.memory_domains || !ram.memory_domains_count) return emplace_on_every_domain(emplace);
     for (std::size_t position = 0; position != ram.memory_domains_count; ++position)
@@ -144,21 +144,12 @@ static status_t place_shards(punned_dense_index<residency_> const& punned,
     for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
         std::size_t const ordinal = named_ordinal(vram, shard);
         if (ordinal >= devices.size()) return status_t::device_error_k;
-        if (status_t const placed = punned.verbs.emplace(punned.index, vram_residency(devices[ordinal].vendor_ordinal));
+        if (status_t const placed = punned.verbs.emplace(punned.index, vram_residency(devices[ordinal].vendor_ordinal),
+                                                         no_memory_domain_k);
             failed(placed))
             return placed;
     }
     return status_t::success_k;
-}
-
-/** The host allocator a variant keeps its tables on: the first named memory domain on RAM, the
- *  heap's domain otherwise. */
-template <typename residency_options_type_>
-static forkunion_allocator_t host_allocator_of(residency_options_type_ const& options) noexcept {
-    if constexpr (std::is_same_v<residency_options_type_, usearch_ram_options_t>)
-        if (options.memory_domains && options.memory_domains_count)
-            return forkunion_allocator_t {static_cast<fu_memory_domain_id_t>(options.memory_domains[0])};
-    return forkunion_allocator_t {no_memory_domain_k};
 }
 
 /** Creates the index of the variant @p verbs, scoring under @p kernel, and places its shards where
@@ -900,7 +891,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
                          punned, arguments->executor, call_executor, outcome);
                      if (!executor) return;
                      progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
-                     refine_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+                     refine_config_t const config = refine_config_of(arguments->refine);
                      auto const [refined, refined_status] = punned.verbs.refine(punned.index, config, *executor, ticks);
                      accumulate_stats(stats, refined);
                      // A stopped pass still healed, so its report stands beside the cancel.
@@ -1077,9 +1068,6 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
-                                                      ram_residency_k, {}, outcome);
-    if (!arena) return;
     fu::standard_atomic_ref<u32_t> const busy {arguments->cursor->busy};
     if (busy.fetch_test_and_set_bit(0, std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
@@ -1089,6 +1077,10 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
             using key_t = typename dense_verbs<residency_>::key_t;
             static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
+            usearch_arena_handle_t* const arena = claim_arena(
+                arguments->arena, arguments->outcome, arguments->executor,
+                staging_residency(arguments->arena, punned.verbs.residency(punned.index, 0)), {}, outcome);
+            if (!arena) return;
             if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
             usearch_executor_handle_t call_executor;
             typename punned_dense_index<residency_>::executor_t* const executor = executor_of(
@@ -1104,9 +1096,15 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
             expected<std::size_t> const read = punned.verbs.cursor_next(
                 punned.index, arguments->cursor->walk, identities, arguments->links ? &links : nullptr, *executor);
             if (!read) return propagate_error(read.status, outcome, "Failed to export the keys"), void();
-            if (arguments->links) *arguments->links = links.tape();
+            auto const [published_keys, published_keys_status] = publish(*arena, keys, read.value);
+            auto const [published_links, published_links_status] = publish_links(*arena, links);
+            if (status_t const drained_status = drained(*arena,
+                                                        first_failure({published_keys_status, published_links_status}));
+                failed(drained_status))
+                return propagate_error(drained_status, outcome, "Failed to upload the keys to the device"), void();
+            if (arguments->links) *arguments->links = published_links;
             if (read.value) {
-                *arguments->keys = {keys, sizeof(usearch_key_t)};
+                *arguments->keys = {published_keys, sizeof(usearch_key_t)};
                 *arguments->written = read.value;
             }
             propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -1139,7 +1137,7 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
                      std::size_t population = punned.verbs.size(punned.index);
                      for (void* const donor : donors) population += punned.verbs.size(donor);
                      progress_ticks_t ticks {arguments->progress, population};
-                     refine_config_t const config {static_cast<candidates_count_t>(arguments->expansion_factor)};
+                     refine_config_t const config = refine_config_of(arguments->refine);
                      auto const [refined, status] = punned.verbs.absorb(punned.index, to_writable_span(donors), config,
                                                                         *executor, ticks);
                      // The engine nulls every donor it consumed; their handles go with them.
@@ -1178,7 +1176,8 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
         for (void* const source : sources) population += punned.verbs.size(source);
         us::dense::compact_config_t config;
         config.shard_capacity = arguments->shard_capacity;
-        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        config.expansion_factor = static_cast<u32_t>(arguments->refine.expansion_factor);
+        config.memory_limit = arguments->refine.memory_limit;
         progress_ticks_t ticks {arguments->progress, population};
         auto const [compacted, status] = punned.verbs.compact(punned.index, to_span(sources), config, *executor, ticks);
         // Only a whole compaction consumed every other source; a failure frees none of them.
@@ -1227,7 +1226,7 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
         if (!opened)
             return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
                    void();
-        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        split_config_t const config {refine_config_of(arguments->refine), arguments->seed};
         auto const [refinement, status] = punned.verbs.refinement_init(
             punned.index, view_dense_variants(arguments->donors, arguments->count),
             view_dense_variants(arguments->receivers, arguments->receivers_count), config, *executor);
@@ -1353,7 +1352,7 @@ USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments) {
                                     "An index cannot split into itself", outcome))
             return;
         progress_ticks_t ticks {arguments->progress, punned.verbs.size(punned.index)};
-        split_config_t const config {{static_cast<candidates_count_t>(arguments->expansion_factor)}, arguments->seed};
+        split_config_t const config {refine_config_of(arguments->refine), arguments->seed};
         auto const [refined, status] = punned.verbs.split(
             punned.index, view_dense_variants(arguments->receivers, arguments->count), config, *executor, ticks);
         accumulate_stats(arguments->stats, refined);
@@ -1386,10 +1385,6 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
             if (punned.verbs.kernel(punned.index) != nk_kernel_dot_k)
                 return propagate_error(usearch_status_config_mismatch_k, outcome,
                                        "A product is a dot, so the kind must be inner product"),
-                       void();
-            if (residency != ram_residency_k && arguments->traversal == usearch_traversal_scan_k)
-                return propagate_error(usearch_status_unsupported_k, outcome,
-                                       "No device residency multiplies by an exact scan yet"),
                        void();
             usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
                                                               residency, {arguments->left.data}, outcome);
@@ -1465,11 +1460,6 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "A softmax weighs logits, so the kind must be inner product"),
                    void();
-        if constexpr (residency_ != vendored_residency_t::ram_k && residency_ != vendored_residency_t::nvme_k)
-            if (arguments->traversal == usearch_traversal_scan_k)
-                return propagate_error(usearch_status_unsupported_k, outcome,
-                                       "No device residency attends by an exact scan yet"),
-                       void();
         if (!arguments->value_lookup)
             return propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set"), void();
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
@@ -1737,6 +1727,17 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) {
     delete arena;
 }
 
+USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    usearch_arena_t const arena = arguments->arena;
+    if (!arena || !arguments->description)
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The arena and description must not be NULL"),
+               void();
+    *arguments->description = {arena->residency.residency, arena_device_ordinal(*arena)};
+    propagate_error(usearch_status_success_k, outcome, nullptr);
+}
+
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
@@ -1746,7 +1747,8 @@ USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* argumen
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    if (!spawn_ram_executor(*executor, arguments->threads, ceiling, outcome)) return delete executor, void();
+    if (!spawn_ram_executor(*executor, arguments->threads, ceiling, arguments->ram, outcome))
+        return delete executor, void();
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 
@@ -1857,8 +1859,9 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
         // into.
         linux_spdk_process_t::config_t environment;
         environment.memory = pcie_ids ? linux_spdk_memory_t::hugepages_k : linux_spdk_memory_t::plain_pages_k;
-        if (status_t const started = linux_spdk_process_t::start<fu::standard_yield_t>(environment); failed(started))
-            return propagate_error(started, outcome, "The SPDK environment did not start"), void();
+        if (status_t const acquired = linux_spdk_process_t::acquire<fu::standard_yield_t>(environment);
+            failed(acquired))
+            return propagate_error(acquired, outcome, "The SPDK environment did not start"), void();
         config.transport = io_transport_t::linux_spdk_k;
 #else
         (void)pcie_ids;

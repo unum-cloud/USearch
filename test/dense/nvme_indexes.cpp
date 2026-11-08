@@ -16,17 +16,20 @@ std::size_t test::dense::check_nvme_indexes(settings_t const& settings) {
     };
     std::size_t failures_count = 0;
     if (char const* name = "nvme bf16+dot+blocking"; selects(name))
-        failures_count += test_nvme_configuration<blocking_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(name,
-                                                                                                       settings.seed);
+        failures_count +=
+            test_nvme_configuration<blocking_files_engine<fu::standard_yield_t>, nk_bf16_k, nk_kernel_dot_k>(
+                name, settings.seed);
 #if USEARCH_WITH_LINUX_AIO
     if (char const* name = "nvme bf16+dot+linux-aio"; selects(name))
-        failures_count += test_nvme_configuration<linux_aio_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(name,
-                                                                                                        settings.seed);
+        failures_count +=
+            test_nvme_configuration<linux_aio_files_engine<fu::standard_yield_t>, nk_bf16_k, nk_kernel_dot_k>(
+                name, settings.seed);
 #endif
 #if USEARCH_WITH_LINUX_URING
     if (char const* name = "nvme bf16+dot+linux-uring"; selects(name))
-        failures_count += test_nvme_configuration<linux_uring_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
-            name, settings.seed);
+        failures_count +=
+            test_nvme_configuration<linux_uring_files_engine<fu::standard_yield_t>, nk_bf16_k, nk_kernel_dot_k>(
+                name, settings.seed);
 #endif
 #if USEARCH_WITH_LINUX_SPDK
     if (char const* name = "nvme bf16+dot+linux-spdk"; selects(name))
