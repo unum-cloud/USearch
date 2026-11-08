@@ -1,4 +1,4 @@
-"""Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices.
+"""One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe.
 
 File: python/usearch/__init__.py
 Author: Ash Vardanian

@@ -7,11 +7,11 @@
 #   = meaning 7 platforms * 6 Python versions = 42 builds.
 [build-system]
 build-backend = "scikit_build_core.build"
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.11"]
 
 [project]
 name = "usearch"
-description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

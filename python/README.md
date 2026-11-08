@@ -125,7 +125,8 @@ A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pi
 A stale output raises `UninitializedError` from `memoryview`, from indexing a `Matches` and from `DenseProducts.query`, but `np.asarray` swallows that error into a 0-d object array, so read through those or copy with `np.array(...)` while the output is fresh.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `DeviceError`.
 It serves only calls on that executor, any other or none raising `DeviceError`, and holds the executor until it is freed, so an executor closed first keeps its streams until then.
-Its views export `__cuda_array_interface__` instead, for CuPy, PyTorch or Numba, and `arena.residency` tells the two apart.
+Its views export `__cuda_array_interface__` instead, for CuPy, PyTorch or Numba, and `arena.describe()` tells the two apart.
+Every view also exports `__dlpack__` wherever it lives, so `torch.from_dlpack(vectors)` takes it in place.
 
 ```python
 hits, arena = 0, usearch.Arena(pool)
@@ -244,7 +245,7 @@ Residency is never among those fields, because where the payload lives stays the
 
 ### Rows & Scalars
 
-Inputs arrive through PEP 3118 first and `__array_interface__` second, so NumPy is never required and a PyTorch or TensorFlow tensor needs no round-trip through it.
+Inputs arrive through DLPack first, then PEP 3118 and `__array_interface__`, so NumPy is never required and a PyTorch, JAX or CuPy tensor needs no round-trip through it, on the host or on its GPU.
 Only the row stride may vary; a strided column would force a gather the SIMD kernels have no form for.
 A `dtype=` names the scalar type a buffer cannot spell, such as `Scalar.BF16` over raw bytes, and must be as wide as the buffer's items.
 In `get` and `attend`, an `outputs_dtype=` names the scalar type the verb exports as, converted from storage.

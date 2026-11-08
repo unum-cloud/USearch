@@ -28,7 +28,6 @@ __all__: list[str] = [
     "index_keys",
     "integers_to_keys",
     "keys_to_integers",
-    "measure_seconds",
     "random_vectors",
     "self_recall",
 ]

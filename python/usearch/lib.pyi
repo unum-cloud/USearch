@@ -14,24 +14,78 @@ import uuid
 from collections.abc import Buffer, Callable, Generator, Sequence
 from enum import IntEnum
 from types import GenericAlias, TracebackType
-from typing import Any, Final, NoReturn, Self, final, type_check_only
+from typing import Any, Final, NoReturn, Protocol, Self, final, type_check_only
 
 from _typeshed import structseq
+
+__all__: list[str] = [
+    "Arena",
+    "CPUClass",
+    "CancelledError",
+    "CapacityOverflowError",
+    "ConfigMismatchError",
+    "ContendedError",
+    "Deferred",
+    "DeferredOn",
+    "DenseBatch",
+    "DenseCursor",
+    "DenseIndex",
+    "DenseIndexDescription",
+    "DenseMetadata",
+    "DenseMetric",
+    "DenseProducts",
+    "DenseReachability",
+    "DenseSearchStream",
+    "DenseTraversalStats",
+    "DenseVectors",
+    "DeviceError",
+    "Error",
+    "Executor",
+    "GPUClass",
+    "InputOutputError",
+    "InternalError",
+    "InvalidArgumentError",
+    "Key",
+    "MalformedError",
+    "Match",
+    "Matches",
+    "Monolith",
+    "Mood",
+    "NVMeClass",
+    "On",
+    "OutOfMemoryError",
+    "ReadOnlyError",
+    "RefineReport",
+    "Residency",
+    "Sample",
+    "Scalar",
+    "ShapeMismatchError",
+    "Status",
+    "Traversal",
+    "UninitializedError",
+    "UnknownKindError",
+    "UnsupportedError",
+    "UnsupportedLayoutError",
+    "capabilities_available",
+    "capabilities_compiled",
+    "layouts",
+    "version",
+]
 
 # region: Library Probes
 
 __version__: str
 
 def version() -> str:
-    """The library's semantic version. Calls `usearch_version_name`."""
+    """The library's semantic version."""
     ...
 
 def capabilities_compiled() -> str:
-    """The kernel families this build carries. Calls `usearch_capabilities_compiled`."""
+    """The kernel families this build carries."""
     ...
 
 def capabilities_available() -> str:
-    """The kernel families this machine can run. Calls `usearch_capabilities_available`."""
+    """The kernel families this machine can run."""
     ...
 
 def layouts() -> dict[str, tuple[int, dict[str, int]]]:
@@ -42,124 +96,230 @@ def layouts() -> dict[str, tuple[int, dict[str, int]]]:
 
 # region: Shared Vocabulary
 
-# Every batch verb reads PEP 3118 first and `__array_interface__` second, so NumPy is never
-# required - at runtime or here. Frameworks whose stubs predate PEP 688, PyTorch among them,
-# support the protocol at runtime but need a `cast` to satisfy a checker.
-type _Tensor = Buffer
+type _Capsule = object
+
+@type_check_only
+class _ArrowArrayExporter(Protocol):
+    """A column exporting Apache Arrow's PyCapsule array protocol, as PyArrow's arrays do."""
+
+    def __arrow_c_array__(self, requested_schema: _Capsule | None = None) -> tuple[_Capsule, _Capsule]: ...
+
+@type_check_only
+class _ArrowStreamExporter(Protocol):
+    """A column exporting Apache Arrow's PyCapsule stream protocol, as Polars Series do."""
+
+    def __arrow_c_stream__(self, requested_schema: _Capsule | None = None) -> _Capsule: ...
+
+@type_check_only
+class _ArrowOutput:
+    """The PyCapsule protocol of a result, each export holding its arena until its last release."""
+
+    def __arrow_c_array__(self, requested_schema: _Capsule | None = None) -> tuple[_Capsule, _Capsule]:
+        """Exports host rows as an Arrow schema and array capsule."""
+        ...
+
+    def __arrow_c_device_array__(self, requested_schema: _Capsule | None = None) -> tuple[_Capsule, _Capsule]:
+        """Exports rows wherever they live as an Arrow schema and device array capsule."""
+        ...
+
+    def __arrow_c_stream__(self, requested_schema: _Capsule | None = None) -> _Capsule:
+        """Exports host rows as an Arrow stream of one chunk."""
+        ...
+
+# Every batch verb reads PEP 3118 first, `__array_interface__` second and Arrow's PyCapsule
+# protocol third, so NumPy and PyArrow are never required - at runtime or here. Frameworks whose
+# stubs predate PEP 688, PyTorch among them, support the protocol at runtime but need a `cast` to
+# satisfy a checker.
+type _Tensor = Buffer | _ArrowArrayExporter | _ArrowStreamExporter
 
 type _KeyLike = Key | int | str | uuid.UUID | Buffer
 type _PathLike = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 type _Progress = Callable[[int, int], bool | None]
 
 class Status(IntEnum):
-    """What a call finished with, valued as `usearch_status_t`: `Error.status` and `Deferred.status`."""
+    """What a call finished with: `Error.status` and `Deferred.status`."""
 
     SUCCESS = 0
+    """The call succeeded."""
     DEFERRED = 1
+    """The call was submitted deferred and is not final yet; the one non-final status."""
     OUT_OF_MEMORY = 2
+    """An allocation or reservation could not be satisfied."""
     SHAPE_MISMATCH = 3
+    """Dimensionality or row counts disagree."""
     UNSUPPORTED_LAYOUT = 4
+    """A stride or packing the engine cannot traverse."""
     UNKNOWN_KIND = 5
+    """A scalar, metric, residency, traversal or relation tag this build does not know."""
     READ_ONLY = 6
+    """A mutating verb on a handle that serves its checkpoint in place."""
     IO = 7
+    """A file could not be opened, read, written, or parsed."""
     DEVICE = 8
+    """A device could not be selected, or its memory could not be claimed."""
     MALFORMED = 9
+    """A caller-supplied key, buffer or checkpoint could not be decoded."""
     INTERNAL = 10
+    """The library reported neither success nor a failure, which names a defect."""
     OVERFLOW = 11
+    """A hard design ceiling was reached, like the 32-bit ID space; a smaller request cannot help."""
     UNINITIALIZED = 12
+    """The verb needs a prior successful reservation that never happened."""
     CONFIG_MISMATCH = 13
+    """The request contradicts an already-frozen configuration."""
     CONTENDED = 14
+    """The call was refused rather than waited for, like a submission to a full deferred table."""
     CANCELLED = 15
+    """A progress handler stopped the call, which published nothing."""
     UNSUPPORTED = 16
+    """This residency, traversal or build does not implement the verb; no retry can help."""
     INVALID_ARGUMENT = 17
+    """An argument breaks the verb's contract."""
 
 class Mood(IntEnum):
-    """What an executor's idle workers do, valued as `usearch_mood_t`: sleep, or stay hot."""
+    """What an executor's idle workers do: sleep, or stay hot."""
 
     PARKED = 1
+    """Idle workers sleep; the next call pays a wake-up."""
     SPINNING = 2
+    """Idle workers stay hot, trading power for the next call's latency."""
 
 class Scalar(IntEnum):
-    """A stored or exchanged scalar type, valued as `usearch_scalar_t`, widest dynamic range first."""
+    """A stored or exchanged scalar type, widest dynamic range first."""
 
     F64 = 1
+    """IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, with infinities and NaNs."""
     F32 = 2
+    """IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, with infinities and NaNs."""
     BF16 = 3
+    """Truncated f32 with a 7-bit mantissa: f32's range and epsilon 7.81e-3."""
     F16 = 4
+    """IEEE-754 binary16: ±65504, epsilon 9.77e-4, with infinities and NaNs."""
     E5M2 = 5
+    """FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs."""
     E4M3 = 6
+    """FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities, two NaN codes."""
     E3M2 = 7
+    """FP6 with a 3-bit exponent in one byte: ±28, every one of its 64 codes a number."""
     E2M3 = 8
+    """FP6 with a 2-bit exponent in one byte: ±7.5, every one of its 64 codes a number."""
     I8 = 10
+    """8-bit signed integer spanning -128 to 127."""
     I4X2 = 11
+    """Two signed nibbles per byte spanning -8 to 7, even dimensions in the low nibble."""
     I32 = 12
+    """32-bit signed integer spanning ±2.15e9."""
     U8 = 20
+    """8-bit unsigned integer spanning 0 to 255."""
     U4X2 = 21
+    """Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low nibble."""
     U1X8 = 22
+    """Eight single-bit dimensions per byte, the form Hamming and Jaccard score."""
 
 class Residency(IntEnum):
-    """Where a handle's payload lives, valued as `usearch_residency_t`."""
+    """Where a handle's payload lives."""
 
     RAM = 1
+    """Host memory, traversed by CPU threads."""
     VRAM = 2
+    """Accelerator memory, traversed by GPU warps on chosen devices."""
     NVME = 3
+    """Persisted on drives, traversed through I/O engines and sized past RAM."""
 
 class Traversal(IntEnum):
-    """How a search reaches the entries it scores, valued as `usearch_traversal_t`."""
+    """How a search reaches the entries it scores."""
 
     WALK = 1
+    """Walks the graph, scoring the entries the expansion reaches; approximate, the default."""
     SCAN = 2
+    """Scores every entry published when the scan starts; exact, the ground truth a walk approximates."""
 
 class CPUClass(IntEnum):
-    """The CPU families dispatch picks from, valued as `usearch_cpu_class_t`; a placement may pin one."""
+    """The CPU families dispatch picks from; a placement may pin one."""
 
     SERIAL = 1
+    """The portable floor: no SIMD assumptions."""
     INTEL_HASWELL = 2
+    """Haswell-class x86: AVX2 and FMA, the 256-bit floor."""
     INTEL_SIERRA = 3
+    """Sierra Forest-class x86, the E-core Xeons: AVX-VNNI without AVX-512."""
     INTEL_SKYLAKE = 4
+    """Skylake-class x86: the AVX-512 foundation tier."""
     INTEL_ICELAKE = 5
+    """Icelake-class x86: AVX-512 VNNI and VPOPCNT."""
     AMD_GENOA = 6
+    """Genoa-class x86, Zen 4 and newer: native bf16 dot products over AVX-512."""
     INTEL_SAPPHIRE = 7
+    """Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and AMX tiles."""
     INTEL_GRANITE = 8
+    """Granite Rapids-class x86: the Sapphire Rapids bundle plus AMX-FP16 tiles."""
     INTEL_DIAMOND = 9
+    """Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2 FP8 conversions."""
     AWS_G2 = 10
+    """Graviton2-class Arm, Neoverse N1: the bare NEON floor."""
     APPLE_M2 = 11
+    """Armv8.6 NEON with dot products and bf16 and f16 fused multiplies, as in Apple M2."""
     APPLE_M4 = 12
+    """Apple M4-class Arm: the Armv8.6 NEON bundle plus SME outer-product tiles."""
     AWS_G5 = 13
+    """Graviton5-class Arm, Neoverse V3 and Armv9.2: monitored waits."""
     NVIDIA_VERA = 14
+    """Vera-class Arm: NVIDIA's Armv9.2-generation cores with FP8 dot products."""
     ALIBABA_C930 = 15
+    """Alibaba C930-class RISC-V, RVA23: vectors with Zvbb, monitored waits."""
     WASM32_V128 = 16
+    """WebAssembly every engine loads: 32-bit, single-threaded, simd128."""
     WASM64_EXTENDED = 17
+    """WebAssembly with relaxed SIMD, shared memory and 64-bit addressing."""
     MONOVERSIONED = 18
+    """The one class of a monoversioned build, carrying every capability its floor implies."""
 
 class GPUClass(IntEnum):
-    """The GPU families dispatch picks from, valued as `usearch_gpu_class_t`; a placement may pin one."""
+    """The GPU families dispatch picks from; a placement may pin one."""
 
     NVIDIA_AMPERE = 1
+    """Ampere-class NVIDIA and every NVIDIA GPU without a class of its own: A100, A10, RTX 30."""
     NVIDIA_ADA = 2
+    """Ada-class NVIDIA: L4, L40S and RTX 40, with fp8 conversions."""
     NVIDIA_HOPPER = 3
+    """Hopper-class NVIDIA: H100 and H200, with DPX instructions."""
     NVIDIA_BLACKWELL = 4
+    """Blackwell-class NVIDIA: B200, B300 and GB300, with TMA gather4 fetches."""
     NVIDIA_BLACKWELLRTX = 5
+    """Consumer Blackwell NVIDIA: RTX 50, RTX PRO 6000 and DGX Spark."""
     NVIDIA_RUBIN = 6
+    """Rubin-class NVIDIA, the Vera-Rubin platform's device half."""
     AMD_CDNA3 = 7
+    """CDNA3 AMD: MI300X and MI325X, 64-wide waves, FNUZ fp8."""
     AMD_CDNA4 = 8
+    """CDNA4 AMD: MI350X and MI355X, OCP fp8."""
     AMD_CDNA5 = 9
+    """CDNA5 AMD: MI400, 32-wide waves."""
     APPLE_METAL7 = 10
+    """Apple7-family GPUs and every Apple GPU without a class of its own: M1 and M2."""
     APPLE_METAL9 = 11
+    """Apple9-family GPUs: M3 and M4."""
     APPLE_METAL10 = 12
+    """Apple10-family GPUs: M5, with Neural Accelerator matrix units."""
 
 class NVMeClass(IntEnum):
-    """The I/O engines NVMe executors submit through, valued as `usearch_nvme_class_t`; an executor may pin one."""
+    """The I/O engines NVMe executors submit through; an executor may pin one."""
 
     POSIX = 1
+    """Blocking reads on the calling thread."""
     LINUX_AIO = 2
+    """Linux AIO with direct I/O."""
     LINUX_URING = 3
+    """io_uring reads on files and block devices."""
     LINUX_URING_PASSTHROUGH = 4
+    """io_uring NVMe passthrough on namespace character devices, such as "/dev/ng0n1"."""
     LINUX_SPDK = 5
+    """The SPDK user-space driver, over namespaces named by transport identifiers."""
     WINDOWS_IORING = 6
+    """I/O Rings, on Windows 11 22H2 and newer."""
 
 class Error(RuntimeError):
-    """The base of every failure the library reports, one subclass per status shared with the C API."""
+    """The base of every failure the library reports, one subclass per failing `Status`."""
 
     status: Status
 
@@ -246,7 +406,7 @@ class Executor:
         deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
-        """Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`."""
+        """Spawns host worker threads for a RAM-resident index."""
         ...
 
     @classmethod
@@ -259,14 +419,14 @@ class Executor:
         deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
-        """Drives RAM-resident indexes on a thread pool the caller owns. Calls `usearch_executor_on_pool`."""
+        """Drives RAM-resident indexes on a thread pool the caller owns."""
         ...
 
     @classmethod
     def for_vram(
         cls, *, devices: Sequence[int] | None = None, deferred_limit: int = 0, gpu_class: GPUClass | None = None
     ) -> Executor:
-        """Opens one stream per device for a VRAM-resident index. Calls `usearch_executor_for_vram`."""
+        """Opens one stream per device for a VRAM-resident index."""
         ...
 
     @classmethod
@@ -279,11 +439,11 @@ class Executor:
         nvme_class: NVMeClass | None = None,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
-        """Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`."""
+        """Opens one submission ring per worker for an NVMe-resident index."""
         ...
 
     def drain(self, mood: Mood = ...) -> None:
-        """Waits for every call submitted before it, then sets what idle workers do. Calls `usearch_executor_drain`."""
+        """Waits for every call submitted before it, then sets what idle workers do."""
         ...
 
     @property
@@ -295,7 +455,7 @@ class Executor:
     def __exit__(
         self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None, /
     ) -> None:
-        """Closes it once its calls finish, or leaves that to its last live GPU arena. Calls `usearch_executor_free`."""
+        """Closes it once its calls finish, or leaves that to its last live GPU arena."""
         ...
 
     def __repr__(self) -> str: ...
@@ -305,15 +465,30 @@ class Arena:
     """The memory every output whose length scales with a call lands in, rewound by each call handed it."""
 
     def __new__(cls, executor: Executor | None = None, /) -> Self:
-        """Makes one where `executor` computes, or host pages for the calling thread. Calls `usearch_arena_init`."""
+        """Makes one where `executor` computes, or host pages for the calling thread."""
         ...
+
+    def describe(self) -> ArenaDescription:
+        """Where its outputs live, as the executor that made it decided."""
+        ...
+
+@final
+class ArenaDescription(structseq[Any], tuple[Residency, int | None]):
+    """Where an `Arena`'s outputs live."""
+
+    __match_args__: Final = ("residency", "device")
 
     @property
     def residency(self) -> Residency:
-        """The `Residency` its outputs live in. Python-only."""
+        """RAM for host pages, VRAM for one device's memory."""
         ...
 
-# The C base of every result over an arena, which the module does not export by name.
+    @property
+    def device(self) -> int | None:
+        """The device ordinal, as `Executor.for_vram` takes it; None for host pages."""
+        ...
+
+# The base of every result over an arena, which the module does not export by name.
 @type_check_only
 class _ArenaBuffer:
     """One output a call left in an `Arena`, readable until a later call rewinds it."""
@@ -331,14 +506,29 @@ class _ArenaBuffer:
         """Version 3 of the CUDA Array Interface, present only over device memory. Python-only."""
         ...
 
+    def __dlpack__(
+        self,
+        *,
+        stream: int | None = None,
+        max_version: tuple[int, int] | None = None,
+        dl_device: tuple[int, int] | None = None,
+        copy: bool | None = None,
+    ) -> _Capsule:
+        """A DLPack tensor in place, holding the arena against a rewind until it is deleted. Python-only."""
+        ...
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        """The (device type, device ID) pair DLPack names where the output lives. Python-only."""
+        ...
+
 @final
-class DenseVectors(_ArenaBuffer):
+class DenseVectors(_ArenaBuffer, _ArrowOutput):
     """The rows `get` or `attend` wrote into an `Arena`: (count, dimensions), or (count, row_bytes) of 'B'."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
 
 @final
-class DenseProducts:
+class DenseProducts(_ArrowOutput):
     """The ragged sparse product `multiply` wrote into an `Arena`: per left row, every pair its walk scored.
 
     `maxsim` lands its documents alike, one run per query, largest first, `required` counting those it scored.
@@ -395,8 +585,11 @@ class Match(structseq[Any], tuple[Key, float]):
         ...
 
 @final
-class Matches:
-    """A ranked run `search` wrote into an `Arena`, reading through to three outputs."""
+class Matches(_ArrowOutput):
+    """A ranked run `search` wrote into an `Arena`, reading through to three outputs.
+
+    Exports Arrow as a LargeList of `Struct<key, distance>`, compacted into a copy that holds no arena.
+    """
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
@@ -405,7 +598,7 @@ class Matches:
         ...
 
     @property
-    def distances(self) -> _ArenaBuffer:
+    def distances(self) -> DenseVectors:
         """(queries, columns) distances in the index's own metric, columns at most the call's wanted."""
         ...
 
@@ -429,11 +622,11 @@ class Deferred[AnswerT]:
 
     @property
     def status(self) -> Status:
-        """`Status.DEFERRED` until the call is final, then the final one. Calls `usearch_outcome_status`."""
+        """`Status.DEFERRED` until the call is final, then the final one."""
         ...
 
     def wait(self) -> AnswerT:
-        """Blocks until the call is final, then answers or raises. Calls `usearch_outcome_wait`."""
+        """Blocks until the call is final, then answers or raises."""
         ...
 
     def __await__(self) -> Generator[Any, None, AnswerT]:
@@ -454,7 +647,6 @@ class On[IndexT]:
     def describe(self: On[DenseIndex]) -> DenseIndexDescription:
         """The frozen metadata and the current counters, read in one call. Each counter is read
         once, so under concurrent insertions they may come from slightly different moments.
-        Calls `usearch_dense_describe`.
 
         Example:
           >>> usearch.DenseIndex.init_ram(256).describe().metadata.dimensions
@@ -465,7 +657,6 @@ class On[IndexT]:
     def reserve(self: On[DenseIndex], capacity: int, /) -> None:
         """Grows the index to host at least `capacity` entries, a hint,
         since insertions grow the index on demand.
-        Calls `usearch_dense_reserve`.
 
         Args:
           capacity (int): Entries the index must accept without growing again.
@@ -474,7 +665,6 @@ class On[IndexT]:
 
     def clear(self: On[DenseIndex]) -> None:
         """Drops every entry, keeping the capacity and the frozen geometry.
-        Calls `usearch_dense_clear`.
         """
         ...
 
@@ -494,7 +684,6 @@ class On[IndexT]:
         Keys need not be unique: inserting one twice stores two entries, and `count`
         reports both. A batch is all-or-nothing and becomes visible at once, so a rejected
         batch leaves the index untouched and a concurrent search sees all of it or none.
-        Calls `usearch_dense_insert`.
 
         Args:
           keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.
@@ -538,7 +727,6 @@ class On[IndexT]:
         Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
         re-links its islands, leaves the graph correct and merely less improved, and raises
         `CancelledError`. A handler is therefore how a sweep is put under a time budget.
-        Calls `usearch_dense_refine`.
 
         Args:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
@@ -564,7 +752,6 @@ class On[IndexT]:
     def health(self: On[DenseIndex]) -> DenseReachability:
         """Audits how much of the graph a search can reach, sweeping forward reachability from as
         many landmarks as one search draws. Read-only.
-        Calls `usearch_dense_health`.
 
         Example:
           >>> from array import array
@@ -594,7 +781,6 @@ class On[IndexT]:
     ) -> Matches:
         """Finds the `wanted` nearest entries for every query row; one query is a one-row matrix.
         Never writes to the graph, so any number of searches may overlap with insertions.
-        Calls `usearch_dense_search`.
 
         Args:
           queries (buffer): A (Q, dimensions) matrix of query rows.
@@ -630,7 +816,6 @@ class On[IndexT]:
 
     def count(self: On[DenseIndex], key: _KeyLike, /) -> int:
         """How many entries share `key`; zero means the index holds none.
-        Calls `usearch_dense_count`.
 
         Args:
           key (Key | int | str): The identity to count.
@@ -649,7 +834,6 @@ class On[IndexT]:
 
     def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
         """Every vector stored under `key`, in insertion order, and none when the key is absent.
-        Calls `usearch_dense_get`.
 
         Args:
           key (Key | int | str): The identity to retrieve.
@@ -681,7 +865,6 @@ class On[IndexT]:
         sibling of `search`, reporting every pair the traversal scored rather than only the
         nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
-        Calls `usearch_dense_multiply`.
 
         Args:
           rows (buffer): An (R, dimensions) matrix of left-hand rows.
@@ -729,7 +912,6 @@ class On[IndexT]:
 
         The index holds one layer's keys for one key-value head and no values: `row_of` names
         the row of `values` each scored key reads, so only keys a walk scores are ever resolved.
-        Calls `usearch_dense_attend`.
 
         Args:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
@@ -792,7 +974,6 @@ class On[IndexT]:
         exists for, and the walk stays over individual tokens under a plain inner product - so
         a document's vectors need no ordering and two documents need not share a vector count.
         The result is sized over documents rather than over rows.
-        Calls `usearch_dense_maxsim`.
 
         Args:
           queries (buffer): The token rows of every query laid end to end, an (Q * R,
@@ -835,7 +1016,6 @@ class On[IndexT]:
         islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
         fails, and every later one, stays a live handle its caller still owns, though the
         entries of the one it struck may already have moved into this index.
-        Calls `usearch_dense_absorb`.
 
         Args:
           donors (DenseIndex): The indexes to absorb.
@@ -861,7 +1041,6 @@ class On[IndexT]:
         partitioned along the graph, each part lands in one receiver with its edges kept, and
         a closing refinement re-links every receiver. This index is left empty and live.
         Receivers match its residency, scalar, metric, geometry and shard count.
-        Calls `usearch_dense_split`.
 
         Args:
           receivers (DenseIndex): At least two empty indexes, one per part.
@@ -897,7 +1076,6 @@ class On[IndexT]:
         one connected sample as it zooms, never scanning the index. Equal seeds, shown keys
         and focus over an unchanged index draw equally, and a larger `wanted` draws a superset.
         Only a RAM index samples yet.
-        Calls `usearch_dense_sample`.
 
         Args:
           wanted (int): The upper bound on draws.
@@ -924,7 +1102,6 @@ class On[IndexT]:
         """Writes the index under `path`, in the layout its extension picks: one `.safegraphs`
         monolith, or a `.safegraphs.json` manifest beside one part per shard. Demands a
         mutation-free window; concurrent readers keep searching throughout.
-        Calls `usearch_dense_save`.
 
         Args:
           path (str | bytes | os.PathLike): Where the checkpoint goes.
@@ -940,7 +1117,6 @@ class On[IndexT]:
     ) -> Monolith:
         """Serializes the index as one monolith of every shard, the very bytes `save` writes to
         a `.safegraphs` path.
-        Calls `usearch_dense_save_buffer`.
 
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
@@ -961,7 +1137,9 @@ class On[IndexT]:
         ...
 
     def cursor(self: On[DenseIndex], starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
-        """Calls `usearch_dense_cursor_init`."""
+        """Opens a walk over the stored entries that `DenseCursor.next` pulls in batches, from the
+        `starts` keys in their order when given, or across every entry as stored otherwise.
+        """
         ...
 
     def search_stream(
@@ -970,7 +1148,6 @@ class On[IndexT]:
         """Opens a resumable nearest-neighbor stream for one query, which `next` pulls for as
         long as the caller wants more, each pull into the arena it names. Every pull blocks,
         on the receiver's executor, which the stream keeps alive, or on the calling thread.
-        Calls `usearch_dense_search_stream_init`.
 
         Args:
           query (buffer): One vector of `dimensions` scalars.
@@ -1004,7 +1181,6 @@ class DeferredOn[IndexT]:
     def describe(self: DeferredOn[DenseIndex]) -> Deferred[DenseIndexDescription]:
         """The frozen metadata and the current counters, read in one call. Each counter is read
         once, so under concurrent insertions they may come from slightly different moments.
-        Calls `usearch_dense_describe`.
 
         Example:
           >>> usearch.DenseIndex.init_ram(256).describe().metadata.dimensions
@@ -1015,7 +1191,6 @@ class DeferredOn[IndexT]:
     def reserve(self: DeferredOn[DenseIndex], capacity: int, /) -> Deferred[None]:
         """Grows the index to host at least `capacity` entries, a hint,
         since insertions grow the index on demand.
-        Calls `usearch_dense_reserve`.
 
         Args:
           capacity (int): Entries the index must accept without growing again.
@@ -1024,7 +1199,6 @@ class DeferredOn[IndexT]:
 
     def clear(self: DeferredOn[DenseIndex]) -> Deferred[None]:
         """Drops every entry, keeping the capacity and the frozen geometry.
-        Calls `usearch_dense_clear`.
         """
         ...
 
@@ -1044,7 +1218,6 @@ class DeferredOn[IndexT]:
         Keys need not be unique: inserting one twice stores two entries, and `count`
         reports both. A batch is all-or-nothing and becomes visible at once, so a rejected
         batch leaves the index untouched and a concurrent search sees all of it or none.
-        Calls `usearch_dense_insert`.
 
         Args:
           keys (Sequence[Key | int] | buffer): One key per row, or an (N, 16) buffer.
@@ -1088,7 +1261,6 @@ class DeferredOn[IndexT]:
         Stopping is safe: re-selecting edges claims no identity, so a stopped sweep still
         re-links its islands, leaves the graph correct and merely less improved, and raises
         `CancelledError`. A handler is therefore how a sweep is put under a time budget.
-        Calls `usearch_dense_refine`.
 
         Args:
           expansion_factor (int, optional): Breadth of the candidates; 0 derives it.
@@ -1114,7 +1286,6 @@ class DeferredOn[IndexT]:
     def health(self: DeferredOn[DenseIndex]) -> Deferred[DenseReachability]:
         """Audits how much of the graph a search can reach, sweeping forward reachability from as
         many landmarks as one search draws. Read-only.
-        Calls `usearch_dense_health`.
 
         Example:
           >>> from array import array
@@ -1144,7 +1315,6 @@ class DeferredOn[IndexT]:
     ) -> Deferred[Matches]:
         """Finds the `wanted` nearest entries for every query row; one query is a one-row matrix.
         Never writes to the graph, so any number of searches may overlap with insertions.
-        Calls `usearch_dense_search`.
 
         Args:
           queries (buffer): A (Q, dimensions) matrix of query rows.
@@ -1180,7 +1350,6 @@ class DeferredOn[IndexT]:
 
     def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]:
         """How many entries share `key`; zero means the index holds none.
-        Calls `usearch_dense_count`.
 
         Args:
           key (Key | int | str): The identity to count.
@@ -1201,7 +1370,6 @@ class DeferredOn[IndexT]:
         self: DeferredOn[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
     ) -> Deferred[DenseVectors]:
         """Every vector stored under `key`, in insertion order, and none when the key is absent.
-        Calls `usearch_dense_get`.
 
         Args:
           key (Key | int | str): The identity to retrieve.
@@ -1233,7 +1401,6 @@ class DeferredOn[IndexT]:
         sibling of `search`, reporting every pair the traversal scored rather than only the
         nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.
         How many a walk scores is known only once it ends, so the pairs come back ragged.
-        Calls `usearch_dense_multiply`.
 
         Args:
           rows (buffer): An (R, dimensions) matrix of left-hand rows.
@@ -1281,7 +1448,6 @@ class DeferredOn[IndexT]:
 
         The index holds one layer's keys for one key-value head and no values: `row_of` names
         the row of `values` each scored key reads, so only keys a walk scores are ever resolved.
-        Calls `usearch_dense_attend`.
 
         Args:
           queries (buffer): A (Q, dimensions) matrix; row `t * head_count + h` is head `h`
@@ -1344,7 +1510,6 @@ class DeferredOn[IndexT]:
         exists for, and the walk stays over individual tokens under a plain inner product - so
         a document's vectors need no ordering and two documents need not share a vector count.
         The result is sized over documents rather than over rows.
-        Calls `usearch_dense_maxsim`.
 
         Args:
           queries (buffer): The token rows of every query laid end to end, an (Q * R,
@@ -1387,7 +1552,6 @@ class DeferredOn[IndexT]:
         islands still re-linked, and the call raises `CancelledError`. A donor whose absorption
         fails, and every later one, stays a live handle its caller still owns, though the
         entries of the one it struck may already have moved into this index.
-        Calls `usearch_dense_absorb`.
 
         Args:
           donors (DenseIndex): The indexes to absorb.
@@ -1413,7 +1577,6 @@ class DeferredOn[IndexT]:
         partitioned along the graph, each part lands in one receiver with its edges kept, and
         a closing refinement re-links every receiver. This index is left empty and live.
         Receivers match its residency, scalar, metric, geometry and shard count.
-        Calls `usearch_dense_split`.
 
         Args:
           receivers (DenseIndex): At least two empty indexes, one per part.
@@ -1449,7 +1612,6 @@ class DeferredOn[IndexT]:
         one connected sample as it zooms, never scanning the index. Equal seeds, shown keys
         and focus over an unchanged index draw equally, and a larger `wanted` draws a superset.
         Only a RAM index samples yet.
-        Calls `usearch_dense_sample`.
 
         Args:
           wanted (int): The upper bound on draws.
@@ -1476,7 +1638,6 @@ class DeferredOn[IndexT]:
         """Writes the index under `path`, in the layout its extension picks: one `.safegraphs`
         monolith, or a `.safegraphs.json` manifest beside one part per shard. Demands a
         mutation-free window; concurrent readers keep searching throughout.
-        Calls `usearch_dense_save`.
 
         Args:
           path (str | bytes | os.PathLike): Where the checkpoint goes.
@@ -1492,7 +1653,6 @@ class DeferredOn[IndexT]:
     ) -> Deferred[Monolith]:
         """Serializes the index as one monolith of every shard, the very bytes `save` writes to
         a `.safegraphs` path.
-        Calls `usearch_dense_save_buffer`.
 
         Args:
           arena (Arena): Where the monolith lands, rewound by the call.
@@ -1519,17 +1679,22 @@ class DeferredOn[IndexT]:
 # region: Dense Index
 
 class DenseMetric(IntEnum):
-    """How a dense index scores two vectors, valued as `usearch_dense_metric_t`."""
+    """How a dense index scores two vectors."""
 
     INNER = 1
+    """Sum of elementwise products, unnormalized; the one metric the linear-algebra verbs accept."""
     ANGULAR = 2
+    """Cosine distance in [0, 2], zero for identical directions and blind to magnitude."""
     EUCLIDEAN = 3
+    """L2 distance, non-negative and zero only for identical vectors."""
     HAMMING = 4
+    """Count of differing bits, ranging up to the dimensionality."""
     JACCARD = 5
+    """Differing bits over union bits in [0, 1], ignoring the zeros both vectors share."""
 
 @final
 class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
-    """The geometry and metric a checkpoint froze, as `usearch_dense_metadata_t` holds them."""
+    """The geometry and metric a checkpoint froze."""
 
     __match_args__: Final = ("dimensions", "metric", "quantization", "connectivity")
 
@@ -1555,7 +1720,7 @@ class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
 
 @final
 class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, CPUClass | None, GPUClass | None, int]):
-    """A live index's frozen metadata and current counters, as `usearch_dense_index_description_t` holds them."""
+    """A live index's frozen metadata and current counters."""
 
     __match_args__: Final = (
         "metadata",
@@ -1604,7 +1769,7 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
 
 @final
 class DenseReachability(structseq[Any], tuple[int, int, int, int]):
-    """One reachability audit, as `usearch_reachability_t` holds it."""
+    """One reachability audit."""
 
     __match_args__: Final = ("audited", "reachable", "sweeps", "back_sweeps")
 
@@ -1630,7 +1795,7 @@ class DenseReachability(structseq[Any], tuple[int, int, int, int]):
 
 @final
 class RefineReport(structseq[Any], tuple[int, int, int, int, DenseReachability]):
-    """What one refine-family call did to the graph, as `usearch_refine_report_t` counts it."""
+    """What one refine-family call did to the graph."""
 
     __match_args__: Final = ("reselected", "changed", "islands_found", "islands_reconnected", "reachability")
 
@@ -1734,11 +1899,11 @@ class DenseCursor:
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def next(self, wanted: int, arena: Arena, /, *, links: bool = False) -> DenseBatch:
-        """The next batch of at most `wanted` entries, in `arena`. Calls `usearch_dense_cursor_next`."""
+        """The next batch of at most `wanted` entries, in `arena`."""
         ...
 
     def close(self) -> None:
-        """Releases the scan before the cursor is collected. Calls `usearch_dense_cursor_free`."""
+        """Releases the scan before the cursor is collected."""
         ...
 
     def __enter__(self) -> Self: ...
@@ -1752,11 +1917,11 @@ class DenseSearchStream:
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def next(self, wanted: int, arena: Arena, /) -> Matches:
-        """The next at most `wanted` matches, as one query in `arena`. Calls `usearch_dense_search_stream_next`."""
+        """The next at most `wanted` matches, as one query in `arena`."""
         ...
 
     def close(self) -> None:
-        """Releases the walk before the stream is collected. Calls `usearch_dense_search_stream_free`."""
+        """Releases the walk before the stream is collected."""
         ...
 
     def __enter__(self) -> Self: ...
@@ -1781,7 +1946,7 @@ class DenseIndex:
         memory_domains: Sequence[int] | None = None,
         cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
-        """Starts an empty, mutable graph in host memory. Calls `usearch_dense_init_ram`."""
+        """Starts an empty, mutable graph in host memory."""
         ...
 
     @classmethod
@@ -1796,7 +1961,7 @@ class DenseIndex:
         devices: Sequence[int] | None = None,
         gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
-        """Starts an empty, mutable graph on CUDA devices. Calls `usearch_dense_init_vram`."""
+        """Starts an empty, mutable graph on CUDA devices."""
         ...
 
     @classmethod
@@ -1812,7 +1977,7 @@ class DenseIndex:
         progress_steps: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
-        """Copies a checkpoint into a new, mutable index in host memory. Calls `usearch_dense_load_ram`."""
+        """Copies a checkpoint into a new, mutable index in host memory."""
         ...
 
     @classmethod
@@ -1828,7 +1993,7 @@ class DenseIndex:
         progress_steps: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
-        """Copies a monolith out of a buffer into host memory. Calls `usearch_dense_load_ram_buffer`."""
+        """Copies a monolith out of a buffer into host memory."""
         ...
 
     @classmethod
@@ -1844,7 +2009,7 @@ class DenseIndex:
         progress_steps: int = 0,
         gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
-        """Copies a checkpoint into a new, mutable index on CUDA devices. Calls `usearch_dense_load_vram`."""
+        """Copies a checkpoint into a new, mutable index on CUDA devices."""
         ...
 
     @classmethod
@@ -1860,12 +2025,12 @@ class DenseIndex:
         progress_steps: int = 0,
         gpu_class: GPUClass | None = None,
     ) -> DenseIndex:
-        """Copies a monolith out of a buffer onto CUDA devices. Calls `usearch_dense_load_vram_buffer`."""
+        """Copies a monolith out of a buffer onto CUDA devices."""
         ...
 
     @classmethod
     def view_ram(cls, path: _PathLike, /) -> DenseIndex:
-        """Serves a checkpoint in place through a memory mapping, read-only. Calls `usearch_dense_view_ram`."""
+        """Serves a checkpoint in place through a memory mapping, read-only."""
         ...
 
     @classmethod
@@ -1878,17 +2043,17 @@ class DenseIndex:
         executor: Executor | None = None,
         cpu_class: CPUClass | None = None,
     ) -> DenseIndex:
-        """Serves a checkpoint in place from NVMe drives, read-only. Calls `usearch_dense_view_nvme`."""
+        """Serves a checkpoint in place from NVMe drives, read-only."""
         ...
 
     @staticmethod
     def metadata_read(path: _PathLike, /, *, executor: Executor | None = None) -> DenseMetadata:
-        """Reads a checkpoint's geometry without loading it. Calls `usearch_dense_metadata_read`."""
+        """Reads a checkpoint's geometry without loading it."""
         ...
 
     @staticmethod
     def metadata_read_buffer(buffer: Buffer, /, *, executor: Executor | None = None) -> DenseMetadata:
-        """Reads a monolith's geometry. Calls `usearch_dense_metadata_read_buffer`."""
+        """Reads a monolith's geometry."""
         ...
 
     def on(self, executor: Executor, /) -> On[DenseIndex]:
@@ -1900,18 +2065,17 @@ class DenseIndex:
         ...
 
     def describe(self) -> DenseIndexDescription:
-        """The frozen metadata and current counters. Calls `usearch_dense_describe`."""
+        """The frozen metadata and current counters."""
         ...
 
     def reserve(self, capacity: int, /) -> None:
         """Grows the index to host at least `capacity` entries, a hint, since insertions grow it on demand.
 
-        Calls `usearch_dense_reserve`.
         """
         ...
 
     def clear(self) -> None:
-        """Drops every entry, keeping the capacity and geometry. Calls `usearch_dense_clear`."""
+        """Drops every entry, keeping the capacity and geometry."""
         ...
 
     def insert(
@@ -1926,7 +2090,7 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> None:
-        """Inserts a batch of vectors under their keys, all or nothing. Calls `usearch_dense_insert`."""
+        """Inserts a batch of vectors under their keys, all or nothing."""
         ...
 
     def refine(
@@ -1937,11 +2101,11 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> RefineReport:
-        """Re-selects every entry's neighbors, reporting what changed. Calls `usearch_dense_refine`."""
+        """Re-selects every entry's neighbors, reporting what changed."""
         ...
 
     def health(self) -> DenseReachability:
-        """Audits how much of the graph a search reaches. Calls `usearch_dense_health`."""
+        """Audits how much of the graph a search reaches."""
         ...
 
     def search(
@@ -1959,15 +2123,15 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Matches:
-        """Finds the `wanted` nearest entries for every query row. Calls `usearch_dense_search`."""
+        """Finds the `wanted` nearest entries for every query row."""
         ...
 
     def count(self, key: _KeyLike, /) -> int:
-        """How many entries share `key`. Calls `usearch_dense_count`."""
+        """How many entries share `key`."""
         ...
 
     def get(self, key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
-        """Every vector stored under `key`, empty when it is absent. Calls `usearch_dense_get`."""
+        """Every vector stored under `key`, empty when it is absent."""
         ...
 
     def multiply(
@@ -1983,7 +2147,7 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
-        """Every pair the walk scored, an approximate sparse product. Calls `usearch_dense_multiply`."""
+        """Every pair the walk scored, an approximate sparse product."""
         ...
 
     def attend(
@@ -2005,7 +2169,7 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseVectors:
-        """Softmax attention folded into the walk, refused on VRAM with `DeviceError`. Calls `usearch_dense_attend`."""
+        """Softmax attention folded into the walk, refused on VRAM with `DeviceError`."""
         ...
 
     def maxsim(
@@ -2024,11 +2188,11 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
-        """Late interaction over multi-row queries. Calls `usearch_dense_maxsim`."""
+        """Late interaction over multi-row queries."""
         ...
 
     def absorb(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> RefineReport:
-        """Absorbs and consumes every donor, one after another. Calls `usearch_dense_absorb`."""
+        """Absorbs and consumes every donor, one after another."""
         ...
 
     def split(
@@ -2040,7 +2204,7 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> RefineReport:
-        """Splits the entries into the empty receivers, leaving this index empty. Calls `usearch_dense_split`."""
+        """Splits the entries into the empty receivers, leaving this index empty."""
         ...
 
     def sample(
@@ -2058,68 +2222,68 @@ class DenseIndex:
         progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Sample:
-        """Draws keys around `focus`, placed beside the `shown` keys. Calls `usearch_dense_sample`."""
+        """Draws keys around `focus`, placed beside the `shown` keys."""
         ...
 
     def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:
-        """Writes a checkpoint in the layout the extension picks. Calls `usearch_dense_save`."""
+        """Writes a checkpoint in the layout the extension picks."""
         ...
 
     def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
-        """Serializes one monolith into an arena. Calls `usearch_dense_save_buffer`."""
+        """Serializes one monolith into an arena."""
         ...
 
     def cursor(self, starts: Sequence[_KeyLike] | _Tensor | None = None) -> DenseCursor:
-        """A walk `DenseCursor.next` pulls in batches, from `starts` when given. Calls `usearch_dense_cursor_init`."""
+        """A walk `DenseCursor.next` pulls in batches, from `starts` when given."""
         ...
 
     def search_stream(
         self, query: _Tensor, /, *, expansion_factor: int = 0, dtype: Scalar | None = None
     ) -> DenseSearchStream:
-        """A resumable stream of matches for one query. Calls `usearch_dense_search_stream_init`."""
+        """A resumable stream of matches for one query."""
         ...
 
     @property
     def capacity(self) -> int:
-        """Entries hosted without growing again. Calls `usearch_dense_describe`."""
+        """Entries hosted without growing again."""
         ...
 
     @property
     def dimensions(self) -> int:
-        """Scalars per vector. Calls `usearch_dense_describe`."""
+        """Scalars per vector."""
         ...
 
     @property
     def connectivity(self) -> int:
-        """Connections per node. Calls `usearch_dense_describe`."""
+        """Connections per node."""
         ...
 
     @property
     def memory_usage(self) -> int:
-        """Bytes the handle holds. Calls `usearch_dense_describe`."""
+        """Bytes the handle holds."""
         ...
 
     @property
     def cpu_class(self) -> CPUClass | None:
-        """The `CPUClass` dispatch picked on this machine, or None. Calls `usearch_dense_describe`."""
+        """The `CPUClass` dispatch picked on this machine, or None."""
         ...
 
     @property
     def gpu_class(self) -> GPUClass | None:
-        """The `GPUClass` dispatch picked on the index's devices, or None. Calls `usearch_dense_describe`."""
+        """The `GPUClass` dispatch picked on the index's devices, or None."""
         ...
 
     @property
     def shards_count(self) -> int:
-        """Live shards. Calls `usearch_dense_describe`."""
+        """Live shards."""
         ...
 
     def __len__(self) -> int:
-        """Stored entries. Python-only; calls `usearch_dense_describe`."""
+        """Stored entries. Python-only."""
         ...
 
     def __contains__(self, key: _KeyLike, /) -> bool:
-        """Whether any entry holds `key`. Python-only; calls `usearch_dense_count`."""
+        """Whether any entry holds `key`. Python-only."""
         ...
 
     def __repr__(self) -> str: ...

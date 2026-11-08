@@ -38,6 +38,13 @@
  *  rewind, as a @c bytearray refuses to resize, and a result whose arena a later call rewound
  *  raises @c UninitializedError when read.
  *
+ *  @section python_arrow Arrow PyCapsule Interface
+ *
+ *  Anything else exporting @c __arrow_c_array__ or @c __arrow_c_stream__ reads as a third source,
+ *  so a PyArrow or Polars column reaches the index with neither library imported: one chunk stays
+ *  in place, and several gather once, since one call is one batch. Results export the same
+ *  protocol over their arena, an exported array counting among its exports until its release.
+ *
  *  @section python_naming Naming
  *
  *  A Python object's structure takes its class name, @c Matches for @c usearch.Matches, and its type
@@ -58,8 +65,9 @@
 #include <stdint.h>    // `uint8_t`, `uint64_t`, `PTRDIFF_MAX`
 #include <string.h>    // `memcpy`, `memset`
 
-#include <usearch/dense_index.h>
-#include <usearch/types.h>
+#include "usearch/arrow.h"
+#include "usearch/dense_index.h"
+#include "usearch/types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -141,7 +149,8 @@ typedef struct usearch_py_buffer_backing_t {
     /** Per-axis byte strides the synthesized buffer points at; likewise unused. */
     Py_ssize_t strides[usearch_py_max_rank_k];
 
-    /** The exporter a synthesized buffer borrows from, kept alive; NULL otherwise. */
+    /** The exporter a synthesized buffer borrows from, or the Arrow column one was read from, kept
+     *  alive; NULL otherwise. */
     PyObject* synthesized_owner;
 } usearch_py_buffer_backing_t;
 
@@ -189,6 +198,7 @@ extern PyTypeObject MatchType;
 extern PyTypeObject MatchesType;
 extern PyTypeObject ExecutorType;
 extern PyTypeObject ArenaType;
+extern PyTypeObject ArenaDescriptionType;
 extern PyTypeObject ArenaBufferType;
 extern PyTypeObject DenseVectorsType;
 extern PyTypeObject DenseProductsType;
@@ -214,6 +224,7 @@ extern PyTypeObject GeospatialIndexType;
 
 /** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */
 extern PyStructSequence_Desc usearch_py_match_desc;
+extern PyStructSequence_Desc usearch_py_arena_description_desc;
 extern PyStructSequence_Desc usearch_py_dense_metadata_desc;
 extern PyStructSequence_Desc usearch_py_dense_index_description_desc;
 extern PyStructSequence_Desc usearch_py_dense_reachability_desc;
@@ -257,9 +268,6 @@ typedef struct Arena {
 
     /** Calls that claimed it so far, which a result compares against the one it was written by. */
     size_t generation;
-
-    /** Where its executor computes, which decides how its results export their outputs. */
-    usearch_residency_t residency;
 
     /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL for host
      *  pages. */
@@ -524,7 +532,8 @@ int usearch_py_matrix_bytes(size_t rows, size_t columns, size_t unit, Py_ssize_t
 int usearch_py_scalar_from_object(PyObject* object, char const* field, usearch_scalar_t* kind);
 
 /**
- *  @brief Borrows a contiguous-rowed matrix, PEP 3118 first, @c __array_interface__ second.
+ *  @brief Borrows a contiguous-rowed matrix, PEP 3118 first, @c __array_interface__ second, and
+ *      an Arrow column third.
  *
  *  A one-dimensional input is read as a single row, matching the C surface's rule that one
  *  vector is a one-row matrix. Only the row stride may vary; a strided column would force a
@@ -558,7 +567,8 @@ int usearch_py_output_from_object(PyObject* object, char const* field, Py_ssize_
 void usearch_py_buffer_release(usearch_py_buffer_backing_t* backing);
 
 /**
- *  @brief Gathers @p expected identities from a buffer of 16-byte rows or a sequence of keys.
+ *  @brief Gathers @p expected identities from a buffer of 16-byte rows, an Arrow column of 16-byte
+ *      keys or integers, or a sequence of keys.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int usearch_py_keys_from_object(PyObject* object, size_t expected, usearch_py_keys_t* batch);
@@ -622,17 +632,33 @@ int usearch_py_arena_claim(PyObject* object, PyObject** arena);
 /** Ends the claim @c usearch_py_arena_claim took, and drops its reference. */
 void usearch_py_arena_unclaim(PyObject* arena);
 
+/** Asks the library where the outputs of the @c Arena @p arena live; 0, or -1 with an exception
+ *  set. */
+int usearch_py_arena_describe(PyObject* arena, usearch_arena_description_t* description);
+
 /**
  *  @brief A result of @p type - @c ArenaBufferType or a subtype - over the C-contiguous @p data the
  *      claiming call wrote inside @p arena, which it keeps alive and reads only until a later call
  *      rewinds it.
  *
- *  Host memory exports the writable buffer protocol, and device memory @c __cuda_array_interface__ alone.
+ *  Every output exports DLPack; host memory also exports the writable buffer protocol, and device
+ *  memory @c __cuda_array_interface__.
  *
  *  @return A new reference, or @c NULL with an exception set.
  */
 PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
                                   Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
+
+/**
+ *  @brief A @c DenseVectors over the @p count rows a call wrote packed into the claimed
+ *      @c Arena @p arena.
+ *
+ *  Kinds a @c memoryview cannot format - the sub-byte and mini-float ones - leave as a
+ *  @b (count,row_bytes) run of @c 'B', since a cast to their format would report the wrong extent.
+ *
+ *  @return A new reference, or NULL with an exception set.
+ */
+PyObject* usearch_py_rows_new(PyObject* arena, usearch_rows_view_t const* rows, size_t count);
 
 /** A new @c Matches over the @p queries a ranked verb wrote into @p arena; NULL with an exception
  *  set. */
