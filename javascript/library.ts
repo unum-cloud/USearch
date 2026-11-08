@@ -25,7 +25,7 @@ export interface CompiledExecutor {
 
 /** Memory every output whose length scales with a call lands in, made where its executor computes. */
 export interface CompiledArena {
-  readonly residency: string;
+  describe(): { residency: string; device: number | null };
   free(): void;
 }
 

@@ -38,6 +38,8 @@ import (
 #cgo noescape usearch_executor_drain
 #cgo noescape usearch_arena_init
 #cgo nocallback usearch_arena_init
+#cgo noescape usearch_arena_describe
+#cgo nocallback usearch_arena_describe
 
 #include "shim.h"
 */
@@ -97,7 +99,7 @@ const (
 	StatusInvalidArgument Status = C.usearch_status_invalid_argument_k
 )
 
-// String renders the status as the library spells it. Calls usearch_status_name.
+// String renders the status as the library spells it.
 func (status Status) String() string {
 	return C.GoString(C.usearch_status_name(C.usearch_status_t(status)))
 }
@@ -262,7 +264,7 @@ const (
 	ScalarU1x8 Scalar = C.usearch_scalar_u1x8_k
 )
 
-// String renders the scalar kind as the library spells it. Calls usearch_scalar_name.
+// String renders the scalar kind as the library spells it.
 func (scalar Scalar) String() string {
 	return C.GoString(C.usearch_scalar_name(C.usearch_scalar_t(scalar)))
 }
@@ -453,8 +455,6 @@ func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
 // MatchesView is a ranked run a call wrote into its arena: per query, up to Columns keys and the
 // scores positionally paired with them. A search writes distances, nearest first; a late
 // interaction writes summed similarities, largest first.
-//
-// Mirrors usearch_matches_view_t.
 type MatchesView struct {
 	exported
 	raw     C.usearch_matches_view_t
@@ -491,15 +491,11 @@ func (matches MatchesView) Query(query uint) ([]Key, []Distance, error) {
 // Predicate admits a candidate key into a filtered search, or passes over it. It runs on the
 // executor's threads together, so it must be safe for concurrent use, and a panic inside it
 // rejects the key and becomes the call's error.
-//
-// Mirrors usearch_predicate_t.
 type Predicate func(key Key) bool
 
 // ProgressCallback is called with the units a long call finished so far and the units it
 // finishes unless stopped; false stops it wherever the verb can stop. It never runs on two
 // threads at once, and a panic inside it stops the call and becomes its error.
-//
-// Mirrors usearch_progress_callback_t.
 type ProgressCallback func(completed, total uint) bool
 
 // upcall is a Go value a C callback reaches, and the call its panics fail.
@@ -571,24 +567,19 @@ func (call *call) callback(value any) unsafe.Pointer {
 // kind is fixed by the constructor that produced it and must match the residency of the handles
 // it drives, or the engine reports StatusDevice.
 //
-// A nil *Executor is the C interface's null executor: it owns nothing, and every call handed it
-// runs on the calling goroutine - single-threaded on RAM, on the handle's device and default
-// stream on VRAM. Calls on one executor run in submission order, while handles stay freely
-// concurrent - it is the executor that orders.
+// A nil *Executor is the null executor: it owns nothing, and every call handed it runs on the
+// calling goroutine - single-threaded on RAM, on the handle's device and default stream on VRAM.
+// Calls on one executor run in submission order, while handles stay freely concurrent - it is the
+// executor that orders.
 //
 // Every constructor takes a deferredLimit sizing its table of deferred calls, where zero takes the
 // default; a deferred submission finding the table full finishes StatusContended.
-//
-// Mirrors usearch_executor_t.
 type Executor struct {
-	handle    C.usearch_executor_t
-	residency Residency
+	handle C.usearch_executor_t
 }
 
 // Residency is where a handle keeps its payload, and where an executor computes and places the
 // arenas it makes.
-//
-// Mirrors usearch_residency_t.
 type Residency int32
 
 const (
@@ -600,14 +591,12 @@ const (
 	ResidencyNvme Residency = C.usearch_residency_nvme_k
 )
 
-// String renders the residency as the library spells it. Calls usearch_residency_name.
+// String renders the residency as the library spells it.
 func (residency Residency) String() string {
 	return C.GoString(C.usearch_residency_name(C.usearch_residency_t(residency)))
 }
 
 // Traversal is how a search reaches the entries it scores.
-//
-// Mirrors usearch_traversal_t.
 type Traversal int32
 
 const (
@@ -617,14 +606,12 @@ const (
 	TraversalScan Traversal = C.usearch_traversal_scan_k
 )
 
-// String renders the traversal as the library spells it. Calls usearch_traversal_name.
+// String renders the traversal as the library spells it.
 func (traversal Traversal) String() string {
 	return C.GoString(C.usearch_traversal_name(C.usearch_traversal_t(traversal)))
 }
 
 // Mood is what an executor does with its threads or streams once it goes idle.
-//
-// Mirrors usearch_mood_t.
 type Mood int32
 
 const (
@@ -634,15 +621,13 @@ const (
 	MoodSpinning Mood = C.usearch_mood_spinning_k
 )
 
-// String renders the mood as the library spells it. Calls usearch_mood_name.
+// String renders the mood as the library spells it.
 func (mood Mood) String() string {
 	return C.GoString(C.usearch_mood_name(C.usearch_mood_t(mood)))
 }
 
 // CPUClass is a CPU family USearch ships tuned variants for; a RAM or NVMe placement or executor
 // may pin one, and the zero value pins none.
-//
-// Mirrors usearch_cpu_class_t.
 type CPUClass int32
 
 const (
@@ -686,15 +671,13 @@ const (
 	CPUClassMonoversioned CPUClass = C.usearch_cpu_class_monoversioned_k
 )
 
-// String renders the class as the library spells it. Calls usearch_cpu_class_name.
+// String renders the class as the library spells it.
 func (class CPUClass) String() string {
 	return C.GoString(C.usearch_cpu_class_name(C.usearch_cpu_class_t(class)))
 }
 
 // GPUClass is a GPU family USearch ships tuned variants for; a VRAM placement or executor may pin
 // one, and the zero value pins none.
-//
-// Mirrors usearch_gpu_class_t.
 type GPUClass int32
 
 const (
@@ -726,7 +709,7 @@ const (
 	GPUClassAppleMetal10 GPUClass = C.usearch_gpu_class_apple_metal10_k
 )
 
-// String renders the class as the library spells it. Calls usearch_gpu_class_name.
+// String renders the class as the library spells it.
 func (class GPUClass) String() string {
 	return C.GoString(C.usearch_gpu_class_name(C.usearch_gpu_class_t(class)))
 }
@@ -737,10 +720,10 @@ func (class GPUClass) String() string {
 //
 // Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
 // the ordered publication path. A pinned cpuClass narrows the workers' waiters and atomics to that
-// class's. Calls usearch_executor_for_ram.
+// class's.
 func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := &Executor{residency: ResidencyRam}
+	executor := &Executor{}
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -754,10 +737,10 @@ func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads, deferredL
 
 // ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
 // libraries in one process share one set of threads while each keeps its own scratch. The pool
-// must outlive the executor, and keeps its lender's mood. Calls usearch_executor_on_pool.
+// must outlive the executor, and keeps its lender's mood.
 func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointer, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := &Executor{residency: ResidencyRam}
+	executor := &Executor{}
 	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -773,10 +756,10 @@ func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointe
 // across the compute domains local to the devices paths names. One ring per thread is what keeps
 // submission lock-free: a thread owns its queue outright.
 //
-// Zero threads derives from those devices' queue capabilities. Calls usearch_executor_for_nvme.
+// Zero threads derives from those devices' queue capabilities.
 func ExecutorForNvme(paths []string, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := &Executor{residency: ResidencyNvme}
+	executor := &Executor{}
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -794,7 +777,7 @@ func ExecutorForNvme(paths []string, cpuClass CPUClass, threads, deferredLimit u
 //
 // Streams is empty, or holds one live CUDA stream per device in devices order, each outliving the
 // executor. Zero scratchLimit lets scratch grow as geometry asks. A pinned gpuClass the devices do
-// not run is refused with StatusUnsupported. Calls usearch_executor_for_vram.
+// not run is refused with StatusUnsupported.
 func ExecutorForVram(
 	devices []int32, gpuClass GPUClass, streams []unsafe.Pointer, scratchLimit, deferredLimit uint,
 ) (*Executor, error) {
@@ -803,7 +786,7 @@ func ExecutorForVram(
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
 	lent := open[*Executor]()
-	executor := &Executor{residency: ResidencyVram}
+	executor := &Executor{}
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -818,7 +801,6 @@ func ExecutorForVram(
 
 // Drain waits for every call submitted to this executor, then adopts mood whenever it next goes
 // idle. A failure is the executor's own, such as a lost device, never one of a drained call.
-// Calls usearch_executor_drain.
 func (executor *Executor) Drain(mood Mood) error {
 	handle, refusal := executor.lower()
 	if refusal != nil {
@@ -832,7 +814,7 @@ func (executor *Executor) Drain(mood Mood) error {
 
 // Close drains every thread or stream and releases them, waiting for every deferred call naming
 // the executor. It is idempotent, and a closed executor must not be used again. The host arenas
-// it made stay valid, while its GPU arenas must be closed first. Calls usearch_executor_free.
+// it made stay valid, while its GPU arenas must be closed first.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil
@@ -867,11 +849,8 @@ func (executor *Executor) lower() (C.usearch_executor_t, *Error) {
 // overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do, since
 // Close waits for every deferred call naming it. A slice an accessor already handed out is never
 // checked again, so drop it before the arena's next call.
-//
-// Mirrors usearch_arena_t.
 type Arena struct {
-	handle    C.usearch_arena_t
-	residency Residency
+	handle C.usearch_arena_t
 	// generation counts the calls that rewound the arena, so a view knows when its memory moved on.
 	generation atomic.Uint64
 }
@@ -880,16 +859,13 @@ type Arena struct {
 // decided once; a nil executor makes host pages for calls on the calling goroutine. Nothing is
 // allocated until a call writes into it, and host pages may outlive their executor. A GPU arena
 // grows and frees on its executor's stream, so it serves only calls on that executor, any other or
-// nil finishing StatusDevice, and must be closed before it. Calls usearch_arena_init.
+// nil finishing StatusDevice, and must be closed before it.
 func NewArena(executor *Executor) (*Arena, error) {
 	handle, refusal := executor.lower()
 	if refusal != nil {
 		return nil, refusal
 	}
-	arena := &Arena{residency: ResidencyRam}
-	if executor != nil {
-		arena.residency = executor.residency
-	}
+	arena := &Arena{}
 	lent := open[*Arena]()
 	C.usearch_arena_init(&C.usearch_arena_init_t{
 		arena:    pin(&lent.call, &arena.handle),
@@ -900,13 +876,32 @@ func NewArena(executor *Executor) (*Arena, error) {
 	return block(lent)
 }
 
-// Residency reports where the arena's memory lives. A ResidencyVram arena holds device memory, which
-// no Go code may read, so the accessors of its views refuse with StatusDevice.
-func (arena *Arena) Residency() Residency { return arena.residency }
+// ArenaDescription is where an arena's outputs live, which decides whether Go code may read them.
+type ArenaDescription struct {
+	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory, which no
+	// Go code may read, so the accessors of its views refuse with StatusDevice.
+	Residency Residency
+	// Device is the ordinal of the GPU holding the outputs on ResidencyVram, and 0 for host pages.
+	Device uint
+}
+
+// Describe reports where the arena's outputs live, as the executor that made it decided.
+func (arena *Arena) Describe() (ArenaDescription, error) {
+	handle, refusal := arena.lower()
+	if refusal != nil {
+		return ArenaDescription{}, refusal
+	}
+	lent := open[ArenaDescription]()
+	raw := pin(&lent.call, new(C.usearch_arena_description_t))
+	C.usearch_arena_describe(&C.usearch_arena_describe_t{arena: handle, outcome: lent.outcome, description: raw})
+	lent.result = func() ArenaDescription {
+		return ArenaDescription{Residency: Residency(raw.residency), Device: uint(raw.device)}
+	}
+	return block(lent)
+}
 
 // Close releases the memory, waiting for every deferred call naming the arena, and turns every view
-// over it away. It is idempotent, and a closed arena must not be used again. Calls
-// usearch_arena_free.
+// over it away. It is idempotent, and a closed arena must not be used again.
 func (arena *Arena) Close() error {
 	if arena == nil || arena.handle == nil {
 		return nil
@@ -945,7 +940,11 @@ func (view exported) host() error {
 	if view.arena == nil || view.arena.generation.Load() != view.generation {
 		return fail(StatusUninitialized, "the view's arena served another call or was closed since")
 	}
-	if view.arena.residency == ResidencyVram {
+	description, err := view.arena.Describe()
+	if err != nil {
+		return err
+	}
+	if description.Residency == ResidencyVram {
 		return fail(StatusDevice, "the view is device memory")
 	}
 	return nil
@@ -1058,8 +1057,6 @@ func block[Result any](lent *lent[Result]) (Result, error) {
 // then every later collection checks it again.
 //
 // A failure the binding catches before the call crosses is reported here too, like any other.
-//
-// Binding-only; Wait and Close call usearch_outcome_wait.
 type Deferred[Result any] struct {
 	lent    *lent[Result]
 	cleanup runtime.Cleanup
@@ -1084,7 +1081,6 @@ func release[Result any](lent *lent[Result]) {
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-// Calls usearch_outcome_status.
 func (deferred *Deferred[Result]) Status() Status {
 	if deferred.lent.refusal != nil {
 		return deferred.lent.refusal.Status
@@ -1093,15 +1089,14 @@ func (deferred *Deferred[Result]) Status() Status {
 }
 
 // Wait blocks until the call is final, releases its pins, then hands back what it produced, as
-// many times as it is asked; one goroutine waits at a time. Calls usearch_outcome_wait.
+// many times as it is asked; one goroutine waits at a time.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
 	return block(deferred.lent)
 }
 
 // Close blocks until the call is final, releases its pins, frees whatever it produced that Wait
-// has not handed out, and reports the call's failure. It is idempotent and safe after Wait. Calls
-// usearch_outcome_wait.
+// has not handed out, and reports the call's failure. It is idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
 	err := deferred.lent.settle()
@@ -1113,15 +1108,15 @@ func (deferred *Deferred[Result]) Close() error {
 
 // region: Introspection
 
-// Version reports the version of the linked library. Calls usearch_version_name.
+// Version reports the version of the linked library.
 func Version() string { return C.GoString(C.usearch_version_name()) }
 
 // CapabilitiesCompiled lists the hardware capabilities the linked binary was compiled with,
-// comma separated. Calls usearch_capabilities_compiled.
+// comma separated.
 func CapabilitiesCompiled() string { return C.GoString(C.usearch_capabilities_compiled()) }
 
 // CapabilitiesAvailable lists the hardware capabilities the current machine offers at
-// runtime, comma separated. Calls usearch_capabilities_available.
+// runtime, comma separated.
 func CapabilitiesAvailable() string { return C.GoString(C.usearch_capabilities_available()) }
 
 // endregion: Introspection

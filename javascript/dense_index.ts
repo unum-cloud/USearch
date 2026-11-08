@@ -53,20 +53,22 @@ import {
  *  @readonly
  */
 export enum DenseMetric {
+  /** The inner product. */
   Inner = "inner",
+  /** The cosine distance. */
   Angular = "angular",
+  /** The L2 distance. */
   Euclidean = "euclidean",
+  /** The count of differing bits. */
   Hamming = "hamming",
+  /** The bit-level Jaccard distance. */
   Jaccard = "jaccard",
 }
 
-/**
- *  Traversal telemetry from one call, a pure output the call fully overwrites. Mirrors
- *  `usearch_traversal_stats_t`.
+/** Traversal telemetry from one call, a pure output the call fully overwrites.
  *
  *  One reading handed to several calls holds the last of them, so a sweep that wants totals folds
- *  them with `accumulate` rather than expecting the calls to sum themselves.
- */
+ *  them with `accumulate` rather than expecting the calls to sum themselves. */
 export class DenseTraversalStats {
   /** Entries whose neighborhoods the walk expanded. */
   visitedMembers = 0;
@@ -83,7 +85,7 @@ export class DenseTraversalStats {
   }
 }
 
-/** Optional per-call settings of an insertion. Mirrors `usearch_dense_insert_t`. */
+/** Optional per-call settings of an insertion. */
 export interface DenseInsertConfig {
   /** Breadth of the candidates the build walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
@@ -91,7 +93,7 @@ export interface DenseInsertConfig {
   stats?: DenseTraversalStats;
 }
 
-/** Optional per-call settings of the refinement pass that follows an insertion. Mirrors `usearch_dense_refine_t`. */
+/** Optional per-call settings of the refinement pass that follows an insertion. */
 export interface DenseRefineConfig {
   /** Breadth of the candidates the re-selection walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
@@ -99,7 +101,7 @@ export interface DenseRefineConfig {
   stats?: DenseTraversalStats;
 }
 
-/** Optional per-call settings of a split. Mirrors `usearch_dense_split_t`. */
+/** Optional per-call settings of a split. */
 export interface DenseSplitConfig {
   /** Picks the part roots: equal seeds over an unchanged index split equally. */
   seed?: number | bigint;
@@ -107,8 +109,8 @@ export interface DenseSplitConfig {
   expansionFactor?: number;
 }
 
-/** Optional per-call settings of a sample; absent ones draw across the whole index with nothing
- *  shown. Mirrors `usearch_dense_sample_t`. */
+/** Optional per-call settings of a sample; absent ones draw across the whole index
+ *  with nothing shown. */
 export interface DenseSampleConfig {
   /** The keys already shown: never drawn again, and the paths reach toward them; read in place,
    *  never copied. */
@@ -123,7 +125,7 @@ export interface DenseSampleConfig {
   expansionFactor?: number;
 }
 
-/** Optional per-call settings of a search. Mirrors `usearch_dense_search_t`. */
+/** Optional per-call settings of a search. */
 export interface DenseSearchConfig {
   /** Breadth of the candidates the walk explores; absent lets the engine derive it, and a scan ignores it. */
   expansionFactor?: number;
@@ -133,7 +135,7 @@ export interface DenseSearchConfig {
   stats?: DenseTraversalStats;
 }
 
-/** Optional per-call settings of late-interaction scoring. Mirrors `usearch_dense_maxsim_t`. */
+/** Optional per-call settings of late-interaction scoring. */
 export interface DenseMaxsimConfig {
   /** Breadth of the candidates the walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
@@ -141,13 +143,13 @@ export interface DenseMaxsimConfig {
   stats?: DenseTraversalStats;
 }
 
-/** Optional settings of a retrieval. Mirrors `usearch_dense_get_t`. */
+/** Optional settings of a retrieval. */
 export interface DenseGetConfig {
   /** The scalar kind to export as, converted from storage; defaults to `f32`. */
   scalar?: Scalar;
 }
 
-/** Optional per-call settings of a sparse product. Mirrors `usearch_dense_multiply_t`. */
+/** Optional per-call settings of a sparse product. */
 export interface DenseMultiplyConfig {
   /** Pairs kept per left row, the first ones its walk scored; absent keeps every pair. */
   wanted?: number;
@@ -157,13 +159,13 @@ export interface DenseMultiplyConfig {
   stats?: DenseTraversalStats;
 }
 
-/** Optional settings of one cursor pull. Mirrors `usearch_dense_cursor_next_t`. */
+/** Optional settings of one cursor pull. */
 export interface DenseCursorNextConfig {
   /** Whether to export the keys each entry links to beside it; absent pulls the keys alone. */
   links?: boolean;
 }
 
-/** Optional per-call settings of attention. Mirrors `usearch_dense_attend_t`. */
+/** Optional per-call settings of attention. */
 export interface DenseAttendConfig {
   /** Query heads sharing the index's key-value head, and with it one walk per token; absent is one. */
   headCount?: number;
@@ -173,100 +175,96 @@ export interface DenseAttendConfig {
   expansionFactor?: number;
   /** The logit scale, conventionally the inverse square root of the head dimensionality; absent derives it. */
   scoreScale?: number;
-  /**
-   *  Two floats per query row - the largest logit and the partition taken against it.
+  /** Two floats per query row - the largest logit and the partition taken against it.
    *
    *  Supplying one folds this branch into another over the same queries by partial-softmax
    *  rescaling; a maximum without its partition is a number nothing can rescale, which is why
-   *  they share a row rather than travelling as two arrays.
-   */
+   *  they share a row rather than travelling as two arrays. */
   carry?: Float32Array;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
 }
 
-/** Optional settings of a resumable search stream. Mirrors `usearch_dense_search_stream_init_t`. */
+/** Optional settings of a resumable search stream. */
 export interface DenseSearchStreamInitConfig {
   /** Breadth of the candidates the walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
 }
 
-/** Where a checkpoint loaded into host memory lands. Mirrors `usearch_dense_load_ram_t`. */
+/** Where a checkpoint loaded into host memory lands. */
 export interface DenseLoadRamConfig {
   /** The workers the read fans out over, one shard per thread; absent reads on the calling thread. */
   executor?: Executor;
   /** NUMA node IDs to place the parts on; absent spreads them over every node. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
-/** Where a checkpoint loaded into device memory lands. Mirrors `usearch_dense_load_vram_t`. */
+/** Where a checkpoint loaded into device memory lands. */
 export interface DenseLoadVramConfig {
   /** The executor the upload runs on, one stream per device; absent uploads on the default stream. */
   executor?: Executor;
   /** CUDA ordinals to place the parts on; absent takes one free device. */
   devices?: number[];
-  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
   gpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
-/** Where a monolith held in memory lands in host memory. Mirrors `usearch_dense_load_ram_buffer_t`. */
+/** Where a monolith held in memory lands in host memory. */
 export interface DenseLoadRamBufferConfig {
   /** The workers the copy fans out over; absent copies on the calling thread. */
   executor?: Executor;
   /** NUMA node IDs to place the shards on; the monolith lands whole on the first. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
-/** Where a monolith held in memory lands in device memory. Mirrors `usearch_dense_load_vram_buffer_t`. */
+/** Where a monolith held in memory lands in device memory. */
 export interface DenseLoadVramBufferConfig {
   /** The executor the upload runs on, one stream per device; absent uploads on the default stream. */
   executor?: Executor;
   /** CUDA ordinals to place the shards on; the monolith lands whole on the first. */
   devices?: number[];
-  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
   gpuClass?: string;
   /** Entries one key may carry, which no checkpoint records; absent is unbounded. */
   valuesPerKey?: number;
 }
 
-/** Where a checkpoint served from NVMe drives is read from. Mirrors `usearch_dense_view_nvme_t`. */
+/** Where a checkpoint served from NVMe drives is read from. */
 export interface DenseViewNvmeConfig {
   /** The NVMe executor whose rings read the checkpoint's headers. */
   executor?: Executor;
   /** Devices or directories to serve the parts from; absent leaves each where its manifest points. */
   paths?: string[];
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
 
-/** The workers a checkpoint's metadata is read on. Mirrors `usearch_dense_metadata_read_t`. */
+/** The workers a checkpoint's metadata is read on. */
 export interface DenseMetadataReadConfig {
   /** The executor the read runs on; absent reads on the calling thread. */
   executor?: Executor;
 }
 
-/** The workers a monolith's metadata is read on. Mirrors `usearch_dense_metadata_read_buffer_t`. */
+/** The workers a monolith's metadata is read on. */
 export interface DenseMetadataReadBufferConfig {
   /** The executor the read runs on; absent reads on the calling thread. */
   executor?: Executor;
 }
 
-/**
- *  The geometry and metric a checkpoint froze. Mirrors `usearch_dense_metadata_t`.
+/** The geometry and metric a checkpoint froze.
  *
  *  Where it was written is never recorded, and neither is `valuesPerKey`, which bounds a live
- *  handle rather than the file - both stay the caller's to choose when loading.
- */
+ *  handle rather than the file - both stay the caller's to choose when loading. */
 export interface DenseMetadata {
   /** The metric the graph was built for. */
   metric: DenseMetric;
@@ -278,7 +276,7 @@ export interface DenseMetadata {
   connectivity: number;
 }
 
-/** A live index's frozen metadata and current counters, each read once. Mirrors `usearch_dense_index_description_t`. */
+/** A live index's frozen metadata and current counters, each read once. */
 export interface DenseIndexDescription {
   /** The frozen metric, quantization, dimensions and connectivity, as a checkpoint reports them. */
   metadata: DenseMetadata;
@@ -288,7 +286,7 @@ export interface DenseIndexDescription {
   capacity: number;
   /** Bytes the handle holds; traversal scratch is the executor's. */
   memoryUsage: number;
-  /** The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it. */
+  /** The CPU class dispatch picked on this machine by its canonical name. */
   cpuClass: string;
   /** The GPU class dispatch picked on the index's devices; "unknown" for a host index. */
   gpuClass: string;
@@ -296,7 +294,7 @@ export interface DenseIndexDescription {
   shardsCount: number;
 }
 
-/** One reachability audit: the population it judged, and how much of it a search reaches. Mirrors `usearch_reachability_t`. */
+/** One reachability audit: the population it judged, and how much of it a search reaches. */
 export interface DenseReachability {
   /** Entries published when the audit started; compare `reachable` against this, never a later size. */
   audited: number;
@@ -308,7 +306,7 @@ export interface DenseReachability {
   backSweeps: number;
 }
 
-/** What one `refine`, `absorb` or `split` did to the graph. Mirrors `usearch_refine_report_t`. */
+/** What one `refine`, `absorb` or `split` did to the graph. */
 export interface DenseRefineReport {
   /** Entries whose neighbors were selected again, the islands of every heal round included. */
   reselected: number;
@@ -334,18 +332,18 @@ export interface DenseOptions {
   connectivity?: number;
   /** Entries one key may carry; absent is unbounded. */
   valuesPerKey?: number;
-  /** The CPU class a host index dispatches as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class a host index dispatches as by its canonical name; absent dispatches
+   *  as the machine. */
   cpuClass?: string;
-  /** The GPU class a device index dispatches as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  /** The GPU class a device index dispatches as by its canonical name; absent dispatches
+   *  as the devices. */
   gpuClass?: string;
 }
 
-/**
- *  Resolves one scored key to its row of the values `attend` borrows, on the calling thread. Backs
- *  `usearch_value_lookup_t`.
+/** Resolves one scored key to its row of the values `attend` borrows, on the calling thread.
  *
- *  Anything but the index of a row the values hold refuses the call with {@link Status.ShapeMismatch}.
- */
+ *  Anything but the index of a row the values hold refuses the call with
+ *  {@link Status.ShapeMismatch}. */
 export type ValueRowOf = (key: Key) => number;
 
 /** Lifts the canonical spellings the addon reports into the binding's enumerations. */
@@ -359,7 +357,6 @@ function metadataOf(read: CompiledMetadata): DenseMetadata {
 }
 
 /** Rows a call wrote into its arena: the entries `get` exported, or the rows `attend` attended.
- *  Mirrors a `usearch_rows_view_t` output.
  *
  *  `data` is a `Float64Array`, `Float32Array`, `Float16Array` or `Int8Array` for the kinds
  *  JavaScript spells, a `Uint16Array` for `bf16` and for `f16` on a runtime without `Float16Array`,
@@ -391,11 +388,9 @@ export class DenseVectors extends ArenaView {
   }
 }
 
-/**
- *  Every pair a sparse product scored, as a ragged run with Apache Arrow offsets: left row `i` spans
- *  pairs `offsets[i]` up to `offsets[i + 1]`, in traversal order rather than sorted. `maxsim` lands
- *  its documents alike, one run per query, largest first. Mirrors `usearch_matches_tape_view_t`.
- */
+/** Every pair a sparse product scored, as a ragged run with Apache Arrow offsets: left row `i`
+ *  spans pairs `offsets[i]` up to `offsets[i + 1]`, in traversal order rather than sorted. `maxsim`
+ *  lands its documents alike, one run per query, largest first. */
 export class DenseProducts extends ArenaView {
   /** Left rows the product covers, or queries `maxsim` scored. */
   readonly queries: number;
@@ -441,10 +436,8 @@ export class DenseProducts extends ArenaView {
   }
 }
 
-/**
- *  The keys each entry of a cursor pull links to, as a ragged run with Apache Arrow offsets: entry
- *  `i` links to keys `offsets[i]` up to `offsets[i + 1]`. Mirrors `usearch_keys_tape_view_t`.
- */
+/** The keys each entry of a cursor pull links to, as a ragged run with Apache Arrow offsets: entry
+ *  `i` links to keys `offsets[i]` up to `offsets[i + 1]`. */
 export class DenseCursorLinks extends ArenaView {
   /** Entries the pull covers. */
   readonly entries: number;
@@ -537,14 +530,12 @@ export class DenseCursorBatch extends ArenaView {
   }
 }
 
-/**
- *  A walk over an index. Each shard's publication watermark is read as the walk enters it, so
- *  an entry once passed is never revisited. Mirrors `usearch_dense_cursor_t`.
+/** A walk over an index. Each shard's publication watermark is read as the walk enters it, so an
+ *  entry once passed is never revisited.
  *
  *  Holds engine state until `free` is called; a walk left to the garbage collector releases it
  *  whenever the collector gets to it. It keeps its index alive, and pulls on the executor of the
- *  receiver that opened it.
- */
+ *  receiver that opened it. */
 export class DenseCursor implements Disposable {
   readonly #compiled: CompiledCursor;
 
@@ -555,7 +546,6 @@ export class DenseCursor implements Disposable {
 
   /**
    *  Pulls the next entries of the walk into `arena`; the vectors themselves come from `get`.
-   *  Calls `usearch_dense_cursor_next`.
    *
    *  @param wanted - The upper bound on entries this pull lands.
    *  @param arena - The memory the batch lands in, rewound by the pull.
@@ -566,7 +556,7 @@ export class DenseCursor implements Disposable {
     return new DenseCursorBatch(this.#compiled.next(wanted, arena, config.links));
   }
 
-  /** Releases the scan; a second call does nothing. Calls `usearch_dense_cursor_free`. */
+  /** Releases the scan; a second call does nothing. */
   free(): void {
     this.#compiled.free();
   }
@@ -576,15 +566,12 @@ export class DenseCursor implements Disposable {
   }
 }
 
-/**
- *  A resumable nearest-neighbor walk over one query, pulled from the caller's own thread. Mirrors
- *  `usearch_dense_search_stream_t`.
+/** A resumable nearest-neighbor walk over one query, pulled from the caller's own thread.
  *
  *  This is the filtered path: pull matches, drop the ones a JavaScript predicate rejects, and
  *  pull again until satisfied - rather than guessing a `k` wide enough to survive the filter.
  *  The stream keeps walk state rather than a thread, and every pull is an ordinary call on the
- *  executor of the receiver that opened it.
- */
+ *  executor of the receiver that opened it. */
 export class DenseSearchStream implements Disposable {
   readonly #compiled: CompiledSearchStream;
 
@@ -594,7 +581,7 @@ export class DenseSearchStream implements Disposable {
   }
 
   /**
-   *  Pulls the next-nearest matches from the stream into `arena`. Calls `usearch_dense_search_stream_next`.
+   *  Pulls the next-nearest matches from the stream into `arena`.
    *
    *  @param wanted - The upper bound on matches this pull lands.
    *  @param arena - The memory the matches land in, rewound by the pull.
@@ -604,7 +591,7 @@ export class DenseSearchStream implements Disposable {
     return new Matches(this.#compiled.next(wanted, arena), 1);
   }
 
-  /** Releases the walk state; a second call does nothing. Calls `usearch_dense_search_stream_free`. */
+  /** Releases the walk state; a second call does nothing. */
   free(): void {
     this.#compiled.free();
   }
@@ -642,8 +629,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   ): Answer<Receiving, Answered>;
 
   /**
-   *  Claims room for a total entry count ahead of insertion, a hint, since insertions grow the index
-   *  on demand. Calls `usearch_dense_reserve`.
+   *  Claims room for a total entry count ahead of insertion, a hint, since insertions grow the
+   *  index on demand.
    *  @param capacity - The desired total capacity, the current size included.
    */
   reserve(capacity: number): Answer<Receiving, void> {
@@ -653,7 +640,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
     );
   }
 
-  /** Erases every entry, keeping the reserved capacity and the frozen geometry. Calls `usearch_dense_clear`. */
+  /** Erases every entry, keeping the reserved capacity and the frozen geometry. */
   clear(): Answer<Receiving, void> {
     return this.submit(
       (completion) => this.compiled.clear(this.executor, completion),
@@ -662,7 +649,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Reports the frozen metadata and the current counters in one call. Calls `usearch_dense_describe`.
+   *  Reports the frozen metadata and the current counters in one call.
    *  @returns The geometry, the size, the capacity, the memory and the kernels in use.
    */
   describe(): Answer<Receiving, DenseIndexDescription> {
@@ -676,7 +663,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Audits how much of the graph a search reaches from its landmarks. Calls `usearch_dense_health`.
+   *  Audits how much of the graph a search reaches from its landmarks.
    *  @returns The population audited, and how much of it is reachable.
    */
   health(): Answer<Receiving, DenseReachability> {
@@ -687,7 +674,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Counts the entries stored under one key. Calls `usearch_dense_count`.
+   *  Counts the entries stored under one key.
    *
    *  @param key - The identifier to be enumerated.
    *  @returns How many entries the key holds.
@@ -702,7 +689,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Add vectors to the index. Calls `usearch_dense_insert`.
+   *  Add vectors to the index.
    *
    *  A typed array is one row, and a {@link RowsView} is a batch borrowed in place. A single key
    *  broadcasts across every row. A batch is all-or-nothing: a rejected one leaves the index
@@ -729,7 +716,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Re-selects the neighbors of every stored entry against the finished graph. Calls `usearch_dense_refine`.
+   *  Re-selects the neighbors of every stored entry against the finished graph.
    *
    *  A cheap insertion pass followed by one refinement reaches a better graph, in less total
    *  time, than a single expensive insertion pass - so a wide breadth belongs here.
@@ -746,7 +733,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Searches the index for the nearest neighbours of every query row. Calls `usearch_dense_search`.
+   *  Searches the index for the nearest neighbours of every query row.
    *
    *  The matches land in `arena` and come back as a view into it, so a recall sweep reusing one
    *  arena allocates once.
@@ -782,8 +769,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Late-interaction scoring of multi-row queries: every query row takes its best match within
-   *  a key, and those maxima sum to that key's score. Calls `usearch_dense_maxsim`.
+   *  Late-interaction scoring of multi-row queries: every query row takes its best match within a
+   *  key, and those maxima sum to that key's score.
    *
    *  The run is over keys rather than rows, which is what an index built with `valuesPerKey`
    *  above one exists for. Runs on the inner-product kinds alone.
@@ -823,7 +810,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Retrieves the vectors stored under one key, one row per entry, in insertion order. Calls `usearch_dense_get`.
+   *  Retrieves the vectors stored under one key, one row per entry, in insertion order.
    *
    *  Rows land in `arena` and come back as a view into it, converted into `scalar`, shaped by the
    *  width and stride the call reports.
@@ -843,8 +830,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Multiplies a matrix against the index, sparsely - every pair the walk scored, not only the
-   *  nearest. Calls `usearch_dense_multiply`.
+   *  Multiplies a matrix against the index, sparsely - every pair the walk scored, not
+   *  only the nearest.
    *
    *  How many pairs a walk scores is known only once it ends, so the products land in `arena` and
    *  come back as views into it. The scores are unnormalized logits, so the handle must hold the
@@ -874,7 +861,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
 
   /**
    *  Absorbs every donor into this index, one after another, keeping their graphs rather than
-   *  re-inserting their vectors and linking each in across the appended part. Calls `usearch_dense_absorb`.
+   *  re-inserting their vectors and linking each in across the appended part.
    *
    *  A donor the library consumed refuses every later verb with {@link Status.Uninitialized}; one it
    *  did not absorb, like a donor of another scalar refused with {@link Status.ConfigMismatch}, stays
@@ -894,7 +881,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
 
   /**
    *  Splits this index into the receivers, the inverse of `absorb`: graph-local parts keeping their
-   *  edges, one per receiver, leaving this index empty but live. Calls `usearch_dense_split`.
+   *  edges, one per receiver, leaving this index empty but live.
    *
    *  Receivers must be empty and share the index's residency, scalar, class, metric, geometry and
    *  shard count, or the call refuses with {@link Status.ConfigMismatch}, moving nothing.
@@ -913,8 +900,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
 
   /**
    *  Draws keys around `config.focus`, or across the whole index, each hanging from a shown or
-   *  earlier draw and placed in three dimensions beside the shown ones. Calls
-   *  `usearch_dense_sample`.
+   *  earlier draw and placed in three dimensions beside the shown ones.
    *
    *  A larger `wanted` draws a superset, so a view grows one connected sample as it zooms. Only RAM
    *  samples yet.
@@ -950,7 +936,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
 
   /**
    *  Saves the index in the layout the path extension picks - one `.safegraphs` monolith, or a
-   *  `.safegraphs.json` manifest beside its shards. Calls `usearch_dense_save`.
+   *  `.safegraphs.json` manifest beside its shards.
    *
    *  @param path - File path to write.
    *  @throws Will throw an error if `path` is not a string.
@@ -963,7 +949,7 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Writes the index into memory as one monolith. Calls `usearch_dense_save_buffer`.
+   *  Writes the index into memory as one monolith.
    *
    *  The bytes are what a checkpoint holds, so a service that keeps its indexes in an object
    *  store never touches the filesystem. They land in `arena` and come back as a view into it.
@@ -979,10 +965,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 }
 
-/**
- *  The verbs of one index, blocking on one executor: `index.on(executor)`. Every call starts after
- *  every earlier submission to that executor, and returns with its outputs written.
- */
+/** The verbs of one index, blocking on one executor: `index.on(executor)`. Every call starts after
+ *  every earlier submission to that executor, and returns with its outputs written. */
 export class DenseIndexOn extends DenseVerbs<"blocking"> {
   /** Made by `index.on(executor)`, never directly. */
   constructor(compiled: CompiledIndex, executor: Executor | undefined) {
@@ -1005,8 +989,8 @@ export class DenseIndexOn extends DenseVerbs<"blocking"> {
 
   /**
    *  Opens a walk over the current contents, every pull on this receiver's executor. Without
-   *  `starts` it yields every entry as stored; with them, the start keys' own entries first in order,
-   *  then the entries those link to breadth-first, each once. Calls `usearch_dense_cursor_init`.
+   *  `starts` it yields every entry as stored; with them, the start keys' own entries first in
+   *  order, then the entries those link to breadth-first, each once.
    *  @param starts - The keys to walk from; absent walks every entry.
    *  @returns The walk, which should be freed once pulling stops.
    */
@@ -1017,8 +1001,8 @@ export class DenseIndexOn extends DenseVerbs<"blocking"> {
   }
 
   /**
-   *  Opens a resumable nearest-neighbor walk over one query row, every pull on this receiver's
-   *  executor. Calls `usearch_dense_search_stream_init`.
+   *  Opens a resumable nearest-neighbor walk over one query row, every pull on
+   *  this receiver's executor.
    *
    *  @param query - A single query row of the index geometry.
    *  @param config - The breadth.
@@ -1053,10 +1037,9 @@ export class DenseIndexDeferredOn extends DenseVerbs<"deferred"> {
 /** The token the lifecycle verbs hold, which is what a direct `new DenseIndex` cannot produce. */
 const indexSeal = Symbol("DenseIndex");
 
-/**
- *  A dense vector index, running every verb on the calling thread. `on(executor)` and
- *  `deferred(executor)` reach the same verbs on an executor, all but `attend`, whose `rowOf` runs here.
- */
+/** A dense vector index, running every verb on the calling thread. `on(executor)` and
+ *  `deferred(executor)` reach the same verbs on an executor, all but `attend`, whose `rowOf`
+ *  runs here. */
 export class DenseIndex extends DenseIndexOn implements Disposable {
   /** Reached through the `init*`, `load*` and `view*` lifecycle verbs. */
   private constructor(seal: symbol, compiledIndex: CompiledIndex) {
@@ -1086,8 +1069,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
 
   /**
    *  Softmax attention of every query row over every key its graph walk scores, folded as Flash
-   *  Attention folds key tiles, writing one attended row per query in `arena`. Calls
-   *  `usearch_dense_attend`.
+   *  Attention folds key tiles, writing one attended row per query in `arena`.
    *
    *  The index stores no values: every key a walk scores resolves through `rowOf` to a row of
    *  `values`, borrowed for the call, so only the keys a walk scores are ever resolved. The values
@@ -1131,7 +1113,8 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
     return new DenseVectors(outputs, config.scalar ?? rowsOf(queries).scalar);
   }
 
-  /** Releases the handle now, waiting for every deferred call naming it; a freed index refuses every later call, and a second `free` does nothing. Calls `usearch_dense_free`. */
+  /** Releases the handle now, waiting for every deferred call naming it; a freed index refuses
+   *  every later call, and a second `free` does nothing. */
   free(): void {
     this.compiled.free();
   }
@@ -1141,7 +1124,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Creates an empty, mutable index in host memory, one shard per named NUMA node. Calls `usearch_dense_init_ram`.
+   *  Creates an empty, mutable index in host memory, one shard per named NUMA node.
    *
    *  @param options - The geometry.
    *  @param memoryDomains - NUMA node IDs to shard over; absent spreads the shards over every node.
@@ -1164,7 +1147,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Creates an empty, mutable index in device memory, one shard per named CUDA ordinal. Calls `usearch_dense_init_vram`.
+   *  Creates an empty, mutable index in device memory, one shard per named CUDA ordinal.
    *
    *  @param options - The geometry.
    *  @param devices - CUDA ordinals to shard over; absent takes one free device.
@@ -1189,7 +1172,6 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   /**
    *  Copies a checkpoint into a new, mutable index in host memory, part `p` loading into shard `p`
    *  modulo the shard count. The geometry and metric come from the checkpoint itself.
-   *  Calls `usearch_dense_load_ram`.
    *
    *  @param path - The manifest of a sharded checkpoint, or a single monolith.
    *  @param config - The executor, the memory domains, and `valuesPerKey`.
@@ -1203,8 +1185,8 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
-   *  {@link DenseIndex.loadRam}. Calls `usearch_dense_load_vram`.
+   *  Copies a checkpoint into a new, mutable index in device memory, with the placement rules
+   *  of {@link DenseIndex.loadRam}.
    *
    *  @param path - The manifest of a sharded checkpoint, or a single monolith.
    *  @param config - The executor, the devices, and `valuesPerKey`.
@@ -1218,7 +1200,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Copies a monolith held in memory into a new, mutable index in host memory. Calls `usearch_dense_load_ram_buffer`.
+   *  Copies a monolith held in memory into a new, mutable index in host memory.
    *
    *  @param buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
    *  @param config - The executor, the memory domains, and `valuesPerKey`.
@@ -1239,7 +1221,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Copies a monolith held in memory into a new, mutable index in device memory. Calls `usearch_dense_load_vram_buffer`.
+   *  Copies a monolith held in memory into a new, mutable index in device memory.
    *
    *  @param buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
    *  @param config - The executor, the devices, and `valuesPerKey`.
@@ -1262,7 +1244,6 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   /**
    *  Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
    *  verbs throw with {@link Status.ReadOnly}; the files must stay unmodified while it lives.
-   *  Calls `usearch_dense_view_ram`.
    *
    *  @param path - The manifest of a sharded checkpoint, or a single monolith.
    *  @returns The read-only index.
@@ -1273,7 +1254,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
 
   /**
    *  Serves a checkpoint in place from NVMe drives, read through the executor's submission rings,
-   *  as a read-only index. Calls `usearch_dense_view_nvme`.
+   *  as a read-only index.
    *
    *  @param path - The manifest of a sharded checkpoint, or a single monolith.
    *  @param config - The NVMe executor, and the paths to serve the parts from.
@@ -1287,7 +1268,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Reads a checkpoint's geometry and metric without loading it. Calls `usearch_dense_metadata_read`.
+   *  Reads a checkpoint's geometry and metric without loading it.
    *
    *  @param path - The manifest of a sharded checkpoint, or a single monolith.
    *  @param config - The workers the read runs on.
@@ -1298,7 +1279,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  Reads the geometry and metric of a monolith held in memory. Calls `usearch_dense_metadata_read_buffer`.
+   *  Reads the geometry and metric of a monolith held in memory.
    *
    *  @param buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
    *  @param config - The workers the read runs on.

@@ -80,6 +80,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * grow the index on demand. The capacity is the desired total, including the current size.
      * Calls {@code usearch_dense_reserve}.
      *
+     * @param capacity the desired total number of entries, including the current size.
      * @throws USearchException OUT_OF_MEMORY when the capacity cannot be claimed, READ_ONLY on a
      *     view, and OVERFLOW past the identity space's ceiling.
      */
@@ -102,12 +103,20 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         return block(describing());
     }
 
-    /** How many entries are stored under a key; zero means the index holds none. Calls {@code usearch_dense_count}. */
+    /**
+     * How many entries are stored under a key; zero means the index holds none. Calls {@code usearch_dense_count}.
+     *
+     * @param key the key to look up.
+     */
     public long count(Key key) {
         return block(counting(key));
     }
 
-    /** Whether the index holds at least one entry under a key. Binding-only sugar over {@link #count}. */
+    /**
+     * Whether the index holds at least one entry under a key. Binding-only sugar over {@link #count}.
+     *
+     * @param key the key to look up.
+     */
     public boolean contains(Key key) {
         return count(key) != 0;
     }
@@ -117,6 +126,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * insertion order, packed at the natural width of the kind asked for - one call, however many
      * there turn out to be. Calls {@code usearch_dense_get}.
      *
+     * @param key the key to look up.
+     * @param outputsScalar the scalar kind the rows are converted into.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @return the rows read in place, none when the key holds nothing.
      * @throws USearchException UNKNOWN_KIND on a scalar the engine cannot convert into, and
      *     CONTENDED when the arena serves another call.
@@ -128,6 +140,8 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     /**
      * Inserts a matrix of vectors under their keys, with every knob derived.
      *
+     * @param keys one key per vector row.
+     * @param vectors the rows to insert, of any scalar kind the engine converts.
      * @throws USearchException the statuses {@link #insert(Key[], RowsView, DenseInsertConfig)} names.
      */
     public void insert(Key[] keys, RowsView vectors) {
@@ -145,6 +159,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * exception, reporting DEVICE and latching the index unusable rather than partially applied.
      * Calls {@code usearch_dense_insert}.
      *
+     * @param keys one key per vector row.
+     * @param vectors the rows to insert, of any scalar kind the engine converts.
+     * @param config the insertion knobs.
      * @throws USearchException SHAPE_MISMATCH when the key count and the row count disagree or the
      *     rows are not as wide as the frozen geometry, UNKNOWN_KIND on a scalar the engine cannot convert, READ_ONLY on a view, and
      *     OUT_OF_MEMORY when the batch cannot be accommodated.
@@ -172,6 +189,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * caller loops until the report's {@code changed} falls below whatever rate it considers settled.
      * Calls {@code usearch_dense_refine}.
      *
+     * @param config the refinement knobs.
      * @return the nodes re-selected and changed, the islands found and reconnected, and the audit
      *     closing the heal; {@code changed} at zero means the graph has settled.
      * @throws USearchException READ_ONLY on a view.
@@ -193,6 +211,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Resolves a matrix of queries into up to {@code wanted} nearest matches apiece, with every other
      * knob derived.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param wanted the most matches kept per query.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException the statuses {@link #search(RowsView, DenseSearchConfig, Arena)} names.
      */
     public Matches search(RowsView queries, long wanted, Arena arena) {
@@ -204,6 +225,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * internally. Never writes to the graph, so any number of these may overlap with concurrent
      * insertions. Calls {@code usearch_dense_search}.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param config the wanted count and the other search knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException SHAPE_MISMATCH when the rows are not as wide as the frozen geometry,
      *     UNKNOWN_KIND on a scalar the engine cannot convert, and CONTENDED when the arena serves
      *     another call.
@@ -216,6 +240,10 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Late-interaction scoring keeping up to {@code wanted} keys per query, zero keeping every key a
      * query scored, with every other knob derived.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param rowsPerQuery the token rows every query carries.
+     * @param wanted the most keys kept per query, zero keeping every key it scored.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig, Arena)}
      *     names.
      */
@@ -236,6 +264,10 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Each query's keys land in {@code arena} largest score first, as one ragged output like
      * {@link #multiply}'s. Calls {@code usearch_dense_maxsim}.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param rowsPerQuery the token rows every query carries.
+     * @param config the wanted count and the other scoring knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the token rows do not divide into whole queries or the rows are not as
      *     wide as the frozen geometry, and CONTENDED when the arena serves another call.
@@ -247,6 +279,8 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     /**
      * Approximate sparse product keeping every pair, with every other knob derived.
      *
+     * @param left the rows multiplied against the indexed vectors.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException the statuses {@link #multiply(RowsView, DenseMultiplyConfig, Arena)}
      *     names.
      */
@@ -264,6 +298,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Only the call knows how many pairs it scores, so the keys, the products and their offsets land
      * in {@code arena} as one ragged output. Calls {@code usearch_dense_multiply}.
      *
+     * @param left the rows multiplied against the indexed vectors.
+     * @param config the product knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the rows are not as wide as the frozen geometry, and CONTENDED when the
      *     arena serves another call.
@@ -275,6 +312,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     /**
      * Softmax attention with every knob derived.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param valueLookup resolves every scored key to its value row.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException the statuses
      *     {@link #attend(RowsView, ValueLookup, DenseAttendConfig, Arena)} names.
      */
@@ -292,6 +332,10 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * The index holds one layer's keys for one key-value head and no values, so the lookup resolves
      * every scored key to its value row. Calls {@code usearch_dense_attend}.
      *
+     * @param queries the query rows, as wide as the frozen geometry.
+     * @param valueLookup resolves every scored key to its value row.
+     * @param config the attention knobs.
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row or the head count
      *     does not divide the rows; CONFIG_MISMATCH on a graph frozen under a distance kind; CONTENDED
      *     when the arena serves another call; DEVICE on a VRAM arena, whose walk needs a device
@@ -308,6 +352,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * absorb is a live index again, which the caller still owns, though its entries may already have
      * moved here. Calls {@code usearch_dense_absorb}.
      *
+     * @param donors the indexes absorbed, of this index's residency, scalar, metric and geometry.
      * @return what the closing refinement did to the graph.
      * @throws USearchException READ_ONLY on a view, CONFIG_MISMATCH on a donor of another residency,
      *     scalar, metric or geometry, and INVALID_ARGUMENT when the index is among its own donors or a
@@ -323,6 +368,8 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * refinement re-links every receiver, leaving this index empty and live. Calls
      * {@code usearch_dense_split}.
      *
+     * @param config the partitioning knobs.
+     * @param receivers at least two empty indexes matching this one, which take the parts.
      * @return what the closing refinements did, across the receivers.
      * @throws USearchException INVALID_ARGUMENT on fewer than two receivers, and CONFIG_MISMATCH on a
      *     receiver of another residency, scalar, metric, geometry or shard count, one holding entries,
@@ -338,6 +385,9 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * sample as it zooms. Writes up to {@code wanted} draws, and a larger count under the same seed
      * draws a superset; only a RAM index samples yet. Calls {@code usearch_dense_sample}.
      *
+     * @param wanted the most draws written.
+     * @param arena the arena the output lands in, borrowed until the call returns.
+     * @param config the focus, seed and other sampling knobs.
      * @throws USearchException INVALID_ARGUMENT on a negative count, UNSUPPORTED on a GPU or NVMe
      *     handle, and CONTENDED when the arena serves another call.
      */
@@ -350,6 +400,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * monolith, or a {@code .safegraphs.json} manifest beside its shards. Demands a mutation-free
      * window; concurrent readers keep searching throughout. Calls {@code usearch_dense_save}.
      *
+     * @param path the destination; its extension picks the layout.
      * @throws USearchException INVALID_ARGUMENT on an empty path, and IO when the destination cannot
      *     be written - which leaves a file without its header, for the caller to remove.
      */
@@ -362,6 +413,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * {@link #save} writes to a {@code .safegraphs} path, into {@code arena}. Calls
      * {@code usearch_dense_save_buffer}.
      *
+     * @param arena the arena the output lands in, borrowed until the call returns.
      * @throws USearchException CONTENDED when the arena serves another call.
      */
     public Monolith saveBuffer(Arena arena) {
@@ -374,6 +426,8 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * Without {@code starts} it yields every entry as stored; with them, the start keys' own entries
      * first in order, then the entries those link to breadth-first, each once. Calls
      * {@code usearch_dense_cursor_init}.
+     *
+     * @param starts the keys whose entries the walk starts from, or none to yield every entry.
      */
     public DenseCursor cursor(Key... starts) {
         DenseIndex index = index();
@@ -387,6 +441,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     /**
      * Opens a resumable search for one query row, with the breadth of the candidates derived.
      *
+     * @param query exactly one query row.
      * @throws USearchException the statuses {@link #searchStream(RowsView, long)} names.
      */
     public DenseSearchStream searchStream(RowsView query) {
@@ -398,6 +453,8 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * traversal is naturally pausable, so callers that post-filter aggressively pull until satisfied
      * instead of guessing the wanted count upfront. Calls {@code usearch_dense_search_stream_init}.
      *
+     * @param query exactly one query row.
+     * @param expansionFactor the breadth of the candidates, zero to derive it.
      * @throws USearchException SHAPE_MISMATCH when the query is not exactly one row, and UNSUPPORTED
      *     where no residency implements the stream yet.
      */
@@ -475,7 +532,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     static Request<RefineReport> refining(DenseRefineConfig config) {
         return new Request<>(DenseIndex.REFINE, call -> {
             MemorySegment report = call.output("report", DenseIndex.REFINE_REPORT);
-            call.size("expansion_factor", config.expansionFactor);
+            call.size("refine.expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
             return () -> RefineReport.lift(report);
         });
@@ -558,7 +615,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             MemorySegment outputs = call.output("outputs", Library.ROWS_VIEW);
             call.arena("arena", arena);
             // A VRAM arena serves only a VRAM call, whose walk would run this host upcall on the device.
-            if (arena.residency() == Residency.VRAM) {
+            if (arena.describe().residency() == Residency.VRAM) {
                 throw new USearchException(Status.DEVICE, "a VRAM walk needs a device-callable value lookup");
             }
             call.size("expansion_factor", config.expansionFactor);
@@ -625,7 +682,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             call.size("count", receivers.length);
             call.pointer("receivers", handles);
             MemorySegment report = call.output("report", DenseIndex.REFINE_REPORT);
-            call.size("expansion_factor", config.expansionFactor);
+            call.size("refine.expansion_factor", config.expansionFactor);
             call.size("seed", config.seed);
             call.stats("stats", config.stats);
             return () -> RefineReport.lift(report);

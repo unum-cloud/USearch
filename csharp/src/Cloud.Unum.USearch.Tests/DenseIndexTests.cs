@@ -776,7 +776,7 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(Dimensions * sizeof(float), first.StrideBytes);
         Assert.Equal(RowOf(3f), first.Row<float>(2).ToArray());
         Assert.Equal(0, second.Rows);
-        Assert.Equal(Residency.Ram, other.Residency);
+        Assert.Equal(new ArenaDescription(Residency.Ram, null), other.Describe());
         Assert.Equal(3UL, index.On(this._pool).Count(shared));
     }
 

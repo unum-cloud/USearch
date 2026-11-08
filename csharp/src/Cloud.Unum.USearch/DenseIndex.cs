@@ -1415,7 +1415,8 @@ internal unsafe struct DenseRefineCall(CallHandles handles, ulong expansionFacto
         NativeDenseRefine arguments = new()
         {
             Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
-            Completion = completion, Report = RefineReport.In(outputs), ExpansionFactor = (nuint)expansionFactor,
+            Completion = completion, Report = RefineReport.In(outputs),
+            Refine = new() { ExpansionFactor = (nuint)expansionFactor },
             Stats = (NativeDenseTraversalStats*)outputs->Report,
         };
         usearch_dense_refine(&arguments);
@@ -1655,8 +1656,13 @@ internal unsafe struct DenseAttendCall(
                 Status.ShapeMismatch, "the softmax carry holds fewer entries than there are queries");
         }
 
+        if (arena is null)
+        {
+            throw new USearchException(Status.InvalidArgument, "the arena must not be null");
+        }
+
         // A VRAM arena serves only a VRAM call, whose walk would run this host lookup on the device.
-        if (arena is { Residency: Residency.Vram })
+        if (arena.Describe().Residency == Residency.Vram)
         {
             throw new USearchException(Status.Device, "a VRAM walk needs a device-callable value lookup");
         }
@@ -1804,7 +1810,8 @@ internal unsafe struct DenseSplitCall(
             {
                 Index = index.Pointer, Executor = executor.Pointer, Outcome = &outputs->Outcome,
                 Completion = completion, Count = (nuint)receivers.Length, Receivers = slots,
-                Report = RefineReport.In(outputs), ExpansionFactor = (nuint)expansionFactor, Seed = seed,
+                Report = RefineReport.In(outputs),
+                Refine = new() { ExpansionFactor = (nuint)expansionFactor }, Seed = seed,
                 Stats = (NativeDenseTraversalStats*)outputs->Report,
             };
             usearch_dense_split(&arguments);
@@ -2631,6 +2638,14 @@ internal struct NativeRefineReport
     public NativeDenseReachability Reachability;
 }
 
+/// <summary>How a pass over the graph may spend, laid out as <c>usearch_refine_options_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeRefineOptions
+{
+    public nuint ExpansionFactor;
+    public nuint MemoryLimit;
+}
+
 /// <summary>The arguments of <c>usearch_dense_init_ram</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeDenseInitRam
@@ -2785,7 +2800,7 @@ internal unsafe struct NativeDenseRefine
     public NativeOutcome* Outcome;
     public Completion Completion;
     public NativeRefineReport* Report;
-    public nuint ExpansionFactor;
+    public NativeRefineOptions Refine;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
@@ -2860,7 +2875,7 @@ internal unsafe struct NativeDenseAbsorb
     public nuint Count;
     public IntPtr* Donors;
     public NativeRefineReport* Report;
-    public nuint ExpansionFactor;
+    public NativeRefineOptions Refine;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
@@ -2876,7 +2891,7 @@ internal unsafe struct NativeDenseSplit
     public nuint Count;
     public IntPtr* Receivers;
     public NativeRefineReport* Report;
-    public nuint ExpansionFactor;
+    public NativeRefineOptions Refine;
     public ulong Seed;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;

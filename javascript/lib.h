@@ -96,9 +96,6 @@ typedef struct usearch_js_executor_t {
     /** The engine handle, freed by @c free or when the JavaScript wrapper is collected. */
     usearch_executor_t handle;
 
-    /** The residency its factory named, which every arena it makes inherits. */
-    usearch_residency_t residency;
-
     /** Live GPU arenas it made, each of which must be freed before it is. */
     size_t arenas;
 } usearch_js_executor_t;
@@ -108,9 +105,6 @@ typedef struct usearch_js_arena_t {
 
     /** The engine handle, made with the wrapper and @c NULL once freed. */
     usearch_arena_t handle;
-
-    /** The residency of the executor that made it; the host never views a VRAM arena's memory. */
-    usearch_residency_t residency;
 
     /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
      *  for host pages, which may outlive theirs. */

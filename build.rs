@@ -153,6 +153,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
     }
+
+    // The whole tree, so a dependent's CMake adds the checkout Cargo resolved as a subdirectory.
+    println!("cargo:source={}", manifest.display());
     Ok(())
 }
 

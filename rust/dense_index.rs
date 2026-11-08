@@ -31,15 +31,16 @@ use std::path::Path;
 use numkong::MatrixView;
 
 use crate::types::{
-    arena_slice, check, fail, lower_predicate, lower_progress, nvme_options, path_view, path_views, ram_options,
-    read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k,
-    usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t, usearch_executor_t, usearch_gpu_class_name,
-    usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t, usearch_keys_view_t, usearch_matches_tape_view_t,
-    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
-    usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
-    values_of, vram_options, Accepts, Arena, Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Element,
-    Error, Executor, Exported, GPUClass, Handles, Key, Matches, On, Predicate, ProgressCallback, QueryMatches,
-    Residency, Result, RowsView, Scalar, Status, Traversal,
+    arena_slice, arrow_checked, check, fail, lower_predicate, lower_progress, nvme_options, path_view, path_views,
+    ram_options, read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t,
+    usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t,
+    usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t,
+    usearch_keys_view_t, usearch_matches_tape_view_t, usearch_matches_tape_view_to_arrow, usearch_matches_view_t,
+    usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t, usearch_ram_options_t,
+    usearch_rows_view_t, usearch_rows_view_to_arrow, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
+    values_of, vram_options, Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Blocking, CPUClass, Callbacks,
+    Calling, Completion, Deferring, Element, Error, Executor, Exported, GPUClass, Handles, Key, Matches, On, Predicate,
+    ProgressCallback, QueryMatches, Residency, Result, RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -181,13 +182,19 @@ pub struct usearch_dense_refine_t {
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
     pub report: *mut usearch_refine_report_t,
-    pub expansion_factor: usize,
+    pub refine: usearch_refine_options_t,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
 }
 
 pub type usearch_reachability_t = DenseReachability;
 pub type usearch_refine_report_t = RefineReport;
+
+#[repr(C)]
+pub struct usearch_refine_options_t {
+    pub expansion_factor: usize,
+    pub memory_limit: usize,
+}
 
 #[repr(C)]
 pub struct usearch_dense_health_t {
@@ -249,7 +256,7 @@ pub struct usearch_dense_absorb_t {
     pub count: usize,
     pub donors: *mut usearch_dense_index_t,
     pub report: *mut usearch_refine_report_t,
-    pub expansion_factor: usize,
+    pub refine: usearch_refine_options_t,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
 }
@@ -263,7 +270,7 @@ pub struct usearch_dense_split_t {
     pub count: usize,
     pub receivers: *const usearch_dense_index_t,
     pub report: *mut usearch_refine_report_t,
-    pub expansion_factor: usize,
+    pub refine: usearch_refine_options_t,
     pub seed: u64,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_traversal_stats_t,
@@ -546,8 +553,6 @@ extern "C" {
 ///
 /// Arbitrary metrics belong to the C++ baseline tier, which forfeits the SIMD kernel chains and
 /// the magnitude cache both.
-///
-/// Mirrors `usearch_dense_metric_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
@@ -584,7 +589,7 @@ impl DenseMetric {
 }
 
 impl fmt::Display for DenseMetric {
-    /// Calls `usearch_dense_metric_name`.
+    /// Writes the metric's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_dense_metric_name, *self as c_int))
     }
@@ -593,7 +598,7 @@ impl fmt::Display for DenseMetric {
 impl FromStr for DenseMetric {
     type Err = Error;
 
-    /// Calls `usearch_dense_metric_from_name`.
+    /// Reads a metric back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(
             text,
@@ -607,7 +612,7 @@ impl FromStr for DenseMetric {
 /// Construction options of a dense index, whose stored vectors round up to the SIMD step quantum so
 /// every kernel runs tail-free.
 ///
-/// Rust-only; the fields `usearch_dense_init_ram_t` and `usearch_dense_init_vram_t` share.
+/// [`DenseIndex::init_ram`] and [`DenseIndex::init_vram`] both take it.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct DenseOptions {
     /// The number of indexed dimensions, which init freezes; zero is refused with
@@ -645,8 +650,6 @@ impl Default for DenseOptions {
 ///
 /// `values_per_key` and the placement are the reader's to choose when loading, so a checkpoint
 /// fixes neither.
-///
-/// Mirrors `usearch_dense_metadata_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub struct DenseMetadata {
@@ -661,7 +664,7 @@ pub struct DenseMetadata {
 }
 
 impl DenseMetadata {
-    /// Lifts the C structure, refusing a kind this binding has no name for.
+    /// Lifts the raw structure, refusing a kind this binding has no name for.
     fn from_raw(raw: &usearch_dense_metadata_t) -> Result<Self> {
         Ok(DenseMetadata {
             dimensions: raw.dimensions,
@@ -676,8 +679,6 @@ impl DenseMetadata {
 
 /// A live index's frozen metadata and current counters, each read once, so under concurrent
 /// insertions they may come from slightly different moments.
-///
-/// Mirrors `usearch_dense_index_description_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub struct DenseIndexDescription {
@@ -689,7 +690,7 @@ pub struct DenseIndexDescription {
     pub capacity: usize,
     /// Bytes the handle holds; traversal scratch is the executor's.
     pub memory_usage: usize,
-    /// The CPU class dispatch picked on this machine, as `usearch_cpu_class_name` spells it.
+    /// The CPU class dispatch picked on this machine, as [`CPUClass`] spells it.
     pub cpu_class: &'static str,
     /// The GPU class dispatch picked on the index's devices; "unknown" for a host index.
     pub gpu_class: &'static str,
@@ -702,8 +703,6 @@ pub struct DenseIndexDescription {
 // region: Configs
 
 /// Traversal telemetry, fully overwritten by the call it is passed to.
-///
-/// Mirrors `usearch_traversal_stats_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 #[non_exhaustive]
@@ -719,8 +718,6 @@ pub struct DenseTraversalStats {
 }
 
 /// One reachability audit: the population it judged, and how much of it a search reaches.
-///
-/// Mirrors `usearch_reachability_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 #[non_exhaustive]
@@ -737,8 +734,6 @@ pub struct DenseReachability {
 
 /// What one refine-family call did to the graph: [`DenseVerbs::refine`], [`DenseVerbs::absorb`]
 /// and [`DenseVerbs::split`] land it.
-///
-/// Mirrors `usearch_refine_report_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(C)]
 #[non_exhaustive]
@@ -758,8 +753,6 @@ pub struct RefineReport {
 
 /// The online-softmax carry of one query row, which folds one attention call into another over
 /// the same queries.
-///
-/// Mirrors `usearch_dense_softmax_state_t`.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 #[repr(C)]
 pub struct DenseSoftmaxState {
@@ -772,14 +765,10 @@ pub struct DenseSoftmaxState {
 /// An attention's value lookup, run on the executor's threads together: it resolves one key to
 /// its value row, stored in the index's own quantization and borrowed from storage outliving the
 /// call, and `None` refuses the call, as a panic does before it resurfaces once the call is final.
-///
-/// Mirrors `usearch_value_lookup_t`.
 pub type ValueLookup<'lookup, Value> = dyn Fn(Key) -> Option<&'lookup [Value]> + Sync + 'lookup;
 
 /// A checkpoint path and how it is copied into a new index in host memory; see
 /// [`DenseIndex::load_ram`].
-///
-/// Mirrors `usearch_dense_load_ram_t`.
 pub struct DenseLoadRamConfig<'config> {
     /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
     pub path: &'config Path,
@@ -814,8 +803,6 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
 
 /// A checkpoint path and how it is uploaded into a new index in device memory; see
 /// [`DenseIndex::load_vram`].
-///
-/// Mirrors `usearch_dense_load_vram_t`.
 pub struct DenseLoadVramConfig<'config> {
     /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
     pub path: &'config Path,
@@ -850,8 +837,6 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
 
 /// A serialized monolith and how it is copied into a new index in host memory; see
 /// [`DenseIndex::load_ram_buffer`].
-///
-/// Mirrors `usearch_dense_load_ram_buffer_t`.
 pub struct DenseLoadRamBufferConfig<'config> {
     /// The monolith's bytes.
     pub buffer: &'config [u8],
@@ -890,8 +875,6 @@ impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for DenseLoadRam
 
 /// A serialized monolith and how it is uploaded into a new index in device memory; see
 /// [`DenseIndex::load_vram_buffer`].
-///
-/// Mirrors `usearch_dense_load_vram_buffer_t`.
 pub struct DenseLoadVramBufferConfig<'config> {
     /// The monolith's bytes, in host or device memory.
     pub buffer: &'config [u8],
@@ -929,8 +912,6 @@ impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for DenseLoadVra
 }
 
 /// A checkpoint path and the drives serving it in place; see [`DenseIndex::view_nvme`].
-///
-/// Mirrors `usearch_dense_view_nvme_t`.
 pub struct DenseViewNvmeConfig<'config> {
     /// A `.safegraphs` monolith or a `.safegraphs.json` manifest.
     pub path: &'config Path,
@@ -955,8 +936,6 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseV
 }
 
 /// The rows of an insertion and the knobs of its walk; see [`DenseVerbs::insert`].
-///
-/// Mirrors `usearch_dense_insert_t`.
 pub struct DenseInsertConfig<'config, Rows> {
     /// One row per key, borrowed or owned.
     pub vectors: Rows,
@@ -984,8 +963,6 @@ impl<Rows: RowsView> From<Rows> for DenseInsertConfig<'_, Rows> {
 }
 
 /// The knobs of [`DenseVerbs::refine`].
-///
-/// Mirrors `usearch_dense_refine_t`.
 #[derive(Default)]
 pub struct DenseRefineConfig<'config> {
     /// The breadth of the candidates the walk explores; zero derives it from the geometry.
@@ -999,8 +976,6 @@ pub struct DenseRefineConfig<'config> {
 }
 
 /// The matches a search keeps and the knobs of its walk; see [`DenseVerbs::search`].
-///
-/// Mirrors `usearch_dense_search_t`.
 pub struct DenseSearchConfig<'config> {
     /// Matches kept per query, the "k" in "kANN".
     pub wanted: usize,
@@ -1037,8 +1012,6 @@ impl From<usize> for DenseSearchConfig<'_> {
 
 /// The documents a late-interaction search keeps and the knobs of its walk; see
 /// [`DenseVerbs::maxsim`].
-///
-/// Mirrors `usearch_dense_maxsim_t`.
 pub struct DenseMaxsimConfig<'config> {
     /// Documents kept per query, counted over keys rather than entries; zero keeps every key the
     /// query scored.
@@ -1066,8 +1039,6 @@ impl From<usize> for DenseMaxsimConfig<'_> {
 }
 
 /// The pairs a sparse product keeps and the knobs of its walk; see [`DenseVerbs::multiply`].
-///
-/// Mirrors `usearch_dense_multiply_t`.
 pub struct DenseMultiplyConfig<'config> {
     /// Keeps the first `wanted` pairs each row's walk scored; zero keeps every pair.
     pub wanted: usize,
@@ -1094,8 +1065,6 @@ impl From<usize> for DenseMultiplyConfig<'_> {
 }
 
 /// The heads, carry and knobs of an attention's walk; see [`DenseVerbs::attend`].
-///
-/// Mirrors `usearch_dense_attend_t`.
 pub struct DenseAttendConfig<'config> {
     /// The query heads sharing the index's key-value head, and with it one walk per token: row
     /// `t · head_count + h` is head `h` of token `t`, so it must divide the rows; zero means one.
@@ -1132,8 +1101,6 @@ impl From<usize> for DenseAttendConfig<'_> {
 }
 
 /// The donors an absorb consumes and the handler counting them; see [`DenseVerbs::absorb`].
-///
-/// Mirrors `usearch_dense_absorb_t`.
 pub struct DenseAbsorbConfig<'config, Donors> {
     /// The indexes absorbed, consumed whether or not the absorb succeeds.
     pub donors: Donors,
@@ -1144,8 +1111,6 @@ pub struct DenseAbsorbConfig<'config, Donors> {
 }
 
 /// The receivers a split fills and the knobs of its closing refinements; see [`DenseVerbs::split`].
-///
-/// Mirrors `usearch_dense_split_t`.
 pub struct DenseSplitConfig<'config> {
     /// At least two empty indexes of the source's residency, scalar, class, metric, geometry and
     /// shard count, each receiving one part.
@@ -1176,8 +1141,6 @@ impl<'config> From<&'config [&'config DenseIndex]> for DenseSplitConfig<'config>
 }
 
 /// The view a sample grows and how it draws; see [`DenseVerbs::sample`].
-///
-/// Mirrors `usearch_dense_sample_t`.
 #[derive(Default)]
 pub struct DenseSampleConfig<'config> {
     /// The keys already shown: never drawn again, and the paths reach toward them.
@@ -1209,8 +1172,6 @@ impl<Donors: IntoIterator<Item = DenseIndex>> From<Donors> for DenseAbsorbConfig
 }
 
 /// The path a checkpoint is written to and the handler counting its shards; see [`DenseVerbs::save`].
-///
-/// Mirrors `usearch_dense_save_t`.
 pub struct DenseSaveConfig<'config, Location> {
     /// A `.safegraphs` path for one monolith, a `.safegraphs.json` path for a manifest.
     pub path: Location,
@@ -1232,8 +1193,6 @@ impl<Location: AsRef<Path>> From<Location> for DenseSaveConfig<'_, Location> {
 
 /// The arena a monolith is written into and the handler counting its bytes; see
 /// [`DenseVerbs::save_buffer`].
-///
-/// Mirrors `usearch_dense_save_buffer_t`.
 pub struct DenseSaveBufferConfig<'config, 'arena> {
     /// The arena the monolith lands in, which the result borrows.
     pub arena: &'arena mut Arena,
@@ -1254,8 +1213,6 @@ impl<'arena> From<&'arena mut Arena> for DenseSaveBufferConfig<'_, 'arena> {
 }
 
 /// The query a stream walks and the breadth of its walk; see [`DenseVerbs::search_stream`].
-///
-/// Mirrors `usearch_dense_search_stream_init_t`.
 pub struct DenseSearchStreamInitConfig<Query> {
     /// Exactly one query row.
     pub query: Query,
@@ -1317,13 +1274,42 @@ impl<'arena, Value: Element> DenseVectors<'arena, Value> {
     /// One row per entry under the key in insertion order, or per query, at the pitch the library
     /// reported; refused with [`Status::Device`] over device memory.
     pub fn view(&self) -> Result<MatrixView<'arena, Value>> { exported_rows(self.arena, &self.vectors.0, self.count) }
+
+    /// Exports the rows as one Arrow `FixedSizeList` column of their scalar in place.
+    ///
+    /// The export borrows the arena, so no verb reaches it while the export lives:
+    ///
+    /// ```compile_fail
+    /// use usearch::*;
+    /// # fn main() -> Result<()> {
+    /// let options = DenseOptions { dimensions: 2, ..DenseOptions::default() };
+    /// let index = DenseIndex::init_ram(&options, &[])?;
+    /// let mut arena = Arena::new()?;
+    /// let vectors = index.get::<f32>(Key::from(1u64), &mut arena)?;
+    /// let export = vectors.to_arrow()?;
+    /// index.get::<f32>(Key::from(1u64), &mut arena)?;
+    /// drop(export);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_arrow(&self) -> Result<ArrowExport<'arena>> {
+        let mut schema = ArrowSchema::default();
+        let mut array = ArrowDeviceArray::default();
+        let status = unsafe {
+            usearch_rows_view_to_arrow(self.vectors.0, self.count, self.arena.handle, &mut schema, &mut array)
+        };
+        arrow_checked(status)?;
+        Ok(ArrowExport {
+            arena: self.arena,
+            schema,
+            array,
+        })
+    }
 }
 
 /// The ragged run [`DenseVerbs::multiply`] or [`DenseVerbs::maxsim`] exported into the arena it
 /// borrows: per left row, every pair its walk scored, in traversal order, or per query, its kept
 /// keys, largest score first.
-///
-/// Mirrors `usearch_matches_tape_view_t`.
 pub struct DenseProducts<'arena> {
     arena: &'arena Arena,
     products: Exported<usearch_matches_tape_view_t>,
@@ -1358,6 +1344,39 @@ impl<'arena> DenseProducts<'arena> {
         let products = self.products.0;
         // Safety: the arena holds a finished call's output in host memory.
         Ok((0..self.count).map(move |query| unsafe { products.query(query) }))
+    }
+
+    /// Exports every left row's pairs, or every query's keys, as one Arrow `LargeList` of
+    /// `Struct<key, distance>` in place.
+    ///
+    /// The export borrows the arena, so no verb reaches it while the export lives:
+    ///
+    /// ```compile_fail
+    /// use usearch::*;
+    /// # fn main() -> Result<()> {
+    /// let options = DenseOptions { dimensions: 2, metric: DenseMetric::Inner, ..DenseOptions::default() };
+    /// let index = DenseIndex::init_ram(&options, &[])?;
+    /// let slab = [1.0f32, 0.0];
+    /// let mut arena = Arena::new()?;
+    /// let products = index.multiply(&rows(&slab, 2)?, 1, &mut arena)?;
+    /// let export = products.to_arrow()?;
+    /// index.multiply(&rows(&slab, 2)?, 1, &mut arena)?;
+    /// drop(export);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_arrow(&self) -> Result<ArrowExport<'arena>> {
+        let mut schema = ArrowSchema::default();
+        let mut array = ArrowDeviceArray::default();
+        let status = unsafe {
+            usearch_matches_tape_view_to_arrow(self.products.0, self.count, self.arena.handle, &mut schema, &mut array)
+        };
+        arrow_checked(status)?;
+        Ok(ArrowExport {
+            arena: self.arena,
+            schema,
+            array,
+        })
     }
 }
 
@@ -1497,7 +1516,7 @@ impl<'arena> DenseBatch<'arena> {
 /// # Ok::<(), usearch::Error>(())
 /// ```
 ///
-/// Mirrors `usearch_dense_index_t`; dropping it calls `usearch_dense_free`.
+/// Dropping it waits for every deferred call naming the index, then frees it.
 #[derive(Debug)]
 pub struct DenseIndex {
     handle: usearch_dense_index_t,
@@ -1572,8 +1591,6 @@ impl DenseIndex {
 
     /// Erases all entries on the calling thread, keeping the reserved capacity and frozen geometry;
     /// `&mut self` keeps every other call on the handle from overlapping it.
-    ///
-    /// Calls `usearch_dense_clear`.
     pub fn clear(&mut self) -> Result<()> {
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1589,8 +1606,6 @@ impl DenseIndex {
 
     /// Creates an empty, mutable index in host memory, one shard per NUMA node `memory_domains`
     /// names; empty derives every node the process may use.
-    ///
-    /// Calls `usearch_dense_init_ram`.
     pub fn init_ram(options: &DenseOptions, memory_domains: &[i32]) -> Result<Self> {
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
@@ -1611,8 +1626,6 @@ impl DenseIndex {
 
     /// Creates an empty, mutable index in device memory, sharded across `devices` and never
     /// replicated; empty derives one free device.
-    ///
-    /// Calls `usearch_dense_init_vram`.
     pub fn init_vram(options: &DenseOptions, devices: &[i32]) -> Result<Self> {
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
@@ -1633,8 +1646,6 @@ impl DenseIndex {
 
     /// Copies a checkpoint into a new, mutable index in host memory; a bare path reads on the
     /// calling thread.
-    ///
-    /// Calls `usearch_dense_load_ram`.
     pub fn load_ram<'config>(config: impl Into<DenseLoadRamConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
@@ -1660,8 +1671,6 @@ impl DenseIndex {
 
     /// Uploads a checkpoint into a new, mutable index in device memory, placing its parts as
     /// [`DenseIndex::load_ram`] does.
-    ///
-    /// Calls `usearch_dense_load_vram`.
     pub fn load_vram<'config>(config: impl Into<DenseLoadVramConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
@@ -1685,8 +1694,6 @@ impl DenseIndex {
     }
 
     /// Copies a monolith from a buffer into a new, mutable index in host memory.
-    ///
-    /// Calls `usearch_dense_load_ram_buffer`.
     pub fn load_ram_buffer<'config>(config: impl Into<DenseLoadRamBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
@@ -1711,8 +1718,6 @@ impl DenseIndex {
     }
 
     /// Uploads a monolith from a buffer into a new, mutable index in device memory.
-    ///
-    /// Calls `usearch_dense_load_vram_buffer`.
     pub fn load_vram_buffer<'config>(config: impl Into<DenseLoadVramBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
@@ -1737,8 +1742,6 @@ impl DenseIndex {
 
     /// Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
     /// verbs report [`Status::ReadOnly`]; the files must stay unmodified while it lives.
-    ///
-    /// Calls `usearch_dense_view_ram`.
     pub fn view_ram(path: impl AsRef<Path>) -> Result<Self> {
         let path = path_view(path.as_ref())?;
         let mut index = DenseIndex::null();
@@ -1757,8 +1760,6 @@ impl DenseIndex {
     /// report [`Status::ReadOnly`].
     ///
     /// Answers [`Status::Unsupported`] until NVMe checkpoints carry keys.
-    ///
-    /// Calls `usearch_dense_view_nvme`.
     pub fn view_nvme<'config>(config: impl Into<DenseViewNvmeConfig<'config>>) -> Result<Self> {
         let config = config.into();
         let views = path_views(config.paths)?;
@@ -1780,8 +1781,6 @@ impl DenseIndex {
 
     /// Reads a checkpoint's geometry and metric without loading it; a manifest answers from its
     /// summary and its first part's header, so the cost does not grow with the index.
-    ///
-    /// Calls `usearch_dense_metadata_read`.
     pub fn metadata(path: impl AsRef<Path>) -> Result<DenseMetadata> {
         let path = path_view(path.as_ref())?;
         let mut raw = usearch_dense_metadata_t::default();
@@ -1800,8 +1799,6 @@ impl DenseIndex {
     }
 
     /// Reads geometry and metric out of a serialized monolith buffer.
-    ///
-    /// Calls `usearch_dense_metadata_read_buffer`.
     pub fn metadata_buffer(buffer: &[u8]) -> Result<DenseMetadata> {
         let mut raw = usearch_dense_metadata_t::default();
         let mut outcome = usearch_outcome_t::default();
@@ -1844,8 +1841,6 @@ pub trait DenseVerbs<'index>: Copy {
 
     /// Reserves capacity for a number of incoming vectors ahead of insertion, a hint, since
     /// insertions grow the index on demand.
-    ///
-    /// Calls `usearch_dense_reserve`.
     fn reserve(self, capacity: usize) -> Answer<'index, Self, DenseReserve> {
         <Self::Completion as Completion>::answer(DenseReserve {
             handles: self.handles(),
@@ -1854,8 +1849,6 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// Reports the frozen metadata and the current counters in one call.
-    ///
-    /// Calls `usearch_dense_describe`.
     fn describe(self) -> Answer<'index, Self, DenseDescribe> {
         <Self::Completion as Completion>::answer(DenseDescribe {
             handles: self.handles(),
@@ -1864,8 +1857,6 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// The number of entries stored under `key`.
-    ///
-    /// Calls `usearch_dense_count`.
     fn count(self, key: Key) -> Answer<'index, Self, DenseCount> {
         <Self::Completion as Completion>::answer(DenseCount {
             handles: self.handles(),
@@ -1886,8 +1877,6 @@ pub trait DenseVerbs<'index>: Copy {
 
     /// Retrieves every vector stored under `key` into `arena`, which the result borrows; an absent
     /// key yields no rows.
-    ///
-    /// Calls `usearch_dense_get`.
     fn get<'arena, Value: Element>(
         self,
         key: Key,
@@ -1909,8 +1898,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// progress report, so a `Break` is ignored. Overlaps safely with concurrent searches on the
     /// same handle, and the input scalar type is independent of the stored quantization - the
     /// library converts on ingest.
-    ///
-    /// Calls `usearch_dense_insert`.
     fn insert<'config, Keys: AsRef<[Key]>, Rows: RowsView>(
         self,
         keys: Keys,
@@ -1934,8 +1921,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// throughout, on a VRAM one they may not, and insertions never may. A stop is a time budget:
     /// the call still re-links its islands, leaving the graph correct, and answers
     /// [`Status::Cancelled`].
-    ///
-    /// Calls `usearch_dense_refine`.
     fn refine<'config>(self, config: DenseRefineConfig<'config>) -> Answer<'index, Self, DenseRefine<'config>>
     where
         Self::Completion: Accepts<DenseRefineConfig<'config>>,
@@ -1951,8 +1936,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// as one search draws, swept level by level.
     ///
     /// Read-only, so concurrent insertions merely leave fresh entries unaudited.
-    ///
-    /// Calls `usearch_dense_health`.
     fn health(self) -> Answer<'index, Self, DenseHealth> {
         <Self::Completion as Completion>::answer(DenseHealth {
             handles: self.handles(),
@@ -1964,8 +1947,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// `arena` as [`Matches`].
     ///
     /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
-    ///
-    /// Calls `usearch_dense_search`.
     fn search<'config, 'arena, Queries: RowsView>(
         self,
         queries: Queries,
@@ -1995,8 +1976,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// above one exists for. Runs on an inner-product index alone.
     ///
     /// See <https://arxiv.org/abs/2004.12832> - ColBERT, which introduced this scoring.
-    ///
-    /// Calls `usearch_dense_maxsim`.
     fn maxsim<'config, 'arena, Queries: RowsView>(
         self,
         queries: Queries,
@@ -2025,8 +2004,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// The linear-algebra sibling of [`DenseVerbs::search`], reporting every pair the traversal
     /// scored rather than only the nearest. Pairs arrive in traversal order rather than sorted.
     /// Runs on an inner-product index alone, since a product is a logit.
-    ///
-    /// Calls `usearch_dense_multiply`.
     fn multiply<'config, 'arena, Left: RowsView>(
         self,
         left: Left,
@@ -2061,8 +2038,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// needs logits.
     ///
     /// See <https://arxiv.org/abs/2205.14135> - Flash Attention, whose recurrence this reuses.
-    ///
-    /// Calls `usearch_dense_attend`.
     fn attend<'config, 'lookup, 'arena, Queries: RowsView, Value: Element>(
         self,
         queries: Queries,
@@ -2093,8 +2068,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// only the closing refinement, every donor already moved, and answers [`Status::Cancelled`],
     /// while a failure frees the donors it never reached and may leave the failing donor's entries
     /// behind.
-    ///
-    /// Calls `usearch_dense_absorb`.
     fn absorb<'config, Donors: IntoIterator<Item = DenseIndex>>(
         self,
         config: impl Into<DenseAbsorbConfig<'config, Donors>>,
@@ -2115,8 +2088,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// Splits this index into the empty receivers, the inverse of [`DenseVerbs::absorb`]: the
     /// entries are partitioned along the graph, each part lands in one receiver with its edges
     /// kept, and a closing refinement re-links every receiver, leaving this index empty and live.
-    ///
-    /// Calls `usearch_dense_split`.
     fn split<'config>(self, config: impl Into<DenseSplitConfig<'config>>) -> Answer<'index, Self, DenseSplit<'config>>
     where
         Self::Completion: Accepts<DenseSplitConfig<'config>>,
@@ -2133,8 +2104,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// earlier draw and placed in three dimensions beside the shown ones, writing up to `wanted`
     /// of them into `arena` as a [`Sample`]. A larger `wanted` under the same seed draws a
     /// superset; only a RAM index samples yet.
-    ///
-    /// Calls `usearch_dense_sample`.
     fn sample<'config, 'arena>(
         self,
         wanted: usize,
@@ -2162,8 +2131,6 @@ pub trait DenseVerbs<'index>: Copy {
     ///
     /// Demands a mutation-free window; concurrent readers keep searching throughout. A stopped save
     /// leaves leftovers every reader rejects and the caller is left to remove.
-    ///
-    /// Calls `usearch_dense_save`.
     fn save<'config, Location: AsRef<Path>>(
         self,
         config: impl Into<DenseSaveConfig<'config, Location>>,
@@ -2178,8 +2145,6 @@ pub trait DenseVerbs<'index>: Copy {
     }
 
     /// Saves the index as one monolith into the arena its config carries.
-    ///
-    /// Calls `usearch_dense_save_buffer`.
     fn save_buffer<'config, 'arena>(
         self,
         config: impl Into<DenseSaveBufferConfig<'config, 'arena>>,
@@ -2200,8 +2165,6 @@ pub trait DenseVerbs<'index>: Copy {
     ///
     /// Without `starts` the walk yields every entry as stored. With them it yields the start keys'
     /// own entries first, in order, then the entries those link to breadth-first, each entry once.
-    ///
-    /// Calls `usearch_dense_cursor_init`.
     fn cursor(self, starts: &[Key]) -> Result<DenseCursor<'index>>
     where
         Self: DenseVerbs<'index, Completion = Blocking>,
@@ -2232,8 +2195,6 @@ pub trait DenseVerbs<'index>: Copy {
     /// thread.
     ///
     /// No residency implements the stream yet, so the engine answers [`Status::Unsupported`].
-    ///
-    /// Calls `usearch_dense_search_stream_init`.
     fn search_stream<Query: RowsView>(
         self,
         config: impl Into<DenseSearchStreamInitConfig<Query>>,
@@ -2292,8 +2253,6 @@ impl<'index, Completion: crate::types::Completion> DenseVerbs<'index> for On<'in
 // region: Calls
 
 /// A capacity reservation; see [`DenseVerbs::reserve`].
-///
-/// Calls `usearch_dense_reserve`.
 pub struct DenseReserve {
     handles: Handles,
     capacity: usize,
@@ -2324,8 +2283,6 @@ impl Calling for DenseReserve {
 }
 
 /// A report of the metadata and counters; see [`DenseVerbs::describe`].
-///
-/// Calls `usearch_dense_describe`.
 pub struct DenseDescribe {
     handles: Handles,
     description: usearch_dense_index_description_t,
@@ -2369,8 +2326,6 @@ impl Calling for DenseDescribe {
 }
 
 /// A count of the entries under one key; see [`DenseVerbs::count`].
-///
-/// Calls `usearch_dense_count`.
 pub struct DenseCount {
     handles: Handles,
     key: Key,
@@ -2403,8 +2358,6 @@ impl Calling for DenseCount {
 }
 
 /// A retrieval of the vectors under one key; see [`DenseVerbs::get`].
-///
-/// Calls `usearch_dense_get`.
 pub struct DenseGet<'arena, Value> {
     handles: Handles,
     key: Key,
@@ -2450,8 +2403,6 @@ impl<'arena, Value: Element> Calling for DenseGet<'arena, Value> {
 }
 
 /// An insertion; see [`DenseVerbs::insert`].
-///
-/// Calls `usearch_dense_insert`.
 pub struct DenseInsert<'config, Keys, Rows> {
     handles: Handles,
     keys: Keys,
@@ -2497,8 +2448,6 @@ impl<Keys: AsRef<[Key]>, Rows: RowsView> Calling for DenseInsert<'_, Keys, Rows>
 }
 
 /// A refinement sweep; see [`DenseVerbs::refine`].
-///
-/// Calls `usearch_dense_refine`.
 pub struct DenseRefine<'config> {
     handles: Handles,
     report: RefineReport,
@@ -2522,7 +2471,10 @@ impl Calling for DenseRefine<'_> {
             outcome,
             completion,
             report: &mut self.report,
-            expansion_factor: self.config.expansion_factor,
+            refine: usearch_refine_options_t {
+                expansion_factor: self.config.expansion_factor,
+                memory_limit: 0,
+            },
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
@@ -2534,8 +2486,6 @@ impl Calling for DenseRefine<'_> {
 }
 
 /// A reachability audit; see [`DenseVerbs::health`].
-///
-/// Calls `usearch_dense_health`.
 pub struct DenseHealth {
     handles: Handles,
     reachability: DenseReachability,
@@ -2566,8 +2516,6 @@ impl Calling for DenseHealth {
 }
 
 /// A k-nearest-neighbors search; see [`DenseVerbs::search`].
-///
-/// Calls `usearch_dense_search`.
 pub struct DenseSearch<'config, 'arena, Queries> {
     handles: Handles,
     queries: Queries,
@@ -2622,8 +2570,6 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
 }
 
 /// A late-interaction search; see [`DenseVerbs::maxsim`].
-///
-/// Calls `usearch_dense_maxsim`.
 pub struct DenseMaxsim<'config, 'arena, Queries> {
     handles: Handles,
     queries: Queries,
@@ -2691,8 +2637,6 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
 }
 
 /// An approximate sparse product; see [`DenseVerbs::multiply`].
-///
-/// Calls `usearch_dense_multiply`.
 pub struct DenseMultiply<'config, 'arena, Left> {
     handles: Handles,
     left: Left,
@@ -2777,8 +2721,6 @@ unsafe extern "C" fn value_lookup_trampoline<Value: Element>(
 }
 
 /// A graph-walk attention; see [`DenseVerbs::attend`].
-///
-/// Calls `usearch_dense_attend`.
 pub struct DenseAttend<'config, 'lookup, 'arena, Queries, Value> {
     handles: Handles,
     queries: Queries,
@@ -2800,7 +2742,7 @@ impl<'arena, Queries: RowsView, Value: Element> Calling for DenseAttend<'_, '_, 
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         // A VRAM walk calls its value lookup on the device, which a host trampoline cannot serve.
-        if self.arena.residency() == Residency::Vram {
+        if self.arena.describe()?.residency == Residency::Vram {
             return Err(fail(Status::Device, "a VRAM walk needs a device-callable value lookup"));
         }
         let batch = self.queries.batch()?;
@@ -2880,8 +2822,6 @@ impl Drop for DonorHandles {
 }
 
 /// An absorb of donor indexes; see [`DenseVerbs::absorb`].
-///
-/// Calls `usearch_dense_absorb`.
 pub struct DenseAbsorb<'config> {
     handles: Handles,
     donors: DonorHandles,
@@ -2909,7 +2849,10 @@ impl Calling for DenseAbsorb<'_> {
             count: self.donors.0.len(),
             donors: self.donors.0.as_mut_ptr(),
             report: &mut self.report,
-            expansion_factor: 0,
+            refine: usearch_refine_options_t {
+                expansion_factor: 0,
+                memory_limit: 0,
+            },
             progress,
             stats: ptr::null_mut(),
         })
@@ -2921,8 +2864,6 @@ impl Calling for DenseAbsorb<'_> {
 }
 
 /// A split into receiver indexes; see [`DenseVerbs::split`].
-///
-/// Calls `usearch_dense_split`.
 pub struct DenseSplit<'config> {
     handles: Handles,
     receivers: ReceiverHandles,
@@ -2956,7 +2897,10 @@ impl Calling for DenseSplit<'_> {
             count: self.receivers.0.len(),
             receivers: self.receivers.0.as_ptr(),
             report: &mut self.report,
-            expansion_factor: self.config.expansion_factor,
+            refine: usearch_refine_options_t {
+                expansion_factor: self.config.expansion_factor,
+                memory_limit: 0,
+            },
             seed: self.config.seed,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
@@ -2969,8 +2913,6 @@ impl Calling for DenseSplit<'_> {
 }
 
 /// A sample of draws around a focus; see [`DenseVerbs::sample`].
-///
-/// Calls `usearch_dense_sample`.
 pub struct DenseSample<'config, 'arena> {
     handles: Handles,
     wanted: usize,
@@ -3041,8 +2983,6 @@ impl<'arena> Calling for DenseSample<'_, 'arena> {
 }
 
 /// A checkpoint write; see [`DenseVerbs::save`].
-///
-/// Calls `usearch_dense_save`.
 pub struct DenseSave<'config, Location> {
     handles: Handles,
     config: DenseSaveConfig<'config, Location>,
@@ -3076,8 +3016,6 @@ impl<Location: AsRef<Path>> Calling for DenseSave<'_, Location> {
 }
 
 /// A monolith written into an arena; see [`DenseVerbs::save_buffer`].
-///
-/// Calls `usearch_dense_save_buffer`.
 pub struct DenseSaveBuffer<'config, 'arena> {
     handles: Handles,
     monolith: Exported<usearch_bytes_view_t>,
@@ -3125,7 +3063,7 @@ impl<'arena> Calling for DenseSaveBuffer<'_, 'arena> {
 /// The walk is a sequential scan, so it stays a batch operation: export, migration, and
 /// visualization all move whole slabs.
 ///
-/// Mirrors `usearch_dense_cursor_t`; dropping it calls `usearch_dense_cursor_free`.
+/// Dropping it waits for every deferred call naming the cursor, then releases it.
 #[derive(Debug)]
 pub struct DenseCursor<'index> {
     handle: usearch_dense_cursor_t,
@@ -3135,16 +3073,12 @@ pub struct DenseCursor<'index> {
 
 impl DenseCursor<'_> {
     /// Copies up to `wanted` next keys into `arena`; an empty batch means the walk is exhausted.
-    ///
-    /// Calls `usearch_dense_cursor_next`.
     pub fn next_keys<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
         self.next(false, wanted, arena)
     }
 
     /// Copies up to `wanted` next keys into `arena`, each with the keys it links to; an empty
     /// batch means the walk is exhausted.
-    ///
-    /// Calls `usearch_dense_cursor_next`.
     pub fn next_links<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<DenseBatch<'arena>> {
         self.next(true, wanted, arena)
     }
@@ -3190,7 +3124,8 @@ impl Drop for DenseCursor<'_> {
 /// lands its matches in the arena it is given as one query of a search, so nothing allocates per
 /// match. An empty pull means the walk is drained.
 ///
-/// Mirrors `usearch_dense_search_stream_t`; dropping it calls `usearch_dense_search_stream_free`.
+/// Dropping it waits for every deferred call naming the stream, then releases the walk state it
+/// keeps.
 #[derive(Debug)]
 pub struct DenseSearchStream<'index> {
     handle: usearch_dense_search_stream_t,
@@ -3200,8 +3135,6 @@ pub struct DenseSearchStream<'index> {
 
 impl DenseSearchStream<'_> {
     /// Pulls up to `wanted` more matches into `arena`, as the one query of [`Matches`].
-    ///
-    /// Calls `usearch_dense_search_stream_next`.
     pub fn next<'arena>(&mut self, wanted: usize, arena: &'arena mut Arena) -> Result<Matches<'arena>> {
         let mut matches = Exported::default();
         let mut outcome = usearch_outcome_t::default();

@@ -157,7 +157,7 @@ for call in calls {
 ```
 
 The library never frees an arena under a call: dropping one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `Status::Contended` and rewinds nothing, so even a leaked `Deferred` leaves it safe.
-An arena's `residency()` says where it lives.
+An arena's `describe()` says where it lives, and on which device.
 Fixed-size reports, such as stats, descriptions and `required`, stay plain values, and so does state you carry between calls, like the attention `carry`.
 
 ## Keys

@@ -1900,6 +1900,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("state"),
                     Library.SIZE.withName("steps"))
             .withName("progress");
+    private static final MemoryLayout REFINE_OPTIONS = MemoryLayout.structLayout(
+                    Library.SIZE.withName("expansion_factor"), Library.SIZE.withName("memory_limit"))
+            .withName("refine");
     private static final MemoryLayout STATS = Library.POINTER.withName("stats");
 
     /** {@code usearch_dense_metadata_t}. */
@@ -2031,12 +2034,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
     static final Verb REFINE = new Verb(
             "usearch_dense_refine",
-            Library.opening(
-                    Library.padding(),
-                    Library.POINTER.withName("report"),
-                    Library.SIZE.withName("expansion_factor"),
-                    PROGRESS,
-                    STATS));
+            Library.opening(Library.padding(), Library.POINTER.withName("report"), REFINE_OPTIONS, PROGRESS, STATS));
 
     static final Verb HEALTH = new Verb(
             "usearch_dense_health", Library.opening(Library.padding(), Library.POINTER.withName("reachability")));
@@ -2081,7 +2079,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("count"),
                     Library.POINTER.withName("donors"),
                     Library.POINTER.withName("report"),
-                    Library.SIZE.withName("expansion_factor"),
+                    REFINE_OPTIONS,
                     PROGRESS,
                     STATS));
 
@@ -2092,7 +2090,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("count"),
                     Library.POINTER.withName("receivers"),
                     Library.POINTER.withName("report"),
-                    Library.SIZE.withName("expansion_factor"),
+                    REFINE_OPTIONS,
                     ValueLayout.JAVA_LONG.withName("seed"),
                     PROGRESS,
                     STATS));

@@ -1,4 +1,4 @@
-//! USearch - Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices.
+//! USearch - One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe.
 //!
 //! The crate links the precompiled engine, so building it compiles no index.
 //!
@@ -33,17 +33,16 @@ mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use dense_index::{
-    DenseAbsorb, DenseAbsorbConfig, DenseAttend, DenseAttendConfig, DenseBatch, DenseCount, DenseCursor, DenseDescribe,
-    DenseGet, DenseHealth, DenseIndex, DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig,
-    DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMetadata,
-    DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability, DenseRefine,
-    DenseRefineConfig, DenseReserve, DenseSample, DenseSampleConfig, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig,
-    DenseSaveConfig, DenseSearch, DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState,
-    DenseSplit, DenseSplitConfig, DenseTraversalStats, DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith,
-    RefineReport, Sample, ValueLookup,
+    DenseAbsorbConfig, DenseAttendConfig, DenseBatch, DenseCursor, DenseIndex, DenseIndexDescription,
+    DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig,
+    DenseMaxsimConfig, DenseMetadata, DenseMetric, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability,
+    DenseRefineConfig, DenseSampleConfig, DenseSaveBufferConfig, DenseSaveConfig, DenseSearchConfig, DenseSearchStream,
+    DenseSearchStreamInitConfig, DenseSoftmaxState, DenseSplitConfig, DenseTraversalStats, DenseVectors, DenseVerbs,
+    DenseViewNvmeConfig, Monolith, RefineReport, Sample, ValueLookup,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, CPUClass, Deferred, Deferring,
+    capabilities_available, capabilities_compiled, keys_from_arrow, rows, version, Arena, ArenaDescription, ArrowArray,
+    ArrowColumn, ArrowDeviceArray, ArrowExport, ArrowRows, ArrowSchema, Blocking, CPUClass, Deferred, Deferring,
     Distance, Element, Error, Executor, GPUClass, Key, Matches, Mood, On, Predicate, ProgressCallback, QueryMatches,
     Residency, Result, Scalar, Status, Traversal, Wait,
 };

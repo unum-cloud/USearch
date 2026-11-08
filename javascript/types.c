@@ -608,8 +608,7 @@ static napi_value usearch_js_executor_construct(napi_env env, napi_callback_info
 }
 
 /** Wraps the handle a factory just made, or throws its outcome; frees the handle on failure. */
-static napi_value usearch_js_executor_adopt(napi_env env, usearch_outcome_t const* outcome, usearch_executor_t handle,
-                                            usearch_residency_t residency) {
+static napi_value usearch_js_executor_adopt(napi_env env, usearch_outcome_t const* outcome, usearch_executor_t handle) {
     if (!usearch_js_succeeded(env, outcome)) return NULL;
     usearch_js_addon_t* const addon = usearch_js_addon(env);
     napi_value const instance = addon ? usearch_js_instantiate(env, addon->executor_class) : NULL;
@@ -622,7 +621,6 @@ static napi_value usearch_js_executor_adopt(napi_env env, usearch_outcome_t cons
         return NULL;
     }
     executor->handle = handle;
-    executor->residency = residency;
     return instance;
 }
 
@@ -666,7 +664,7 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     for_ram.ram.memory_domains = ordinals;
     usearch_executor_for_ram(&for_ram);
     free(ordinals);
-    return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_ram_k);
+    return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c onPool(pool, {memoryDomains, deferredLimit, cpuClass}) → an executor borrowing a ForkUnion
@@ -689,7 +687,7 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     on_pool.ram.memory_domains = ordinals;
     usearch_executor_on_pool(&on_pool);
     free(ordinals);
-    return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_ram_k);
+    return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c forVram({devices, streams, scratchLimit, deferredLimit, gpuClass}) → one stream per
@@ -748,7 +746,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     usearch_executor_for_vram(&for_vram);
     free(streams);
     free(ordinals);
-    return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_vram_k);
+    return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c forNvme({paths, threads, deferredLimit, cpuClass}) → one submission ring per worker. */
@@ -768,7 +766,7 @@ static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info 
     for_nvme.nvme = (usearch_nvme_options_t) {paths.views, paths.count, for_nvme.nvme.cpu_class};
     usearch_executor_for_nvme(&for_nvme);
     usearch_js_paths_release(&paths);
-    return usearch_js_executor_adopt(env, &outcome, handle, usearch_residency_nvme_k);
+    return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c drain(mood) - waits for every call submitted so far, then idles in @p mood; absent parks. */
@@ -907,13 +905,20 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
                                  .executor = executor ? executor->handle : NULL,
                                  .outcome = &outcome};
     usearch_arena_init(&init);
-    arena->residency = executor ? executor->residency : usearch_residency_ram_k;
     if (!usearch_js_succeeded(env, &outcome)) {
         free(arena);
         return NULL;
     }
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
+    usearch_arena_describe(&describe);
+    if (!usearch_js_succeeded(env, &outcome)) {
+        usearch_arena_free(arena->handle);
+        free(arena);
+        return NULL;
+    }
     // A GPU arena frees on its executor's first stream, so it holds that executor until freed.
-    if (arena->residency == usearch_residency_vram_k) {
+    if (description.residency == usearch_residency_vram_k) {
         if (napi_create_reference(env, argument, 1, &arena->executor_reference) != napi_ok) {
             usearch_arena_free(arena->handle);
             free(arena);
@@ -933,10 +938,27 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
     return self;
 }
 
-/** @c residency → the canonical name of the residency its executor drives. */
-static napi_value usearch_js_arena_residency(napi_env env, napi_callback_info info) {
+/** @c describe() → @c {residency, device}: the canonical residency name and the device ordinal,
+ *  @c null for host pages. */
+static napi_value usearch_js_arena_describe(napi_env env, napi_callback_info info) {
     usearch_js_arena_t const* const arena = (usearch_js_arena_t const*)usearch_js_self(env, info, NULL, NULL, NULL);
-    return arena ? usearch_js_static_string(env, usearch_residency_name(arena->residency)) : NULL;
+    if (!arena) return NULL;
+    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
+    usearch_arena_describe(&describe);
+    if (!usearch_js_succeeded(env, &outcome)) return NULL;
+    napi_value object = NULL, device = NULL;
+    if (napi_create_object(env, &object) != napi_ok) {
+        usearch_js_throw(env, usearch_status_internal_k, "Could not publish the arena description");
+        return NULL;
+    }
+    if (description.residency != usearch_residency_vram_k) napi_get_null(env, &device);
+    else device = usearch_js_number(env, description.device);
+    napi_set_named_property(env, object, "residency",
+                            usearch_js_static_string(env, usearch_residency_name(description.residency)));
+    napi_set_named_property(env, object, "device", device);
+    return object;
 }
 
 /** @c free() - releases the memory now, once every deferred call writing it is final, detaching
@@ -985,7 +1007,12 @@ napi_value usearch_js_arena_view(napi_env env, napi_value arena_value, napi_type
         usearch_js_throw(env, usearch_status_internal_k, "The Arena is not attached");
         return NULL;
     }
-    if (arena->residency == usearch_residency_vram_k) {
+    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
+    usearch_arena_describe(&describe);
+    if (!usearch_js_succeeded(env, &outcome)) return NULL;
+    if (description.residency == usearch_residency_vram_k) {
         napi_get_null(env, &array);
         return array;
     }
@@ -1017,7 +1044,7 @@ napi_value usearch_js_arena_view(napi_env env, napi_value arena_value, napi_type
 
 napi_value usearch_js_arena_define(napi_env env) {
     static napi_property_descriptor const properties[] = {
-        {"residency", NULL, NULL, usearch_js_arena_residency, NULL, NULL, napi_default, NULL},
+        {"describe", NULL, usearch_js_arena_describe, NULL, NULL, NULL, napi_default_method, NULL},
         {"free", NULL, usearch_js_arena_release, NULL, NULL, NULL, napi_default_method, NULL},
     };
     napi_value arena_class = NULL;

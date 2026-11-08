@@ -5,7 +5,7 @@
 
     <Authors>Ash Vardanian</Authors>
     <Company>Unum</Company>
-    <Description>Billion-Scale Multi-Modal Search, Clustering, &amp; Sparse Algebra Engine for CPUs, GPUs, &amp; NVMe Devices</Description>
+    <Description>One Proximity Graph for Search, Sparse Products &amp; Attention, across RAM, VRAM &amp; NVMe</Description>
     <!-- Search keywords, semicolon-separated: each is matched on its own, so a phrase would never hit. -->
     <PackageTags>vector-search;similarity-search;nearest-neighbors;hnsw;embeddings;clustering;simd;gpu</PackageTags>
     <PackageId>Cloud.Unum.USearch</PackageId>

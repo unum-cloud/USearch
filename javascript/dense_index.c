@@ -674,7 +674,7 @@ static napi_value usearch_js_index_refine(napi_env env, napi_callback_info info)
     usearch_js_dense_call_t* const call =
         index ? usearch_js_dense_open(env, arguments, &local, &refine.executor, &refine.completion) : NULL;
     if (!call) return NULL;
-    if (!usearch_js_size_from_value(env, arguments[2], "expansionFactor", &refine.expansion_factor) ||
+    if (!usearch_js_size_from_value(env, arguments[2], "expansionFactor", &refine.refine.expansion_factor) ||
         !usearch_js_stats_from_value(env, arguments[3], call, &refine.stats)) {
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
@@ -1099,7 +1099,7 @@ static napi_value usearch_js_index_split(napi_env env, napi_callback_info info) 
         return NULL;
     }
     if (!usearch_js_size_from_value(env, arguments[3], "seed", &seed) ||
-        !usearch_js_size_from_value(env, arguments[4], "expansionFactor", &split.expansion_factor)) {
+        !usearch_js_size_from_value(env, arguments[4], "expansionFactor", &split.refine.expansion_factor)) {
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
@@ -1334,8 +1334,13 @@ static napi_value usearch_js_index_attend(napi_env env, napi_callback_info info)
         !usearch_js_carry_from_value(env, arguments[13], attend.count, &attend.carry) ||
         !usearch_js_arena_from_value(env, arguments[11], &call.call, &attend.arena))
         return NULL;
+    usearch_outcome_t described = {usearch_status_success_k, NULL};
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe_t describe = {.arena = attend.arena, .outcome = &described, .description = &description};
+    usearch_arena_describe(&describe);
+    if (!usearch_js_succeeded(env, &described)) return NULL;
     // A VRAM arena means a device walk, which would call this host lookup on the device.
-    if (call.call.arena->residency == usearch_residency_vram_k) {
+    if (description.residency == usearch_residency_vram_k) {
         usearch_js_throw(env, usearch_status_device_k, "A VRAM walk needs a device-callable value lookup");
         return NULL;
     }

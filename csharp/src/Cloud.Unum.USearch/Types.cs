@@ -1005,15 +1005,7 @@ public sealed unsafe class Executor : IDisposable
 
     /// <summary>Adopts a handle one of the factories below spawned.</summary>
     /// <param name="handle">The engine handle the factory claimed.</param>
-    /// <param name="residency">Where the factory's hardware computes.</param>
-    private Executor(NativeExecutorHandle handle, Residency residency)
-    {
-        this._handle = handle;
-        this.Residency = residency;
-    }
-
-    /// <summary>Where the executor computes, which is where the arenas it makes keep their memory.</summary>
-    internal Residency Residency { get; }
+    private Executor(NativeExecutorHandle handle) => this._handle = handle;
 
     /// <summary>
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local to
@@ -1051,7 +1043,7 @@ public sealed unsafe class Executor : IDisposable
             usearch_executor_for_ram(&arguments);
         }
 
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome), Residency.Ram);
+        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
     }
 
     /// <summary>
@@ -1087,7 +1079,7 @@ public sealed unsafe class Executor : IDisposable
             usearch_executor_on_pool(&arguments);
         }
 
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome), Residency.Ram);
+        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
     }
 
     /// <summary>
@@ -1128,7 +1120,7 @@ public sealed unsafe class Executor : IDisposable
             NativeMemory.Free(views);
         }
 
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome), Residency.Nvme);
+        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
     }
 
     /// <summary>
@@ -1179,7 +1171,7 @@ public sealed unsafe class Executor : IDisposable
             usearch_executor_for_vram(&arguments);
         }
 
-        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome), Residency.Vram);
+        return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
     }
 
     /// <summary>Waits for every call submitted to this executor, then sets the mood it adopts
@@ -1243,15 +1235,26 @@ public sealed unsafe class Arena : IDisposable
         NativeArenaInit arguments = new() { Arena = &created, Executor = pool.Pointer, Outcome = &outcome };
         usearch_arena_init(&arguments);
         this._handle = EngineHandle.Created<NativeArenaHandle>(created, outcome);
-        this.Residency = executor?.Residency ?? Residency.Ram;
-        if (this.Residency == Residency.Vram)
+        if (this.Describe().Residency == Residency.Vram)
         {
             this._handle.Executor = Lease.Of(executor!.Handle, "executor");
         }
     }
 
-    /// <summary>Where the arena keeps its memory, decided by the executor it was made for.</summary>
-    public Residency Residency { get; }
+    /// <summary>Reports where the outputs live, as the executor the arena was made for decided, so a
+    /// caller reads them as host memory or hands them to device code without remembering that
+    /// executor. Calls <c>usearch_arena_describe</c>.</summary>
+    /// <returns>The residency of the outputs and the device holding them, if any.</returns>
+    public ArenaDescription Describe()
+    {
+        using Lease arena = Lease.Of(this._handle, "arena");
+        NativeOutcome outcome = default;
+        NativeArenaDescription description = default;
+        NativeArenaDescribe arguments = new() { Arena = arena.Pointer, Outcome = &outcome, Description = &description };
+        usearch_arena_describe(&arguments);
+        outcome.ThrowIfFailed();
+        return new(description.Residency, description.Residency == Residency.Vram ? (int)description.Device : null);
+    }
 
     /// <summary>Frees the arena and every output in it. Calls <c>usearch_arena_free</c>.</summary>
     public void Dispose() => this._handle.Dispose();
@@ -1283,12 +1286,19 @@ public sealed unsafe class Arena : IDisposable
             throw new USearchException(Status.Uninitialized, "the arena was rewound or freed since this view");
         }
 
-        if (arena.Residency == Residency.Vram)
+        if (arena.Describe().Residency == Residency.Vram)
         {
             throw new USearchException(Status.Device, "the view is device memory");
         }
     }
 }
+
+/// <summary>Where an arena's outputs live, as <see cref="Arena.Describe"/> reports it. Mirrors
+/// <c>usearch_arena_description_t</c>.</summary>
+/// <param name="Residency"><see cref="Residency.Ram"/> for host pages, <see cref="Residency.Vram"/> for
+/// one device's memory.</param>
+/// <param name="Device">The ordinal of the device holding the outputs; null for host pages.</param>
+public readonly record struct ArenaDescription(Residency Residency, int? Device);
 
 #endregion Arenas
 
@@ -1839,6 +1849,23 @@ internal unsafe struct NativeArenaInit
     public NativeOutcome* Outcome;
 }
 
+/// <summary>Where an arena's outputs live, laid out as <c>usearch_arena_description_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeArenaDescription
+{
+    public Residency Residency;
+    public nuint Device;
+}
+
+/// <summary>The arguments of <c>usearch_arena_describe</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeArenaDescribe
+{
+    public IntPtr Arena;
+    public NativeOutcome* Outcome;
+    public NativeArenaDescription* Description;
+}
+
 /// <summary>The arguments of <c>usearch_executor_drain</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeExecutorDrain
@@ -1980,6 +2007,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial void usearch_arena_free(IntPtr arena);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void usearch_arena_describe(NativeArenaDescribe* arguments);
 }
 
 #endregion Entry Points

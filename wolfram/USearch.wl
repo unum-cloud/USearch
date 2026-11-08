@@ -10,48 +10,49 @@
 
 BeginPackage["USearch`"]
 
-DenseIndex::usage = "DenseIndex[id] is a dense index, freed through usearch_dense_free once its last reference dies."
-DenseIndexOn::usage = "DenseIndexOn[index, executor] runs every verb on the executor, blocking. Binding-only."
-Executor::usage = "Executor[id] owns the threads or streams verbs run on, freed through usearch_executor_free."
-Arena::usage = "Arena[id] holds the outputs a verb writes, freed through usearch_arena_free."
+DenseIndex::usage = "DenseIndex[id] is a dense vector index, freed once nothing references it."
+DenseIndexOn::usage = "DenseIndexOn[index, executor] is a receiver that runs every verb on executor, blocking until the verb is final; a bare DenseIndex runs verbs on the calling thread."
+Executor::usage = "Executor[id] owns the threads, streams or submission rings verbs run on, freed once nothing references it."
+Arena::usage = "Arena[id] holds the outputs a verb writes, rewound by every call writing into it and freed once nothing references it."
 
-ExecutorForRam::usage = "ExecutorForRam[] calls usearch_executor_for_ram."
-ExecutorOnPool::usage = "ExecutorOnPool[pool] calls usearch_executor_on_pool, borrowing the ForkUnion pool there."
-ExecutorForVram::usage = "ExecutorForVram[] calls usearch_executor_for_vram."
-ExecutorForNvme::usage = "ExecutorForNvme[] calls usearch_executor_for_nvme."
-ExecutorDrain::usage = "ExecutorDrain[executor, mood] calls usearch_executor_drain, \"parked\" or \"spinning\"."
-ArenaInit::usage = "ArenaInit[] calls usearch_arena_init, placing the arena where its \"Executor\" computes."
+ExecutorForRam::usage = "ExecutorForRam[] spawns host worker threads for RAM-resident indexes. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on, and \"Threads\" is how many threads to spawn, 0 taking 7/8 of the cores those nodes carry."
+ExecutorOnPool::usage = "ExecutorOnPool[pool] drives RAM-resident indexes on the ForkUnion thread pool at address pool, which the caller owns. \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
+ExecutorForVram::usage = "ExecutorForVram[] opens one stream per device for VRAM-resident indexes. \"Devices\" lists the device ordinals to place shards on, {} picking device zero; \"Streams\" lends existing streams, one per device, {} creating its own; and \"ScratchLimit\" caps the memory each stream carves scratch and outputs from, past which a call fails with \"out-of-memory\", 0 letting it grow as needed."
+ExecutorForNvme::usage = "ExecutorForNvme[] opens one submission ring per worker for NVMe-resident indexes. \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points, and \"Threads\" is how many workers to spawn, 0 deriving it from the devices' queues."
+ExecutorDrain::usage = "ExecutorDrain[executor, mood] waits for every call submitted before it, then sets what idle workers do: \"parked\", the default, or \"spinning\"."
+ArenaInit::usage = "ArenaInit[] makes an arena for verb outputs, placed where its \"Executor\" computes; None, the default, holds host memory for calls on the calling thread."
+ArenaDescribe::usage = "ArenaDescribe[arena] reports where the arena's outputs live: its \"Residency\", \"ram\" for host pages or \"vram\" for one device's memory, and the ordinal of that \"Device\", None for host pages."
 
-DenseInitRam::usage = "DenseInitRam[metric : \"angular\", quantization : \"bf16\", dimensions] calls usearch_dense_init_ram."
-DenseInitVram::usage = "DenseInitVram[metric : \"angular\", quantization : \"bf16\", dimensions] calls usearch_dense_init_vram."
-DenseLoadRam::usage = "DenseLoadRam[path] calls usearch_dense_load_ram."
-DenseLoadVram::usage = "DenseLoadVram[path] calls usearch_dense_load_vram."
-DenseLoadRamBuffer::usage = "DenseLoadRamBuffer[monolith] calls usearch_dense_load_ram_buffer."
-DenseLoadVramBuffer::usage = "DenseLoadVramBuffer[monolith] calls usearch_dense_load_vram_buffer."
-DenseViewRam::usage = "DenseViewRam[path] calls usearch_dense_view_ram."
-DenseViewNvme::usage = "DenseViewNvme[path] calls usearch_dense_view_nvme."
-DenseMetadataRead::usage = "DenseMetadataRead[path] calls usearch_dense_metadata_read."
-DenseMetadataReadBuffer::usage = "DenseMetadataReadBuffer[monolith] calls usearch_dense_metadata_read_buffer."
+DenseInitRam::usage = "DenseInitRam[metric, quantization, dimensions] creates an empty, mutable index in host memory, scoring by metric, \"angular\" by default, and storing quantization scalars, \"bf16\" by default. \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on."
+DenseInitVram::usage = "DenseInitVram[metric, quantization, dimensions] creates an empty, mutable index in device memory, scoring by metric, \"angular\" by default, and storing quantization scalars, \"bf16\" by default. \"Connectivity\" bounds the connections per node, 0 deriving it; \"ValuesPerKey\" bounds the entries sharing one key, 0 leaving it unbounded; and \"Devices\" lists the device ordinals to place shards on, {} picking device zero."
+DenseLoadRam::usage = "DenseLoadRam[path] copies a checkpoint, a manifest or a single monolith, into a new, mutable index in host memory. \"Executor\" runs the call, None meaning the calling thread; \"MemoryDomains\" lists the NUMA nodes to place shards on, {} deriving every node the process may allocate on; and \"ValuesPerKey\" bounds the entries sharing one key, which no checkpoint records, 0 leaving it unbounded."
+DenseLoadVram::usage = "DenseLoadVram[path] copies a checkpoint, a manifest or a single monolith, into a new, mutable index in device memory. \"Executor\" runs the call, None meaning the calling thread; \"Devices\" lists the device ordinals to place shards on, {} picking device zero; and \"ValuesPerKey\" bounds the entries sharing one key, which no checkpoint records, 0 leaving it unbounded."
+DenseLoadRamBuffer::usage = "DenseLoadRamBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable index in host memory, taking the options of DenseLoadRam."
+DenseLoadVramBuffer::usage = "DenseLoadVramBuffer[monolith] copies a checkpoint held in a ByteArray or a byte NumericArray into a new, mutable index in device memory, taking the options of DenseLoadVram."
+DenseViewRam::usage = "DenseViewRam[path] serves a checkpoint in place through a memory mapping, as a read-only index."
+DenseViewNvme::usage = "DenseViewNvme[path] serves a checkpoint in place from NVMe drives as a read-only index, which every later call reads through its executor. \"Executor\" runs the call, None meaning the calling thread, and \"Paths\" lists the devices or directories to serve shards from, {} leaving every shard where its manifest points."
+DenseMetadataRead::usage = "DenseMetadataRead[path] reads a checkpoint's geometry and metric without loading it. \"Executor\" runs the call, None meaning the calling thread."
+DenseMetadataReadBuffer::usage = "DenseMetadataReadBuffer[monolith] reads the geometry and metric of a checkpoint held in a ByteArray or a byte NumericArray, taking the option of DenseMetadataRead."
 
-DenseReserve::usage = "DenseReserve[receiver, capacity] calls usearch_dense_reserve."
-DenseClear::usage = "DenseClear[receiver] calls usearch_dense_clear."
-DenseInsert::usage = "DenseInsert[receiver, keys, vectors] calls usearch_dense_insert."
-DenseRefine::usage = "DenseRefine[receiver] calls usearch_dense_refine."
-DenseHealth::usage = "DenseHealth[receiver] calls usearch_dense_health."
-DenseSearch::usage = "DenseSearch[receiver, queries, wanted, arena] calls usearch_dense_search; \"Traversal\" is \"walk\" or \"scan\"."
-DenseMaxsim::usage = "DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena] calls usearch_dense_maxsim."
-DenseCount::usage = "DenseCount[receiver, key] calls usearch_dense_count."
-DenseGet::usage = "DenseGet[receiver, key, arena] calls usearch_dense_get."
-DenseSave::usage = "DenseSave[receiver, path] calls usearch_dense_save."
-DenseSaveBuffer::usage = "DenseSaveBuffer[receiver, arena] calls usearch_dense_save_buffer."
-DenseDescribe::usage = "DenseDescribe[receiver] calls usearch_dense_describe."
-DenseMultiply::usage = "DenseMultiply[receiver, left, arena] calls usearch_dense_multiply; DenseMultiply[receiver, left, columnKeys, arena] returns a SparseArray."
-DenseValues::usage = "DenseValues[receiver, keys, values] prepares immutable value rows in the index's quantization for DenseAttend. Binding-only."
-DenseAttend::usage = "DenseAttend[receiver, queries, values, arena] calls usearch_dense_attend and folds softmax attention over every key scored by the graph walk."
+DenseReserve::usage = "DenseReserve[receiver, capacity] grows the index ahead of incoming vectors to capacity entries in total, the current ones included."
+DenseClear::usage = "DenseClear[receiver] erases every entry, keeping the reserved capacity and the frozen geometry."
+DenseInsert::usage = "DenseInsert[receiver, keys, vectors] adds vectors, one row per key, under keys, each an integer below 2^128. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
+DenseRefine::usage = "DenseRefine[receiver] re-selects the neighbors of every stored entry against the finished graph, improving those chosen while the graph around them was incomplete. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
+DenseHealth::usage = "DenseHealth[receiver] audits how much of the graph a search can reach, leaving the index unchanged."
+DenseSearch::usage = "DenseSearch[receiver, queries, wanted, arena] finds up to wanted nearest entries for each query row, answering their \"Keys\" and \"Scores\" per query. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it, and \"Traversal\" is \"walk\", the default, or \"scan\", an exact pass over every entry."
+DenseMaxsim::usage = "DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena] scores queries of rowsPerQuery rows against multi-row entries: every query row takes its best match within a key, and those maxima sum to the key's score, keeping up to wanted keys per query. \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it."
+DenseCount::usage = "DenseCount[receiver, key] counts the entries stored under key."
+DenseGet::usage = "DenseGet[receiver, key, arena] retrieves every vector stored under key, one row per entry."
+DenseSave::usage = "DenseSave[receiver, path] saves the index under path, as one monolith or as a manifest beside its shards, while readers keep searching."
+DenseSaveBuffer::usage = "DenseSaveBuffer[receiver, arena] saves the index into arena, as one monolith for an index of one shard or as a manifest leading one part per shard."
+DenseDescribe::usage = "DenseDescribe[receiver] reports the index's frozen metadata and current counters."
+DenseMultiply::usage = "DenseMultiply[receiver, left, arena] approximates the sparse product of the rows of left with the indexed vectors, answering every pair the walk scored as \"Offsets\", \"Keys\" and \"Scores\"; DenseMultiply[receiver, left, columnKeys, arena] lays the same products out as a SparseArray with one column per key of columnKeys. \"Wanted\" bounds the pairs kept per row, the first ones its walk scored, 0 keeping every pair, and \"ExpansionFactor\" sets the breadth of the candidates, which widens the pattern, 0 deriving it."
+DenseValues::usage = "DenseValues[receiver, keys, values] prepares immutable value rows, one per key, in the index's quantization, for DenseAttend."
+DenseAttend::usage = "DenseAttend[receiver, queries, values, arena] folds softmax attention of the query heads over every key their graph walks score, reading each key's row from values, a DenseValues. \"HeadCount\" is how many query heads share one walk per token, dividing the query count; \"ExpansionFactor\" sets the breadth of the candidates the walk explores, 0 deriving it; and \"ScoreScale\" is the logit scale, conventionally the inverse square root of the head dimensionality, 0. deriving it from the index's geometry."
 
-VersionName::usage = "VersionName[] calls usearch_version_name."
-CapabilitiesCompiled::usage = "CapabilitiesCompiled[] calls usearch_capabilities_compiled."
-CapabilitiesAvailable::usage = "CapabilitiesAvailable[] calls usearch_capabilities_available."
+VersionName::usage = "VersionName[] gives the library's semantic version."
+CapabilitiesCompiled::usage = "CapabilitiesCompiled[] lists the kernel families this build carries."
+CapabilitiesAvailable::usage = "CapabilitiesAvailable[] lists the kernel families this machine can run."
 
 Begin["`Private`"]
 
@@ -73,6 +74,7 @@ executorForVram = verb["ExecutorForVram", {Integer, "DataStore", "DataStore", In
 executorForNvme = verb["ExecutorForNvme", {Integer, "DataStore", Integer}];
 executorDrain = verb["ExecutorDrain", {Integer, "UTF8String"}];
 arenaInit = verb["ArenaInit", {Integer, Integer}];
+arenaDescribe = verb["ArenaDescribe", {Integer}];
 denseInitRam = verb["DenseInitRam", {Integer, "UTF8String", "UTF8String", Integer, Integer, Integer, "DataStore"}];
 denseInitVram = verb["DenseInitVram", {Integer, "UTF8String", "UTF8String", Integer, Integer, Integer, "DataStore"}];
 denseLoadRam = verb["DenseLoadRam", {Integer, Integer, "UTF8String", "DataStore", Integer}];
@@ -165,6 +167,8 @@ ExecutorForNvme[OptionsPattern[]] := construct[Executor, executorForNvme,
 ExecutorDrain[executor_Executor, mood_String : "parked"] := call[executorDrain, {executor, mood}]
 Options[ArenaInit] = {"Executor" -> None};
 ArenaInit[OptionsPattern[]] := construct[Arena, arenaInit, {OptionValue["Executor"]}]
+ArenaDescribe[arena_Arena] := Replace[call[arenaDescribe, {arena}],
+    description_Association :> Append[description, "Device" -> Replace[description["Device"], -1 -> None]]]
 
 Options[DenseInitRam] = {"Connectivity" -> 0, "ValuesPerKey" -> 0, "MemoryDomains" -> {}};
 DenseInitRam[metric_String : "angular", quantization_String : "bf16", dimensions_Integer, OptionsPattern[]] :=

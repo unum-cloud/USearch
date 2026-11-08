@@ -2,9 +2,10 @@
  *  @file javascript/usearch.ts
  *  @author Ash Vardanian
  *  @date March 30, 2024
- *  @brief Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices, for Node.
+ *  @brief One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe,
+ *      for Node.
  *
- *  The package entry point: one module per C header underneath, re-exported here so a caller
+ *  The package entry point: one module per modality underneath, re-exported here so a caller
  *  imports `usearch` and nothing deeper.
  */
 export {
@@ -30,6 +31,7 @@ export {
 } from "./types";
 export type {
   ArenaConstructor,
+  ArenaDescription,
   ExecutorConstructor,
   ExecutorForNvmeConfig,
   ExecutorForRamConfig,
@@ -122,17 +124,17 @@ import {
   DenseVerbs,
 } from "./dense_index";
 
-/** The library's version, as the release tooling stamped it. Calls `usearch_version_name`. */
+/** The library's version, as the release tooling stamped it. */
 export function version(): string {
   return compiled.version();
 }
 
-/** The hardware capabilities this binary was compiled with, comma-separated. Calls `usearch_capabilities_compiled`. */
+/** The hardware capabilities this binary was compiled with, comma-separated. */
 export function capabilitiesCompiled(): string {
   return compiled.capabilitiesCompiled();
 }
 
-/** The hardware capabilities the current machine offers at runtime, comma-separated. Calls `usearch_capabilities_available`. */
+/** The hardware capabilities the current machine offers at runtime, comma-separated. */
 export function capabilitiesAvailable(): string {
   return compiled.capabilitiesAvailable();
 }

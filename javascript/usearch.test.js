@@ -1126,9 +1126,9 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert.throws(() => index.get(1n, arena), { code: Status.Uninitialized, message: "The Arena was already freed" });
   });
 
-  await t.test("an arena takes the residency of the executor that made it", () => {
-    assert.equal(new Arena().residency, usearch.Residency.Ram);
-    assert.equal(new Arena(EXECUTOR).residency, usearch.Residency.Ram);
+  await t.test("a host arena describes itself as RAM with no device", () => {
+    assert.deepEqual(new Arena().describe(), { residency: usearch.Residency.Ram, device: null });
+    assert.deepEqual(new Arena(EXECUTOR).describe(), { residency: usearch.Residency.Ram, device: null });
     assert.throws(() => new Arena({}), {
       code: Status.InvalidArgument,
       message: "The 'executor' argument must be an Executor",

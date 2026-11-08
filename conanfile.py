@@ -1,5 +1,10 @@
 """Conan 2 recipe. The engine is CMake's to build, so this drives it rather than restating the
-instantiation grid and the per-target flags a second time."""
+instantiation grid and the per-target flags a second time.
+
+File: conanfile.py
+Author: Ash Vardanian
+Date: May 13, 2023
+"""
 
 import os
 
@@ -14,7 +19,7 @@ required_conan_version = ">=2.0"
 class USearchConan(ConanFile):
     name = "usearch"
     license = "Apache-2.0"
-    description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+    description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
     homepage = "https://github.com/unum-cloud/USearch"
     url = "https://github.com/unum-cloud/USearch"
     topics = (

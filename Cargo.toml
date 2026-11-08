@@ -1,6 +1,6 @@
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+description = "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
 keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
 documentation = "https://docs.rs/usearch"
 edition = "2021"
@@ -17,6 +17,7 @@ include = [
 ]
 license = "Apache-2.0"
 name = "usearch"
+links = "usearch"
 publish = true
 repository = "https://github.com/unum-cloud/USearch"
 version = "3.0.0-rc.1"
@@ -27,10 +28,10 @@ path = "rust/lib.rs"
 
 [dependencies]
 # CMake builds each crate's tree in place of downloading the revision the submodule pins.
-forkunion = { version = "4.0.0-rc.1", default-features = false }
-numkong = "8.0.0-rc.1"
-smashtable = "1.0.0-rc.1"
-stringzilla = { version = "6.0.0-rc.1", default-features = false }
+forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", default-features = false }
+numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong" }
+smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable" }
+stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", default-features = false }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

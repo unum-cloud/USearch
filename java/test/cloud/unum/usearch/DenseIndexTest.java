@@ -15,6 +15,7 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -43,6 +44,7 @@ import cloud.unum.usearch.DenseIndex.RefineReport;
 import cloud.unum.usearch.DenseIndex.Sample;
 import cloud.unum.usearch.DenseIndex.ValueLookup;
 import cloud.unum.usearch.Types.Arena;
+import cloud.unum.usearch.Types.ArenaDescription;
 import cloud.unum.usearch.Types.Deferred;
 import cloud.unum.usearch.Types.Executor;
 import cloud.unum.usearch.Types.Extents;
@@ -468,7 +470,7 @@ public class DenseIndexTest {
             assertFalse(index.contains(Key.of(6)));
 
             Arena arena = new Arena(POOL);
-            assertEquals(Residency.RAM, arena.residency());
+            assertEquals(new ArenaDescription(Residency.RAM, OptionalInt.empty()), arena.describe());
             DenseVectors every = index.get(Key.of(5), Scalar.F64, arena);
             assertEquals(3, every.rows());
             assertEquals(2 * Double.BYTES, every.strideBytes());

@@ -25,6 +25,8 @@ $executor = ExecutorForRam[]
 Print["New Executor: ", $executor]
 $arena = ArenaInit["Executor" -> $executor]
 $local = ArenaInit[]
+Expect["a host arena", ArenaDescribe[$arena], <|"Residency" -> "ram", "Device" -> None|>]
+Expect["an arena for the calling thread", ArenaDescribe[$local], <|"Residency" -> "ram", "Device" -> None|>]
 Expect["an unknown mood", ExecutorDrain[$executor, "chill"],
     Failure["invalid-argument", <|"MessageTemplate" -> "the mood is neither parked nor spinning"|>]]
 

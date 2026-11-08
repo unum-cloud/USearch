@@ -208,8 +208,10 @@ struct VocabularyTests {
         // The streams cross behind a pointer that carries no count, so the binding counts them.
         #expect(failureStatus(of: try Executor.forVram(devices: [0, 1], streams: [nil])) == .shapeMismatch)
         // An arena lives where its executor computes, and without one in host pages.
-        #expect(try Arena(on: executor).residency == .ram)
-        #expect(try Arena().residency == .ram)
+        for arena in [try Arena(on: executor), try Arena()] {
+            let description = try arena.describe()
+            #expect(description.residency == .ram && description.device == nil)
+        }
     }
 
     @Test func theLibraryNamesItsCapabilities() {

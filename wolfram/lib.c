@@ -306,16 +306,14 @@ typedef struct index_t {
     usearch_residency_t residency;
 } index_t;
 
-/** What an @c Executor slot holds: the handle and the residency its constructor picked. */
+/** What an @c Executor slot holds. */
 typedef struct executor_t {
     usearch_executor_t handle;
-    usearch_residency_t residency;
 } executor_t;
 
-/** What an @c Arena slot holds: the handle and the residency of the executor that placed it. */
+/** What an @c Arena slot holds. */
 typedef struct arena_t {
     usearch_arena_t handle;
-    usearch_residency_t residency;
 } arena_t;
 
 /**
@@ -484,7 +482,11 @@ static usearch_status_t call_key(WolframLibraryData library_data, call_t* call, 
 static usearch_arena_t call_arena(call_t* call, mint id) {
     arena_t const* const arena = (arena_t const*)handles_find(&arenas, id);
     if (!arena) return call_refuse(call, usearch_status_uninitialized_k, "the Arena was released"), NULL;
-    if (arena->residency == usearch_residency_vram_k)
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe(
+        &(usearch_arena_describe_t) {.arena = arena->handle, .outcome = &call->outcome, .description = &description});
+    if (call->outcome.status != usearch_status_success_k) return NULL;
+    if (description.residency == usearch_residency_vram_k)
         return call_refuse(call, usearch_status_device_k, "the Arena holds VRAM, which the kernel cannot read"), NULL;
     return arena->handle;
 }
@@ -632,10 +634,9 @@ EXTERN_C DLLEXPORT int CapabilitiesAvailable(WolframLibraryData library_data, mi
 
 #pragma region Executor
 
-/** Fills a fresh executor's slot with the handle and its residency, or reports why no executor was
- *  made. */
+/** Fills a fresh executor's slot with the handle, or reports why no executor was made. */
 static int executor_adopt(WolframLibraryData library_data, void** slot, usearch_executor_t handle,
-                          usearch_residency_t residency, usearch_outcome_t const* outcome, MArgument result) {
+                          usearch_outcome_t const* outcome, MArgument result) {
     executor_t* const executor = outcome->status == usearch_status_success_k ? (executor_t*)malloc(sizeof(executor_t))
                                                                              : NULL;
     if (!executor) {
@@ -646,7 +647,6 @@ static int executor_adopt(WolframLibraryData library_data, void** slot, usearch_
         return answer_outcome(library_data, outcome, result);
     }
     executor->handle = handle;
-    executor->residency = residency;
     *slot = executor;
     return answer_outcome(library_data, outcome, result);
 }
@@ -671,7 +671,7 @@ EXTERN_C DLLEXPORT int ExecutorForRam(WolframLibraryData library_data, mint argu
         .threads = (size_t)MArgument_getInteger(arguments[2]),
     });
     free(domains);
-    return executor_adopt(library_data, slot, executor, usearch_residency_ram_k, &outcome, result);
+    return executor_adopt(library_data, slot, executor, &outcome, result);
 }
 
 /** Calls @c usearch_executor_on_pool: @c executor → @c memoryDomains → @c pool. */
@@ -694,7 +694,7 @@ EXTERN_C DLLEXPORT int ExecutorOnPool(WolframLibraryData library_data, mint argu
         .pool = (void*)(intptr_t)MArgument_getInteger(arguments[2]),
     });
     free(domains);
-    return executor_adopt(library_data, slot, executor, usearch_residency_ram_k, &outcome, result);
+    return executor_adopt(library_data, slot, executor, &outcome, result);
 }
 
 /**
@@ -746,7 +746,7 @@ EXTERN_C DLLEXPORT int ExecutorForVram(WolframLibraryData library_data, mint arg
     });
     free(devices);
     free(streams);
-    return executor_adopt(library_data, slot, executor, usearch_residency_vram_k, &outcome, result);
+    return executor_adopt(library_data, slot, executor, &outcome, result);
 }
 
 /** Calls @c usearch_executor_for_nvme: @c executor → @c paths → @c threads. */
@@ -769,7 +769,7 @@ EXTERN_C DLLEXPORT int ExecutorForNvme(WolframLibraryData library_data, mint arg
         .threads = (size_t)MArgument_getInteger(arguments[2]),
     });
     free(paths);
-    return executor_adopt(library_data, slot, executor, usearch_residency_nvme_k, &outcome, result);
+    return executor_adopt(library_data, slot, executor, &outcome, result);
 }
 
 /** Calls @c usearch_executor_drain: @c executor → @c mood, @c parked or @c spinning. */
@@ -807,7 +807,6 @@ EXTERN_C DLLEXPORT int ArenaInit(WolframLibraryData library_data, mint arguments
     if (!arena)
         return answer_failure(library_data, usearch_status_out_of_memory_k, "the Arena could not be kept", result);
     arena->handle = NULL;
-    arena->residency = executor ? executor->residency : usearch_residency_ram_k;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
     usearch_arena_init(&(usearch_arena_init_t) {
         .arena = &arena->handle,
@@ -817,6 +816,26 @@ EXTERN_C DLLEXPORT int ArenaInit(WolframLibraryData library_data, mint arguments
     if (outcome.status == usearch_status_success_k) *slot = arena;
     else usearch_arena_free(arena->handle), free(arena);
     return answer_outcome(library_data, &outcome, result);
+}
+
+/** Calls @c usearch_arena_describe: @c arena → @c Residency, its canonical name, and @c Device, -1
+ *  for host pages. */
+EXTERN_C DLLEXPORT int ArenaDescribe(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
+                                     MArgument result) {
+    arena_t const* const arena = (arena_t const*)handles_find(&arenas, MArgument_getInteger(arguments[0]));
+    if (!arena) return answer_failure(library_data, usearch_status_uninitialized_k, "the Arena was released", result);
+    usearch_outcome_t outcome = {usearch_status_success_k, NULL};
+    usearch_arena_description_t description = {usearch_residency_ram_k, 0};
+    usearch_arena_describe(
+        &(usearch_arena_describe_t) {.arena = arena->handle, .outcome = &outcome, .description = &description});
+    if (outcome.status != usearch_status_success_k) return answer_outcome(library_data, &outcome, result);
+    int const answered = answer_nothing(library_data, result);
+    if (answered != LIBRARY_NO_ERROR) return answered;
+    DataStore const store = MArgument_getDataStore(result);
+    store_text(library_data, store, "Residency", usearch_residency_name(description.residency));
+    mint const device = description.residency == usearch_residency_vram_k ? (mint)description.device : -1;
+    library_data->ioLibraryFunctions->DataStore_addNamedInteger(store, "Device", device);
+    return LIBRARY_NO_ERROR;
 }
 
 #pragma endregion Executor
@@ -1259,7 +1278,9 @@ static int answer_describe(WolframLibraryData library_data, call_t* call, DataSt
     store_size(library_data, store, "Size", call->description.size);
     store_size(library_data, store, "Capacity", call->description.capacity);
     store_size(library_data, store, "MemoryUsage", call->description.memory_usage);
-    store_text(library_data, store, "Capabilities", call->description.capabilities);
+    store_text(library_data, store, "CPUClass", usearch_cpu_class_name(call->description.cpu_class));
+    store_text(library_data, store, "GPUClass", usearch_gpu_class_name(call->description.gpu_class));
+    store_size(library_data, store, "ShardsCount", call->description.shards_count);
     return LIBRARY_NO_ERROR;
 }
 
@@ -1342,7 +1363,7 @@ EXTERN_C DLLEXPORT int DenseRefine(WolframLibraryData library_data, mint argumen
             .executor = call.executor,
             .outcome = &call.outcome,
             .report = &call.report,
-            .expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments]),
+            .refine = {.expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments])},
         });
     }
     return call_answer(library_data, &call, result);
@@ -1545,7 +1566,7 @@ EXTERN_C DLLEXPORT int DenseSaveBuffer(WolframLibraryData library_data, mint arg
     return call_answer(library_data, &call, result);
 }
 
-/** Calls @c usearch_dense_describe: the frozen metadata, counters and dispatched capabilities. */
+/** Calls @c usearch_dense_describe: the frozen metadata, counters, classes and shard count. */
 EXTERN_C DLLEXPORT int DenseDescribe(WolframLibraryData library_data, mint arguments_count, MArgument* arguments,
                                      MArgument result) {
     call_t call;

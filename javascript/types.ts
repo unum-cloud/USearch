@@ -8,32 +8,48 @@
  */
 import { CompiledDeferred, CompiledMatches, CompiledRows, compiled } from "./library";
 
-/**
- *  What went wrong, one member per `usearch_status_*_k` of the C interface and spelled as its
- *  canonical name. Every error the library or this binding throws carries one as its `code`, so a
- *  caller branches on the identity of the fault rather than on which side of the boundary saw it.
- *  A {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
+/** What went wrong, one member per failure the library reports, spelled as its canonical name.
+ *  Every error the library or this binding throws carries one as its `code`, so a caller branches
+ *  on the identity of the fault rather than on which side of the boundary saw it. A
+ *  {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
  *  @enum {string}
- *  @readonly
- */
+ *  @readonly */
 export enum Status {
+  /** The call succeeded. */
   Success = "success",
+  /** The call was submitted deferred and is not final yet; the one non-final status. */
   Deferred = "deferred",
+  /** An allocation or reservation could not be satisfied. */
   OutOfMemory = "out-of-memory",
+  /** Dimensionality or row counts disagree. */
   ShapeMismatch = "shape-mismatch",
+  /** A stride or packing the engine cannot traverse. */
   UnsupportedLayout = "unsupported-layout",
+  /** A scalar, metric, residency, traversal or relation this build does not know. */
   UnknownKind = "unknown-kind",
+  /** A mutating verb on an index that serves its checkpoint in place. */
   ReadOnly = "read-only",
+  /** A file could not be opened, read, written or parsed. */
   Io = "io",
+  /** A device could not be selected, or its memory could not be claimed. */
   Device = "device",
+  /** A caller-supplied representation could not be decoded, like a truncated checkpoint. */
   Malformed = "malformed",
+  /** The library reported neither success nor a failure, which names a defect, not a state. */
   Internal = "internal",
+  /** A hard design ceiling was reached, like the 32-bit ID space; a smaller request cannot help. */
   Overflow = "overflow",
+  /** The verb needs a prior successful reservation that never happened. */
   Uninitialized = "uninitialized",
+  /** The request contradicts a frozen configuration, like re-reserving with another geometry. */
   ConfigMismatch = "config-mismatch",
+  /** The call was refused rather than waited for, like a submission to a full deferred table. */
   Contended = "contended",
+  /** A progress handler asked the operation to stop; it published nothing. */
   Cancelled = "cancelled",
+  /** This residency, traversal, predicate or build does not implement the request; pick another. */
   Unsupported = "unsupported",
+  /** An argument breaks the verb's contract, like a missing input or a name no table spells. */
   InvalidArgument = "invalid-argument",
 }
 
@@ -91,20 +107,33 @@ export enum Traversal {
  *  @readonly
  */
 export enum Scalar {
+  /** IEEE-754 binary64: ±1.80e308, epsilon 2.22e-16, with infinities and NaNs. */
   F64 = "f64",
+  /** IEEE-754 binary32: ±3.40e38, epsilon 1.19e-7, with infinities and NaNs. */
   F32 = "f32",
+  /** Truncated `f32` with a 7-bit mantissa: `f32`'s range at epsilon 7.81e-3. */
   BF16 = "bf16",
+  /** IEEE-754 binary16: ±65504, epsilon 9.77e-4, with infinities and NaNs. */
   F16 = "f16",
+  /** FP8 with a 5-bit exponent: ±57344, epsilon 0.25, with infinities and NaNs. */
   E5M2 = "e5m2",
+  /** FP8 with a 4-bit exponent: ±448, epsilon 0.125, no infinities. */
   E4M3 = "e4m3",
+  /** FP6 with a 3-bit exponent in one byte: ±28, every code a number. */
   E3M2 = "e3m2",
+  /** FP6 with a 2-bit exponent in one byte: ±7.5, every code a number. */
   E2M3 = "e2m3",
+  /** 8-bit signed integer spanning -128 to 127. */
   I8 = "i8",
+  /** Two signed nibbles per byte spanning -8 to 7, even dimensions in the low nibble. */
   I4x2 = "i4x2",
   /** The coordinates of geospatial points, which vectors refuse. */
   I32 = "i32",
+  /** 8-bit unsigned integer spanning 0 to 255. */
   U8 = "u8",
+  /** Two unsigned nibbles per byte spanning 0 to 15, even dimensions in the low nibble. */
   U4x2 = "u4x2",
+  /** Eight single-bit dimensions per byte, the form the Hamming and Jaccard metrics score. */
   U1x8 = "u1x8",
 }
 
@@ -230,12 +259,10 @@ export function normalizeKey(key: KeyLike): Key {
   );
 }
 
-/**
- *  Gathers any spelling of a run of identities into the two forms the addon reads.
+/** Gathers any spelling of a run of identities into the two forms the addon reads.
  *
  *  A `BigUint64Array` and a whole run of sixteen-byte identities pass straight through, so a
- *  caller that already holds either pays for no copy.
- */
+ *  caller that already holds either pays for no copy. */
 export function normalizeKeys(keys: KeysLike): Uint8Array | BigUint64Array {
   if (keys instanceof BigUint64Array) return keys;
   if (keys instanceof Uint8Array) {
@@ -283,11 +310,8 @@ export function scalarOf(data: Vector): Scalar {
   throw fail(Status.UnknownKind, "The rows spell no scalar kind on their own; name one in a RowsView.");
 }
 
-/**
- *  A borrowed run of rows of one width - what every batch argument is, and what a single row is
- *  when it travels as a bare TypedArray. Mirrors `usearch_rows_view_t`, with the row count the
- *  call's `count` takes beside it.
- */
+/** A borrowed run of rows of one width - what every batch argument is, and what a single row is
+ *  when it travels as a bare TypedArray. Its row count travels beside it as the call's `count`. */
 export class RowsView {
   /**
    *  Borrows `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats the first row.
@@ -344,7 +368,7 @@ export interface ExecutorForRamConfig {
   threads?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
 
@@ -354,7 +378,7 @@ export interface ExecutorOnPoolConfig {
   memoryDomains?: number[];
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
 
@@ -368,7 +392,7 @@ export interface ExecutorForVramConfig {
   scratchLimit?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
-  /** The GPU class to dispatch as, as `usearch_gpu_class_name` spells it; absent dispatches as the devices. */
+  /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
   gpuClass?: string;
 }
 
@@ -380,33 +404,33 @@ export interface ExecutorForNvmeConfig {
   threads?: number;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
-  /** The CPU class to dispatch as, as `usearch_cpu_class_name` spells it; absent dispatches as the machine. */
+  /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
 
-/**
- *  The workers a fanned-out verb runs on, shared across indexes.
+/** The workers a fanned-out verb runs on, shared across indexes.
  *
  *  An executor owns host threads or device streams; an index owns entries. Keeping them apart is
  *  what lets one pool serve several indexes, and what makes the cost of spawning visible at the
- *  line that spawns it. The collector frees it eventually; `free` joins the workers now.
- */
+ *  line that spawns it. The collector frees it eventually; `free` joins the workers now. */
 export interface Executor extends Disposable {
   /**
-   *  Waits for every call submitted to this executor so far, then idles in `mood`. Calls `usearch_executor_drain`.
+   *  Waits for every call submitted to this executor so far, then idles in `mood`.
    *
    *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood?: Mood): void;
 
-  /** Runs every deferred call and joins the workers now; a freed executor refuses every later call, and a second `free` does nothing. Refuses with {@link Status.Contended} while a GPU arena made on it is live. Calls `usearch_executor_free`. */
+  /** Runs every deferred call and joins the workers now; a freed executor refuses every later
+   *  call, and a second `free` does nothing. Refuses with {@link Status.Contended} while a GPU
+   *  arena made on it is live. */
   free(): void;
 }
 
 /** The four factories an {@link Executor} is spawned by; a direct `new Executor()` is refused. */
 export interface ExecutorConstructor {
   /**
-   *  Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`.
+   *  Spawns host worker threads for a RAM-resident index.
    *
    *  @param config - The NUMA nodes, the thread count and the deferred limit.
    *  @returns The pool, which must outlive every call it runs.
@@ -414,7 +438,7 @@ export interface ExecutorConstructor {
   forRam(config?: ExecutorForRamConfig): Executor;
 
   /**
-   *  Borrows a ForkUnion `fu_pool_t` for a RAM-resident index, keeping its lender's mood. Calls `usearch_executor_on_pool`.
+   *  Borrows a caller's thread pool for a RAM-resident index, keeping its lender's mood.
    *
    *  @param pool - The pool's address; it must outlive the executor.
    *  @param config - The NUMA nodes and the deferred limit.
@@ -423,7 +447,7 @@ export interface ExecutorConstructor {
   onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
 
   /**
-   *  Opens one stream per device for a VRAM-resident index, driven from a single host thread. Calls `usearch_executor_for_vram`.
+   *  Opens one stream per device for a VRAM-resident index, driven from a single host thread.
    *
    *  @param config - The devices, borrowed streams, scratch ceiling and deferred limit.
    *  @returns The streams, which must outlive every call they run.
@@ -431,7 +455,7 @@ export interface ExecutorConstructor {
   forVram(config?: ExecutorForVramConfig): Executor;
 
   /**
-   *  Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`.
+   *  Opens one submission ring per worker for an NVMe-resident index.
    *
    *  @param config - The device or directory paths, the thread count and the deferred limit.
    *  @returns The pool, which must outlive every call it runs.
@@ -460,14 +484,25 @@ export const Executor = compiled.Executor as ExecutorConstructor;
  *  that executor and keeps it alive until freed; host pages may outlive their executor.
  */
 export interface Arena extends Disposable {
-  /** The residency of the executor that made it; a `Vram` arena's views refuse host reads with {@link Status.Device}. */
-  readonly residency: Residency;
+  /** Where its outputs live, as the executor that made it decided; a `Vram` arena's views refuse
+   *  host reads with {@link Status.Device}. */
+  describe(): ArenaDescription;
 
-  /** Releases the memory now, once every deferred call writing it is final, detaching every view into it; a second call does nothing. Calls `usearch_arena_free`. */
+  /** Releases the memory now, once every deferred call writing it is final, detaching every view
+   *  into it; a second call does nothing. */
   free(): void;
 }
 
-/** Makes an arena where `executor` computes, or host pages for calls on the calling thread when absent. Calls `usearch_arena_init`. */
+/** Where an arena's outputs live. */
+export interface ArenaDescription {
+  /** `Ram` for host pages, `Vram` for one device's memory. */
+  residency: Residency;
+  /** The ordinal of the device holding a `Vram` arena; `null` for host pages. */
+  device: number | null;
+}
+
+/** Makes an arena where `executor` computes, or host pages for calls on the calling
+ *  thread when absent. */
 export interface ArenaConstructor {
   new (executor?: Executor): Arena;
   readonly prototype: Arena;
@@ -493,11 +528,9 @@ export abstract class ArenaView {
   }
 }
 
-/**
- *  The matches of one query, borrowed out of a run rather than copied.
+/** The matches of one query, borrowed out of a run rather than copied.
  *
- *  Both arrays are subarrays of the run's own storage, so reading a query costs nothing.
- */
+ *  Both arrays are subarrays of the run's own storage, so reading a query costs nothing. */
 export class QueryMatches {
   constructor(
     /** Sixteen bytes per match found for this query. */
@@ -512,10 +545,8 @@ export class QueryMatches {
   }
 }
 
-/**
- *  The ranked matches a search or a stream pull wrote into its arena: `queries` rows of `columns`
- *  cells, query `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
- */
+/** The ranked matches a search or a stream pull wrote into its arena: `queries` rows of `columns`
+ *  cells, query `i` holding `counts[i]` matches. */
 export class Matches extends ArenaView {
   /** Queries the call resolved. */
   readonly queries: number;
@@ -620,10 +651,8 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     return this.#call.status() as Status;
   }
 
-  /**
-   *  Blocks the calling thread until the call is final, then answers its result or throws its failure.
-   *  Calls `usearch_outcome_wait`.
-   */
+  /** Blocks the calling thread until the call is final, then answers its result or
+   *  throws its failure. */
   wait(): T {
     if (!this.#outcome) {
       this.#call.wait();
@@ -632,7 +661,7 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     return this.#unwrap();
   }
 
-  /** Waits on the libuv pool rather than the calling thread, which is what `await` reaches for. Calls `usearch_outcome_wait` there. */
+  /** Waits on the libuv pool rather than the calling thread, which is what `await` reaches for. */
   then<Fulfilled = T, Rejected = never>(
     onFulfilled?: ((value: T) => Fulfilled | PromiseLike<Fulfilled>) | null,
     onRejected?: ((reason: unknown) => Rejected | PromiseLike<Rejected>) | null,

@@ -20,12 +20,12 @@ import USearchC
 // MARK: - Errors
 
 /// What went wrong, in the vocabulary the engine and this binding share - one constant per
-/// `usearch_status_*_k`, carrying the C enumerator itself. Validation performed here before a call
-/// crosses reports the status the engine would have reported for the same fault.
+/// engine status. Validation performed here before a call crosses reports the status the engine
+/// would have reported for the same fault.
 ///
 /// A `USearchError` never carries `success` or `deferred`; a `Deferred` call reports both.
 public struct Status: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_status_t
 
     /// The call succeeded and carries no message.
@@ -67,11 +67,10 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     /// An argument breaks the verb's contract.
     public static let invalidArgument = Status(raw: usearch_status_invalid_argument_k)
 
-    /// The status rendered as the library spells it, like `invalid-argument`. Calls
-    /// `usearch_status_name`.
+    /// The status rendered as the library spells it, like `invalid-argument`.
     public var description: String { String(cString: usearch_status_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no status carries. Calls `usearch_status_from_name`.
+    /// Reads a spelling back, and nil for one no status carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_status_from_name, usearch_status_name) else { return nil }
         self.raw = raw
@@ -123,8 +122,8 @@ public struct USearchError: Swift.Error, CustomStringConvertible, Equatable, Sen
     }
 }
 
-/// Reads `name` through a C `from_name` table, keeping only a value whose own spelling echoes it,
-/// since every table answers some default for a name it does not know.
+/// Reads `name` through the library's spelling table, keeping only a value whose own spelling
+/// echoes it, since every table answers some default for a name it does not know.
 func parsed<Raw>(
     _ name: String,
     _ read: (usearch_bytes_view_t) -> Raw,
@@ -147,7 +146,7 @@ public typealias Distance = Double
 /// reports how many. Integer identities park in the low eight bytes, so `Key(42)`
 /// prints as `00000000-0000-0000-0000-00000000002a`.
 public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByIntegerLiteral, Sendable {
-    /// The sixteen identity bytes, most significant first - the C key itself, so batches
+    /// The sixteen identity bytes, most significant first - the engine's own key, so batches
     /// reinterpret rather than copy.
     var raw: usearch_key_t
 
@@ -188,7 +187,7 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
         for position in 0 ..< 16 { raw[position] = digits[position * 2] << 4 | digits[position * 2 + 1] }
     }
 
-    /// Adopts the C key.
+    /// Adopts the engine's key.
     init(raw: usearch_key_t) { self.raw = raw }
 
     /// The sixteen identity bytes, most significant first.
@@ -234,7 +233,7 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
 }
 
 extension usearch_key_t {
-    /// One identity byte, read through the tuple Swift imports the C array member as.
+    /// One identity byte, read through the tuple Swift imports the fixed-size array as.
     fileprivate subscript(position: Int) -> UInt8 {
         get { withUnsafeBytes(of: bytes) { $0[position] } }
         set { withUnsafeMutableBytes(of: &bytes) { $0[position] = newValue } }
@@ -275,10 +274,10 @@ extension Unicode.Scalar {
 
 // MARK: - Scalars
 
-/// A stored or exchanged scalar type, named by width and encoding, carrying the C enumerator
-/// itself. Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell.
+/// A stored or exchanged scalar type, named by width and encoding. Sub-byte kinds pack several
+/// dimensions per byte, as their `xN` suffixes spell.
 public struct Scalar: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_scalar_t
 
     /// No scalar named - an unset field.
@@ -312,10 +311,10 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
     /// Eight single-bit dimensions per byte.
     public static let u1x8 = Scalar(raw: usearch_scalar_u1x8_k)
 
-    /// The kind rendered as the library spells it. Calls `usearch_scalar_name`.
+    /// The kind rendered as the library spells it.
     public var description: String { String(cString: usearch_scalar_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no kind carries. Calls `usearch_scalar_from_name`.
+    /// Reads a spelling back, and nil for one no kind carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_scalar_from_name, usearch_scalar_name) else { return nil }
         self.raw = raw
@@ -385,7 +384,7 @@ extension U1x8: ScalarValue {
 // MARK: - Rows
 
 /// A borrowed run of rows along a call's batch axis - the input of every verb whose rows share one
-/// width - mirroring `usearch_rows_view_t`, plus the row count the call takes as its `count`.
+/// width - with the row count that sets the call's batch size.
 ///
 /// Built over a NumKong `MatrixView`, it borrows and stays valid only as long as the storage the
 /// view points into, so a memory-mapped dataset reaches the index with no reshape and no copy.
@@ -419,7 +418,7 @@ public struct RowsView: @unchecked Sendable {
         self.owner = owner
     }
 
-    /// The descriptor the C interface reads.
+    /// The descriptor the engine reads.
     var raw: usearch_rows_view_t {
         usearch_rows_view_t(data: data, stride: stride, columns: columns, scalar: scalar.raw)
     }
@@ -436,7 +435,6 @@ public struct Match: Equatable, Sendable {
 }
 
 /// The ranked matches a search or a stream pull wrote into an arena, one list per query, read in place.
-/// Mirrors `usearch_matches_view_t`.
 public struct Matches: RandomAccessCollection {
     /// The arena the matches live in, and which call wrote them.
     let write: ArenaWrite
@@ -503,13 +501,13 @@ public enum Continuation: Sendable {
 /// the verb consumes - and the caller's chance to stop it.
 ///
 /// Never invoked concurrently, however many threads perform the work, so the handler needs no
-/// synchronization of its own; an error it throws never unwinds into a C frame, but stops the call
+/// synchronization of its own; an error it throws never unwinds into the engine, but stops the call
 /// as `.cancel` would and is thrown once the call is final. It runs on whichever thread advanced the
 /// work, hence `@Sendable`.
 public typealias Progress = @Sendable (_ completed: Int, _ total: Int) throws -> Continuation
 
 /// A progress handler and the call state its first thrown error goes to, placed in that state,
-/// since a Swift closure has no stable C representation.
+/// since a Swift closure has no stable representation the engine can call.
 private final class ProgressState {
     let progress: Progress
     /// The call state that keeps this one, so it outlives every call of the trampoline.
@@ -737,7 +735,7 @@ public final class Deferred<Value> {
     }
 
     /// `deferred` until the call is final, then `success` or its failure, read without blocking.
-    /// Binding-only: reads the status word `usearch_outcome_wait` would, with its acquire ordering.
+    /// Binding-only: reads the status word `wait` would, with its acquire ordering.
     public var status: Status {
         guard case .pending(let callState, _) = submission else { return .success }
         let raw = usearch_outcome_status(callState.outcome)
@@ -746,7 +744,7 @@ public final class Deferred<Value> {
     }
 
     /// Blocks until the call is final, then answers its result or throws its failure, the same
-    /// every time it is asked. Calls `usearch_outcome_wait`.
+    /// every time it is asked.
     public func wait() throws(USearchError) -> Value { try submission.wait() }
 }
 
@@ -775,10 +773,10 @@ extension Deferred {
 
 // MARK: - Classes
 
-/// A CPU family USearch ships tuned variants for, carrying the C enumerator; dispatch reports its pick
-/// in this vocabulary, and a RAM or NVMe placement or executor may pin one.
+/// A CPU family USearch ships tuned variants for; dispatch reports its pick in this vocabulary, and
+/// a RAM or NVMe placement or executor may pin one.
 public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_cpu_class_t
 
     /// The portable floor, with no SIMD assumptions.
@@ -818,10 +816,10 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The one class of a monoversioned build.
     public static let monoversioned = CPUClass(raw: usearch_cpu_class_monoversioned_k)
 
-    /// The class as the library spells it. Calls `usearch_cpu_class_name`.
+    /// The class as the library spells it.
     public var description: String { String(cString: usearch_cpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries. Calls `usearch_cpu_class_from_name`.
+    /// Reads a spelling back, and nil for one no class carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_cpu_class_from_name, usearch_cpu_class_name),
             raw != usearch_cpu_class_unknown_k
@@ -832,10 +830,9 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_cpu_class_t) { self.raw = raw }
 }
 
-/// A GPU family USearch ships tuned variants for, carrying the C enumerator; a VRAM placement or
-/// executor may pin one.
+/// A GPU family USearch ships tuned variants for; a VRAM placement or executor may pin one.
 public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_gpu_class_t
 
     /// Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
@@ -863,10 +860,10 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// Apple10-family GPUs.
     public static let appleMetal10 = GPUClass(raw: usearch_gpu_class_apple_metal10_k)
 
-    /// The class as the library spells it. Calls `usearch_gpu_class_name`.
+    /// The class as the library spells it.
     public var description: String { String(cString: usearch_gpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries. Calls `usearch_gpu_class_from_name`.
+    /// Reads a spelling back, and nil for one no class carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_gpu_class_from_name, usearch_gpu_class_name),
             raw != usearch_gpu_class_unknown_k
@@ -879,10 +876,9 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
 
 // MARK: - Executors
 
-/// Where an executor computes, and with it where the arenas it makes keep their memory, carrying
-/// the C enumerator.
+/// Where an executor computes, and with it where the arenas it makes keep their memory.
 public struct Residency: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_residency_t
 
     /// Host memory, walked by host threads.
@@ -892,11 +888,10 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
     /// NVMe drives, read through host submission rings into host memory.
     public static let nvme = Residency(raw: usearch_residency_nvme_k)
 
-    /// The residency rendered as the library spells it. Calls `usearch_residency_name`.
+    /// The residency rendered as the library spells it.
     public var description: String { String(cString: usearch_residency_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no residency carries. Calls
-    /// `usearch_residency_from_name`.
+    /// Reads a spelling back, and nil for one no residency carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_residency_from_name, usearch_residency_name) else { return nil }
         self.raw = raw
@@ -905,9 +900,9 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_residency_t) { self.raw = raw }
 }
 
-/// How a search reaches the entries it scores, carrying the C enumerator.
+/// How a search reaches the entries it scores.
 public struct Traversal: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_traversal_t
 
     /// Walks the graph, scoring the entries the expansion reaches - approximate, the default.
@@ -915,11 +910,10 @@ public struct Traversal: Hashable, Sendable, CustomStringConvertible {
     /// Scores every entry published when the query's scan starts - exact, on RAM and NVMe handles.
     public static let scan = Traversal(raw: usearch_traversal_scan_k)
 
-    /// The traversal rendered as the library spells it. Calls `usearch_traversal_name`.
+    /// The traversal rendered as the library spells it.
     public var description: String { String(cString: usearch_traversal_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no traversal carries. Calls
-    /// `usearch_traversal_from_name`.
+    /// Reads a spelling back, and nil for one no traversal carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_traversal_from_name, usearch_traversal_name) else { return nil }
         self.raw = raw
@@ -928,9 +922,9 @@ public struct Traversal: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_traversal_t) { self.raw = raw }
 }
 
-/// What an executor does with its threads or streams once it goes idle, carrying the C enumerator.
+/// What an executor does with its threads or streams once it goes idle.
 public struct Mood: Hashable, Sendable, CustomStringConvertible {
-    /// The C enumerator.
+    /// The engine's own value.
     let raw: usearch_mood_t
 
     /// Idle threads and streams sleep; the next call pays a wake-up.
@@ -938,10 +932,10 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
     /// Idle threads and streams stay hot, trading power for the next call's latency.
     public static let spinning = Mood(raw: usearch_mood_spinning_k)
 
-    /// The mood rendered as the library spells it. Calls `usearch_mood_name`.
+    /// The mood rendered as the library spells it.
     public var description: String { String(cString: usearch_mood_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no mood carries. Calls `usearch_mood_from_name`.
+    /// Reads a spelling back, and nil for one no mood carries.
     public init?(name: String) {
         guard let raw = parsed(name, usearch_mood_from_name, usearch_mood_name) else { return nil }
         self.raw = raw
@@ -965,14 +959,9 @@ public final class Executor: @unchecked Sendable {
     /// The native handle, released by `deinit`. Immutable for the object's whole life, so the
     /// engine's own synchronization is the only thing sharing this across threads relies on.
     let raw: usearch_executor_t
-    /// Where it computes, which the factory that spawned it named.
-    public let residency: Residency
 
     /// Adopts a handle a factory below spawned.
-    private init(raw: usearch_executor_t, residency: Residency) {
-        self.raw = raw
-        self.residency = residency
-    }
+    private init(raw: usearch_executor_t) { self.raw = raw }
 
     /// Spawns host threads for RAM-resident indexes, interleaved across the compute domains local
     /// to `memoryDomains` - the very list the indexes were initialized with.
@@ -980,7 +969,7 @@ public final class Executor: @unchecked Sendable {
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
     /// ordered publication path. Every factory's `deferredLimit` sizes the table of deferred calls
     /// it tracks at once, and zero takes a default. A `cpuClass` narrows the threads' waiters and
-    /// atomics to that class's; nil derives the CPU's own. Calls `usearch_executor_for_ram`.
+    /// atomics to that class's; nil derives the CPU's own.
     public static func forRam(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
@@ -1005,12 +994,12 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_ram(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
     /// process share one set of threads while each keeps its own scratch. The pool must outlive
-    /// the executor, and keeps its lender's mood. Calls `usearch_executor_on_pool`.
+    /// the executor, and keeps its lender's mood.
     public static func onPool(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
@@ -1035,14 +1024,13 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_on_pool(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
     }
 
     /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
     /// compute domains local to the devices `paths` names.
     ///
-    /// Zero `threads` derives from those devices' queue capabilities. Calls
-    /// `usearch_executor_for_nvme`.
+    /// Zero `threads` derives from those devices' queue capabilities.
     public static func forNvme(
         paths: [String] = [],
         cpuClass: CPUClass? = nil,
@@ -1062,7 +1050,7 @@ public final class Executor: @unchecked Sendable {
             )
             usearch_executor_for_nvme(&arguments)
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .nvme) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
     }
 
     /// Opens one submission stream on every named device, all of them driven by the one host thread
@@ -1070,8 +1058,7 @@ public final class Executor: @unchecked Sendable {
     ///
     /// `streams` borrows the caller's CUDA streams, one per device in `devices` order, and nil
     /// creates the executor's own. A zero `scratchLimit` lets per-device scratch grow as geometry
-    /// asks. A `gpuClass` the devices do not run is refused with `unsupported`. Calls
-    /// `usearch_executor_for_vram`.
+    /// asks. A `gpuClass` the devices do not run is refused with `unsupported`.
     public static func forVram(
         devices: [Int32] = [],
         gpuClass: GPUClass? = nil,
@@ -1103,14 +1090,13 @@ public final class Executor: @unchecked Sendable {
                 usearch_executor_for_vram(&arguments)
             }
         }
-        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .vram) }
+        return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
     }
 
     deinit { usearch_executor_free(raw) }
 
     /// Waits for every call submitted to this executor, then adopts `mood` whenever it next goes
     /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
-    /// Calls `usearch_executor_drain`.
     public func drain(mood: Mood = .parked) throws(USearchError) {
         let callState = CallState()
         var arguments = usearch_executor_drain_t(executor: raw, outcome: callState.outcome, mood: mood.raw)
@@ -1119,8 +1105,8 @@ public final class Executor: @unchecked Sendable {
     }
 }
 
-/// Lends NVMe paths as the byte views `usearch_nvme_options_t` points at, beside the class it
-/// dispatches as, for one blocking call.
+/// Lends NVMe paths as the byte views the engine's NVMe options point at, beside the class they
+/// dispatch as, for one blocking call.
 func withPaths<Value>(
     _ paths: [String],
     _ cpuClass: CPUClass?,
@@ -1160,27 +1146,46 @@ func withPaths<Value>(
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: usearch_arena_t
-    /// Where its memory lives, which the executor that made it decided.
-    public let residency: Residency
     /// The VRAM executor that made it, held so the arena is freed first, on that executor's first stream.
-    private let executor: Executor?
+    private var executor: Executor?
     /// Advanced by every call given the arena, so a view remembers which call wrote it.
     var generation: UInt64 = 0
 
     /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
-    /// makes host pages for calls on the calling thread. Calls `usearch_arena_init`.
+    /// makes host pages for calls on the calling thread.
     public init(on executor: Executor? = nil) throws(USearchError) {
         let callState = CallState()
         let arena = callState.slots(usearch_arena_t?.none)
         var arguments = usearch_arena_init_t(arena: arena, executor: executor?.raw, outcome: callState.outcome)
         usearch_arena_init(&arguments)
         raw = try callState.read { () throws(USearchError) in try created(arena) }
-        residency = executor?.residency ?? .ram
-        self.executor = executor?.residency == .vram ? executor : nil
+        if try describe().residency == .vram { self.executor = executor }
     }
 
-    /// Calls `usearch_arena_free`.
+    /// Frees the arena once every deferred call naming it is final.
     deinit { usearch_arena_free(raw) }
+
+    /// Reports where the arena's outputs live, as the executor that made it decided.
+    public func describe() throws(USearchError) -> ArenaDescription {
+        let callState = CallState()
+        let description = callState.slots(usearch_arena_description_t())
+        var arguments = usearch_arena_describe_t(arena: raw, outcome: callState.outcome, description: description)
+        usearch_arena_describe(&arguments)
+        return try callState.read { ArenaDescription(description.pointee) }
+    }
+}
+
+/// Where an arena's outputs live, which decides whether a host read reaches them.
+public struct ArenaDescription: Sendable {
+    /// `ram` for host pages, `vram` for one device's memory.
+    public var residency: Residency
+    /// The ordinal of the GPU holding the outputs; nil for host pages.
+    public var device: Int32?
+
+    init(_ raw: usearch_arena_description_t) {
+        residency = Residency(raw: raw.residency)
+        device = residency == .vram ? Int32(raw.device) : nil
+    }
 }
 
 /// The arena a view reads, and which of the calls given it wrote the view.
@@ -1191,7 +1196,7 @@ struct ArenaWrite {
     /// Refuses a read the arena no longer backs, or one reaching device memory.
     func check() {
         precondition(arena.generation == generation, "the arena was rewound since this view was written: uninitialized")
-        precondition(arena.residency != .vram, "the view is device memory, which no host read reaches")
+        precondition(try! arena.describe().residency != .vram, "the view is device memory, which no host read reaches")
     }
 
     /// Refuses as `check()` does, then a `position` past `count`, as a collection does.
@@ -1203,13 +1208,11 @@ struct ArenaWrite {
 
 // MARK: - Introspection
 
-/// The version of the linked library, like `3.0.0`. Calls `usearch_version_name`.
+/// The version of the linked library, like `3.0.0`.
 public func version() -> String { String(cString: usearch_version_name()) }
 
-/// The hardware capabilities the linked binary was compiled with, comma separated. Calls
-/// `usearch_capabilities_compiled`.
+/// The hardware capabilities the linked binary was compiled with, comma separated.
 public func capabilitiesCompiled() -> String { String(cString: usearch_capabilities_compiled()) }
 
-/// The hardware capabilities the current machine offers at runtime, comma separated. Calls
-/// `usearch_capabilities_available`.
+/// The hardware capabilities the current machine offers at runtime, comma separated.
 public func capabilitiesAvailable() -> String { String(cString: usearch_capabilities_available()) }

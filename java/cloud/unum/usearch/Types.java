@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -591,6 +592,20 @@ public final class Types {
             return code;
         }
 
+        /**
+         * Names the residency a code carries.
+         *
+         * @throws USearchException UNKNOWN_KIND on a code this build cannot name.
+         */
+        static Residency of(int code) {
+            for (Residency candidate : values()) {
+                if (candidate.code == code) {
+                    return candidate;
+                }
+            }
+            throw new USearchException(Status.UNKNOWN_KIND, "the residency is unknown to this build");
+        }
+
         /** Renders the residency as its C enumerator's stem. Calls {@code usearch_residency_name}. */
         @Override
         public String toString() {
@@ -651,12 +666,8 @@ public final class Types {
 
         private final Handle handle;
 
-        /** Where the executor computes, which every arena it makes inherits. */
-        final Residency residency;
-
-        private Executor(MemorySegment spawned, Residency residency) {
+        private Executor(MemorySegment spawned) {
             this.handle = new Handle(spawned, EXECUTOR_FREE);
-            this.residency = residency;
         }
 
         /**
@@ -678,7 +689,7 @@ public final class Types {
          */
         public static Executor forRam(
                 int[] memoryDomains, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
-            return spawn(FOR_RAM, Residency.RAM, call -> {
+            return spawn(FOR_RAM, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.pinned("ram", cpuClass);
                 call.size("threads", unsigned(threads));
@@ -702,7 +713,7 @@ public final class Types {
          */
         public static Executor onPool(
                 MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClass, long deferredLimit) {
-            return spawn(ON_POOL, Residency.RAM, call -> {
+            return spawn(ON_POOL, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.pinned("ram", cpuClass);
                 call.pointer("pool", pool);
@@ -739,7 +750,7 @@ public final class Types {
             if (streams.length != 0 && streams.length != devices.length) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "pass no streams or one per device");
             }
-            return spawn(FOR_VRAM, Residency.VRAM, call -> {
+            return spawn(FOR_VRAM, call -> {
                 call.ordinals("vram", devices);
                 call.pinned("vram", gpuClass);
                 if (streams.length != 0) {
@@ -776,7 +787,7 @@ public final class Types {
          *     scratch cannot be claimed.
          */
         public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
-            return spawn(FOR_NVME, Residency.NVME, call -> {
+            return spawn(FOR_NVME, call -> {
                 call.paths("nvme", paths);
                 call.pinned("nvme", cpuClass);
                 call.size("threads", unsigned(threads));
@@ -823,11 +834,11 @@ public final class Types {
         }
 
         /** Runs one executor factory and adopts what it spawned. */
-        private static Executor spawn(Verb verb, Residency residency, java.util.function.Consumer<Call> fill) {
+        private static Executor spawn(Verb verb, java.util.function.Consumer<Call> fill) {
             return Call.block(verb, null, null, call -> {
                 MemorySegment spawned = call.output("executor", Library.POINTER);
                 fill.accept(call);
-                return () -> new Executor(spawned.get(Library.POINTER, 0), residency);
+                return () -> new Executor(spawned.get(Library.POINTER, 0));
             });
         }
 
@@ -879,14 +890,13 @@ public final class Types {
     public static final class Arena implements AutoCloseable {
 
         private final Handle handle;
-        private final Residency residency;
 
         /** The scope the latest call's views read through, closed while a call holds the arena. */
         private volatile java.lang.foreign.Arena outputs = java.lang.foreign.Arena.ofShared();
 
         /** Host pages for calls on the calling thread. Calls {@code usearch_arena_init}. */
         public Arena() {
-            this(null, Residency.RAM);
+            this.handle = init(null);
         }
 
         /**
@@ -895,22 +905,41 @@ public final class Types {
          * executor and must be closed before it. Calls {@code usearch_arena_init}.
          */
         public Arena(Executor executor) {
-            this(executor, executor.residency);
+            this.handle = init(Objects.requireNonNull(executor));
         }
 
-        private Arena(@Nullable Executor executor, Residency residency) {
-            this.residency = residency;
-            // A GPU arena frees on its executor's stream, so its release keeps that executor alive.
-            Object owner = residency == Residency.VRAM ? executor : null;
-            this.handle = Call.block(ARENA_INIT, null, executor, call -> {
+        private static Handle init(@Nullable Executor executor) {
+            return Call.block(ARENA_INIT, null, executor, call -> {
                 MemorySegment made = call.output("arena", Library.POINTER);
-                return () -> new Handle(made.get(Library.POINTER, 0), ARENA_FREE, owner);
+                return () -> {
+                    MemorySegment arena = made.get(Library.POINTER, 0);
+                    ArenaDescription description = described(naming -> naming.pointer("arena", arena));
+                    // A GPU arena frees on its executor's stream, so its release keeps that executor alive.
+                    Object owner = description.residency() == Residency.VRAM ? executor : null;
+                    return new Handle(arena, ARENA_FREE, owner);
+                };
             });
         }
 
-        /** Where the memory lives: the residency of the executor that made it. */
-        public Residency residency() {
-            return residency;
+        /**
+         * Where the outputs live, as the executor that made the arena decided, so a caller reads them
+         * as host memory or hands them to device code without remembering that executor.
+         *
+         * <p>
+         * Calls {@code usearch_arena_describe}.
+         *
+         * @throws IllegalStateException on a closed arena.
+         */
+        public ArenaDescription describe() {
+            return described(naming -> naming.lease("arena", handle));
+        }
+
+        private static ArenaDescription described(java.util.function.Consumer<Call> naming) {
+            return Call.block(ARENA_DESCRIBE, null, null, call -> {
+                naming.accept(call);
+                MemorySegment description = call.output("description", ARENA_DESCRIPTION);
+                return () -> ArenaDescription.lift(description);
+            });
         }
 
         /**
@@ -947,7 +976,7 @@ public final class Types {
          * @throws USearchException DEVICE on a VRAM arena.
          */
         void host() {
-            if (residency == Residency.VRAM) {
+            if (describe().residency() == Residency.VRAM) {
                 throw new USearchException(Status.DEVICE, "the outputs are device memory");
             }
         }
@@ -963,7 +992,7 @@ public final class Types {
         MemorySegment reach(MemorySegment pointer, long length) {
             // A call joined after close() released a fresh scope over freed memory, so the handle refuses.
             handle.address();
-            return length == 0 || residency == Residency.VRAM
+            return length == 0 || describe().residency() == Residency.VRAM
                     ? MemorySegment.NULL
                     : pointer.reinterpret(length, outputs, ignored -> Reference.reachabilityFence(this));
         }
@@ -985,10 +1014,31 @@ public final class Types {
             handle.close();
         }
 
-        /** Renders the arena as its residency and the handle it wraps. */
+        /** Renders the arena as the handle it wraps. */
         @Override
         public String toString() {
-            return "Arena(" + residency + ", " + handle + ")";
+            return "Arena(" + handle + ")";
+        }
+    }
+
+    /**
+     * Where an arena's outputs live, as {@link Arena#describe} reports it.
+     *
+     * <p>
+     * Mirrors {@code usearch_arena_description_t}.
+     *
+     * @param residency RAM for host pages, VRAM for one device's memory.
+     * @param device the ordinal of the device holding the outputs, empty for host pages.
+     */
+    public record ArenaDescription(Residency residency, OptionalInt device) {
+
+        /** Lifts a {@code usearch_arena_description_t}. */
+        static ArenaDescription lift(MemorySegment description) {
+            Residency residency =
+                    Residency.of(description.get(Library.ENUM, Library.offset(ARENA_DESCRIPTION, "residency")));
+            long device = description.get(Library.SIZE, Library.offset(ARENA_DESCRIPTION, "device"));
+            return new ArenaDescription(
+                    residency, residency == Residency.VRAM ? OptionalInt.of((int) device) : OptionalInt.empty());
         }
     }
 
@@ -2012,4 +2062,16 @@ public final class Types {
 
     private static final MethodHandle ARENA_FREE =
             Library.downcall("usearch_arena_free", FunctionDescriptor.ofVoid(Library.POINTER));
+
+    /** {@code usearch_arena_description_t}. */
+    private static final StructLayout ARENA_DESCRIPTION = MemoryLayout.structLayout(
+            Library.ENUM.withName("residency"), Library.padding(), Library.SIZE.withName("device"));
+
+    /** {@code usearch_arena_describe_t}. */
+    private static final Verb ARENA_DESCRIBE = new Verb(
+            "usearch_arena_describe",
+            MemoryLayout.structLayout(
+                    Library.POINTER.withName("arena"),
+                    Library.POINTER.withName("outcome"),
+                    Library.POINTER.withName("description")));
 }

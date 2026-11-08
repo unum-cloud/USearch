@@ -117,7 +117,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended` and rewinds nothing, so the holder's views stay readable.
 A stale view throws `USearchException` with `Status.Uninitialized`; a `ReadOnlySpan` an accessor already returned cannot outlive its stack frame, so read it before the next call.
-An arena's `Residency` says where it lives, and one from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+An arena's `Describe()` says where it lives, and one from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
 It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; a host arena may outlive its executor.
 
 ```csharp

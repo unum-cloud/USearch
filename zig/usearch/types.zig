@@ -3,8 +3,7 @@
 //! Holds the `Status`/`Error` pair every call reports through, the 128-bit `Key` and the
 //! `Distance` it is scored by, the `Scalar` encodings rows travel in, the `RowsView` every
 //! modality's batches ride, the `Executor` that drives every verb, the `Arena` every output whose
-//! length scales with a call lands in, the `Matches` a ranked run comes back as, and the
-//! `Deferred` a submitted call is held in.
+//! length scales with a call lands in, and the `Matches` a ranked run comes back as.
 //!
 //! The library's entry points are declared by hand rather than pulled through `@cImport`, so the
 //! module needs no include path from its dependents and no cast at a call site: an `extern struct`
@@ -16,8 +15,6 @@
 
 const std = @import("std");
 
-extern fn usearch_outcome_wait(outcome: *Outcome) Status;
-extern fn usearch_outcome_status(outcome: *Outcome) Status;
 extern fn usearch_executor_for_ram(arguments: *usearch_executor_for_ram_t) void;
 extern fn usearch_executor_on_pool(arguments: *usearch_executor_on_pool_t) void;
 extern fn usearch_executor_for_nvme(arguments: *usearch_executor_for_nvme_t) void;
@@ -26,6 +23,7 @@ extern fn usearch_executor_drain(arguments: *usearch_executor_drain_t) void;
 extern fn usearch_executor_free(executor: ?*anyopaque) void;
 extern fn usearch_arena_init(arguments: *usearch_arena_init_t) void;
 extern fn usearch_arena_free(arena: ?*anyopaque) void;
+extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
 
 extern fn usearch_status_name(status: Status) [*:0]const u8;
 extern fn usearch_status_from_name(name: BytesView) Status;
@@ -39,15 +37,15 @@ extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
 extern fn usearch_mood_from_name(name: BytesView) Mood;
 
 extern fn usearch_version_name() [*:0]const u8;
-pub extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
-pub extern fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) [*:0]const u8;
+extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
+extern fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) [*:0]const u8;
 
 /// Mirrors `usearch_cpu_class_t`, whose zero derives the CPU's own class.
-pub const usearch_cpu_class_t = c_int;
+const usearch_cpu_class_t = c_int;
 /// Mirrors `usearch_gpu_class_t`, whose zero derives the devices' own class.
-pub const usearch_gpu_class_t = c_int;
+const usearch_gpu_class_t = c_int;
 /// Mirrors `usearch_nvme_class_t`, whose zero derives the devices' own class.
-pub const usearch_nvme_class_t = c_int;
+const usearch_nvme_class_t = c_int;
 extern fn usearch_capabilities_compiled() [*:0]const u8;
 extern fn usearch_capabilities_available() [*:0]const u8;
 
@@ -411,7 +409,7 @@ pub const BytesView = extern struct {
 
 /// A strided run of keys - how a batch names the identity of each of its rows, or a cursor pull
 /// the keys it wrote into its arena. Mirrors `usearch_keys_view_t`; the call's own count bounds it.
-pub const usearch_keys_view_t = extern struct {
+const usearch_keys_view_t = extern struct {
     /// First key of the run; null names an absent argument.
     data: ?[*]const Key = null,
     /// Bytes between consecutive keys; zero repeats the first.
@@ -426,7 +424,7 @@ pub const usearch_keys_view_t = extern struct {
 /// A run of rows along a call's batch axis, as the C interface reads an input or writes an output
 /// into an arena. Mirrors `usearch_rows_view_t`; an input is built from a `RowsView`, whose row
 /// count becomes the call's count.
-pub const usearch_rows_view_t = extern struct {
+const usearch_rows_view_t = extern struct {
     data: ?*const anyopaque = null,
     stride: usize = 0,
     columns: usize = 0,
@@ -491,7 +489,7 @@ fn valuesPerRow(comptime Element: type, length: usize, columns: usize) Error!usi
 
 /// A ranked run a call wrote into its arena: one list of `columns` packed columns per query, at most
 /// the call's `wanted`, the first `counts[i]` of query `i` written. Mirrors `usearch_matches_view_t`.
-pub const usearch_matches_view_t = extern struct {
+const usearch_matches_view_t = extern struct {
     keys: ?[*]const Key = null,
     scores: ?[*]const Distance = null,
     counts: ?[*]const usize = null,
@@ -500,7 +498,7 @@ pub const usearch_matches_view_t = extern struct {
 
 /// A ragged run of matches a call wrote into its arena, query `i` spanning `offsets[i]` up to
 /// `offsets[i + 1]`. Mirrors `usearch_matches_tape_view_t`.
-pub const usearch_matches_tape_view_t = extern struct {
+const usearch_matches_tape_view_t = extern struct {
     keys: ?[*]const Key = null,
     scores: ?[*]const Distance = null,
     offsets: ?[*]const usize = null,
@@ -508,7 +506,7 @@ pub const usearch_matches_tape_view_t = extern struct {
 
 /// A ragged run of keys a call wrote into its arena, entry `i` spanning `offsets[i]` up to
 /// `offsets[i + 1]`. Mirrors `usearch_keys_tape_view_t`.
-pub const usearch_keys_tape_view_t = extern struct {
+const usearch_keys_tape_view_t = extern struct {
     keys: ?[*]const Key = null,
     offsets: ?[*]const usize = null,
 };
@@ -541,11 +539,6 @@ pub const Matches = struct {
         const written = self.view.counts.?[position];
         return .{ .keys = outputSlice(Key, self.view.keys, first, written), .scores = outputSlice(Distance, self.view.scores, first, written) };
     }
-
-    /// Where the matches live, which the host reads only as `.ram` or `.nvme`.
-    pub fn residency(self: Matches) Residency {
-        return self.stamp.arena.residency;
-    }
 };
 
 /// Borrows `length` elements from `first` on, of a run a call wrote into an arena; a failed or
@@ -556,7 +549,7 @@ pub fn outputSlice(comptime Element: type, data: ?[*]const Element, first: usize
 
 /// The host memory domains a RAM-resident index places its shards in. Mirrors
 /// `usearch_ram_options_t`.
-pub const usearch_ram_options_t = extern struct {
+const usearch_ram_options_t = extern struct {
     /// NUMA node IDs to place shards on; null derives every node the process may allocate on.
     memory_domains: ?[*]const i32 = null,
     /// Entries in `memory_domains`; zero derives.
@@ -574,7 +567,7 @@ pub const usearch_ram_options_t = extern struct {
 };
 
 /// The devices a VRAM-resident index places its shards in. Mirrors `usearch_vram_options_t`.
-pub const usearch_vram_options_t = extern struct {
+const usearch_vram_options_t = extern struct {
     /// CUDA device ordinals to place shards on; null derives one free device.
     devices: ?[*]const i32 = null,
     /// Entries in `devices`; zero derives.
@@ -590,7 +583,7 @@ pub const usearch_vram_options_t = extern struct {
 };
 
 /// The devices an NVMe-resident index serves its shards from. Mirrors `usearch_nvme_options_t`.
-pub const usearch_nvme_options_t = extern struct {
+const usearch_nvme_options_t = extern struct {
     /// Devices or directories to serve shards from; null leaves every shard where its manifest points.
     paths: ?[*]const BytesView = null,
     /// Entries in `paths`; zero derives.
@@ -653,7 +646,7 @@ pub const ProgressCallback = struct {
 
 /// How a long call reports its advance: a handler, its state, and how many reports it hears.
 /// Mirrors `usearch_progress_t`.
-pub const usearch_progress_t = extern struct {
+const usearch_progress_t = extern struct {
     /// The optional handler; null skips every report.
     callback: ?ProgressFunction = null,
     /// Opaque pointer forwarded into every `callback` call.
@@ -664,6 +657,25 @@ pub const usearch_progress_t = extern struct {
     pub fn of(progress: ProgressCallback, steps: usize) usearch_progress_t {
         return .{ .callback = progress.callback, .state = progress.state, .steps = steps };
     }
+};
+
+/// The library's own layouts of the views, options and classes above, and the class spellings,
+/// for the modality files to fill; the package root never exports them.
+pub const abi = struct {
+    pub const cpu_class_t = usearch_cpu_class_t;
+    pub const gpu_class_t = usearch_gpu_class_t;
+    pub const nvme_class_t = usearch_nvme_class_t;
+    pub const keys_view_t = usearch_keys_view_t;
+    pub const rows_view_t = usearch_rows_view_t;
+    pub const matches_view_t = usearch_matches_view_t;
+    pub const matches_tape_view_t = usearch_matches_tape_view_t;
+    pub const keys_tape_view_t = usearch_keys_tape_view_t;
+    pub const ram_options_t = usearch_ram_options_t;
+    pub const vram_options_t = usearch_vram_options_t;
+    pub const nvme_options_t = usearch_nvme_options_t;
+    pub const progress_t = usearch_progress_t;
+    pub const cpu_class_name = usearch_cpu_class_name;
+    pub const gpu_class_name = usearch_gpu_class_name;
 };
 
 /// How costly one predicate call is, which decides how many keys each call carries.
@@ -786,6 +798,17 @@ const usearch_arena_init_t = extern struct {
     outcome: *Outcome,
 };
 
+const usearch_arena_description_t = extern struct {
+    residency: Residency = .ram,
+    device: usize = 0,
+};
+
+const usearch_arena_describe_t = extern struct {
+    arena: ?*anyopaque,
+    outcome: *Outcome,
+    description: *usearch_arena_description_t,
+};
+
 const usearch_executor_drain_t = extern struct {
     executor: ?*anyopaque,
     outcome: *Outcome,
@@ -853,8 +876,6 @@ pub const ExecutorForNvmeConfig = struct {
 pub const Executor = struct {
     /// The opaque `usearch_executor_t` the ABI hands back.
     handle: ?*anyopaque,
-    /// The residency of the constructor that produced it, which places the arenas it makes.
-    residency: Residency,
 
     /// Spawns host threads for RAM-resident indexes across the domains local to `memory_domains`,
     /// which should be the very slice the indexes were placed with.
@@ -872,7 +893,7 @@ pub const Executor = struct {
             .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_ram(&arguments);
-        return adopt(handle, .ram, outcome, config.diagnostics);
+        return adopt(handle, outcome, config.diagnostics);
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
@@ -889,7 +910,7 @@ pub const Executor = struct {
             .deferred_limit = config.deferred_limit,
         };
         usearch_executor_on_pool(&arguments);
-        return adopt(handle, .ram, outcome, config.diagnostics);
+        return adopt(handle, outcome, config.diagnostics);
     }
 
     /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
@@ -905,7 +926,7 @@ pub const Executor = struct {
             .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_nvme(&arguments);
-        return adopt(handle, .nvme, outcome, config.diagnostics);
+        return adopt(handle, outcome, config.diagnostics);
     }
 
     /// Opens one submission stream on every named device, or borrows `streams`, one CUDA stream
@@ -926,13 +947,13 @@ pub const Executor = struct {
             .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_vram(&arguments);
-        return adopt(handle, .vram, outcome, config.diagnostics);
+        return adopt(handle, outcome, config.diagnostics);
     }
 
-    fn adopt(handle: ?*anyopaque, residency: Residency, outcome: Outcome, diagnostics: ?*Outcome) Error!Executor {
+    fn adopt(handle: ?*anyopaque, outcome: Outcome, diagnostics: ?*Outcome) Error!Executor {
         errdefer usearch_executor_free(handle);
         try outcome.checkInto(diagnostics);
-        return .{ .handle = handle, .residency = residency };
+        return .{ .handle = handle };
     }
 
     /// Waits for every call submitted before the drain began, then sets the mood the executor
@@ -970,8 +991,6 @@ pub const Executor = struct {
 pub const Arena = struct {
     /// The opaque `usearch_arena_t` the ABI hands back; null once freed.
     handle: ?*anyopaque,
-    /// The residency of the executor that made it: host pages, or a GPU's memory as `.vram`.
-    residency: Residency,
     /// Calls it has served, which every view compares against its own. Binding-only.
     generation: usize = 0,
 
@@ -979,7 +998,7 @@ pub const Arena = struct {
     /// calling thread when null; host pages may outlive the executor, a GPU arena may not.
     /// Calls `usearch_arena_init`.
     pub fn init(executor: ?Executor) Error!Arena {
-        var arena: Arena = .{ .handle = null, .residency = if (executor) |chosen| chosen.residency else .ram };
+        var arena: Arena = .{ .handle = null };
         var outcome: Outcome = .{};
         var arguments: usearch_arena_init_t = .{
             .arena = &arena.handle,
@@ -1000,6 +1019,20 @@ pub const Arena = struct {
         self.generation +%= 1;
     }
 
+    /// Where its outputs live, as the executor that made it decided, refusing a freed arena with
+    /// `Error.InvalidArgument`. Calls `usearch_arena_describe`.
+    pub fn describe(self: Arena) Error!ArenaDescription {
+        var outcome: Outcome = .{};
+        var description: usearch_arena_description_t = .{};
+        var arguments: usearch_arena_describe_t = .{ .arena = self.handle, .outcome = &outcome, .description = &description };
+        usearch_arena_describe(&arguments);
+        try outcome.check();
+        return .{
+            .residency = description.residency,
+            .device = if (description.residency == .vram) @intCast(description.device) else null,
+        };
+    }
+
     /// The arena and call a view was written by. Binding-only.
     pub const Stamp = struct {
         arena: *const Arena,
@@ -1009,9 +1042,17 @@ pub const Arena = struct {
         /// and a read of device memory with `Error.Device`.
         pub fn check(self: Stamp) Error!void {
             if (self.arena.generation != self.generation) return refuse(.uninitialized);
-            if (self.arena.residency == .vram) return refuse(.device);
+            if ((try self.arena.describe()).residency == .vram) return refuse(.device);
         }
     };
+};
+
+/// Where an arena's outputs live. Mirrors `usearch_arena_description_t`.
+pub const ArenaDescription = struct {
+    /// `.ram` for host pages, `.vram` for one device's memory.
+    residency: Residency,
+    /// The ordinal of the device holding a `.vram` arena; null for host pages.
+    device: ?u32,
 };
 
 /// The stamp a call C has taken from `arena` carries, once a blocking call returns or a deferred one
@@ -1020,57 +1061,6 @@ pub const Arena = struct {
 pub fn served(arena: *Arena, status: Status) Arena.Stamp {
     if (status != .contended) arena.generation +%= 1;
     return .{ .arena = arena, .generation = arena.generation };
-}
-
-/// A submitted call, held in storage the caller places - on the stack, in a struct, or from an
-/// allocator - which owns its outcome until the call is final, while the arena, the handles and the
-/// slices it was handed stay borrowed until then.
-///
-/// `status` polls without blocking, `wait` blocks until the call is final and answers its result
-/// or error - the same one however often it is asked - and `deinit` waits the same way. A submitted
-/// `Deferred` stays put until `deinit`, and has one owner: `wait` and `deinit` never run on two
-/// threads at once, while `status` reads from any. Binding-only; `wait` and `deinit` call
-/// `usearch_outcome_wait`.
-pub fn Deferred(comptime Call: type) type {
-    return struct {
-        const Self = @This();
-
-        call: Call,
-        answer: ?(Error!Call.Result) = null,
-
-        /// Copies `call` into `self`, which stays put until final, and submits it. Binding-only.
-        pub fn submit(self: *Self, call: Call, index: ?*anyopaque, executor: ?*anyopaque) void {
-            self.* = .{ .call = call };
-            self.call.launch(index, executor, .deferred);
-        }
-
-        /// `.deferred` until the call is final, then its final status. Calls `usearch_outcome_status`.
-        pub fn status(self: *Self) Status {
-            return usearch_outcome_status(&self.call.outcome);
-        }
-
-        /// The static detail of the final status; empty until the call is final, and on success.
-        pub fn message(self: *Self) [:0]const u8 {
-            return if (self.status() == .deferred) "" else self.call.outcome.text();
-        }
-
-        /// Blocks until the call is final, then answers its result, the same views a blocking call
-        /// answers over the arena it borrowed. One thread waits at a time. Calls `usearch_outcome_wait`.
-        pub fn wait(self: *Self) Error!Call.Result {
-            if (self.answer) |answer| return answer;
-            _ = usearch_outcome_wait(&self.call.outcome);
-            self.answer = self.call.finish();
-            return self.answer.?;
-        }
-
-        /// Blocks until the call is final; the storage is reusable afterwards, and the result's
-        /// views stay as valid as the arena keeps them. Calls `usearch_outcome_wait`.
-        pub fn deinit(self: *Self) void {
-            _ = self.wait() catch {};
-            self.call = undefined;
-            self.answer = null;
-        }
-    };
 }
 
 /// The library's version, as a static null-terminated string. Calls `usearch_version_name`.

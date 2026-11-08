@@ -443,9 +443,8 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 	if _, _, err := (MatchesView{}).Query(0); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a view no call wrote read with %v", err)
 	}
-	device := exported{arena: &Arena{residency: ResidencyVram}}
-	if err := device.host(); !errors.Is(err, StatusDevice) {
-		t.Errorf("a view over device memory read with %v", err)
+	if description, err := other.Describe(); err != nil || description != (ArenaDescription{ResidencyRam, 0}) {
+		t.Errorf("a host arena described itself as %+v: %v", description, err)
 	}
 }
 
@@ -1189,9 +1188,9 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	}
 }
 
-// An absorbed donor is consumed, so it cannot be closed twice, and a stop between donors hands the
-// rest back live to the caller who still owns them.
-func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
+// An absorbed donor is consumed, so it cannot be absorbed twice, and a stopped absorb still
+// consumes every donor, since a cancel stops only the walks across.
+func TestAbsorbConsumesEveryDonor(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, _, _ := populated(t, angularBF16(dimensions), 2)
@@ -1225,14 +1224,14 @@ func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
 		t.Errorf("a consumed donor was absorbed again with %v", err)
 	}
 
-	var seen uint
-	stops := func(completed, _ uint) bool { seen = completed; return completed == 0 }
+	// A cancel stops the walks across, never a move, so every donor is consumed either way.
+	stops := func(completed, _ uint) bool { return completed == 0 }
 	if _, err := index.Absorb(donors[1:], &DenseAbsorbConfig{Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
 		t.Fatalf("the stopped absorb reported %v", err)
 	}
 	for position, donor := range donors[1:] {
-		if _, err := donor.Describe(); (err == nil) != (uint(position) >= seen) {
-			t.Errorf("donor %d of the %d absorbed described with %v", position, seen, err)
+		if _, err := donor.Describe(); !errors.Is(err, StatusUninitialized) {
+			t.Errorf("donor %d of a stopped absorb described with %v", position, err)
 		}
 	}
 }

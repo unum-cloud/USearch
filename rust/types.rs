@@ -294,7 +294,7 @@ pub type usearch_predicate_cost_t = c_int;
 
 pub const usearch_predicate_cost_cheap_k: usearch_predicate_cost_t = 0;
 
-/// Mirrors `usearch_predicate_t`.
+/// Which candidate keys a search may report: a handler and the state it is called with.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_predicate_t {
@@ -306,7 +306,7 @@ pub struct usearch_predicate_t {
 /// Periodic advance report and the caller's chance to stop the call.
 pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
 
-/// Mirrors `usearch_progress_t`.
+/// A periodic advance report and the caller's chance to stop the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_progress_t {
@@ -331,6 +331,20 @@ pub struct usearch_arena_init_t {
     pub arena: *mut usearch_arena_t,
     pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct usearch_arena_description_t {
+    pub residency: usearch_residency_t,
+    pub device: usize,
+}
+
+#[repr(C)]
+pub struct usearch_arena_describe_t {
+    pub arena: usearch_arena_t,
+    pub outcome: *mut usearch_outcome_t,
+    pub description: *mut usearch_arena_description_t,
 }
 
 #[repr(C)]
@@ -393,6 +407,7 @@ extern "C" {
 
     pub fn usearch_arena_init(arguments: *mut usearch_arena_init_t);
     pub fn usearch_arena_free(arena: usearch_arena_t);
+    pub fn usearch_arena_describe(arguments: *mut usearch_arena_describe_t);
 
     pub fn usearch_status_name(status: usearch_status_t) -> *const c_char;
     pub fn usearch_status_from_name(name: usearch_bytes_view_t) -> usearch_status_t;
@@ -414,6 +429,40 @@ extern "C" {
     pub fn usearch_gpu_class_from_name(name: usearch_bytes_view_t) -> usearch_gpu_class_t;
     pub fn usearch_nvme_class_name(nvme_class: usearch_nvme_class_t) -> *const c_char;
     pub fn usearch_nvme_class_from_name(name: usearch_bytes_view_t) -> usearch_nvme_class_t;
+
+    pub fn usearch_keys_view_from_arrow(
+        schema: *const ArrowSchema,
+        array: *const ArrowArray,
+        keys: *mut usearch_keys_view_t,
+        count: *mut usize,
+    ) -> usearch_status_t;
+    pub fn usearch_rows_view_from_arrow(
+        schema: *const ArrowSchema,
+        array: *const ArrowArray,
+        rows: *mut usearch_rows_view_t,
+        count: *mut usize,
+    ) -> usearch_status_t;
+    pub fn usearch_keys_view_to_arrow(
+        keys: usearch_keys_view_t,
+        count: usize,
+        arena: usearch_arena_t,
+        schema: *mut ArrowSchema,
+        array: *mut ArrowDeviceArray,
+    ) -> usearch_status_t;
+    pub fn usearch_rows_view_to_arrow(
+        rows: usearch_rows_view_t,
+        count: usize,
+        arena: usearch_arena_t,
+        schema: *mut ArrowSchema,
+        array: *mut ArrowDeviceArray,
+    ) -> usearch_status_t;
+    pub fn usearch_matches_tape_view_to_arrow(
+        matches: usearch_matches_tape_view_t,
+        count: usize,
+        arena: usearch_arena_t,
+        schema: *mut ArrowSchema,
+        array: *mut ArrowDeviceArray,
+    ) -> usearch_status_t;
 }
 
 // endregion: Raw Declarations
@@ -494,11 +543,9 @@ pub trait RowsView {
 
 // region: Errors and Introspection
 
-/// Every value the C status word takes besides success, numbered alike.
+/// Every way a call can end besides success, numbered as the library numbers them.
 ///
 /// An [`Error`] never carries [`Status::Deferred`], which only [`Deferred::status`] reports.
-///
-/// Mirrors `usearch_status_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -568,7 +615,7 @@ impl Status {
 }
 
 impl fmt::Display for Status {
-    /// Calls `usearch_status_name`.
+    /// Writes the status's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_status_name, *self as c_int))
     }
@@ -577,7 +624,8 @@ impl fmt::Display for Status {
 impl FromStr for Status {
     type Err = Error;
 
-    /// Calls `usearch_status_from_name`, refusing "success", which names no failure.
+    /// Reads a status back from the name `Display` writes, refusing "success", which names no
+    /// failure.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(text, usearch_status_from_name, usearch_status_name, |value| {
             Status::from_raw(value).err()
@@ -588,12 +636,10 @@ impl FromStr for Status {
 /// A failure, whether the engine reported it or the binding caught it before the call.
 ///
 /// Messages are static storage, so nothing allocates on the failure path.
-///
-/// Mirrors a failed `usearch_outcome_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub struct Error {
-    /// The identity of the failure, shared with the C interface.
+    /// The identity of the failure, shared by every binding of the library.
     pub status: Status,
     /// The detail the status alone cannot carry.
     pub message: &'static str,
@@ -656,18 +702,12 @@ pub(crate) fn read_spelling<Value>(
 }
 
 /// The version of the linked library.
-///
-/// Calls `usearch_version_name`.
 pub fn version() -> &'static str { unsafe { static_string(usearch_version_name()) } }
 
 /// Comma-separated hardware capabilities the library was compiled with.
-///
-/// Calls `usearch_capabilities_compiled`.
 pub fn capabilities_compiled() -> &'static str { unsafe { static_string(usearch_capabilities_compiled()) } }
 
 /// Comma-separated hardware capabilities this machine offers at runtime.
-///
-/// Calls `usearch_capabilities_available`.
 pub fn capabilities_available() -> &'static str { unsafe { static_string(usearch_capabilities_available()) } }
 
 // endregion: Errors and Introspection
@@ -675,8 +715,6 @@ pub fn capabilities_available() -> &'static str { unsafe { static_string(usearch
 // region: Keys and Distances
 
 /// Distance or similarity score in the metric of the index that produced it.
-///
-/// Mirrors `usearch_distance_t`.
 pub type Distance = usearch_distance_t;
 
 /// A 128-bit entry identity, rendered as a lowercase dashed UUID.
@@ -684,8 +722,6 @@ pub type Distance = usearch_distance_t;
 /// Keys need not be unique: several entries may share one, and `count` reports how many.
 /// Integer identities park in the low eight bytes, so `Key::from(42u64)` prints as
 /// `00000000-0000-0000-0000-00000000002a`.
-///
-/// Mirrors `usearch_key_t`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(
@@ -768,10 +804,8 @@ impl fmt::Debug for Key {
 
 /// Scalar types the indexes store and exchange, named by width and encoding.
 ///
-/// Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell. The C enum
-/// reserves the numbering gaps for kinds not yet implemented, so this one is open.
-///
-/// Mirrors `usearch_scalar_t`.
+/// Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell. The library
+/// reserves the numbering gaps for kinds not yet implemented, so this enum is open.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -837,7 +871,7 @@ impl Scalar {
 }
 
 impl fmt::Display for Scalar {
-    /// Calls `usearch_scalar_name`.
+    /// Writes the scalar's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_scalar_name, *self as c_int))
     }
@@ -846,13 +880,13 @@ impl fmt::Display for Scalar {
 impl FromStr for Scalar {
     type Err = Error;
 
-    /// Calls `usearch_scalar_from_name`.
+    /// Reads a scalar back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(text, usearch_scalar_from_name, usearch_scalar_name, Scalar::from_raw)
     }
 }
 
-/// Ties a NumKong storage type to the [`Scalar`] the C interface tags buffers with.
+/// Ties a NumKong storage type to the [`Scalar`] the library tags its buffers with.
 ///
 /// The stored quantization is chosen separately in the index options, so an `f32` query may
 /// search an `i8` index - the library converts on the way in.
@@ -863,7 +897,7 @@ impl FromStr for Scalar {
 /// The associated scalar must describe the type's in-memory encoding exactly; the library reads
 /// raw buffers under that tag.
 pub unsafe trait Element: StorageElement + 'static {
-    /// The tag the C interface knows this type by.
+    /// The tag the library knows this type by.
     const SCALAR: Scalar;
 }
 
@@ -994,6 +1028,7 @@ impl MatrixLayout {
 }
 
 /// A borrowed run of rows and the batch axis it spans.
+#[derive(Clone, Copy)]
 pub struct Batch {
     pub(crate) rows: usearch_rows_view_t,
     pub(crate) count: usize,
@@ -1047,8 +1082,6 @@ pub struct QueryMatches<'matches> {
 
 /// The ranked matches a search or a stream pull wrote into the arena it borrows; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
-///
-/// Mirrors `usearch_matches_view_t`.
 pub struct Matches<'arena> {
     pub(crate) arena: &'arena Arena,
     pub(crate) view: Exported<usearch_matches_view_t>,
@@ -1077,16 +1110,297 @@ impl<'arena> Matches<'arena> {
         // Safety: the arena holds a finished call's output in host memory.
         Ok((0..self.queries).map(move |query| unsafe { view.query(query) }))
     }
+
+    /// Exports every query's padded keys, `queries` by `columns`, as one Arrow
+    /// `FixedSizeBinary(16)` column tagged `arrow.uuid` in place; each query's count bounds its
+    /// own row.
+    ///
+    /// The export borrows the arena, so no verb reaches it while the export lives:
+    ///
+    /// ```compile_fail
+    /// use usearch::*;
+    /// # fn main() -> Result<()> {
+    /// let options = DenseOptions { dimensions: 2, ..DenseOptions::default() };
+    /// let index = DenseIndex::init_ram(&options, &[])?;
+    /// let slab = [1.0f32, 0.0];
+    /// let mut arena = Arena::new()?;
+    /// let matches = index.search(&rows(&slab, 2)?, 1, &mut arena)?;
+    /// let export = matches.keys_to_arrow()?;
+    /// index.search(&rows(&slab, 2)?, 1, &mut arena)?;
+    /// drop(export);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn keys_to_arrow(&self) -> Result<ArrowExport<'arena>> {
+        let keys = usearch_keys_view_t {
+            data: self.view.0.keys,
+            stride: core::mem::size_of::<usearch_key_t>(),
+        };
+        let count = self.queries * self.view.0.columns;
+        let mut schema = ArrowSchema::default();
+        let mut array = ArrowDeviceArray::default();
+        let status = unsafe { usearch_keys_view_to_arrow(keys, count, self.arena.handle, &mut schema, &mut array) };
+        arrow_checked(status)?;
+        Ok(ArrowExport {
+            arena: self.arena,
+            schema,
+            array,
+        })
+    }
+
+    /// Exports every query's padded distances as one Arrow `FixedSizeList` of `columns` `f64` per
+    /// query in place, borrowing the arena as [`Matches::keys_to_arrow`] does.
+    pub fn distances_to_arrow(&self) -> Result<ArrowExport<'arena>> {
+        let columns = self.view.0.columns;
+        let distances = usearch_rows_view_t {
+            data: self.view.0.scores.cast(),
+            stride: columns * core::mem::size_of::<Distance>(),
+            columns,
+            scalar: Scalar::F64 as usearch_scalar_t,
+        };
+        let mut schema = ArrowSchema::default();
+        let mut array = ArrowDeviceArray::default();
+        let status =
+            unsafe { usearch_rows_view_to_arrow(distances, self.queries, self.arena.handle, &mut schema, &mut array) };
+        arrow_checked(status)?;
+        Ok(ArrowExport {
+            arena: self.arena,
+            schema,
+            array,
+        })
+    }
 }
 
 // endregion: Matches
+
+// region: Arrow
+
+/// A column's type in Apache Arrow's C data interface, laid out as `arrow::ffi::FFI_ArrowSchema`
+/// and released when dropped.
+#[repr(C)]
+pub struct ArrowSchema {
+    format: *const c_char,
+    name: *const c_char,
+    metadata: *const c_char,
+    flags: i64,
+    n_children: i64,
+    children: *mut *mut ArrowSchema,
+    dictionary: *mut ArrowSchema,
+    release: Option<unsafe extern "C" fn(*mut ArrowSchema)>,
+    private_data: *mut c_void,
+}
+
+/// A column's buffers in Apache Arrow's C data interface, laid out as `arrow::ffi::FFI_ArrowArray`
+/// and released when dropped.
+#[repr(C)]
+pub struct ArrowArray {
+    length: i64,
+    null_count: i64,
+    offset: i64,
+    n_buffers: i64,
+    n_children: i64,
+    buffers: *mut *const c_void,
+    children: *mut *mut ArrowArray,
+    dictionary: *mut ArrowArray,
+    release: Option<unsafe extern "C" fn(*mut ArrowArray)>,
+    private_data: *mut c_void,
+}
+
+/// An [`ArrowArray`] and the device holding its buffers, as Arrow's C device data interface lays
+/// them out.
+#[repr(C)]
+pub struct ArrowDeviceArray {
+    array: ArrowArray,
+    device_id: i64,
+    device_type: i32,
+    sync_event: *mut c_void,
+    reserved: [i64; 3],
+}
+
+impl Default for ArrowSchema {
+    /// A released schema, which every converter refuses.
+    fn default() -> Self {
+        ArrowSchema {
+            format: ptr::null(),
+            name: ptr::null(),
+            metadata: ptr::null(),
+            flags: 0,
+            n_children: 0,
+            children: ptr::null_mut(),
+            dictionary: ptr::null_mut(),
+            release: None,
+            private_data: ptr::null_mut(),
+        }
+    }
+}
+
+impl Default for ArrowArray {
+    /// A released array, which every converter refuses.
+    fn default() -> Self {
+        ArrowArray {
+            length: 0,
+            null_count: 0,
+            offset: 0,
+            n_buffers: 0,
+            n_children: 0,
+            buffers: ptr::null_mut(),
+            children: ptr::null_mut(),
+            dictionary: ptr::null_mut(),
+            release: None,
+            private_data: ptr::null_mut(),
+        }
+    }
+}
+
+impl Default for ArrowDeviceArray {
+    /// A released array on no device.
+    fn default() -> Self {
+        ArrowDeviceArray {
+            array: ArrowArray::default(),
+            device_id: 0,
+            device_type: 0,
+            sync_event: ptr::null_mut(),
+            reserved: [0; 3],
+        }
+    }
+}
+
+impl ArrowSchema {
+    /// The column's format string, or none once released.
+    pub fn format(&self) -> Option<&CStr> {
+        // Safety: a live schema's format is a null-terminated string it owns.
+        self.release.map(|_| unsafe { CStr::from_ptr(self.format) })
+    }
+}
+
+impl ArrowArray {
+    /// Rows the column holds.
+    pub fn length(&self) -> i64 { self.length }
+}
+
+impl ArrowDeviceArray {
+    /// The column itself.
+    pub fn array(&self) -> &ArrowArray { &self.array }
+}
+
+impl Drop for ArrowSchema {
+    fn drop(&mut self) {
+        if let Some(release) = self.release {
+            unsafe { release(self) }
+        }
+    }
+}
+
+impl Drop for ArrowArray {
+    fn drop(&mut self) {
+        if let Some(release) = self.release {
+            unsafe { release(self) }
+        }
+    }
+}
+
+// Safety: Arrow's C data interface lets a producer's release run on any thread.
+unsafe impl Send for ArrowSchema {}
+unsafe impl Send for ArrowArray {}
+unsafe impl Send for ArrowDeviceArray {}
+
+/// One Arrow column a producer handed over through the C data interface, which `arrow::ffi` pairs
+/// as `FFI_ArrowSchema` and `FFI_ArrowArray`.
+///
+/// # Safety
+/// Both pointers must address live structures laid out as [`ArrowSchema`] and [`ArrowArray`] and
+/// following Arrow's C data interface, whose host buffers stay valid and unwritten for as long as
+/// `self` stays borrowed.
+pub unsafe trait ArrowColumn {
+    /// The column's type.
+    fn schema(&self) -> *const ArrowSchema;
+    /// The column's buffers.
+    fn array(&self) -> *const ArrowArray;
+}
+
+/// Turns a converter's or an exporter's status into a `Result`.
+pub(crate) fn arrow_checked(status: usearch_status_t) -> Result<()> {
+    Status::from_raw(status).map_err(|status| fail(status, "Arrow refused the column"))
+}
+
+/// The rows of one Arrow fixed-size list column, read in place through its buffers, which a verb
+/// takes wherever it takes a matrix.
+///
+/// Rust-only.
+pub struct ArrowRows<'column, Value> {
+    batch: Batch,
+    column: PhantomData<&'column Value>,
+}
+
+impl<'column, Value: Element> ArrowRows<'column, Value> {
+    /// Views `column`'s rows, refused with [`Status::UnsupportedLayout`] for another Arrow type,
+    /// [`Status::InvalidArgument`] for a null, and [`Status::UnknownKind`] for rows of another
+    /// scalar than `Value`.
+    pub fn new<Column: ArrowColumn + ?Sized>(column: &'column Column) -> Result<Self> {
+        let mut rows = usearch_rows_view_t::default();
+        let mut count = 0;
+        arrow_checked(unsafe { usearch_rows_view_from_arrow(column.schema(), column.array(), &mut rows, &mut count) })?;
+        if rows.scalar != Value::SCALAR as usearch_scalar_t {
+            return Err(fail(Status::UnknownKind, "the Arrow rows hold another scalar"));
+        }
+        Ok(ArrowRows {
+            batch: Batch { rows, count },
+            column: PhantomData,
+        })
+    }
+}
+
+impl<Value: Element> RowsView for ArrowRows<'_, Value> {
+    type Value = Value;
+    fn batch(&self) -> Result<Batch> { Ok(self.batch) }
+}
+
+/// Views the keys of one Arrow `fixed_size_binary(16)` column in place, tagged `arrow.uuid` or not,
+/// refused as [`ArrowRows::new`] refuses.
+pub fn keys_from_arrow<Column: ArrowColumn + ?Sized>(column: &Column) -> Result<&[Key]> {
+    let mut keys = usearch_keys_view_t::default();
+    let mut count = 0;
+    arrow_checked(unsafe { usearch_keys_view_from_arrow(column.schema(), column.array(), &mut keys, &mut count) })?;
+    // Safety: the column's promise keeps the keys alive through its borrow, and a key is its bytes.
+    Ok(unsafe { arena_slice(keys.data, count) })
+}
+
+/// A column exported as Arrow in place, reading the arena it sits in until that arena's next call.
+///
+/// Rust-only.
+pub struct ArrowExport<'arena> {
+    pub(crate) arena: &'arena Arena,
+    pub(crate) schema: ArrowSchema,
+    pub(crate) array: ArrowDeviceArray,
+}
+
+impl ArrowExport<'_> {
+    /// The column's type.
+    pub fn schema(&self) -> &ArrowSchema { &self.schema }
+
+    /// The column's buffers and the device holding them.
+    pub fn array(&self) -> &ArrowDeviceArray { &self.array }
+
+    /// Hands the column over past the arena's borrow, for a consumer that takes the structures by
+    /// value, refused with [`Status::Device`] over device memory, which must be released before
+    /// its executor drops.
+    ///
+    /// # Safety
+    ///
+    /// The arena must outlive the parts and take no call until they are released, as nothing
+    /// refuses one.
+    pub unsafe fn into_parts(self) -> Result<(ArrowSchema, ArrowArray)> {
+        self.arena.host()?;
+        Ok((self.schema, self.array.array))
+    }
+}
+
+// endregion: Arrow
 
 // region: Classes
 
 /// The CPU families USearch ships tuned variants for: dispatch reports its pick in this
 /// vocabulary, and a RAM or NVMe placement or executor may pin one.
-///
-/// Mirrors `usearch_cpu_class_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1133,7 +1447,7 @@ pub enum CPUClass {
 }
 
 impl fmt::Display for CPUClass {
-    /// Calls `usearch_cpu_class_name`.
+    /// Writes the class's name, as an index description reports it.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_cpu_class_name, *self as c_int))
     }
@@ -1141,8 +1455,6 @@ impl fmt::Display for CPUClass {
 
 /// The GPU families USearch ships tuned variants for, the device twin of [`CPUClass`]: a VRAM
 /// placement or executor may pin one.
-///
-/// Mirrors `usearch_gpu_class_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1174,7 +1486,7 @@ pub enum GPUClass {
 }
 
 impl fmt::Display for GPUClass {
-    /// Calls `usearch_gpu_class_name`.
+    /// Writes the class's name, as an index description reports it.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_gpu_class_name, *self as c_int))
     }
@@ -1280,8 +1592,6 @@ impl Callbacks {
 ///
 /// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
 /// be `FnMut`. A panic inside it stops the call like a `Break` and is re-raised once the call is final.
-///
-/// Mirrors `usearch_progress_callback_t`.
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
 /// # Safety
@@ -1319,8 +1629,6 @@ pub(crate) fn lower_progress(
 
 /// A search filter, run on the executor's threads together; a panic rejects the key and is
 /// re-raised once the call is final.
-///
-/// Mirrors `usearch_predicate_t`.
 pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 
 /// # Safety
@@ -1361,8 +1669,6 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callba
 // region: Executors
 
 /// What an executor does with its threads or streams once it goes idle.
-///
-/// Mirrors `usearch_mood_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub enum Mood {
@@ -1384,7 +1690,7 @@ impl Mood {
 }
 
 impl fmt::Display for Mood {
-    /// Calls `usearch_mood_name`.
+    /// Writes the mood's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_mood_name, *self as c_int))
     }
@@ -1393,15 +1699,13 @@ impl fmt::Display for Mood {
 impl FromStr for Mood {
     type Err = Error;
 
-    /// Calls `usearch_mood_from_name`.
+    /// Reads a mood back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(text, usearch_mood_from_name, usearch_mood_name, Mood::from_raw)
     }
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
-///
-/// Mirrors `usearch_residency_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
@@ -1426,7 +1730,7 @@ impl Residency {
 }
 
 impl fmt::Display for Residency {
-    /// Calls `usearch_residency_name`.
+    /// Writes the residency's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_residency_name, *self as c_int))
     }
@@ -1435,7 +1739,7 @@ impl fmt::Display for Residency {
 impl FromStr for Residency {
     type Err = Error;
 
-    /// Calls `usearch_residency_from_name`.
+    /// Reads a residency back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(
             text,
@@ -1447,8 +1751,6 @@ impl FromStr for Residency {
 }
 
 /// How a search reaches the indexed entries it scores.
-///
-/// Mirrors `usearch_traversal_t`.
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 #[non_exhaustive]
@@ -1471,7 +1773,7 @@ impl Traversal {
 }
 
 impl fmt::Display for Traversal {
-    /// Calls `usearch_traversal_name`.
+    /// Writes the traversal's name, which `from_str` reads back.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(usearch_traversal_name, *self as c_int))
     }
@@ -1480,7 +1782,7 @@ impl fmt::Display for Traversal {
 impl FromStr for Traversal {
     type Err = Error;
 
-    /// Calls `usearch_traversal_from_name`.
+    /// Reads a traversal back from the name `Display` writes, refusing any other.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(
             text,
@@ -1498,7 +1800,7 @@ impl FromStr for Traversal {
 /// machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
 /// constructor that produced it and must match the residency of every handle it drives.
 ///
-/// [`Executor::default`] is the C interface's null executor: it owns nothing, and every call
+/// [`Executor::default`] is the null executor: it owns nothing, and every call
 /// handed it runs on the calling thread.
 ///
 /// Calls on one executor start in submission order, so threads wanting to overlap take one apiece;
@@ -1508,13 +1810,9 @@ impl FromStr for Traversal {
 /// [`Arena::new_in`] places an arena where it computes: a host arena may outlive it, while a GPU
 /// arena holds it until the arena drops.
 /// Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so.
-///
-/// Mirrors `usearch_executor_t`; dropping its last holder calls `usearch_executor_free`.
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: usearch_executor_t,
-    /// The residency of the constructor that produced it, which places the arenas it makes.
-    residency: Residency,
     /// Frees `handle` once neither this nor a GPU arena it made holds it.
     share: Arc<ExecutorShare>,
 }
@@ -1524,15 +1822,14 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self { Executor::adopt(ptr::null_mut(), Residency::Ram) }
+    fn default() -> Self { Executor::adopt(ptr::null_mut()) }
 }
 
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
-    fn adopt(handle: usearch_executor_t, residency: Residency) -> Self {
+    fn adopt(handle: usearch_executor_t) -> Self {
         Executor {
             handle,
-            residency,
             share: Arc::new(ExecutorShare(handle)),
         }
     }
@@ -1544,8 +1841,6 @@ impl Executor {
     /// the ordered publication path.
     ///
     /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    ///
-    /// Calls `usearch_executor_for_ram`.
     pub fn for_ram(
         memory_domains: &[i32],
         cpu_class: Option<CPUClass>,
@@ -1563,14 +1858,12 @@ impl Executor {
                 deferred_limit,
             })
         };
-        let executor = Executor::adopt(handle, Residency::Ram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion pool, so several libraries in one process
     /// share one set of threads while each keeps its own scratch.
-    ///
-    /// Calls `usearch_executor_on_pool`.
     ///
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
@@ -1589,7 +1882,7 @@ impl Executor {
             pool,
             deferred_limit,
         });
-        let executor = Executor::adopt(handle, Residency::Ram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
@@ -1599,8 +1892,6 @@ impl Executor {
     /// Zero `threads` derives from those devices' queue capabilities.
     ///
     /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    ///
-    /// Calls `usearch_executor_for_nvme`.
     pub fn for_nvme(
         paths: &[impl AsRef<Path>],
         cpu_class: Option<CPUClass>,
@@ -1620,7 +1911,7 @@ impl Executor {
                 nvme_class: 0,
             })
         };
-        let executor = Executor::adopt(handle, Residency::Nvme);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
@@ -1630,8 +1921,6 @@ impl Executor {
     /// `streams` is empty, or holds one CUDA stream per device in `devices` order. Zero
     /// `scratch_limit` lets scratch grow as geometry asks. A pinned `gpu_class` the devices do not
     /// run is refused with [`Status::Unsupported`].
-    ///
-    /// Calls `usearch_executor_for_vram`.
     ///
     /// # Safety
     /// Every stream must be a live CUDA stream on its device that outlives the executor.
@@ -1659,14 +1948,12 @@ impl Executor {
             scratch_limit,
             deferred_limit,
         });
-        let executor = Executor::adopt(handle, Residency::Vram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
     /// Waits for every call submitted to this executor, then adopts `mood` whenever it next goes
     /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
-    ///
-    /// Calls `usearch_executor_drain`.
     pub fn drain(&self, mood: Mood) -> Result<()> {
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1707,40 +1994,29 @@ impl Drop for ExecutorShare {
 /// it, so it serves only calls on that executor, any other refused with [`Status::Device`], and
 /// holds the executor until it drops.
 ///
-/// Mirrors `usearch_arena_t`; dropping it calls `usearch_arena_free`, which waits for the calls
-/// still writing into it.
+/// Dropping it waits for the calls still writing into it.
 #[derive(Debug)]
 pub struct Arena {
     pub(crate) handle: usearch_arena_t,
-    /// The residency of the executor that made it.
-    residency: Residency,
     /// The executor a GPU arena frees on, dropped after the arena; `None` for host pages.
     _executor: Option<Arc<ExecutorShare>>,
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
-// and a shared borrow reads only its residency.
+// and a shared borrow only asks the library where it lives.
 unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
 impl Arena {
     /// Makes an arena of host pages for calls on the calling thread.
-    ///
-    /// Calls `usearch_arena_init`.
     pub fn new() -> Result<Self> { Arena::new_in(&Executor::default()) }
 
     /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
     /// on `executor` itself for a GPU arena.
-    ///
-    /// Calls `usearch_arena_init`.
     pub fn new_in(executor: &Executor) -> Result<Self> {
         let mut arena = Arena {
             handle: ptr::null_mut(),
-            residency: executor.residency,
-            _executor: match executor.residency {
-                Residency::Vram => Some(Arc::clone(&executor.share)),
-                _ => None,
-            },
+            _executor: None,
         };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1750,15 +2026,39 @@ impl Arena {
                 outcome: &mut outcome,
             })
         };
-        check(outcome).map(|()| arena)
+        check(outcome)?;
+        if arena.describe()?.residency == Residency::Vram {
+            arena._executor = Some(Arc::clone(&executor.share));
+        }
+        Ok(arena)
     }
 
-    /// The residency of the executor that made it, whose memory it keeps.
-    pub fn residency(&self) -> Residency { self.residency }
+    /// Where the outputs live, as the executor that made the arena decided.
+    pub fn describe(&self) -> Result<ArenaDescription> {
+        let mut description = usearch_arena_description_t::default();
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_arena_describe(&mut usearch_arena_describe_t {
+                arena: self.handle,
+                outcome: &mut outcome,
+                description: &mut description,
+            })
+        };
+        check(outcome)?;
+        let residency = Residency::from_raw(description.residency)
+            .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known residency"))?;
+        Ok(ArenaDescription {
+            residency,
+            device: match residency {
+                Residency::Vram => u32::try_from(description.device).ok(),
+                _ => None,
+            },
+        })
+    }
 
     /// Refuses device memory, which no host accessor may read.
     pub(crate) fn host(&self) -> Result<()> {
-        match self.residency {
+        match self.describe()?.residency {
             Residency::Vram => Err(fail(Status::Device, "the outputs are device memory")),
             _ => Ok(()),
         }
@@ -1767,6 +2067,16 @@ impl Arena {
 
 impl Drop for Arena {
     fn drop(&mut self) { unsafe { usearch_arena_free(self.handle) } }
+}
+
+/// Where an [`Arena`]'s outputs live.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub struct ArenaDescription {
+    /// [`Residency::Ram`] for host pages, [`Residency::Vram`] for one device's memory.
+    pub residency: Residency,
+    /// The device ordinal, as [`Executor::for_vram`] takes it; `None` for host pages.
+    pub device: Option<u32>,
 }
 
 /// A view the library wrote into an arena the verb or result borrows.
@@ -1902,7 +2212,7 @@ struct Lent<Verb: Calling> {
 /// A panic a handler raised resurfaces from `wait`, `.await`, or a drop outside unwinding.
 /// `'index` is the borrow of the [`On`] that submitted it.
 ///
-/// Rust-only; waiting and dropping call `usearch_outcome_wait`.
+/// Rust-only.
 #[must_use = "a deferred call's outcome is seen only through `status` or `wait`"]
 pub struct Deferred<'index, Verb: Calling> {
     lent: NonNull<Lent<Verb>>,
@@ -1911,16 +2221,12 @@ pub struct Deferred<'index, Verb: Calling> {
 
 impl<Verb: Calling> Deferred<'_, Verb> {
     /// `Err(Status::Deferred)` until the call is final, then its final status, read without blocking.
-    ///
-    /// Calls `usearch_outcome_status`.
     pub fn status(&self) -> core::result::Result<(), Status> {
         // Safety: the outcome lives in the box this `Deferred` owns until it is final.
         Status::from_raw(unsafe { usearch_outcome_status(ptr::addr_of_mut!((*self.lent.as_ptr()).outcome)) })
     }
 
     /// Blocks until the call is final, then hands back what it produced.
-    ///
-    /// Calls `usearch_outcome_wait`.
     pub fn wait(self) -> Result<Verb::Output> {
         let lent = ManuallyDrop::new(self).lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, so it is freed here.
@@ -1972,10 +2278,10 @@ impl<'index, Verb: Calling> IntoFuture for Deferred<'index, Verb> {
 
 /// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to be polled again.
 ///
-/// The C library has no wake-up, so an executor re-polls it while other tasks run, spinning only
+/// The library has no wake-up, so an executor re-polls it while other tasks run, spinning only
 /// when nothing else is ready; [`Deferred::wait`] blocks without spinning.
 ///
-/// Rust-only; the final poll calls `usearch_outcome_wait`, which returns at once.
+/// Rust-only.
 #[must_use = "an awaited call does nothing unless polled"]
 pub struct Wait<'index, Verb: Calling>(Option<Deferred<'index, Verb>>);
 
@@ -2005,6 +2311,7 @@ mod tests {
     use std::mem::{offset_of, size_of};
 
     use super::*;
+    use crate::DenseVerbs;
 
     #[test]
     fn keys_round_trip_through_their_rendering() {
@@ -2152,21 +2459,34 @@ mod tests {
         assert_eq!(failure.to_string(), "a row needs at least one dimension");
     }
 
-    /// An arena keeps the residency of the executor that made it, and the host reads only host pages.
+    /// An arena lives where the executor that made it computes, and the host reads only host pages.
     #[test]
     fn arenas_live_where_their_executor_computes() -> Result<()> {
         let local = Arena::new()?;
-        assert_eq!(local.residency(), Residency::Ram);
+        let host = ArenaDescription {
+            residency: Residency::Ram,
+            device: None,
+        };
+        assert_eq!(local.describe()?, host);
         assert!(local.host().is_ok());
 
         let executor = Executor::for_ram(&[], None, 1, 0)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
-        assert_eq!(placed.residency(), Residency::Ram, "an arena outlives its executor");
+        assert_eq!(placed.describe()?, host, "an arena outlives its executor");
 
         // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
-        let gpu = Executor::adopt(ptr::null_mut(), Residency::Vram);
+        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], 0, 0) }) else {
+            return Ok(());
+        };
         let device = Arena::new_in(&gpu)?;
+        assert_eq!(
+            device.describe()?,
+            ArenaDescription {
+                residency: Residency::Vram,
+                device: Some(0)
+            }
+        );
         let share = Arc::downgrade(&gpu.share);
         drop(gpu);
         assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
@@ -2255,6 +2575,146 @@ mod tests {
         assert_eq!(offset_of!(usearch_executor_for_nvme_t, threads), 5 * word);
         assert_eq!(offset_of!(usearch_executor_for_nvme_t, nvme_class), 7 * word);
         assert_eq!(size_of::<usearch_executor_for_nvme_t>(), 8 * word);
+    }
+
+    /// Arrow's structures keep the offsets Arrow's C data interface freezes on 64-bit hosts.
+    #[test]
+    fn arrow_layouts() {
+        assert_eq!(offset_of!(ArrowSchema, release), 56);
+        assert_eq!(size_of::<ArrowSchema>(), 72);
+        assert_eq!(offset_of!(ArrowArray, release), 64);
+        assert_eq!(size_of::<ArrowArray>(), 80);
+        assert_eq!(offset_of!(ArrowDeviceArray, device_id), 80);
+        assert_eq!(offset_of!(ArrowDeviceArray, sync_event), 96);
+        assert_eq!(size_of::<ArrowDeviceArray>(), 128);
+    }
+
+    unsafe extern "C" fn leave_schema(schema: *mut ArrowSchema) { (*schema).release = None; }
+    unsafe extern "C" fn leave_array(array: *mut ArrowArray) { (*array).release = None; }
+
+    /// An Arrow column laid out by hand over `T`'s bytes, as a foreign producer hands one over:
+    /// `width` of `format`'s values per row, or one value per row without an element.
+    struct HandMadeColumn<'bytes> {
+        schema: ArrowSchema,
+        array: ArrowArray,
+        _element: Option<(Box<ArrowSchema>, Box<[*mut ArrowSchema; 1]>)>,
+        _values: Option<(Box<ArrowArray>, Box<[*mut ArrowArray; 1]>)>,
+        _buffers: Box<[*const c_void; 2]>,
+        _bytes: PhantomData<&'bytes [u8]>,
+    }
+
+    // Safety: the fields hold every node, and the borrow holds the bytes.
+    unsafe impl ArrowColumn for HandMadeColumn<'_> {
+        fn schema(&self) -> *const ArrowSchema { &self.schema }
+        fn array(&self) -> *const ArrowArray { &self.array }
+    }
+
+    fn hand_made_schema(format: &'static CStr) -> ArrowSchema {
+        ArrowSchema {
+            format: format.as_ptr(),
+            release: Some(leave_schema),
+            ..ArrowSchema::default()
+        }
+    }
+
+    fn hand_made_array(length: i64, buffers: *mut *const c_void) -> ArrowArray {
+        ArrowArray {
+            length,
+            n_buffers: 2,
+            buffers,
+            release: Some(leave_array),
+            ..ArrowArray::default()
+        }
+    }
+
+    /// A `w:16` column of `keys`.
+    fn hand_made_keys(keys: &[Key]) -> HandMadeColumn<'_> {
+        let mut buffers = Box::new([ptr::null(), keys.as_ptr().cast::<c_void>()]);
+        let array = hand_made_array(keys.len() as i64, buffers.as_mut_ptr());
+        HandMadeColumn {
+            schema: hand_made_schema(c"w:16"),
+            array,
+            _element: None,
+            _values: None,
+            _buffers: buffers,
+            _bytes: PhantomData,
+        }
+    }
+
+    /// A `+w:4` column of `f32` rows over `slab`, its first `skipped` rows sliced away.
+    fn hand_made_rows(slab: &[f32], skipped: i64) -> HandMadeColumn<'_> {
+        let mut element = Box::new(hand_made_schema(c"f"));
+        let mut element_pointers = Box::new([&mut *element as *mut ArrowSchema]);
+        let mut buffers = Box::new([ptr::null(), slab.as_ptr().cast::<c_void>()]);
+        let mut values = Box::new(hand_made_array(slab.len() as i64, buffers.as_mut_ptr()));
+        let mut value_pointers = Box::new([&mut *values as *mut ArrowArray]);
+        let mut schema = hand_made_schema(c"+w:4");
+        schema.n_children = 1;
+        schema.children = element_pointers.as_mut_ptr();
+        let array = ArrowArray {
+            length: slab.len() as i64 / 4 - skipped,
+            offset: skipped,
+            n_buffers: 1,
+            n_children: 1,
+            buffers: buffers.as_mut_ptr(),
+            children: value_pointers.as_mut_ptr(),
+            release: Some(leave_array),
+            ..ArrowArray::default()
+        };
+        HandMadeColumn {
+            schema,
+            array,
+            _element: Some((element, element_pointers)),
+            _values: Some((values, value_pointers)),
+            _buffers: buffers,
+            _bytes: PhantomData,
+        }
+    }
+
+    /// A foreign producer's column inserts in place and answers at its own keys, past its offset.
+    #[test]
+    fn arrow_columns_insert_in_place() -> Result<()> {
+        let options = crate::DenseOptions {
+            dimensions: 4,
+            ..crate::DenseOptions::default()
+        };
+        let index = crate::DenseIndex::init_ram(&options, &[])?;
+        let slab = [0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let keys = [Key::from(7u64), Key::from(9u64)];
+        let vectors = hand_made_rows(&slab, 1);
+        let identities = hand_made_keys(&keys);
+        assert_eq!(keys_from_arrow(&identities)?, &keys);
+        index.insert(keys_from_arrow(&identities)?, ArrowRows::<f32>::new(&vectors)?)?;
+
+        let mut arena = Arena::new()?;
+        let matches = index.search(&rows(&slab[8..], 4)?, 1, &mut arena)?;
+        assert_eq!(matches.query(0)?.keys, &[Key::from(9u64)]);
+        assert_eq!(
+            ArrowRows::<f64>::new(&vectors).err().map(|error| error.status),
+            Some(Status::UnknownKind)
+        );
+        Ok(())
+    }
+
+    /// Padded matches export their keys and distances as two columns, one row per query.
+    #[test]
+    fn matches_export_keys_and_distances_apart() -> Result<()> {
+        let options = crate::DenseOptions {
+            dimensions: 4,
+            ..crate::DenseOptions::default()
+        };
+        let index = crate::DenseIndex::init_ram(&options, &[])?;
+        let slab = [1.0f32, 0.0, 0.0, 0.0];
+        index.insert([Key::from(3u64)], &rows(&slab, 4)?)?;
+
+        let mut arena = Arena::new()?;
+        let matches = index.search(&rows(&slab, 4)?, 1, &mut arena)?;
+        let keys = matches.keys_to_arrow()?;
+        assert_eq!(keys.schema().format(), Some(c"w:16"));
+        let distances = matches.distances_to_arrow()?;
+        assert_eq!(distances.schema().format(), Some(c"+w:1"));
+        assert_eq!(distances.array().array.length(), 1);
+        Ok(())
     }
 }
 
