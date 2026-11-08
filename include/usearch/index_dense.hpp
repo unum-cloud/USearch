@@ -715,6 +715,7 @@ class index_dense_gt {
     std::size_t neighbors_base_bytes() const { return typed_->neighbors_base_bytes(); }
     std::size_t neighbors_bytes() const { return typed_->neighbors_bytes(); }
     bool multi() const { return config_.multi; }
+    bool is_immutable() const noexcept { return typed_ ? typed_->is_immutable() : false; }
     std::size_t currently_available_threads() const {
         std::unique_lock<std::mutex> available_threads_lock(available_threads_mutex_);
         return available_threads_.size();
@@ -1690,6 +1691,9 @@ class index_dense_gt {
         usearch_assert_m(config().enable_key_lookups, "Key lookups are disabled");
 
         labeling_result_t result;
+        if (typed_->is_immutable())
+            return result.failed("Can't remove from an immutable index");
+
         unique_lock_t lookup_lock(slot_lookup_mutex_);
         std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         // Grow the removed entries ring, if needed
@@ -1733,6 +1737,9 @@ class index_dense_gt {
      */
     labeling_result_t rename(vector_key_t from, vector_key_t to) {
         labeling_result_t result;
+        if (typed_->is_immutable())
+            return result.failed("Can't rename in an immutable index");
+
         if (from == to) {
             result.completed = count(from);
             return result;

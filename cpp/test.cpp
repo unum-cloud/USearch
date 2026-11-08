@@ -1470,6 +1470,74 @@ void test_load_after_metric_make() {
     expect_eq(viewed.index.size(), collection);
     expect(viewed.index.search(data[0].data(), 5).dump_to(found) != 0);
 
+    viewed.index.reset();
+    std::remove(path);
+}
+
+/**
+ *  @brief  Verifies that viewed (immutable) indexes reject rename and batch remove.
+ *          Issue #835: rename and batch remove on a viewed index crash with SIGBUS.
+ */
+void test_immutable_view() {
+    std::printf("Testing rename and batch remove on an immutable viewed index\n");
+
+    using index_t = index_dense_gt<std::int64_t, std::uint32_t>;
+    std::size_t const dimensions = 16;
+    std::size_t const collection = 10;
+
+    std::default_random_engine rng(42);
+    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
+    std::vector<std::vector<float>> data(collection);
+    for (auto& vector : data) {
+        vector.resize(dimensions);
+        for (auto& value : vector)
+            value = distribution(rng);
+    }
+
+    metric_punned_t metric(dimensions, metric_kind_t::cos_k, scalar_kind<f32_t>());
+    index_dense_config_t config(16);
+
+    index_t::state_result_t built = index_t::make(metric, config);
+    expect(built);
+    expect(built.index.try_reserve(collection));
+    for (std::size_t i = 0; i != collection; ++i)
+        expect(built.index.add(static_cast<std::int64_t>(i), data[i].data()));
+
+    char const* path = "tmp_immutable_view.usearch";
+    expect(built.index.save(path));
+
+    index_t::state_result_t viewed = index_t::make(metric, config);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    expect(viewed.index.is_immutable());
+
+    // Single-key remove must fail on immutable index
+    index_t::labeling_result_t remove_single = viewed.index.remove(static_cast<std::int64_t>(0));
+    expect(!remove_single);
+    remove_single.error.release();
+
+    // Batch remove must fail on immutable index
+    std::vector<std::int64_t> keys_to_remove = {1, 2};
+    index_t::labeling_result_t remove_batch = viewed.index.remove(keys_to_remove.begin(), keys_to_remove.end());
+    expect(!remove_batch);
+    remove_batch.error.release();
+
+    // Rename must fail on immutable index
+    index_t::labeling_result_t rename_res = viewed.index.rename(3, 300);
+    expect(!rename_res);
+    rename_res.error.release();
+
+    // Rename to self must also fail on immutable index
+    index_t::labeling_result_t rename_self = viewed.index.rename(3, 3);
+    expect(!rename_self);
+    rename_self.error.release();
+
+    // Verify index content and search still work unharmed
+    std::int64_t found[4];
+    expect(viewed.index.search(data[0].data(), 3).dump_to(found) != 0);
+    expect_eq(viewed.index.size(), collection);
+
+    viewed.index.reset();
     std::remove(path);
 }
 
@@ -1702,6 +1770,7 @@ int main(int, char**) {
     test_isolate();
     test_compact();
     test_load_after_metric_make();
+    test_immutable_view();
     test_view_of_corrupted_file();
     test_level_generators();
     return 0;
