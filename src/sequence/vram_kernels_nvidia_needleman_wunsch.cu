@@ -8,7 +8,6 @@
  *  @c vram_variants_nvidia.cpp finds linked in beside its variants.
  */
 #include "sequence_specializations.cuh"
-#include "usearch/sequence/vram_nvidia_metric.cuh"
 
-template __device__ void us::sequence::cuda_instantiate<
-    sequence_nvidia_capabilities_k, us::sequence::vram_sequence_metric_t::needleman_wunsch_k, u32_t>();
+template __device__ void
+us::sequence::cuda_instantiate<sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t>();

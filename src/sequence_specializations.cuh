@@ -14,18 +14,19 @@
 #include <cstring> // `std::memcmp` - a donor's costs
 
 #include <array>       // `std::array` - the checkpoint's recorded fields
+#include <limits>      // `std::numeric_limits` - a window width past 32 bits
 #include <memory>      // `std::unique_ptr` - a GPU shard built on its device
 #include <new>         // `std::nothrow` - a GPU shard built on its device
 #include <span>        // `std::span` - the overlap kind's window widths
 #include <string_view> // `std::string_view` - entries, tokens and paths
-#include <type_traits> // `std::type_identity`
+#include <type_traits> // `std::type_identity`, `std::conditional_t` - the kit a kind scores with on NVIDIA
 #include <variant>     // `std::monostate` - no radius walk
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the scan totals
 
 #include "usearch/sequence/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
-#include "usearch/sequence/vram_nvidia_index.hpp"
+#include "usearch/sequence/vram_nvidia_metric.cuh"
 #endif
 
 #include "basic_specializations.cuh"
@@ -350,42 +351,69 @@ struct sequence_nvidia_fatbin {
  *  cubin per class carries. */
 inline constexpr sz_capability_t sequence_nvidia_capabilities_k = sz_cap_cuda_k;
 
-/* The engine's metric keeps the C enum's values, so a variant maps one to the other with a cast. */
-static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_levenshtein_bytes_k) ==
-              us::sequence::vram_sequence_metric_t::levenshtein_bytes_k);
-static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_levenshtein_utf8_k) ==
-              us::sequence::vram_sequence_metric_t::levenshtein_runes_k);
-static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_needleman_wunsch_k) ==
-              us::sequence::vram_sequence_metric_t::needleman_wunsch_k);
-static_assert(static_cast<us::sequence::vram_sequence_metric_t>(usearch_sequence_metric_overlap_k) ==
-              us::sequence::vram_sequence_metric_t::overlap_k);
+/** The kit each sequence kind scores with on NVIDIA, its ladder's pick at the CUDA floor. */
+template <usearch_sequence_metric_t metric_>
+using sequence_nvidia_kit = std::conditional_t<
+    metric_ == usearch_sequence_metric_overlap_k,
+    typename us::sequence::overlap_ladder<sequence_nvidia_capabilities_k>::kit_t,
+    std::conditional_t<
+        metric_ == usearch_sequence_metric_needleman_wunsch_k,
+        typename us::sequence::needleman_wunsch_ladder<sequence_nvidia_capabilities_k>::kit_t,
+        std::conditional_t<
+            metric_ == usearch_sequence_metric_levenshtein_utf8_k,
+            typename us::sequence::levenshtein_ladder<sz_levenshtein_runes_k, sequence_nvidia_capabilities_k>::kit_t,
+            typename us::sequence::levenshtein_ladder<sz_levenshtein_bytes_k, sequence_nvidia_capabilities_k>::kit_t>>>;
 
 /** The faces' members reading the kits, defined in @c src/sequence/vram_variants_nvidia.cpp. */
 extern template struct us::sequence::vram_nvidia_index<
-    us::sequence::vram_sequence_metric_t::levenshtein_bytes_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    us::sequence::vram_sequence_metric_t::levenshtein_runes_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_kit<usearch_sequence_metric_levenshtein_utf8_k>, u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_utf8_k>>;
-extern template struct us::sequence::vram_nvidia_index<us::sequence::vram_sequence_metric_t::overlap_k, u32_t,
-                                                       sequence_nvidia_capabilities_k,
+extern template struct us::sequence::vram_nvidia_index<sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, u32_t,
                                                        sequence_nvidia_fatbin<usearch_sequence_metric_overlap_k>>;
 extern template struct us::sequence::vram_nvidia_index<
-    us::sequence::vram_sequence_metric_t::needleman_wunsch_k, u32_t, sequence_nvidia_capabilities_k,
+    sequence_nvidia_kit<usearch_sequence_metric_needleman_wunsch_k>, u32_t,
     sequence_nvidia_fatbin<usearch_sequence_metric_needleman_wunsch_k>>;
 
 /** A GPU overlap index scores in the same fixed point as the RAM metric. */
-template <typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
+template <typename node_id_type_, typename kernels_type_>
 inline constexpr usearch_distance_t distance_unit<us::sequence::vram_nvidia_index<
-    us::sequence::vram_sequence_metric_t::overlap_k, node_id_type_, capability_, kernels_type_>> =
+    sequence_nvidia_kit<usearch_sequence_metric_overlap_k>, node_id_type_, kernels_type_>> =
     1.0 / us::sequence::overlap_resolution_k;
 
-/** Builds one shard of the sequence kind @p metric_ on a CUDA device, holding the window widths and
- *  costs the variant's frozen @c geometry names, which its first reservation uploads. */
+/** The parameters a sequence kit scores with on NVIDIA, from the frozen @p geometry and @p costs:
+ *  none for Levenshtein, the window widths narrowed into @p widths for overlap, which refuses one
+ *  past 32 bits with @c config_mismatch_k, and the folded costs for Needleman-Wunsch. */
+inline expected<std::monostate> parameters_of(std::type_identity<std::monostate>, sequence_geometry_t const&,
+                                              us::sequence::needleman_wunsch_costs_t const&,
+                                              growing_buffer<u32_t, std::allocator<byte_t>>&) noexcept {
+    return {{}, status_t::success_k};
+}
+inline expected<std::span<u32_t const>> parameters_of(std::type_identity<std::span<u32_t const>>,
+                                                      sequence_geometry_t const& geometry,
+                                                      us::sequence::needleman_wunsch_costs_t const&,
+                                                      growing_buffer<u32_t, std::allocator<byte_t>>& widths) noexcept {
+    if (failed(widths.reserve_exactly(geometry.window_widths.size()))) return {{}, status_t::bad_alloc_k};
+    for (std::size_t const width : geometry.window_widths) {
+        if (width > std::numeric_limits<u32_t>::max()) return {{}, status_t::config_mismatch_k};
+        widths.push_back_reserved(static_cast<u32_t>(width));
+    }
+    return {to_span(widths), status_t::success_k};
+}
+inline expected<us::sequence::needleman_wunsch_costs_t> parameters_of(
+    std::type_identity<us::sequence::needleman_wunsch_costs_t>, sequence_geometry_t const&,
+    us::sequence::needleman_wunsch_costs_t const& costs, growing_buffer<u32_t, std::allocator<byte_t>>&) noexcept {
+    return {costs, status_t::success_k};
+}
+
+/** Builds one shard of the sequence kind @p metric_ on a CUDA device, holding its kit's parameters
+ *  from the variant's frozen @c geometry and costs, uploaded at its first reservation. */
 template <usearch_sequence_metric_t metric_>
 struct sequence_vram_nvidia_build {
-    using face_t = us::sequence::vram_nvidia_index<static_cast<us::sequence::vram_sequence_metric_t>(metric_), u32_t,
-                                                   sequence_nvidia_capabilities_k, sequence_nvidia_fatbin<metric_>>;
+    using face_t =
+        us::sequence::vram_nvidia_index<sequence_nvidia_kit<metric_>, u32_t, sequence_nvidia_fatbin<metric_>>;
 
     /** The geometry and costs of the variant holding the shards, frozen before the first is
      *  placed. */
@@ -395,8 +423,10 @@ struct sequence_vram_nvidia_build {
     std::unique_ptr<face_t> operator()(int device) const noexcept {
         std::unique_ptr<face_t> face {new (std::nothrow)
                                           face_t(cuda_virtual_memory_allocator<byte_t> {gpu_drivers().cuda, device})};
-        if (face && (failed(face->window_widths(to_span(geometry->window_widths))) || failed(face->costs(*costs))))
-            face.reset();
+        growing_buffer<u32_t, std::allocator<byte_t>> widths {std::allocator<byte_t> {}};
+        auto const [parameters, parameters_status] = parameters_of(std::type_identity<typename face_t::parameters_t> {},
+                                                                   *geometry, *costs, widths);
+        if (face && (failed(parameters_status) || failed(face->parameters(parameters)))) face.reset();
         return face;
     }
 };

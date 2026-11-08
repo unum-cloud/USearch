@@ -2,111 +2,52 @@
  *  @file include/usearch/sequence/vram_nvidia_index.hpp
  *  @author Ash Vardanian
  *  @date October 15, 2026
- *  @brief Similarity Search over byte sequences on NVIDIA GPUs: the basic VRAM index under the
- *      sequence kits @c vram_nvidia_metric.cuh picks, Levenshtein over bytes or runes, overlap, or
+ *  @brief Similarity Search over byte sequences on NVIDIA GPUs: the basic VRAM index under one
+ *      sequence kit of @c vram_nvidia_metric.cuh, Levenshtein over bytes or runes, overlap, or
  *      Needleman-Wunsch over packed codes.
  *
- *  Plain C++, so the host classes build with any compiler: the face names its rungs here, and the
- *  members reading its kits, which pick a launch's rung and size its spans, are defined beside the
- *  kits in the metric, which only the modality's NVIDIA unit compiles.
+ *  Plain C++, so the host classes build with any compiler; the members reading the kit, which pick
+ *  a launch's rung and size its spans, are defined beside the kits in the metric, which every unit
+ *  naming a face includes.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
-#include <iterator> // `std::size` - the widest Levenshtein rung
-#include <limits>   // `std::numeric_limits` - the bytes a Myers word covers
-#include <span>     // `std::span` - the rungs and the window widths
-
-#include <stringzilla/capabilities.h> // `sz_capability_t` - the kits' capabilities
+#include <iterator> // `std::size` - the kit's rungs
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the window widths on the host
+#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the parameters on the host
 #include "usearch/basic/vram_nvidia_index.hpp"
-#include "usearch/sequence/ram_metric.hpp" // `needleman_wunsch_costs_t` - the costs a face keeps
 
 namespace unum::usearch::sequence {
 using namespace unum::usearch::utilities;
 
-/** The distance a sequence kit scores. Its values are the C ABI's metric's, so @c src maps one
- *  onto the other with a cast. */
-enum class vram_sequence_metric_t : u32_t {
-    levenshtein_bytes_k = 1,
-    levenshtein_runes_k,
-    needleman_wunsch_k,
-    overlap_k
-};
-
-/** The Itanium spelling of the sequence metric inside a sequence kernel's own scope, @c S1_, as
- *  @c vram_kernel_symbol documents. */
-constexpr char const* kernel_enum_mangling(vram_sequence_metric_t) noexcept { return "NS1_22vram_sequence_metric_tE"; }
-
-/** Myers words of the longest query each Levenshtein rung's kernels score, narrowest first: a warp
- *  walks each query up to sixteen words, 1 KiB, a block past them, up to 4 KiB, where a block's
- *  shared memory runs out. */
-inline constexpr u32_t vram_levenshtein_words_k[] = {2, 4, 8, 16, 32, 64};
-
-/** Bytes of the longest sequence @p words Myers words score, a bit of a 64-bit word per byte; a
- *  sequence of @c b bytes holds at most @c b runes, so it bounds rune sequences too. */
-constexpr std::size_t vram_levenshtein_bytes(u32_t words) noexcept {
-    return std::size_t {words} * std::numeric_limits<u64_t>::digits;
-}
-
-/** Bytes of the longest sequence the widest Levenshtein rung scores; longer ones are refused. */
-inline constexpr std::size_t vram_levenshtein_widest_bytes_k = vram_levenshtein_bytes(
-    vram_levenshtein_words_k[std::size(vram_levenshtein_words_k) - 1]);
-
-/** Lanes each overlap rung splits a sequence's windows among, narrowest first: one lane alone, then
- *  every power of two from a block's warps up to the kit's warp. */
-inline constexpr u32_t vram_overlap_rungs_k[] = {1, 4, 8, 16, 32};
-
-/** Query codes each lane of a Needleman-Wunsch rung holds, narrowest first: a warp's stripe of
- *  rows is as tall as the lanes times these, and the widest rung repeats its stripe down a query
- *  as long as the widest Levenshtein sequence. */
-inline constexpr u32_t vram_needleman_wunsch_rows_k[] = {1, 2, 3, 4, 5, 6, 7, 8};
-
-/** The rungs the kit of @p metric scores on, narrowest first. */
-constexpr std::span<u32_t const> vram_sequence_rungs(vram_sequence_metric_t metric) noexcept {
-    if (metric == vram_sequence_metric_t::overlap_k) return vram_overlap_rungs_k;
-    if (metric == vram_sequence_metric_t::needleman_wunsch_k) return vram_needleman_wunsch_rows_k;
-    return vram_levenshtein_words_k;
-}
-
 /** The kit hooks a sequence graph on NVIDIA GPUs reads, and the fatbin @p kernels_type_ names once
- *  loaded: the kit of the sequence kind @p metric_ its ladder picks under @p capability_, on the
- *  rungs of @c vram_sequence_rungs, over node IDs of @p node_id_type_, with the window widths the
- *  overlap kind hashes or the costs the Needleman-Wunsch kind scores with. */
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
+ *  loaded: the sequence kit @p kit_type_ on its rungs, over node IDs of @p node_id_type_, with the
+ *  parameters it scores with. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_kits {
+    using parameters_t = typename kit_type_::parameters_t;
 
-    /** Rungs of the kit's kernels, one per entry of @c vram_sequence_rungs. */
-    inline static constexpr std::size_t rungs_k = vram_sequence_rungs(metric_).size();
-
-    /**
-     *  Keeps the window widths the overlap kind hashes. Defined in @c vram_nvidia_metric.cuh, as
-     *  are the members below reading the kit.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The overlap kind gets no @p widths, another kind gets some, or a
-     *    width is zero or past 32 bits.
-     */
-    status_t window_widths(std::span<std::size_t const> widths) noexcept;
+    /** Rungs of the kit's kernels. */
+    inline static constexpr std::size_t rungs_k = std::size(kit_type_::rungs_k);
 
     /**
-     *  Keeps the folded costs the Needleman-Wunsch kind scores with.
+     *  @brief Keeps the parameters the kit scores with, uploaded before the first walk. Defined in
+     *      @c vram_nvidia_metric.cuh, as are the members below reading the kit.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The Needleman-Wunsch kind gets unfolded @p costs, or another kind
-     *    gets folded ones.
+     *  - @c bad_alloc_k The host copy found no memory.
      */
-    status_t costs(needleman_wunsch_costs_t const& costs) noexcept;
+    status_t parameters(parameters_t parameters) noexcept;
 
   private:
     template <typename, typename, typename, typename>
     friend struct basic::vram_ragged_graph;
 
-    /** The first rung whose kit serves sequences of @p longest bytes, or @c rungs_k past every one;
-     *  for overlap, the widest whose lanes each still roll a widest window of such a sequence. */
+    /** The kit's rung serving sequences of @p longest bytes under the kept parameters, or
+     *  @c rungs_k past every one. */
     std::size_t rung_serving_(std::size_t longest) const noexcept;
 
     /** Lanes the kit scores a sequence with on @p rung. */
@@ -115,9 +56,8 @@ struct vram_nvidia_kits {
     /** Bytes the @p bytes long sequence at @p data takes once prepared, a multiple of 16. */
     std::size_t span_bytes_(byte_t const* data, std::size_t bytes) const noexcept;
 
-    /** Bytes any loaded sequence of up to @p longest bytes takes once prepared, from length alone:
-     *  overlap's exact span, Needleman-Wunsch's for the most codes those bytes pack, an upper bound
-     *  tight for ASCII, and none for Levenshtein, whose spans the device counts. */
+    /** Bytes any loaded sequence of up to @p longest bytes takes once prepared, from length alone,
+     *  or none where the device counts a load's spans. */
     std::size_t span_bytes_(std::size_t longest) const noexcept;
 
     /** Bytes the @p stored sequence saves into: its own, since a sequence is its bytes, as a RAM
@@ -137,16 +77,8 @@ struct vram_nvidia_kits {
     /** Bytes a sequence of @p saved bytes stores into: its own. */
     static expected<std::size_t> stored_bytes_(std::size_t saved) noexcept { return {saved, status_t::success_k}; }
 
-    /** Stores a step's sequences as saved, one copy of their run into the tape, then sizes their
-     *  spans on the device where they follow from content: Levenshtein counts each sequence's
-     *  classes, while the others size from length at planning. */
-    status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept {
-        if (status_t const copied = step.copy_values(); failed(copied)) return copied;
-        if constexpr (metric_ == vram_sequence_metric_t::overlap_k ||
-                      metric_ == vram_sequence_metric_t::needleman_wunsch_k)
-            return status_t::success_k;
-        else return step.launch_kits(vram_kernel_t::size_spans_k);
-    }
+    /** Stores a step's sequences and sizes their spans as the kit's load hook queues them. */
+    status_t queue_load_values_(basic::vram_load_step<node_id_type_> const& step) const noexcept;
 
     /** The fatbin holding the kits' kernels. */
     static bytes_view_t fatbin_() noexcept { return kernels_type_::bytes(); }
@@ -161,35 +93,34 @@ struct vram_nvidia_kits {
      *      device is current.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The kind takes parameters, and none were set.
+     *  - @c uninitialized_k The kit takes parameters, and none were set.
      */
     status_t upload_parameters_(cuda_api_t const& api) noexcept;
 
-    /** The folded costs the Needleman-Wunsch kind keeps among its parameters. */
-    needleman_wunsch_costs_t const& costs_() const noexcept {
-        return elements_of<needleman_wunsch_costs_t>(bytes_of(host_parameters_.data(), host_parameters_.size()))[0];
-    }
-
-    /** The kit's parameters on the device, which every walk's kit reads; null for the Levenshtein
-     *  kinds. */
+    /** The kit's parameters on the device, which every walk's kit reads; null for a kit taking
+     *  none. */
     byte_t const* parameters_() const noexcept { return reinterpret_cast<byte_t const*>(device_parameters_.get()); }
 
-    /** The kit's parameters on the host and, past the first @c reserve, on the device, where every
-     *  walk's kit reads them: the overlap kind's window widths in bytes after their count, or the
-     *  Needleman-Wunsch kind's folded costs; empty for the Levenshtein kinds. */
+    /** The kit's parameters as its host members read them, a span into @c host_parameters_ where
+     *  they are one. */
+    parameters_t kept_parameters_ {};
+
+    /** The kit's parameters laid out as its kernels read them, on the host and, past the first
+     *  @c reserve, on the device; empty for a kit taking none. */
     growing_buffer<u32_t, std::allocator<byte_t>> host_parameters_ {std::allocator<byte_t> {}};
     cuda_unique_ptr<u32_t> device_parameters_;
 };
 
-/** Similarity Search over byte sequences on NVIDIA GPUs under the sequence kind @p metric_ -
- *  Levenshtein over bytes or UTF-8 runes, window overlap, or Needleman-Wunsch - scored by the kit
- *  its ladder picks under @p capability_ on the rungs of @c vram_sequence_rungs. Node IDs are
- *  @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a @c basic::vram_ragged_graph
- *  over its kits and forwards its verbs, types and constants, which that graph documents. */
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
+/** Similarity Search over byte sequences on NVIDIA GPUs scored by the sequence kit @p kit_type_ -
+ *  Levenshtein over bytes or UTF-8 runes, window overlap, or Needleman-Wunsch - on its rungs. Node
+ *  IDs are @p node_id_type_, and @p kernels_type_ names the fatbin. It owns a
+ *  @c basic::vram_ragged_graph over its kits and forwards its verbs, types and constants, which
+ *  that graph documents. */
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
 struct vram_nvidia_index {
     /* Components */
-    using kits_t = vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>;
+    using kits_t = vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>;
+    using parameters_t = typename kits_t::parameters_t;
     using graph_t = basic::vram_ragged_graph<node_id_type_, kits_t>;
     using traversal_context_t = typename graph_t::traversal_context_t;
 
@@ -225,29 +156,16 @@ struct vram_nvidia_index {
         : graph_(nk_kernel_unknown_k, allocator) {}
 
     /**
-     *  Keeps the window widths the overlap kind hashes; the first @c reserve uploads them, so they
-     *  freeze before it.
+     *  @brief Keeps the parameters the kit scores with, frozen once the first @c reserve has
+     *      uploaded them to the device.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The index is reserved already, the overlap kind gets no @p widths,
-     *    another kind gets some, or a width is zero or past 32 bits.
+     *  - @c config_mismatch_k The index is reserved already.
+     *  - @c bad_alloc_k The host copy found no memory.
      */
-    status_t window_widths(std::span<std::size_t const> widths) noexcept {
+    status_t parameters(parameters_t parameters) noexcept {
         if (graph_.connectivity()) return status_t::config_mismatch_k;
-        return graph_.kits().window_widths(widths);
-    }
-
-    /**
-     *  Keeps the folded costs the Needleman-Wunsch kind scores with; the first @c reserve uploads
-     *  them, so they freeze before it.
-     *
-     *  @par Statuses:
-     *  - @c config_mismatch_k The index is reserved already, the Needleman-Wunsch kind gets
-     *    unfolded @p costs, or another kind gets folded ones.
-     */
-    status_t costs(needleman_wunsch_costs_t const& costs) noexcept {
-        if (graph_.connectivity()) return status_t::config_mismatch_k;
-        return graph_.kits().costs(costs);
+        return graph_.kits().parameters(parameters);
     }
 
     std::size_t size() const noexcept { return graph_.size(); }

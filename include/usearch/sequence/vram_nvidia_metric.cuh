@@ -28,8 +28,9 @@
 #include <iterator>    // `std::size` - every rung's kernels
 #include <limits>      // `std::numeric_limits` - the widths and rows a `u32_t` states
 #include <span>        // `std::span` - the overlap kind's window widths
-#include <type_traits> // `std::conditional_t` - the kit a sequence kind scores with
+#include <type_traits> // `std::is_empty_v` - a kit taking no parameters
 #include <utility>     // `std::make_integer_sequence` - the word counts, every rung's kernels
+#include <variant>     // `std::monostate` - the Levenshtein kits' parameters
 
 #include <numkong/types.h>                  // `NUMKONG_ARCH_CUDA_AMPERE_` - the kits this unit carries
 #include <stringzilla/cuda.cuh>             // `sz_group_shuffle_up_cuda_` & kin - the lane steps
@@ -48,6 +49,26 @@ namespace unum::usearch::sequence {
 using namespace unum::usearch::utilities;
 
 #pragma region Kits
+
+/** Myers words of the longest query each Levenshtein rung's kernels score, narrowest first: a warp
+ *  walks each query up to sixteen words, 1 KiB, a block past them, up to 4 KiB, where a block's
+ *  shared memory runs out. */
+inline constexpr u32_t vram_levenshtein_words_k[] = {2, 4, 8, 16, 32, 64};
+
+/** Bytes of the longest sequence @p words Myers words score, a bit of a 64-bit word per byte; a
+ *  sequence of @c b bytes holds at most @c b runes, so it bounds rune sequences too. */
+constexpr std::size_t vram_levenshtein_bytes(u32_t words) noexcept {
+    return std::size_t {words} * std::numeric_limits<u64_t>::digits;
+}
+
+/** Bytes of the longest sequence the widest Levenshtein rung scores; longer ones are refused. */
+inline constexpr std::size_t vram_levenshtein_widest_bytes_k = vram_levenshtein_bytes(
+    vram_levenshtein_words_k[std::size(vram_levenshtein_words_k) - 1]);
+
+/** Query codes each lane of a Needleman-Wunsch rung holds, narrowest first: a warp's stripe of
+ *  rows is as tall as the lanes times these, and the widest rung repeats its stripe down a query
+ *  as long as the widest Levenshtein sequence. */
+inline constexpr u32_t vram_needleman_wunsch_rows_k[] = {1, 2, 3, 4, 5, 6, 7, 8};
 
 /** Lanes scoring one candidate for queries of up to @p words Myers words: one up to sixteen,
  *  which a lane's registers hold and where a lane outruns a split group, and a group of four past
@@ -233,16 +254,40 @@ struct u8_ampere_levenshtein_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "u8_ampere_levenshtein_kit_t";
+
     using warp_t = cuda_warp_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
+    /** A Levenshtein distance takes no parameters. */
+    using parameters_t = std::monostate;
+
+    /** Myers words of the longest query each rung's kernels score, narrowest first. */
+    inline static constexpr std::span<u32_t const> rungs_k = vram_levenshtein_words_k;
+
     static constexpr u32_t lanes_per_row(u32_t words) noexcept { return cuda_levenshtein_lanes_per_row_ampere(words); }
-    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept {
-        return bytes <= vram_levenshtein_bytes(words);
+
+    /** The first rung whose words cover a @p longest -byte sequence, or past the widest. */
+    static std::size_t rung_serving(std::size_t longest, parameters_t) noexcept {
+        std::size_t rung = 0;
+        while (rung != std::size(rungs_k) && longest > vram_levenshtein_bytes(rungs_k[rung])) ++rung;
+        return rung;
     }
-    static std::size_t span_bytes(byte_t const* data, std::size_t bytes) noexcept {
+
+    /** Bytes the @p bytes long sequence at @p data takes once prepared, and none from a length
+     *  alone, since the device counts a load's spans. */
+    static std::size_t span_bytes(byte_t const* data, std::size_t bytes, parameters_t) noexcept {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_bytes_k>(data, bytes);
+    }
+    static std::size_t span_bytes(std::size_t, parameters_t) noexcept { return 0; }
+
+    /** A load stores sequences as saved, then counts their spans on the device. */
+    template <typename node_id_type_>
+    static status_t queue_load_values(basic::vram_load_step<node_id_type_> const& step) noexcept {
+        if (status_t const copied = step.copy_values(); failed(copied)) return copied;
+        return step.launch_kits(vram_kernel_t::size_spans_k);
     }
 
     /** Counts a load's spans on the device, from each sequence's distinct bytes. */
@@ -273,16 +318,40 @@ struct utf8_ampere_levenshtein_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "utf8_ampere_levenshtein_kit_t";
+
     using warp_t = cuda_warp_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
+    /** A Levenshtein distance takes no parameters. */
+    using parameters_t = std::monostate;
+
+    /** Myers words of the longest query each rung's kernels score, narrowest first. */
+    inline static constexpr std::span<u32_t const> rungs_k = vram_levenshtein_words_k;
+
     static constexpr u32_t lanes_per_row(u32_t words) noexcept { return cuda_levenshtein_lanes_per_row_ampere(words); }
-    static constexpr bool serves(u32_t words, std::size_t bytes) noexcept {
-        return bytes <= vram_levenshtein_bytes(words);
+
+    /** The first rung whose words cover a @p longest -byte sequence, or past the widest. */
+    static std::size_t rung_serving(std::size_t longest, parameters_t) noexcept {
+        std::size_t rung = 0;
+        while (rung != std::size(rungs_k) && longest > vram_levenshtein_bytes(rungs_k[rung])) ++rung;
+        return rung;
     }
-    static std::size_t span_bytes(byte_t const* data, std::size_t bytes) noexcept {
+
+    /** Bytes the @p bytes long sequence at @p data takes once prepared, and none from a length
+     *  alone, since the device counts a load's spans. */
+    static std::size_t span_bytes(byte_t const* data, std::size_t bytes, parameters_t) noexcept {
         return cuda_levenshtein_span_bytes_ampere<sz_levenshtein_runes_k>(data, bytes);
+    }
+    static std::size_t span_bytes(std::size_t, parameters_t) noexcept { return 0; }
+
+    /** A load stores sequences as saved, then counts their spans on the device. */
+    template <typename node_id_type_>
+    static status_t queue_load_values(basic::vram_load_step<node_id_type_> const& step) noexcept {
+        if (status_t const copied = step.copy_values(); failed(copied)) return copied;
+        return step.launch_kits(vram_kernel_t::size_spans_k);
     }
 
     /** Counts a load's spans on the device, from each sequence's pages and distinct runes. */
@@ -352,20 +421,47 @@ struct u8_ampere_overlap_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "u8_ampere_overlap_kit_t";
+
     using warp_t = cuda_warp_t;
     using query_t = sz_overlap_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
+    /** The window widths a face hashes with, set once before the first insert. */
+    using parameters_t = std::span<u32_t const>;
+
+    /** Lanes rolling one sequence's windows, narrowest first: one lane alone, then every power of
+     *  two from a block's warps up to the kit's warp. */
+    inline static constexpr u32_t rungs_k[] = {1, 4, 8, 16, 32};
+
     /** A rung is its lanes per sequence. */
     static constexpr u32_t lanes_per_row(u32_t lanes) noexcept { return lanes; }
-    static_assert(vram_overlap_rungs_k[std::size(vram_overlap_rungs_k) - 1] <= warp_t::width_k);
+    static_assert(rungs_k[std::size(rungs_k) - 1] <= warp_t::width_k);
 
-    /** Every rung scores a sequence of any length its byte count can state. */
-    static constexpr bool serves(u32_t, std::size_t bytes) noexcept {
-        return bytes <= std::numeric_limits<u32_t>::max();
+    /** The widest rung whose lanes still roll a widest window of a @p longest -byte sequence, or
+     *  past every rung for a length no byte count states. */
+    static std::size_t rung_serving(std::size_t longest, parameters_t widths) noexcept {
+        if (longest > std::numeric_limits<u32_t>::max()) return std::size(rungs_k);
+        u32_t widest = 0;
+        for (u32_t const width : widths) widest = max_of(widest, width);
+        std::size_t rung = 0;
+        while (rung + 1 < std::size(rungs_k) && std::size_t {rungs_k[rung + 1]} * widest <= longest) ++rung;
+        return rung;
     }
-    static std::size_t span_bytes(std::span<u32_t const> widths, std::size_t bytes) noexcept {
+
+    /** Bytes a sequence of @p bytes takes once prepared, from its length alone. */
+    static std::size_t span_bytes(byte_t const*, std::size_t bytes, parameters_t widths) noexcept {
+        return span_bytes(bytes, widths);
+    }
+    static std::size_t span_bytes(std::size_t bytes, parameters_t widths) noexcept {
         return round_up_to_multiple<std::size_t>(sz_overlap_query_span_bytes(bytes, widths.data(), widths.size()), 16);
+    }
+
+    /** A load stores sequences as saved; spans size from lengths alone. */
+    template <typename node_id_type_>
+    static status_t queue_load_values(basic::vram_load_step<node_id_type_> const& step) noexcept {
+        return step.copy_values();
     }
 
     /** Prepares @p sequence with the warp, then hands every lane lane zero's query, the only one
@@ -574,19 +670,34 @@ struct packed_ampere_needleman_wunsch_kit_t {
     inline static constexpr sz_capability_t capability_k = sz_cap_cuda_k;
     inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
 
+    /** The kit's identity in kernel symbols. */
+    inline static constexpr char name_k[] = "packed_ampere_needleman_wunsch_kit_t";
+
     using warp_t = cuda_warp_t;
     using query_t = cuda_needleman_wunsch_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
+    /** The folded costs a face scores with, set once before the first insert. */
+    using parameters_t = needleman_wunsch_costs_t;
+
+    /** Query codes each lane holds, narrowest first. */
+    inline static constexpr std::span<u32_t const> rungs_k = vram_needleman_wunsch_rows_k;
+
     /** Every rung scores a sequence with the whole warp. */
     static constexpr u32_t lanes_per_row(u32_t) noexcept { return warp_t::width_k; }
 
-    /** A rung serves queries of up to @p codes whose stripe it holds whole, the widest one any
-     *  number of its stripes. */
-    static constexpr bool serves(u32_t rows, std::size_t codes) noexcept {
-        constexpr u32_t widest_k = vram_needleman_wunsch_rows_k[std::size(vram_needleman_wunsch_rows_k) - 1];
-        return rows == widest_k ? codes <= cuda_needleman_wunsch_widest_codes_k
-                                : codes <= std::size_t {rows} * warp_t::width_k;
+    /** The first rung holding whole the stripe of the most codes a @p longest -byte pack holds,
+     *  the widest one any number of its stripes, or past every rung before any costs. */
+    static std::size_t rung_serving(std::size_t longest, parameters_t const& costs) noexcept {
+        if (!costs.code_bits) return std::size(rungs_k);
+        // A pack of these bytes holds at most this many codes past its one-byte header.
+        std::size_t const codes = longest ? (longest - 1) * 8 / costs.code_bits : 0;
+        std::size_t const widest = std::size(rungs_k) - 1;
+        std::size_t rung = 0;
+        while (rung != std::size(rungs_k) && codes > (rung == widest ? cuda_needleman_wunsch_widest_codes_k
+                                                                     : std::size_t {rungs_k[rung]} * warp_t::width_k))
+            ++rung;
+        return rung;
     }
 
     /** Bytes a query of @p codes codes takes once prepared: its profile stripes, and a boundary
@@ -598,9 +709,19 @@ struct packed_ampere_needleman_wunsch_kit_t {
         return stripes * cuda_needleman_wunsch_stripe_bytes_k + boundaries;
     }
 
-    /** Bytes the packed @p bytes long sequence at @p data takes once prepared. */
-    static std::size_t span_bytes(u32_t code_bits, byte_t const* data, std::size_t bytes) noexcept {
-        return span_bytes_of_codes(packed_codes_count(data, bytes, code_bits));
+    /** Bytes the packed @p bytes long sequence at @p data takes once prepared, and the bound for
+     *  any pack of up to @p longest bytes. */
+    static std::size_t span_bytes(byte_t const* data, std::size_t bytes, parameters_t const& costs) noexcept {
+        return span_bytes_of_codes(packed_codes_count(data, bytes, costs.code_bits));
+    }
+    static std::size_t span_bytes(std::size_t longest, parameters_t const& costs) noexcept {
+        return span_bytes_of_codes(longest ? (longest - 1) * 8 / costs.code_bits : 0);
+    }
+
+    /** A load stores sequences as saved; spans size from lengths alone. */
+    template <typename node_id_type_>
+    static status_t queue_load_values(basic::vram_load_step<node_id_type_> const& step) noexcept {
+        return step.copy_values();
     }
 
     static __device__ __forceinline__ query_t prepare(byte_t const* parameters, basic::vram_entry_t sequence,
@@ -630,119 +751,91 @@ struct needleman_wunsch_ladder<caps_> {
     static constexpr sz_capability_t picked_k = caps_ & kit_t::capability_k;
 };
 
-/** The kit scoring the sequence kind @p metric_ under @p caps_: the overlap or Needleman-Wunsch
- *  ladder's, or the Levenshtein ladder's over the kind's symbols. */
-template <vram_sequence_metric_t metric_, sz_capability_t caps_>
-using vram_sequence_kit = std::conditional_t<
-    metric_ == vram_sequence_metric_t::needleman_wunsch_k, typename needleman_wunsch_ladder<caps_>::kit_t,
-    std::conditional_t<
-        metric_ == vram_sequence_metric_t::overlap_k, typename overlap_ladder<caps_>::kit_t,
-        typename levenshtein_ladder<metric_ == vram_sequence_metric_t::levenshtein_runes_k ? sz_levenshtein_runes_k
-                                                                                           : sz_levenshtein_bytes_k,
-                                    caps_>::kit_t>>;
+/** Spells a sequence kit into a kernel's symbol by its name, inside the kernel's own scope, @c S1_,
+ *  as @c vram_kernel_symbol documents. */
+template <typename kit_type_>
+    requires requires { kit_type_::name_k; }
+void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<kit_type_>) noexcept {
+    symbol.append("NS1_");
+    symbol.append_name(kit_type_::name_k);
+    symbol.append("E");
+}
 
 #pragma endregion Kits
 
 #pragma region Face
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::window_widths(
-    std::span<std::size_t const> widths) noexcept {
-    if ((metric_ == vram_sequence_metric_t::overlap_k) == widths.empty()) return status_t::config_mismatch_k;
-    if (widths.empty()) return status_t::success_k;
-    // The count leads, as the kit reads the parameters.
-    if (status_t const reserved = host_parameters_.reserve_exactly(widths.size() + 1); failed(reserved))
-        return reserved;
-    host_parameters_.clear();
-    host_parameters_.push_back_reserved(static_cast<u32_t>(widths.size()));
-    for (std::size_t const width : widths) {
-        if (!width || width > std::numeric_limits<u32_t>::max()) return status_t::config_mismatch_k;
-        host_parameters_.push_back_reserved(static_cast<u32_t>(width));
-    }
+/** Lays a kit's @p parameters out in @p laid as its kernels read them on the device, and keeps
+ *  them in @p kept as its host members read them: nothing for none, the window widths after their
+ *  count, or a table's bytes. */
+inline status_t vram_lay_out_parameters(std::monostate, growing_buffer<u32_t, std::allocator<byte_t>>&,
+                                        std::monostate&) noexcept {
     return status_t::success_k;
 }
-
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::costs(
-    needleman_wunsch_costs_t const& costs) noexcept {
-    if ((metric_ == vram_sequence_metric_t::needleman_wunsch_k) != (costs.code_bits != 0))
-        return status_t::config_mismatch_k;
-    if (!costs.code_bits) return status_t::success_k;
-    if (status_t const sized = host_parameters_.resize(divide_round_up(sizeof(costs), sizeof(u32_t))); failed(sized))
+inline status_t vram_lay_out_parameters(std::span<u32_t const> widths,
+                                        growing_buffer<u32_t, std::allocator<byte_t>>& laid,
+                                        std::span<u32_t const>& kept) noexcept {
+    if (status_t const sized = laid.resize(widths.size() + 1); failed(sized)) return sized;
+    laid[0] = static_cast<u32_t>(widths.size());
+    for (std::size_t index = 0; index != widths.size(); ++index) laid[index + 1] = widths[index];
+    kept = to_span(laid).subspan(1);
+    return status_t::success_k;
+}
+template <typename table_type_>
+status_t vram_lay_out_parameters(table_type_ const& table, growing_buffer<u32_t, std::allocator<byte_t>>& laid,
+                                 table_type_& kept) noexcept {
+    if (status_t const sized = laid.resize(divide_round_up(sizeof(table_type_), sizeof(u32_t))); failed(sized))
         return sized;
-    std::memcpy(host_parameters_.data(), &costs, sizeof(costs));
+    std::memcpy(laid.data(), &table, sizeof(table_type_));
+    kept = table;
     return status_t::success_k;
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::rung_serving_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+status_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::parameters(parameters_t parameters) noexcept {
+    return vram_lay_out_parameters(parameters, host_parameters_, kept_parameters_);
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::rung_serving_(
     std::size_t longest) const noexcept {
-    using kit_t = vram_sequence_kit<metric_, capability_>;
-    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-    // A Needleman-Wunsch rung serves codes, the most a sequence of these bytes packs.
-    if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k) {
-        if (host_parameters_.empty()) return rungs_k;
-        longest = longest ? (longest - 1) * 8 / costs_().code_bits : 0;
-    }
-    std::size_t rung = 0;
-    while (rung != rungs_k && !kit_t::serves(rungs[rung], longest)) ++rung;
-    if constexpr (metric_ == vram_sequence_metric_t::overlap_k) {
-        // Lanes past the longest sequence's widest windows would roll none of their own.
-        u32_t widest = 0;
-        for (std::size_t index = 1; index < host_parameters_.size(); ++index)
-            widest = max_of(widest, host_parameters_[index]);
-        while (rung + 1 < rungs_k && std::size_t {rungs[rung + 1]} * widest <= longest) ++rung;
-    }
-    return rung;
+    return kit_type_::rung_serving(longest, kept_parameters_);
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-u32_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::lanes_per_entry_(
-    std::size_t rung) noexcept {
-    using kit_t = vram_sequence_kit<metric_, capability_>;
-    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-    return kit_t::lanes_per_row(rungs[rung]);
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+u32_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::lanes_per_entry_(std::size_t rung) noexcept {
+    return kit_type_::lanes_per_row(kit_type_::rungs_k[rung]);
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
-    byte_t const* data, std::size_t bytes) const noexcept {
-    using kit_t = vram_sequence_kit<metric_, capability_>;
-    if constexpr (metric_ == vram_sequence_metric_t::overlap_k)
-        return kit_t::span_bytes(to_span(host_parameters_).subspan(1), bytes);
-    else if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k)
-        return kit_t::span_bytes(costs_().code_bits, data, bytes);
-    else return kit_t::span_bytes(data, bytes);
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(byte_t const* data,
+                                                                                   std::size_t bytes) const noexcept {
+    return kit_type_::span_bytes(data, bytes, kept_parameters_);
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-std::size_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::span_bytes_(
-    std::size_t longest) const noexcept {
-    using kit_t = vram_sequence_kit<metric_, capability_>;
-    if constexpr (metric_ == vram_sequence_metric_t::overlap_k)
-        return kit_t::span_bytes(to_span(host_parameters_).subspan(1), longest);
-    else if constexpr (metric_ == vram_sequence_metric_t::needleman_wunsch_k)
-        // A pack of these bytes holds at most this many codes past its one-byte header.
-        return kit_t::span_bytes_of_codes(longest ? (longest - 1) * 8 / costs_().code_bits : 0);
-    else return 0;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+std::size_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::span_bytes_(std::size_t longest) const noexcept {
+    return kit_type_::span_bytes(longest, kept_parameters_);
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-void vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::spell_kits_kernel_(
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+status_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::queue_load_values_(
+    basic::vram_load_step<node_id_type_> const& step) const noexcept {
+    return kit_type_::queue_load_values(step);
+}
+
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+void vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::spell_kits_kernel_(
     vram_kernel_symbol_t& symbol, std::size_t rung, basic::cuda_rung_t instantiated) noexcept {
-    constexpr std::span<u32_t const> rungs = vram_sequence_rungs(metric_);
-    vram_kernel_symbol(symbol, "sequence", "cuda_kernel", {"vram_arguments", 4, itanium_scope_t::basic_k},
-                       instantiated.kernel, capability_, metric_, rungs[rung], itanium_type<node_id_type_> {},
-                       instantiated.slots);
+    vram_kernel_symbol(symbol, "sequence", "cuda_kernel", {"vram_arguments", 3, itanium_scope_t::basic_k},
+                       instantiated.kernel, itanium_type<kit_type_> {}, kit_type_::rungs_k[rung],
+                       itanium_type<node_id_type_> {}, instantiated.slots);
 }
 
-template <vram_sequence_metric_t metric_, typename node_id_type_, sz_capability_t capability_, typename kernels_type_>
-status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::upload_parameters_(
-    cuda_api_t const& api) noexcept {
-    bool const parametrized = metric_ == vram_sequence_metric_t::overlap_k ||
-                              metric_ == vram_sequence_metric_t::needleman_wunsch_k;
-    if (parametrized && host_parameters_.empty()) return status_t::uninitialized_k;
-    if (host_parameters_.empty()) return status_t::success_k;
+template <typename kit_type_, typename node_id_type_, typename kernels_type_>
+status_t vram_nvidia_kits<kit_type_, node_id_type_, kernels_type_>::upload_parameters_(cuda_api_t const& api) noexcept {
+    if (host_parameters_.empty())
+        return std::is_empty_v<parameters_t> ? status_t::success_k : status_t::uninitialized_k;
     device_parameters_ = cuda_make_unique(cuda_device_allocator<u32_t> {api}, host_parameters_.size());
     if (!device_parameters_) return status_t::bad_alloc_k;
     if (cuda_copy(api, device_parameters_.get(), host_parameters_.data(), host_parameters_.size() * sizeof(u32_t)) !=
@@ -755,49 +848,38 @@ status_t vram_nvidia_kits<metric_, node_id_type_, capability_, kernels_type_>::u
 
 #pragma region Kernels
 
-/** Every NVIDIA sequence kernel: @p kernel_ picks the walk, @p capability_ and @p metric_ the kit
- *  through its ladder, @p rung_ its rung, Myers words or lanes per sequence, @p node_id_type_ the
- *  IDs of the records, and @p slots_ the register rung. */
-template <vram_kernel_t kernel_, sz_capability_t capability_, vram_sequence_metric_t metric_, u32_t rung_,
-          typename node_id_type_, u32_t slots_>
+/** Every NVIDIA sequence kernel: @p kernel_ picks the walk, @p kit_type_ scores at its @p rung_ of
+ *  Myers words or lanes per sequence, @p slots_ is the register rung, and @p node_id_type_ is the
+ *  type of the record IDs it walks. */
+template <vram_kernel_t kernel_, typename kit_type_, u32_t rung_, typename node_id_type_, u32_t slots_>
 __global__ void __launch_bounds__(vram_warps_per_block_k * 32, basic::cuda_resident_blocks(kernel_, slots_))
     cuda_kernel(basic::vram_arguments<node_id_type_> arguments) {
-    using kit_t = vram_sequence_kit<metric_, capability_>;
-    basic::cuda_kernel_body<kernel_, kit_t, rung_, slots_>(arguments);
+    basic::cuda_kernel_body<kernel_, kit_type_, rung_, slots_>(arguments);
 }
 
-template <sz_capability_t capability_, vram_sequence_metric_t metric_, u32_t rung_, typename node_id_type_,
-          std::size_t... rungs_>
+template <typename kit_type_, u32_t rung_, typename node_id_type_, std::size_t... rungs_>
 __device__ void cuda_instantiate_rungs(std::index_sequence<rungs_...>) noexcept {
-    (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, capability_, metric_, rung_, node_id_type_,
+    (static_cast<void>(&cuda_kernel<basic::cuda_rungs[rungs_].kernel, kit_type_, rung_, node_id_type_,
                                     basic::cuda_rungs[rungs_].slots>),
      ...);
 }
 
-/** The rung at @p index of the kit of @p metric, as a template argument in device code. */
-constexpr u32_t vram_sequence_rung(vram_sequence_metric_t metric, std::size_t index) noexcept {
-    std::span<u32_t const> const rungs = vram_sequence_rungs(metric);
-    return rungs[index];
-}
-
-template <sz_capability_t capability_, vram_sequence_metric_t metric_, typename node_id_type_, std::size_t... words_>
+template <typename kit_type_, typename node_id_type_, std::size_t... words_>
 __device__ void cuda_instantiate_words(std::index_sequence<words_...>) noexcept {
-    (cuda_instantiate_rungs<capability_, metric_, vram_sequence_rung(metric_, words_), node_id_type_>(
+    (cuda_instantiate_rungs<kit_type_, kit_type_::rungs_k[words_], node_id_type_>(
          std::make_index_sequence<std::size(basic::cuda_rungs)> {}),
      ...);
 }
 
-/** Instantiates every kernel of every rung of the kind @p metric_ under @p capability_ with
- *  @p node_id_type_ IDs; the unit compiling the fatbin names it once per kind and node-ID type.
- *  Taking the kernels' addresses in device code makes NVCC emit them, while a host-only pass emits
- *  no launch stub. */
-template <sz_capability_t capability_, vram_sequence_metric_t metric_, typename node_id_type_>
+/** Instantiates every kernel of every rung of @p kit_type_ with @p node_id_type_ IDs; the unit
+ *  compiling the fatbin names it once per kit and node-ID type. Taking the kernels' addresses in
+ *  device code makes NVCC emit them, while a host-only pass emits no launch stub. */
+template <typename kit_type_, typename node_id_type_>
 __device__ void cuda_instantiate() noexcept {
-    cuda_instantiate_words<capability_, metric_, node_id_type_>(
-        std::make_index_sequence<vram_sequence_rungs(metric_).size()> {});
-    constexpr u32_t first_rung = vram_sequence_rung(metric_, 0);
-    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, capability_, metric_, first_rung, node_id_type_, 0>);
-    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, capability_, metric_, first_rung, node_id_type_, 0>);
+    cuda_instantiate_words<kit_type_, node_id_type_>(std::make_index_sequence<std::size(kit_type_::rungs_k)> {});
+    constexpr u32_t first_rung = kit_type_::rungs_k[0];
+    static_cast<void>(&cuda_kernel<vram_kernel_t::load_values_k, kit_type_, first_rung, node_id_type_, 0>);
+    static_cast<void>(&cuda_kernel<vram_kernel_t::size_spans_k, kit_type_, first_rung, node_id_type_, 0>);
 }
 
 #pragma endregion Kernels

@@ -24,12 +24,13 @@
 #include <memory>    // `std::unique_ptr` - a sharded index's shards
 #include <new>       // `std::nothrow` - a sharded index's shards
 #include <string>    // `std::string` - the tape and the generated strings
+#include <type_traits> // `std::conditional_t` - the GPU kit of a kind
 #include <vector>    // `std::vector` - strings, offsets, matches
 
 #include "usearch/sequence_index.h"
 #include "usearch/sequence/ram_index.hpp"
 #if USEARCH_ARCH_CUDA_
-#include "usearch/sequence/vram_nvidia_index.hpp"
+#include "usearch/sequence/vram_nvidia_metric.cuh"
 #include "usearch/basic/vram_nvidia_indexes.hpp"
 #endif
 
@@ -146,6 +147,16 @@ static auto make_sequence_metric(std::size_t staging, std::size_t& failures) {
     }
 }
 
+/** The kit the GPU scores @p metric_ with, its ladder's pick at the CUDA floor. */
+template <usearch_sequence_metric_t metric_>
+using vram_kit_of = std::conditional_t<
+    metric_ == usearch_sequence_metric_overlap_k, typename overlap_ladder<sz_cap_cuda_k>::kit_t,
+    std::conditional_t<
+        metric_ == usearch_sequence_metric_needleman_wunsch_k, typename needleman_wunsch_ladder<sz_cap_cuda_k>::kit_t,
+        typename levenshtein_ladder<metric_ == usearch_sequence_metric_levenshtein_utf8_k ? sz_levenshtein_runes_k
+                                                                                          : sz_levenshtein_bytes_k,
+                                    sz_cap_cuda_k>::kit_t>>;
+
 /** Matches, of @p wanted at most, whose distances reach no further than the @p wanted -th exact
  *  one: ties make the IDs ambiguous, the distances never. */
 static std::size_t matched_count(std::span<sz_size_t const> found, std::vector<sz_size_t> exact, std::size_t wanted) {
@@ -175,8 +186,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
                                                   std::size_t length, std::size_t queries_count,
                                                   recall_reference_t reference = recall_reference_t::ram_index_k) {
     using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
-    using vram_index_t = vram_nvidia_index<static_cast<vram_sequence_metric_t>(metric_), node_id_type_, sz_cap_cuda_k,
-                                           sequence_nvidia_fatbin<metric_>>;
+    using vram_index_t = vram_nvidia_index<vram_kit_of<metric_>, node_id_type_, sequence_nvidia_fatbin<metric_>>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
 
@@ -202,7 +212,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     std::size_t ram_matched = 0;
     if (reference == recall_reference_t::ram_index_k) {
         ram_index_t ram_index;
-        auto metric = make_sequence_metric<metric_, sz_cap_any_k>(expansion_k * connectivity_32_k, failures);
+        auto metric = make_sequence_metric<metric_, sz_cap_cpus_k>(expansion_k * connectivity_32_k, failures);
         ram_index_t::traversal_context_t ram_context {seed};
         failures += expect(bool(ram_index.reserve(count)));
         for (std::size_t entry = 0; entry != count; ++entry) {
@@ -229,10 +239,14 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     // The GPU index, in three batches, each over a context carved from the executor's run.
     int const device = executor.device(0);
     vram_index_t vram_index {cuda_virtual_memory_allocator<byte_t> {executor.api(), device}};
-    if constexpr (metric_ == usearch_sequence_metric_overlap_k)
-        failures += expect_eq(vram_index.window_widths(vram_overlap_widths_k), status_t::success_k);
+    if constexpr (metric_ == usearch_sequence_metric_overlap_k) {
+        u32_t widths[std::size(vram_overlap_widths_k)];
+        for (std::size_t window = 0; window != std::size(widths); ++window)
+            widths[window] = static_cast<u32_t>(vram_overlap_widths_k[window]);
+        failures += expect_eq(vram_index.parameters(widths), status_t::success_k);
+    }
     if constexpr (metric_ == usearch_sequence_metric_needleman_wunsch_k)
-        failures += expect_eq(vram_index.costs(vram_nucleotide_costs_k), status_t::success_k);
+        failures += expect_eq(vram_index.parameters(vram_nucleotide_costs_k), status_t::success_k);
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
@@ -304,7 +318,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
 
 /** Builds the byte Levenshtein shards of a sharded index, unreserved, on the device it names. */
 struct sequence_vram_shards_t {
-    using index_t = vram_nvidia_index<vram_sequence_metric_t::levenshtein_bytes_k, u32_t, sz_cap_cuda_k,
+    using index_t = vram_nvidia_index<vram_kit_of<usearch_sequence_metric_levenshtein_bytes_k>, u32_t,
                                       sequence_nvidia_fatbin<usearch_sequence_metric_levenshtein_bytes_k>>;
 
     std::unique_ptr<index_t> operator()(int device) const noexcept {
