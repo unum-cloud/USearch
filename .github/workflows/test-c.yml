@@ -10,19 +10,19 @@ env:
   PYTHONUTF8: 1
   PYTHONFAULTHANDLER: 1
   ANDROID_NDK_VERSION: 30.0.16248370
-  ANDROID_SDK_VERSION: 21
+  ANDROID_SDK_VERSION: 28
   EMSCRIPTEN_VERSION: 6.0.9
   WASI_SDK_VERSION: "34"
   WASMTIME_VERSION: v50.0.1
 
 jobs:
   test_ubuntu_gcc:
-    name: Test on Ubuntu with GCC 14
+    name: Test on Ubuntu with GCC 15
     runs-on: ubuntu-26.04
     timeout-minutes: 40
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CC: gcc-15
+      CXX: g++-15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -31,8 +31,8 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          sudo apt install -y build-essential g++-15 lld libjemalloc-dev libomp-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-15 -D CMAKE_CXX_COMPILER=g++-15 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo
@@ -96,12 +96,12 @@ jobs:
           GENMC_CLANG: clang++-20
 
   test_ubuntu_clang:
-    name: Test on Ubuntu with Clang 20
+    name: Test on Ubuntu with Clang 22
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      CC: clang-20
-      CXX: clang++-20
+      CC: clang-22
+      CXX: clang++-22
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -110,11 +110,31 @@ jobs:
       - name: Build C/C++
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang-20 lld libjemalloc-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
+          sudo apt install -y build-essential clang-22 lld libjemalloc-dev
+          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 -D USEARCH_BUILD_SHARED=1 -D USEARCH_WITH_JEMALLOC=1
           cmake --build --preset relwithdebinfo
       - name: Test C and C++
         run: ctest --preset relwithdebinfo
+
+  # Linux 4.18 headers prove the kernel mirrors suffice, and the runner's newer kernel that they match.
+  test_old_kernel_headers:
+    name: Build C Library on Old Kernel Headers
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull Git Submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule update --init --recursive
+      - name: Build C Library
+        run: |
+          cmake -B build_old_headers -D USEARCH_BUILD_SHARED=1 -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=Release
+          cmake --build build_old_headers --parallel 4 --target usearch_test_c
+      - name: Test C Library
+        run: build_old_headers/usearch_test_c
 
   test_macos:
     name: Test on macOS
@@ -151,7 +171,7 @@ jobs:
 
   build_windows_arm:
     name: Build for Windows Arm64
-    runs-on: windows-2025
+    runs-on: windows-2025-vs2026
     timeout-minutes: 10
     steps:
       - name: Checkout Repository
@@ -165,11 +185,11 @@ jobs:
         # C/C++
       - name: Build C/C++ for Arm64
         run: |
-          cmake --preset msvc2022_arm64
-          cmake --build --preset msvc2022_arm64
+          cmake --preset msvc2026_arm64
+          cmake --build --preset msvc2026_arm64
 
       - name: Verify ARM64 Build Artifacts
-        run: Get-Item build_msvc2022_arm64\libusearch_shared.dll
+        run: Get-Item build_msvc2026_arm64\libusearch_shared.dll
 
   build_cross_linux:
     name: Build for Linux ${{ matrix.arch }}

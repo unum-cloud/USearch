@@ -56,8 +56,8 @@ Placed shards the parts leave empty stay empty, and shards past the placed ones 
 | --------------- | ------------ | ------------ | ------------- |
 | Dense on RAM    | path, buffer | path, buffer | path          |
 | Dense on GPUs   | path, buffer | path, buffer | path          |
-| Basic on RAM    | path         | path         | path          |
-| Basic on NVIDIA | path         | path         | path          |
+| Basic on RAM    | path, buffer | path, buffer | path          |
+| Basic on NVIDIA | path         | path, buffer | path          |
 
 Dense GPUs are NVIDIA, AMD and Apple devices; the basic modalities are sequence, shapes and geospatial.
 Any residency loads what any other saved.

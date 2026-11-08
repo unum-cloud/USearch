@@ -23,18 +23,33 @@ jobs:
       - name: Set Up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15t"
       - name: Install Doxygen
         run: |
           curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
-      - name: Install Sphinx
-        run: pip install -r docs/requirements.txt
-      - name: Install USearch from the Checkout
-        run: pip install .
-      - name: Build Docs
-        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
-      - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v5
+      - name: Install griffe
+        run: pip install griffe==2.4.1
+      - name: Set Up Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          path: ./build/docs/html
+          toolchain: beta-2026-10-18
+      - name: Set Up Swift
+        uses: compnerd/gha-setup-swift@v0.5.0
+        with:
+          swift-version: swift-6.4.0-release
+      - name: Set Up Pixi
+        uses: prefix-dev/setup-pixi@v0
+        with:
+          pixi-version: v0.62.1
+          manifest-path: mojo/pixi.toml
+      # Mojo comes from the binding's own Pixi environment, as its tests take it.
+      - name: Build Docs
+        run: |
+          eval "$(pixi shell-hook --manifest-path mojo/pixi.toml)"
+          .github/scripts/build-docs.sh
+      - name: Upload Docs
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs
+          path: build/usearch_docs_*.tar.gz

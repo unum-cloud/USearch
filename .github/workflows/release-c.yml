@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "^1.22.0"
+  GO_VERSION: "^1.24.0"
   ANDROID_NDK_VERSION: 30.0.16248370
-  ANDROID_SDK_VERSION: 21
+  ANDROID_SDK_VERSION: 28
   EMSCRIPTEN_VERSION: 6.0.9
   MINGW_VERSION: 12.2.0
 
@@ -28,7 +28,7 @@ jobs:
   create_linux_deb_package:
     name: Create Debian Package for ${{ matrix.arch }} ${{ matrix.target }}
     needs: hooks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -98,7 +98,7 @@ jobs:
   create_windows_dll_library:
     name: Create Library for Windows ${{ matrix.arch }}
     needs: hooks
-    runs-on: windows-2025
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-2025-vs2026' || 'windows-2025' }}
     timeout-minutes: 10
     permissions:
       contents: write
@@ -154,7 +154,7 @@ jobs:
       - name: Build Library with MSVC for Arm64
         if: matrix.arch == 'arm64'
         run: |
-          cmake --preset msvc2022_arm64 -B ./build_release
+          cmake --preset msvc2026_arm64 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\

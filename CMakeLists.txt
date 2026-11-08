@@ -3,7 +3,7 @@ project(
     usearch
     VERSION 3.0.0
     LANGUAGES C CXX
-    DESCRIPTION "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
+    DESCRIPTION "One Proximity Graph for Search, Sparse Products & Attention, across RAM, VRAM & NVMe"
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"
 )
 

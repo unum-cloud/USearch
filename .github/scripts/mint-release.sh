@@ -6,7 +6,8 @@
 set -euo pipefail
 version=$1 core=${1%%-*}
 branch=$(git branch --show-current)
-previous=$(git describe --tags --abbrev=0)
+# The first release has no tag before it, so its notes start at the root commit.
+previous=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
 git diff --quiet HEAD || { echo "mint-release: commit or stash your changes first"; exit 1; }
 
 # The Swift binaries `Package.swift` names by checksum are built from this pushed head, stamped with the version
@@ -22,7 +23,6 @@ IFS=. read -r major minor patch <<< "$core"
 export version core major minor patch
 echo "$version" > VERSION
 perl -pi -e 's/^(  "version": ")[^"]+/$1$ENV{version}/' package.json
-perl -pi -e 's/^version: .+$/version: $ENV{version}/' CITATION.cff
 perl -pi -e 's/^(version = ")[^"]+/$1$ENV{version}/' Cargo.toml pixi.toml mojo/pixi.toml
 perl -pi -e 's/^(    \.version = ")[^"]+/$1$ENV{version}/' build.zig.zon
 perl -pi -e 's/(def usearchVersion = \x27)[^\x27]+\x27/$1$ENV{version}\x27/; s/(implementation name: \x27usearch\x27, version: \x27)[^\x27]+\x27/$1$ENV{version}\x27/' java/README.md

@@ -1,4 +1,4 @@
-# Benchmarking USearch
+# USearch Benchmarks
 
 Cross-engine comparisons live in [RetriEval](https://github.com/ashvardanian/RetriEval).
 It drives USearch, FAISS, cuVS and standalone databases through one harness over the BigANN binary layout, with shuffled parallel construction, incremental recall curves and machine-readable reports, and its README carries the dataset catalogue with download recipes and pre-computed ground truth.
@@ -281,13 +281,15 @@ SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euc
 | NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    |  256 / 96 |  56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
 | NVIDIA B200, 148 SMs, 178.35 GB                   | `blackwell` | SIFT    |  256 / 96 | 342.23 k IPS | 483.06 k QPS |   95.160% | 2026-10-15 |
 | NVIDIA B300 SXM6, 148 SMs, 267.68 GB              | `blackwell` | SIFT    | 256 / 256 | 431.52 k IPS | 604.49 k QPS |   99.130% | 2026-10-21 |
+| AWS Graviton5, 192 cores, 2 domains, 4K pages     | `apple-m2`  | SIFT    | 512 / 160 | 161.95 k IPS | 173.82 k QPS |   99.250% | 2026-11-09 |
 
 PubChem MACCS and ECFP4 from USearchMolecules, `u1`, Hamming, all 115,627,267 molecules, of 166 and 2048 bits.
 
-| Machine                              | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
-| :----------------------------------- | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | MACCS   |  256 / 64 | 559.14 k IPS |   1.46 M QPS |   99.070% | 2026-10-21 |
-| NVIDIA B300 SXM6, 148 SMs, 267.68 GB | `blackwell` | ECFP4   | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
+| Machine                                       | Class       | Dataset | Expansion |   Insertions |      Queries | Recall@10 | Date       |
+| :-------------------------------------------- | :---------- | :------ | --------: | -----------: | -----------: | --------: | :--------- |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | MACCS   |  256 / 64 | 559.14 k IPS |   1.46 M QPS |   99.070% | 2026-10-21 |
+| NVIDIA B300 SXM6, 148 SMs, 267.68 GB          | `blackwell` | ECFP4   | 512 / 512 | 146.81 k IPS | 285.23 k QPS |   99.060% | 2026-10-21 |
+| AWS Graviton5, 192 cores, 2 domains, 4K pages | `apple-m2`  | ECFP4   | 512 / 512 | 104.41 k IPS |  57.81 k QPS |   98.210% | 2026-11-09 |
 
 ### 1B
 

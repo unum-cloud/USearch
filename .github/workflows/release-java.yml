@@ -22,7 +22,7 @@ jobs:
   create_linux_library:
     name: Create Library for Linux ${{ matrix.arch }}
     needs: hooks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       CC: clang
@@ -101,7 +101,7 @@ jobs:
   create_windows_library:
     name: Create Library for Windows ${{ matrix.arch }}
     needs: hooks
-    runs-on: windows-2025
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-2025-vs2026' || 'windows-2025' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -112,7 +112,7 @@ jobs:
             configure: -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_SHARED=1 -D USEARCH_DENSE_DTYPES=11
           - arch: arm64
             platform: windows-arm64
-            configure: --preset msvc2022_arm64
+            configure: --preset msvc2026_arm64
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7

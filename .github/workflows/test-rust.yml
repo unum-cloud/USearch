@@ -8,7 +8,7 @@ permissions:
 
 env:
   ANDROID_NDK_VERSION: 30.0.16248370
-  ANDROID_SDK_VERSION: 21
+  ANDROID_SDK_VERSION: 28
 
 jobs:
   test_rust_ubuntu_gcc:
