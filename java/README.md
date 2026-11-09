@@ -186,7 +186,7 @@ try (Arena found = new Arena(); Arena fetched = new Arena()) {       // two live
 }
 List<Deferred<Matches>> calls = new ArrayList<>();
 for (int shard = 0; shard < shards.length; ++shard) {
-    calls.add(shards[shard].deferred(pool).search(queries, 10, arenas[shard]));    // one arena per submitted call
+    calls.add(shards[shard].deferred(pools[shard]).search(queries, 10, arenas[shard]));    // one executor and one arena per submitted call
 }
 for (Deferred<Matches> call : calls) {
     try (call) {

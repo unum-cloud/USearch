@@ -1607,7 +1607,7 @@ public final class Types {
     }
 
     /**
-     * One call in flight: its argument structure, its outcome, and everything it lends the library,
+     * One call: its argument structure, its outcome, and everything it lends the library,
      * in memory that lives until the call is final - confined to the caller when blocking, shared
      * when deferred. As the cleaner of a dropped {@link Deferred}, it frees nothing the library may
      * still write and never waits: an unfinished call is left to a later collection.

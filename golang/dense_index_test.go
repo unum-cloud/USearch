@@ -24,7 +24,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 	"unsafe"
 )
 
@@ -1434,14 +1433,13 @@ func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, keys, slab := populated(t, angularBF16(dimensions), 4)
-	executor := pool(t)
-	on := index.Deferred(executor)
-	rows, bytes := newArena(t, executor), newArena(t, executor)
+	getting, saving, counting, describing := pool(t), pool(t), pool(t), pool(t)
+	rows, bytes := newArena(t, getting), newArena(t, saving)
 
-	found := on.Get(keys[2], ScalarF32, rows)
-	buffer := on.SaveBuffer(bytes, nil)
-	counted := on.Count(keys[3])
-	described := on.Describe()
+	found := index.Deferred(getting).Get(keys[2], ScalarF32, rows)
+	buffer := index.Deferred(saving).SaveBuffer(bytes, nil)
+	counted := index.Deferred(counting).Count(keys[3])
+	described := index.Deferred(describing).Describe()
 
 	vectors, err := found.Wait()
 	if err != nil {
@@ -1467,7 +1465,7 @@ func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	if description, err := described.Wait(); err != nil || description.Size != 4 {
 		t.Errorf("the description came back as %+v: %v", description, err)
 	}
-	if _, err := index.On(executor).Get(keys[0], ScalarF32, rows); err != nil {
+	if _, err := index.On(getting).Get(keys[0], ScalarF32, rows); err != nil {
 		t.Fatalf("the waited call's arena must serve the next one: %v", err)
 	}
 	if _, err := DenseValues[float32](vectors); !errors.Is(err, StatusUninitialized) {
@@ -1475,8 +1473,7 @@ func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	}
 }
 
-// A deferred predicate re-enters Go from whichever thread runs the call, the waiting one included,
-// and admits only what it approves.
+// A deferred predicate re-enters Go from the executor's threads and admits only what it approves.
 func TestDeferredPredicatesAdmitOnlyApprovedKeys(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -1515,14 +1512,16 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	const dimensions = 8
 	const count = 64
 	index := newIndex(t, angularBF16(dimensions), count)
-	executor := pool(t)
+	inserting, discarding, keeping := pool(t), pool(t), pool(t)
 	slab := seededRows(count, dimensions)
-	on := index.Deferred(executor)
 
-	inserted := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
-	discarded := on.Get(KeyFromUint64(1), ScalarF32, newArena(t, executor))
-	kept := on.Get(KeyFromUint64(1), ScalarF32, newArena(t, executor))
-	for _, call := range []interface{ Close() error }{inserted, discarded, discarded} {
+	inserted := index.Deferred(inserting).Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
+	if err := inserted.Close(); err != nil {
+		t.Fatalf("a closed call reported %v", err)
+	}
+	discarded := index.Deferred(discarding).Get(KeyFromUint64(1), ScalarF32, newArena(t, discarding))
+	kept := index.Deferred(keeping).Get(KeyFromUint64(1), ScalarF32, newArena(t, keeping))
+	for _, call := range []interface{ Close() error }{discarded, discarded} {
 		if err := call.Close(); err != nil {
 			t.Fatalf("a closed call reported %v", err)
 		}
@@ -1578,20 +1577,19 @@ func TestDroppedDeferredCallsAreReleased(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	index, _, slab := populated(t, angularBF16(dimensions), 16)
-	executor := pool(t)
-	on := index.Deferred(executor)
-	arena := newArena(t, executor)
+	searching, inserting := pool(t), pool(t)
+	arena := newArena(t, searching)
 
 	released := make(chan struct{})
 	func() {
 		witness := new([4]int64)
 		runtime.AddCleanup(witness, func(released chan struct{}) { close(released) }, released)
-		on.Search(RowsOf(slab[:dimensions], dimensions), 4, arena,
+		index.Deferred(searching).Search(RowsOf(slab[:dimensions], dimensions), 4, arena,
 			&DenseSearchConfig{Predicate: func(Key) bool { return witness[0] == 0 }})
-		on.Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil)
+		index.Deferred(inserting).Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil)
 	}()
 	runtime.GC()
-	if err := executor.Drain(MoodParked); err != nil {
+	if err := searching.Drain(MoodParked); err != nil {
 		t.Fatalf("the executor must drain: %v", err)
 	}
 	for collections := 0; collections < 1000; collections++ {
@@ -1599,7 +1597,8 @@ func TestDroppedDeferredCallsAreReleased(t *testing.T) {
 		select {
 		case <-released:
 			return
-		case <-time.After(time.Millisecond):
+		default:
+			runtime.Gosched()
 		}
 	}
 	t.Fatal("the dropped call still holds its predicate")

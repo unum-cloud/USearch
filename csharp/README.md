@@ -134,8 +134,9 @@ foreach (Key key in index.Search(query, 10, found)[0].Keys)
     Rerank(key, index.Get(key, fetched));
 }
 
-Arena[] arenas = [.. shards.Select(_ => new Arena(pool))];       // One arena per submitted call
-Deferred<Matches>[] calls = [.. shards.Select((shard, at) => shard.Deferred(pool).Search(queries, 10, arenas[at]))];
+Executor[] pools = [.. shards.Select(_ => Executor.ForRam(threads: 8))];  // One executor and one arena per submitted call
+Arena[] arenas = [.. pools.Select(own => new Arena(own))];
+Deferred<Matches>[] calls = [.. shards.Select((shard, at) => shard.Deferred(pools[at]).Search(queries, 10, arenas[at]))];
 foreach (Deferred<Matches> call in calls) Consume(await call);   // Or: call.Wait()
 ```
 

@@ -224,7 +224,7 @@ for _, key := range neighbors {
 
 calls := make([]*usearch.Deferred[usearch.MatchesView], len(shards))
 for position, shard := range shards {
-	calls[position] = shard.Deferred(executor).Search(queries, 10, arenas[position], nil) // one arena per submitted call
+	calls[position] = shard.Deferred(executors[position]).Search(queries, 10, arenas[position], nil) // one executor and one arena per submitted call
 }
 for position, call := range calls {
 	if results[position], err = call.Wait(); err != nil {

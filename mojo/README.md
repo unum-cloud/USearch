@@ -115,10 +115,12 @@ var hits = index.on(executor).search(query, 10, found)
 for key in hits.query_keys(0):
     rerank(key, index.on(executor).get[DType.float32](key, fetched))
 
-var east_arena = Arena(executor)
-var west_arena = Arena(executor)  # one arena per submitted call
-var east = east_shard.deferred(executor).search(queries, 10, east_arena)
-var west = west_shard.deferred(executor).search(queries, 10, west_arena)
+var east_executor = Executor.for_ram(library, threads=4)
+var west_executor = Executor.for_ram(library, threads=4)  # one executor and one arena per submitted call
+var east_arena = Arena(east_executor)
+var west_arena = Arena(west_executor)
+var east = east_shard.deferred(east_executor).search(queries, 10, east_arena)
+var west = west_shard.deferred(west_executor).search(queries, 10, west_arena)
 print(east.wait().query_keys(0)[0], west.wait().query_keys(0)[0])
 ```
 

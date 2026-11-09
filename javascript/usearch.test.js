@@ -424,7 +424,7 @@ test("Deferred calls", async (t) => {
   });
 
   await t.test("every verb a deferred receiver offers answers what its blocking twin does", async () => {
-    // An executor runs one call at a time, so each call in flight takes its own.
+    // An executor runs one call at a time, so each deferred call takes its own.
     const executors = Array.from({ length: 5 }, () => Executor.forRam());
     const [counting, describing, auditing, getting, refining] = executors.map((own) => index.deferred(own));
     const calls = {

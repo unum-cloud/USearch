@@ -92,7 +92,7 @@ const devicePool = usearch.Executor.forVram({ devices: [0, 1], scratchLimit: 1 <
 const diskPool = usearch.Executor.forNvme({ threads: 4, paths: ['/mnt/nvme0', '/mnt/nvme1'] });
 ```
 
-`forRam` spawns host worker threads and spreads them over the named NUMA nodes, absent naming none and spreading them over every node.
+`forRam` creates an executor of host threads and spreads them over the named NUMA nodes, absent naming none and spreading them over every node.
 `onPool` borrows an existing ForkUnion pool by its `BigInt` address instead of spawning one.
 `forVram` opens one CUDA stream per named ordinal, absent taking one free device, or borrows the `streams` given as `BigInt` addresses, one per device.
 It takes no thread count because one host thread drives one stream per device, so the device list is what sizes the work rather than a number of workers.
@@ -127,7 +127,8 @@ const nearest = index.search(query, 10, found).get(0);
 for (let position = 0; position < nearest.count; position++)
   rerank(keyAt(nearest.keys, position), index.get(keyAt(nearest.keys, position), fetched));
 
-const calls = shards.map((shard, position) => shard.deferred(executor).search(queries, 10, arenas[position]));
+// One executor and one arena per submitted call
+const calls = shards.map((shard, at) => shard.deferred(executors[at]).search(queries, 10, arenas[at]));
 const results = [];
 for (const call of calls) results.push(await call); // or: call.wait()
 ```

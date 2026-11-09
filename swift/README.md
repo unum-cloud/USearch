@@ -121,8 +121,8 @@ let found = try Arena(), fetched = try Arena()                                  
 for match in try index.search(query, wanted: 10, arena: found)[0] {
     rerank(match.key, try index.get(key: match.key, as: Float.self, arena: fetched))
 }
-let calls = try zip(shards, arenas).map { shard, arena in
-    try shard.deferred(executor).search(queries, wanted: 10, arena: arena) // one arena per submitted call
+let calls = try shards.indices.map { at in
+    try shards[at].deferred(executors[at]).search(queries, wanted: 10, arena: arenas[at]) // one executor and one arena per submitted call
 }
 var results: [Matches] = []
 for call in calls { results.append(try await call.value) }                       // or: try call.wait()

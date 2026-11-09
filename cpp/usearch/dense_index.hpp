@@ -72,8 +72,8 @@ class executor_t {
     executor_t& operator=(executor_t const&) = delete;
     ~executor_t() noexcept { usearch_executor_free(handle_); }
 
-    /** Spawns host threads for RAM-resident indexes, interleaved across the compute domains local
-     *  to the memory domains @p options names. */
+    /** Creates an executor of host threads for RAM-resident indexes, interleaved across the compute
+     *  domains local to the memory domains @p options names. */
     static outcome<executor_t> for_ram(usearch_executor_for_ram_t options = {}) noexcept {
         return spawned_(usearch_executor_for_ram, options);
     }
@@ -101,7 +101,8 @@ class executor_t {
     }
 
     /**
-     *  Spawns host threads for NVMe-resident indexes, one submission ring apiece.
+     *  @brief Creates an executor of host threads for NVMe-resident indexes, one submission ring
+     *      apiece, interleaved across the compute domains local to the devices the paths name.
      *
      *  @par Statuses:
      *  - @c usearch_status_invalid_argument_k @c NULL paths for a nonzero count, or an unknown
@@ -397,11 +398,11 @@ class dense_index_t {
     }
 
     /**
-     *  Erases all entries, keeping the reserved capacity and frozen geometry.
+     *  @brief Erases all entries, keeping the reserved capacity and frozen geometry.
      *
      *  @par Statuses:
      *  - @c usearch_status_read_only_k The index is an NVMe view.
-     *  - @c usearch_status_contended_k A call in flight, a batch or load holding claims, or a plan
+     *  - @c usearch_status_contended_k A running call, a batch or load holding claims, or a plan
      *    holding the index closed.
      */
     outcome<> clear(usearch_dense_clear_t arguments = {}, executor_t const& executor = {}) noexcept {
@@ -465,7 +466,7 @@ class dense_index_t {
     }
 
     /**
-     *  Absorbs the donor indexes @p arguments names into this one, consuming them.
+     *  @brief Absorbs the donor indexes @p arguments names into this one, consuming them.
      *
      *  @par Statuses:
      *  - @c usearch_status_read_only_k The index is an NVMe view.
@@ -473,7 +474,7 @@ class dense_index_t {
      *    count.
      *  - @c usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
      *    geometry, a donor on a device the executor does not drive, or this index itself.
-     *  - @c usearch_status_contended_k An insertion in flight on this index or on the next donor,
+     *  - @c usearch_status_contended_k An insertion running on this index or on the next donor,
      *    or on VRAM a save of either; that donor and every later one stay live indexes.
      */
     outcome<> absorb(usearch_dense_absorb_t arguments, executor_t const& executor = {}) noexcept {
@@ -593,12 +594,11 @@ class dense_index_t {
     }
 
     /**
-     *  Writes the index to the checkpoint path @p arguments names.
+     *  @brief Writes the index to the checkpoint path @p arguments names.
      *
      *  @par Statuses:
-     *  - @c usearch_status_contended_k A RAM save meeting an insertion in flight or one publishing
-     *    under it, or a VRAM save meeting an insertion, refinement, absorption or another save in
-     *    flight.
+     *  - @c usearch_status_contended_k A RAM save meeting a running insertion or one publishing
+     *    under it, or a VRAM save meeting a running insertion, refinement, absorption or save.
      */
     outcome<> save(usearch_dense_save_t arguments, executor_t const& executor = {}) noexcept {
         return ran_(usearch_dense_save, arguments, executor);

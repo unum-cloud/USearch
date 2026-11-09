@@ -97,7 +97,7 @@ shared_pool = usearch.Executor.on_pool(fu_pool_address)  # Borrows a ForkUnion p
 pool.drain(usearch.Mood.SPINNING)  # Waits, then keeps idle workers hot
 ```
 
-`for_ram` spawns host worker threads, and its `memory_domains` are the NUMA node IDs those threads stay local to.
+`for_ram` creates an executor of host threads, and its `memory_domains` are the NUMA node IDs those threads stay local to.
 `for_nvme` opens one submission ring per worker, striping shards across the `paths` it is given.
 `for_vram` takes no thread count at all: one host thread drives one stream per device, so the width of that pool is the device list rather than a worker count.
 `on_pool` borrows a ForkUnion `fu_pool_t` another library spawned, passed as an integer address the way `ctypes` and `cffi` hand pointers over, and the pool must outlive the executor.
@@ -136,8 +136,9 @@ for batch in batches:
 found, fetched = usearch.Arena(), usearch.Arena()  # two live results, two arenas
 for key, _ in index.search(query, 10, found)[0]:
     rerank(key, index.get(key, fetched))
-arenas = [usearch.Arena(pool) for _ in shards]  # one arena per submitted call
-calls = [shard.deferred(pool).search(queries, 10, arena) for shard, arena in zip(shards, arenas)]
+pools = [usearch.Executor.for_ram(threads=8) for _ in shards]  # one executor and one arena per submitted call
+arenas = [usearch.Arena(own) for own in pools]
+calls = [shard.deferred(own).search(queries, 10, arena) for shard, own, arena in zip(shards, pools, arenas)]
 results = [call.wait() for call in calls]  # or, in a coroutine: await call
 ```
 

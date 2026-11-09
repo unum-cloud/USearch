@@ -60,7 +60,7 @@ Every verb but `clear` comes from the `DenseVerbs` trait, which `use usearch::*`
 The receiver decides where a verb runs and how it completes, while the verb and its arguments stay the same:
 
 - `index.search(..)` runs on the calling thread, through `&DenseIndex`.
-- `index.on(&executor).search(..)` blocks on the executor, after the calls submitted there before it.
+- `index.on(&executor).search(..)` blocks on the executor.
 - `index.deferred(&executor).search(..)` submits the call and answers a `Deferred`.
 
 `DenseVerbs` writes every verb once for all three.
@@ -142,13 +142,16 @@ for &key in index.search(&query, 10, &mut found)?.query(0)?.keys {
     rerank(key, index.get::<f32>(key, &mut fetched)?.view()?);       // rewinds fetched, never found
 }
 
-let mut arenas = Vec::new();                                         // one arena per submitted call
+let (mut executors, mut arenas) = (Vec::new(), Vec::new());          // one executor and one arena per submitted call
 for _ in &shards {
-    arenas.push(Arena::new_in(&executor)?);
+    executors.push(Executor::for_ram(&[], None, 8)?);
+}
+for executor in &executors {
+    arenas.push(Arena::new_in(executor)?);
 }
 let mut calls = Vec::new();
-for (shard, arena) in shards.iter().zip(&mut arenas) {
-    calls.push(shard.deferred(&executor).search(queries.clone().expect("room for a copy"), 10, arena)?);
+for ((shard, executor), arena) in shards.iter().zip(&executors).zip(&mut arenas) {
+    calls.push(shard.deferred(executor).search(queries.clone().expect("room for a copy"), 10, arena)?);
 }
 for call in calls {
     consume(call.await?);                                            // or: call.wait()?

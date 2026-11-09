@@ -132,8 +132,8 @@ const nearest = try index.search(query, 10, &found, .{});
 for ((try nearest.query(0)).keys) |key| rerank(key, try index.get(key, .f32, &fetched));
 
 var calls: [shards.len]usearch.Deferred(usearch.DenseSearch) = undefined;
-for (&calls, shards, &arenas) |*call, shard, *own|
-    try shard.deferred(executor, call).search(queries, 10, own, .{}); // one arena per submitted call
+for (&calls, shards, executors, &arenas) |*call, shard, pool, *own|
+    try shard.deferred(pool, call).search(queries, 10, own, .{}); // one executor and one arena per submitted call
 defer for (&calls) |*call| call.deinit();
 for (&calls) |*call| consume(try call.wait());
 ```

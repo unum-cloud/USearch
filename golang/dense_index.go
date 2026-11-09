@@ -720,8 +720,7 @@ func newDenseIndex(residency Residency) *DenseIndex {
 	return index
 }
 
-// On is the receiver whose verbs block on executor, after the calls submitted there before them.
-// Binding-only.
+// On is the receiver whose verbs block on executor. Binding-only.
 func (index *DenseIndex) On(executor *Executor) DenseIndexOn {
 	return DenseIndexOn{denseReceiver{index: index, executor: executor}}
 }
