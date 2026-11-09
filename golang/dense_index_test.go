@@ -71,7 +71,7 @@ func sequentialKeys(count uint) []Key {
 // pool spawns the executor every fanned-out verb runs on; the engine derives none.
 func pool(t *testing.T) *Executor {
 	t.Helper()
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -411,9 +411,11 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 
 	// A deferred call borrows its arena until final, so a call contending for it rewinds nothing.
 	executor := pool(t)
-	release := make(chan struct{})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enter sync.Once
 	held := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 2, arena,
-		&DenseSearchConfig{Predicate: func(Key) bool { <-release; return true }})
+		&DenseSearchConfig{Predicate: func(Key) bool { enter.Do(func() { close(entered) }); <-release; return true }})
+	<-entered // the predicate runs only once the body has claimed the arena
 	if _, err := index.Get(keys[0], ScalarF32, arena); !errors.Is(err, StatusContended) {
 		t.Errorf("a call on a held arena reported %v", err)
 	}
@@ -493,25 +495,25 @@ func TestClosingTwiceIsHarmless(t *testing.T) {
 // both and never neither.
 func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	t.Parallel()
-	memory, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
+	memory, err := ExecutorForRam(nil, CPUClassUnknown, 2)
 	if err != nil {
 		t.Fatalf("the RAM executor must spawn: %v", err)
 	}
 	defer memory.Close()
 
-	devices, err := ExecutorForVram(nil, GPUClassUnknown, nil, 0, 0)
+	devices, err := ExecutorForVram(nil, GPUClassUnknown, nil, 0)
 	if (devices == nil) == (err == nil) {
 		t.Errorf("the VRAM constructor answered with %v and %v", devices, err)
 	}
 	devices.Close()
 
-	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2, 0)
+	drives, err := ExecutorForNvme(nil, CPUClassUnknown, 2)
 	if (drives == nil) == (err == nil) {
 		t.Errorf("the NVMe constructor answered with %v and %v", drives, err)
 	}
 	drives.Close()
 
-	if _, err := ExecutorForVram([]int32{0}, GPUClassUnknown, make([]unsafe.Pointer, 2), 0, 0); !errors.Is(err, StatusShapeMismatch) {
+	if _, err := ExecutorForVram([]int32{0}, GPUClassUnknown, make([]unsafe.Pointer, 2), 0); !errors.Is(err, StatusShapeMismatch) {
 		t.Errorf("a stream list of the wrong length reported %v", err)
 	}
 	// The stub has no NVMe residency, so it refuses before looking for the file.
@@ -526,7 +528,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	t.Parallel()
 	index := newIndex(t, angularBF16(4), 4)
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2, 0)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 2)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
@@ -1397,7 +1399,7 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	executor := pool(t)
 
 	call := index.Deferred(executor).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, executor), nil)
-	if status := call.Status(); status != StatusDeferred {
+	if status := call.Status(); status != StatusDeferred && status != StatusSuccess {
 		t.Fatalf("a submitted call reported %v", status)
 	}
 	runtime.GC() // the pins, not the variables, keep everything the library reads in place
@@ -1540,8 +1542,7 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	}
 }
 
-// A submission finding the executor's deferred table full is refused rather than waited for, and
-// a refusal the binding catches is reported through the same Status and Wait.
+// A refusal the binding catches is reported through the same Status and Wait as the engine's.
 func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -1549,21 +1550,13 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	index := newIndex(t, angularBF16(dimensions), count)
 	slab := seededRows(count, dimensions)
 
-	executor, err := ExecutorForRam(nil, CPUClassUnknown, 1, 1)
+	executor, err := ExecutorForRam(nil, CPUClassUnknown, 1)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
 	}
 	defer executor.Close()
 	on := index.Deferred(executor)
-	first := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
-	second := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
-	if status := second.Status(); status != StatusContended {
-		t.Errorf("a submission past the table reported %v", status)
-	}
-	if _, err := second.Wait(); !errors.Is(err, StatusContended) {
-		t.Errorf("a submission past the table finished with %v", err)
-	}
-	if _, err := first.Wait(); err != nil {
+	if _, err := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil).Wait(); err != nil {
 		t.Fatalf("the first submission must succeed: %v", err)
 	}
 

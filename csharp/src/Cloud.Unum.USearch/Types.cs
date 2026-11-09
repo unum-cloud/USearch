@@ -54,8 +54,8 @@ public enum Status : int
     Uninitialized = 12,
     /// <summary>The request contradicts an already-frozen configuration.</summary>
     ConfigMismatch = 13,
-    /// <summary>A synchronization contract was violated - a full deferred table, an arena serving
-    /// another call, or a blocking call from inside a callback of the executor it would wait on.</summary>
+    /// <summary>A synchronization contract was violated - an executor or an arena serving another
+    /// call, or a blocking call from inside a callback of the executor it would wait on.</summary>
     Contended = 14,
     /// <summary>A progress handler asked the operation to stop; what the finished increments leave
     /// behind is each verb's own contract.</summary>
@@ -168,8 +168,10 @@ public static partial class Names
     /// <returns>True when the spelling names a status, false otherwise.</returns>
     public static bool TryParse(string name, out Status status)
     {
-        status = Read(name, static view => usearch_status_from_name(view));
-        return status.Name() == name;
+        Status parsed = default;
+        bool read = Read(name, view => usearch_status_from_name(view, out parsed)) == Status.Success;
+        status = parsed;
+        return read;
     }
 
     /// <summary>Reads a scalar kind back from its spelling. Calls <c>usearch_scalar_from_name</c>.</summary>
@@ -188,8 +190,10 @@ public static partial class Names
     /// <returns>True when the spelling names a mood, false otherwise.</returns>
     public static bool TryParse(string name, out Mood mood)
     {
-        mood = Read(name, static view => usearch_mood_from_name(view));
-        return mood.Name() == name;
+        Mood parsed = default;
+        bool read = Read(name, view => usearch_mood_from_name(view, out parsed)) == Status.Success;
+        mood = parsed;
+        return read;
     }
 
     /// <summary>Reads a residency back from its spelling. Calls <c>usearch_residency_from_name</c>.</summary>
@@ -198,8 +202,10 @@ public static partial class Names
     /// <returns>True when the spelling names a residency, false otherwise.</returns>
     public static bool TryParse(string name, out Residency residency)
     {
-        residency = Read(name, static view => usearch_residency_from_name(view));
-        return residency.Name() == name;
+        Residency parsed = default;
+        bool read = Read(name, view => usearch_residency_from_name(view, out parsed)) == Status.Success;
+        residency = parsed;
+        return read;
     }
 
     /// <summary>Reads a traversal back from its spelling. Calls <c>usearch_traversal_from_name</c>.</summary>
@@ -208,8 +214,10 @@ public static partial class Names
     /// <returns>True when the spelling names a traversal, false otherwise.</returns>
     public static bool TryParse(string name, out Traversal traversal)
     {
-        traversal = Read(name, static view => usearch_traversal_from_name(view));
-        return traversal.Name() == name;
+        Traversal parsed = default;
+        bool read = Read(name, view => usearch_traversal_from_name(view, out parsed)) == Status.Success;
+        traversal = parsed;
+        return read;
     }
 
     /// <summary>Copies a static spelling out of the library.</summary>
@@ -893,10 +901,10 @@ public enum Traversal : int
 /// <c>usearch_mood_t</c>.</summary>
 public enum Mood : int
 {
-    /// <summary>Idle threads sleep; the next call pays a wake-up.</summary>
-    Parked = 1,
+    /// <summary>Idle threads sleep; the next call pays a wake-up. The default.</summary>
+    Parked = 0,
     /// <summary>Idle threads stay hot, trading power for the next call's latency.</summary>
-    Spinning = 2,
+    Spinning = 1,
 }
 
 /// <summary>A CPU family USearch ships tuned variants for, which a RAM or NVMe placement or executor may pin.</summary>
@@ -988,8 +996,11 @@ public enum GPUClass : int
 /// A verb runs on an executor when its receiver names one, as <c>index.On(pool)</c> and
 /// <c>index.Deferred(pool)</c> do, and on the caller's own thread when called on the index itself:
 /// single-threaded on RAM, on the handle's device and default stream on VRAM.
-/// Calls on one executor run in submission order, while handles stay freely concurrent - it is the
-/// executor that orders, never the index.
+/// One call holds an executor at a time, and a second finding it held finishes
+/// <see cref="Status.Contended"/>, as nothing queues, while handles stay freely concurrent - it is
+/// the executor that serializes, never the index. A deferred call on a caller-exclusive pool runs on
+/// the pool's thread 0, so polling alone finishes it, while a single thread or a VRAM executor runs
+/// it at submission.
 /// </para>
 /// <example>
 /// <code>
@@ -1016,13 +1027,11 @@ public sealed unsafe class Executor : IDisposable
     /// since full occupancy starves the ordered publication path.</param>
     /// <param name="memoryDomains">NUMA node IDs to place shards on; empty derives every node the
     /// process may allocate on.</param>
-    /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
     /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
     /// CPU's own.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForRam(
-        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0,
-        CPUClass? cpuClass = null)
+        ulong threads = 0, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1038,7 +1047,6 @@ public sealed unsafe class Executor : IDisposable
                     CpuClass = (int)(cpuClass ?? 0),
                 },
                 Threads = (nuint)threads,
-                DeferredLimit = (nuint)deferredLimit,
             };
             usearch_executor_for_ram(&arguments);
         }
@@ -1053,12 +1061,11 @@ public sealed unsafe class Executor : IDisposable
     /// <param name="pool">The borrowed <c>fu_pool_t</c>, which must outlive the executor and keeps
     /// its lender's mood.</param>
     /// <param name="memoryDomains">NUMA node IDs of the indexes it will drive; empty derives.</param>
-    /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
     /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
     /// CPU's own.</param>
     /// <returns>The executor over that pool.</returns>
     public static Executor OnPool(
-        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, ulong deferredLimit = 0, CPUClass? cpuClass = null)
+        IntPtr pool, ReadOnlySpan<int> memoryDomains = default, CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1074,7 +1081,6 @@ public sealed unsafe class Executor : IDisposable
                     CpuClass = (int)(cpuClass ?? 0),
                 },
                 Pool = pool,
-                DeferredLimit = (nuint)deferredLimit,
             };
             usearch_executor_on_pool(&arguments);
         }
@@ -1090,12 +1096,11 @@ public sealed unsafe class Executor : IDisposable
     /// capabilities.</param>
     /// <param name="paths">Devices or directories to place shards on; empty leaves each shard where
     /// its manifest points.</param>
-    /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
     /// <param name="cpuClass">The class whose waiters and atomics the threads use; null derives the
     /// CPU's own.</param>
     /// <returns>The spawned executor.</returns>
     public static Executor ForNvme(
-        ulong threads = 0, ReadOnlySpan<string> paths = default, ulong deferredLimit = 0, CPUClass? cpuClass = null)
+        ulong threads = 0, ReadOnlySpan<string> paths = default, CPUClass? cpuClass = null)
     {
         IntPtr spawned = IntPtr.Zero;
         NativeOutcome outcome = default;
@@ -1111,7 +1116,6 @@ public sealed unsafe class Executor : IDisposable
                     Paths = (IntPtr)views, PathsCount = (nuint)paths.Length, CpuClass = (int)(cpuClass ?? 0),
                 },
                 Threads = (nuint)threads,
-                DeferredLimit = (nuint)deferredLimit,
             };
             usearch_executor_for_nvme(&arguments);
         }
@@ -1134,7 +1138,6 @@ public sealed unsafe class Executor : IDisposable
     /// own.</param>
     /// <param name="scratchLimit">The ceiling on scratch bytes per device; zero lets scratch grow as
     /// geometry asks.</param>
-    /// <param name="deferredLimit">The deferred calls tracked at once; zero takes a default.</param>
     /// <param name="gpuClass">A class the devices must run, refused with
     /// <see cref="Status.Unsupported"/> otherwise; null takes the devices' own.</param>
     /// <returns>The opened executor.</returns>
@@ -1142,7 +1145,6 @@ public sealed unsafe class Executor : IDisposable
         ReadOnlySpan<int> devices = default,
         ReadOnlySpan<IntPtr> streams = default,
         ulong scratchLimit = 0,
-        ulong deferredLimit = 0,
         GPUClass? gpuClass = null)
     {
         // The library reads one stream per device from the pointer alone, so only this side sees a short list.
@@ -1166,7 +1168,6 @@ public sealed unsafe class Executor : IDisposable
                 },
                 Streams = (IntPtr)borrowed,
                 ScratchLimit = (nuint)scratchLimit,
-                DeferredLimit = (nuint)deferredLimit,
             };
             usearch_executor_for_vram(&arguments);
         }
@@ -1174,8 +1175,8 @@ public sealed unsafe class Executor : IDisposable
         return new Executor(EngineHandle.Created<NativeExecutorHandle>(spawned, outcome));
     }
 
-    /// <summary>Waits for every call submitted to this executor, then sets the mood it adopts
-    /// whenever it next goes idle. Calls <c>usearch_executor_drain</c>.</summary>
+    /// <summary>Waits until no call holds this executor, then sets the mood its workers take until
+    /// the next call. Calls <c>usearch_executor_drain</c>.</summary>
     /// <param name="mood">What the executor does with its workers once idle; the last drain wins.</param>
     public void Drain(Mood mood = Mood.Parked)
     {
@@ -1187,7 +1188,7 @@ public sealed unsafe class Executor : IDisposable
     }
 
     /// <summary>
-    /// Drains every thread or stream, releases the scratch it owns, and frees the executor. Freeing
+    /// Waits out the call holding the executor, releases the scratch it owns, and frees it. Freeing
     /// cannot fail, and a freed executor must not be used. Calls <c>usearch_executor_free</c>.
     /// </summary>
     public void Dispose() => this._handle.Dispose();
@@ -1801,7 +1802,6 @@ internal unsafe struct NativeExecutorForRam
     public NativeOutcome* Outcome;
     public NativeRamOptions Ram;
     public nuint Threads;
-    public nuint DeferredLimit;
 }
 
 /// <summary>The arguments of <c>usearch_executor_on_pool</c>.</summary>
@@ -1812,7 +1812,6 @@ internal unsafe struct NativeExecutorOnPool
     public NativeOutcome* Outcome;
     public NativeRamOptions Ram;
     public IntPtr Pool;
-    public nuint DeferredLimit;
 }
 
 /// <summary>The arguments of <c>usearch_executor_for_vram</c>.</summary>
@@ -1824,7 +1823,6 @@ internal unsafe struct NativeExecutorForVram
     public NativeVramOptions Vram;
     public IntPtr Streams;
     public nuint ScratchLimit;
-    public nuint DeferredLimit;
 }
 
 /// <summary>The arguments of <c>usearch_executor_for_nvme</c>.</summary>
@@ -1835,7 +1833,6 @@ internal unsafe struct NativeExecutorForNvme
     public NativeOutcome* Outcome;
     public NativeNvmeOptions Nvme;
     public nuint Threads;
-    public nuint DeferredLimit;
     /// <summary>The NVMe class every ring submits through; zero derives the fastest the host admits.</summary>
     public int NvmeClass;
 }
@@ -1934,7 +1931,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial Status usearch_status_from_name(NativeBytesView name);
+    internal static partial Status usearch_status_from_name(NativeBytesView name, out Status status);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -1950,7 +1947,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial Mood usearch_mood_from_name(NativeBytesView name);
+    internal static partial Status usearch_mood_from_name(NativeBytesView name, out Mood mood);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -1958,7 +1955,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial Residency usearch_residency_from_name(NativeBytesView name);
+    internal static partial Status usearch_residency_from_name(NativeBytesView name, out Residency residency);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -1966,7 +1963,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial Traversal usearch_traversal_from_name(NativeBytesView name);
+    internal static partial Status usearch_traversal_from_name(NativeBytesView name, out Traversal traversal);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

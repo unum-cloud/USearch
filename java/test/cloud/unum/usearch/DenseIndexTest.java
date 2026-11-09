@@ -71,7 +71,7 @@ import cloud.unum.usearch.Types.USearchException;
 public class DenseIndexTest {
 
     /** One pool most verbs here run on; the ones called on the index itself run on the calling thread. */
-    private static final Executor POOL = Executor.forRam(new int[0], null, 0, 0);
+    private static final Executor POOL = Executor.forRam(new int[0], null, 0);
 
     @AfterAll
     public static void releasePool() {
@@ -123,7 +123,8 @@ public class DenseIndexTest {
         assertEquals(DenseIndex.METADATA.byteSize() + 3 * word, cpuClass);
         assertEquals(cpuClass + 4, Library.offset(DenseIndex.DESCRIPTION, "gpu_class"));
         assertEquals(cpuClass + 8, Library.offset(DenseIndex.DESCRIPTION, "shards_count"));
-        assertEquals(cpuClass + 8 + word, DenseIndex.DESCRIPTION.byteSize());
+        assertEquals(cpuClass + 8 + word, Library.offset(DenseIndex.DESCRIPTION, "load_path"));
+        assertEquals(cpuClass + 8 + 2 * word, DenseIndex.DESCRIPTION.byteSize());
     }
 
     @Test
@@ -695,19 +696,20 @@ public class DenseIndexTest {
         }
     }
 
-    /** The stand-in holds a deferred call until its wait, so the status is observable before the join. */
+    /** One call holds the executor at a time, so each deferred call is joined before the next one. */
     @Test
     public void deferredCallsCompleteOnTheirExecutor() {
-        try (Executor pool = Executor.forRam(new int[0], null, 2, 4);
+        try (Executor pool = Executor.forRam(new int[0], null, 2);
                 Arena arena = new Arena(pool);
                 DenseIndex index = empty(twoDimensional())) {
             index.reserve(2);
             DenseIndex.DeferredOn deferred = index.deferred(pool);
             try (Deferred<Void> inserted =
                     deferred.insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {0, 1, 1, 0}, 2))) {
+                inserted.join();
                 Deferred<Matches> searched = deferred.search(RowsView.of(new float[] {1, 0}, 2), 1, arena);
-                assertEquals(Status.DEFERRED, inserted.status());
-                assertEquals(Status.DEFERRED, searched.status());
+                Status submitted = searched.status();
+                assertTrue(submitted == Status.DEFERRED || submitted == Status.SUCCESS);
                 Matches joined = searched.join();
                 assertEquals(Key.of(20), joined.key(0, 0));
                 // The first join freed the outcome, so later ones repeat what it kept, until closed.
@@ -720,6 +722,7 @@ public class DenseIndexTest {
 
             // A failure travels to every join, and a call closed unjoined waits rather than leaking.
             Deferred<Long> counted = deferred.count(Key.of(20));
+            counted.close();
             Deferred<DenseProducts> refused = deferred.maxsim(RowsView.of(new float[] {1, 0}, 2), 1, 1, arena);
             USearchException reported = assertThrows(USearchException.class, refused::join);
             assertEquals(Status.CONFIG_MISMATCH, reported.status());
@@ -731,7 +734,6 @@ public class DenseIndexTest {
                     index.on(pool)
                             .search(RowsView.of(new float[] {1, 0}, 2), 1, arena)
                             .key(0, 0));
-            counted.close();
             assertEquals(2, index.on(pool).describe().size());
         }
     }
@@ -749,17 +751,13 @@ public class DenseIndexTest {
         }
     }
 
-    /** A call refused because a deferred one holds the arena leaves the held call's rows readable. */
+    /** A deferred call keeps its rows readable in its arena until the next call naming it. */
     @Test
     public void aContendedArenaKeepsTheHeldResult() {
         try (DenseIndex index = populated();
                 Arena arena = new Arena();
                 Deferred<DenseVectors> held = index.deferred(POOL).get(Key.of(10), Scalar.F32, arena)) {
-            assertEquals(Status.DEFERRED, held.status());
-            assertEquals(
-                    Status.CONTENDED,
-                    assertThrows(USearchException.class, () -> index.on(POOL).get(Key.of(20), Scalar.F32, arena))
-                            .status());
+            // Whether a call meets the held arena depends on timing here; the C suite checks contention.
             DenseVectors early = held.join();
             assertArrayEquals(new float[] {0, 1}, floatsOf(early), 0f);
 
@@ -856,7 +854,7 @@ public class DenseIndexTest {
 
     @Test
     public void aClosedExecutorRefusesEveryVerb() {
-        Executor pool = Executor.forRam(new int[0], null, 0, 0);
+        Executor pool = Executor.forRam(new int[0], null, 0);
         pool.close();
         pool.close();
         assertThrows(IllegalStateException.class, () -> pool.drain(Mood.PARKED));
@@ -865,13 +863,13 @@ public class DenseIndexTest {
         }
         assertEquals(
                 Status.INVALID_ARGUMENT,
-                assertThrows(USearchException.class, () -> Executor.forRam(new int[0], null, -1, 0))
+                assertThrows(USearchException.class, () -> Executor.forRam(new int[0], null, -1))
                         .status());
         assertEquals(
                 Status.SHAPE_MISMATCH,
                 assertThrows(
                                 USearchException.class,
-                                () -> Executor.forVram(new int[] {0}, null, new MemorySegment[2], 0, 0))
+                                () -> Executor.forVram(new int[] {0}, null, new MemorySegment[2], 0))
                         .status());
     }
 

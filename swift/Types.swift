@@ -56,8 +56,8 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     public static let uninitialized = Status(raw: usearch_status_uninitialized_k)
     /// The request contradicts an already-frozen configuration.
     public static let configMismatch = Status(raw: usearch_status_config_mismatch_k)
-    /// A call was refused rather than waited for - a full deferred table, a busy arena, or a
-    /// blocking call from inside a callback of the executor it would wait on.
+    /// A call was refused rather than waited for - an executor another call holds, a busy arena, or
+    /// a blocking call from inside a callback of the executor it would wait on.
     public static let contended = Status(raw: usearch_status_contended_k)
     /// A progress handler asked the operation to stop; what the finished increments leave behind
     /// is each verb's own contract.
@@ -72,7 +72,7 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no status carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_status_from_name, usearch_status_name) else { return nil }
+        guard let raw = parsed(name, usearch_status_from_name, usearch_status_success_k) else { return nil }
         self.raw = raw
     }
 
@@ -133,6 +133,19 @@ func parsed<Raw>(
         read(usearch_bytes_view_t(data: $0.baseAddress, length: $0.count))
     }
     return spell(raw).map { String(cString: $0) } == name ? raw : nil
+}
+
+/// Reads `name` through a C reader that answers a status, and nil for a spelling it refuses.
+func parsed<Raw>(
+    _ name: String,
+    _ read: (usearch_bytes_view_t, UnsafeMutablePointer<Raw>?) -> usearch_status_t,
+    _ unread: Raw
+) -> Raw? {
+    var raw = unread
+    let status = Array(name.utf8).withUnsafeBufferPointer {
+        read(usearch_bytes_view_t(data: $0.baseAddress, length: $0.count), &raw)
+    }
+    return status == usearch_status_success_k ? raw : nil
 }
 
 // MARK: - Keys & Distances
@@ -893,7 +906,7 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no residency carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_residency_from_name, usearch_residency_name) else { return nil }
+        guard let raw = parsed(name, usearch_residency_from_name, usearch_residency_unknown_k) else { return nil }
         self.raw = raw
     }
 
@@ -915,7 +928,7 @@ public struct Traversal: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no traversal carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_traversal_from_name, usearch_traversal_name) else { return nil }
+        guard let raw = parsed(name, usearch_traversal_from_name, usearch_traversal_unknown_k) else { return nil }
         self.raw = raw
     }
 
@@ -937,7 +950,7 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no mood carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_mood_from_name, usearch_mood_name) else { return nil }
+        guard let raw = parsed(name, usearch_mood_from_name, usearch_mood_parked_k) else { return nil }
         self.raw = raw
     }
 
@@ -953,8 +966,10 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
 /// reports `device`.
 ///
 /// A verb called on the index itself runs on the calling thread - single-threaded on RAM, on the
-/// handle's device and default stream on VRAM. Calls on one executor run in submission order, and
-/// index handles stay freely shareable.
+/// handle's device and default stream on VRAM. One call holds an executor at a time, and a second
+/// finding it held finishes `contended`, as nothing queues; index handles stay freely shareable. A
+/// deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes
+/// it, while a single thread or a VRAM executor runs it at submission.
 public final class Executor: @unchecked Sendable {
     /// The native handle, released by `deinit`. Immutable for the object's whole life, so the
     /// engine's own synchronization is the only thing sharing this across threads relies on.
@@ -963,18 +978,16 @@ public final class Executor: @unchecked Sendable {
     /// Adopts a handle a factory below spawned.
     private init(raw: usearch_executor_t) { self.raw = raw }
 
-    /// Spawns host threads for RAM-resident indexes, interleaved across the compute domains local
-    /// to `memoryDomains` - the very list the indexes were initialized with.
+    /// Creates an executor of host threads for RAM-resident indexes, interleaved across the compute
+    /// domains local to `memoryDomains` - the very list the indexes were initialized with.
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
-    /// ordered publication path. Every factory's `deferredLimit` sizes the table of deferred calls
-    /// it tracks at once, and zero takes a default. A `cpuClass` narrows the threads' waiters and
-    /// atomics to that class's; nil derives the CPU's own.
+    /// ordered publication path. A `cpuClass` narrows the threads' waiters and atomics to that
+    /// class's; nil derives the CPU's own.
     public static func forRam(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
-        threads: Int = 0,
-        deferredLimit: Int = 0
+        threads: Int = 0
     ) throws(USearchError) -> Executor {
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
@@ -989,8 +1002,7 @@ public final class Executor: @unchecked Sendable {
                     cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 ),
-                threads: threads,
-                deferred_limit: deferredLimit
+                threads: threads
             )
             usearch_executor_for_ram(&arguments)
         }
@@ -1003,8 +1015,7 @@ public final class Executor: @unchecked Sendable {
     public static func onPool(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
-        pool: UnsafeMutableRawPointer,
-        deferredLimit: Int = 0
+        pool: UnsafeMutableRawPointer
     ) throws(USearchError) -> Executor {
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
@@ -1019,23 +1030,21 @@ public final class Executor: @unchecked Sendable {
                     cpu_class: cpuClass?.raw ?? usearch_cpu_class_unknown_k,
                     memory_limit: 0
                 ),
-                pool: pool,
-                deferred_limit: deferredLimit
+                pool: pool
             )
             usearch_executor_on_pool(&arguments)
         }
         return try callState.read { () throws(USearchError) in Executor(raw: try created(executor)) }
     }
 
-    /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
-    /// compute domains local to the devices `paths` names.
+    /// Creates an executor of host threads for NVMe-resident indexes, one submission ring apiece,
+    /// across the compute domains local to the devices `paths` names.
     ///
     /// Zero `threads` derives from those devices' queue capabilities.
     public static func forNvme(
         paths: [String] = [],
         cpuClass: CPUClass? = nil,
-        threads: Int = 0,
-        deferredLimit: Int = 0
+        threads: Int = 0
     ) throws(USearchError) -> Executor {
         let callState = CallState()
         let executor = callState.slots(usearch_executor_t?.none)
@@ -1045,7 +1054,6 @@ public final class Executor: @unchecked Sendable {
                 outcome: callState.outcome,
                 nvme: nvme,
                 threads: threads,
-                deferred_limit: deferredLimit,
                 nvme_class: usearch_nvme_class_unknown_k
             )
             usearch_executor_for_nvme(&arguments)
@@ -1063,8 +1071,7 @@ public final class Executor: @unchecked Sendable {
         devices: [Int32] = [],
         gpuClass: GPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
-        scratchLimit: Int = 0,
-        deferredLimit: Int = 0
+        scratchLimit: Int = 0
     ) throws(USearchError) -> Executor {
         // The C side reads one stream per device behind a pointer that carries no count.
         if let streams, streams.count != devices.count {
@@ -1084,8 +1091,7 @@ public final class Executor: @unchecked Sendable {
                         gpu_class: gpuClass?.raw ?? usearch_gpu_class_unknown_k
                     ),
                     streams: streams == nil ? nil : lentStreams,
-                    scratch_limit: scratchLimit,
-                    deferred_limit: deferredLimit
+                    scratch_limit: scratchLimit
                 )
                 usearch_executor_for_vram(&arguments)
             }
@@ -1095,8 +1101,8 @@ public final class Executor: @unchecked Sendable {
 
     deinit { usearch_executor_free(raw) }
 
-    /// Waits for every call submitted to this executor, then adopts `mood` whenever it next goes
-    /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
+    /// Waits until no call holds this executor, then adopts `mood` until the next call; a failure
+    /// is the executor's own, such as a lost device, never one of a drained call.
     public func drain(mood: Mood = .parked) throws(USearchError) {
         let callState = CallState()
         var arguments = usearch_executor_drain_t(executor: raw, outcome: callState.outcome, mood: mood.raw)

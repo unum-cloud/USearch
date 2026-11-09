@@ -183,6 +183,8 @@ static napi_value usearch_js_finish_describe(napi_env env, usearch_js_call_t* ca
     napi_set_named_property(env, object, "gpuClass",
                             usearch_js_static_string(env, usearch_gpu_class_name(description->gpu_class)));
     napi_set_named_property(env, object, "shardsCount", usearch_js_number(env, description->shards_count));
+    napi_set_named_property(env, object, "loadPath",
+                            usearch_js_static_string(env, usearch_load_path_name(description->load_path)));
     return object;
 }
 

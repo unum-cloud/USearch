@@ -280,7 +280,10 @@ handle<verbs_type_> checkpoint_open(session_t& session, std::string_view address
                                                : reopen<verbs_type_>(session, address, geometry, residency, 0);
     if (!index) return index;
     double const seconds = checkpoint_seconds_since(started);
-    if (residency != usearch_residency_nvme_k) fmt::println(stream, "loaded {} in {:.1f} s", address, seconds);
+    if (residency == usearch_residency_vram_k)
+        fmt::println(stream, "loaded {} in {:.1f} s through {}", address, seconds,
+                     usearch_load_path_name(describe(index).load_path));
+    else if (residency != usearch_residency_nvme_k) fmt::println(stream, "loaded {} in {:.1f} s", address, seconds);
     else if (!session.nvme_ram_options()) fmt::println(stream, "viewed {} in {:.1f} s", address, seconds);
     else {
         typename verbs_type_::description_t const described = describe(index);

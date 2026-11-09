@@ -6,7 +6,7 @@ None of it is a public header: the C libraries, the C test and every binding lin
 ## Files
 
 - `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
-- `lib.hpp` holds what every modality's dispatch shares: the CPU classes, the executor and arena handles, the deferred table, and the outcome, progress and output helpers.
+- `lib.hpp` holds what every modality's dispatch shares: the CPU classes, the executor and arena handles, the holding call, and the outcome, progress and output helpers.
 - `dense_index.cuh` implements `dense_index.h`: the handle owning one picked variant through its residency's verb table, the ladders that pick it, and every exported verb as one visit over five residencies apiece.
 - `dense_index.cpp` compiles that header with the host compiler for every build, and includes no tower.
 - `dense_kernels.cuh` is what every dense GPU device unit compiles beside the kernels: the C value lookup's device call, the lookup a sharded attend walks through, and the ceiling of the class a pass compiles for.
@@ -28,7 +28,7 @@ Every exported verb takes one argument structure and runs the same three steps:
 ```cpp
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (submitted<usearch_dense_search>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     // ... validate the shapes, claim the arena, carve the outputs
     visit_punned(*arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
         /* punned.verbs.search(punned.index, ...) */
@@ -36,7 +36,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 }
 ```
 
-- `submitted<verb>` decides whether the call runs now or waits in the executor's deferred table, as described under [Deferred Calls](#deferred-calls).
+- `submitted<verb>` claims the executor and runs the body now or on pool thread 0, as described under [Holding Calls](#holding-calls).
 - `call_outcome_t` marks the outcome pending, collects every step's status privately, and on unwinding releases the arena before the one final store.
   A path that forgot to report finishes `usearch_status_internal_k` rather than hanging its waiters.
 - `visit_punned` reaches the table of the handle's residency, whose entries cast the handle's `void*` index back to its variant and forward to the engine's sharded index templates from `include/usearch/dense/`.
@@ -106,7 +106,7 @@ Every buffer a verb only works through, imported rows, walk frontiers, tiles, so
 The engine running there sizes and reuses it, and the executor rewinds it once per verb.
 A call's arena holds the outputs alone, the results that outlive the call, so neither the C layer nor an argument structure ever stages or allocates on a verb's behalf.
 
-`usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, its deferred table, and one residency's executor.
+`usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, the call holding it, and one residency's executor.
 The executor is a `std::variant` of `forkunion_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
 A verb whose executor kind does not match the handle's residency answers `usearch_status_device_k`.
 A null executor builds one for that call alone: the calling thread on RAM, one thread of blocking reads on NVMe, and the default streams of the index's devices on VRAM.
@@ -121,16 +121,18 @@ A null executor builds one for that call alone: the calling thread on RAM, one t
 
 `carve` then hands out the call's outputs, and `call_outcome_t` lets go of the arena just before the final store, so a waiter that sees the status may reuse it at once.
 
-## Deferred Calls
+## Holding Calls
 
-A call naming an executor and `usearch_completion_deferred_k` runs nothing at submission:
+Every call naming an executor enters through `submitted<verb>`, and one call holds an executor at a time:
 
-- `submitted<verb>` copies its argument structure by value into a free slot of the executor's table, tickets it, holds its arena, and returns with the outcome pending.
-- The table is sized when the executor is created, 64 slots unless `deferred_limit` names another count, so a submission never allocates and a full table finishes the call `usearch_status_contended_k`.
-- A held call runs on whichever thread first needs it, oldest ticket first: `usearch_outcome_wait` on its outcome, `usearch_executor_drain`, a blocking call on the same executor, or freeing any handle it names.
-  Every call held before it on that executor runs first, so the executor keeps its submission order.
-- `deferred_registry` lists every executor under one mutex and condition variable, which is how a wait or a free finds the calls naming its handle without asking each executor.
-- The runner passes the copied arguments back into their verb through the thread-local `resuming_call`, which runs them in place rather than holding them again.
+- It takes `holding_call.claim` by exchange; a call finding it held finishes `usearch_status_contended_k`, and nothing queues.
+- It raises `named_calls` on every index, cursor, refinement and arena it names, which every free and every consumed donor waits to fall to zero.
+- A blocking call, or a deferred one on a pool that needs its caller, runs the verb's body on the calling thread.
+- A deferred call on a caller-exclusive pool copies its arguments into `holding_call.delegated_arguments` and dispatches them with `fu_pool_unsafe_for_threads`, whose slice on thread 0 runs the body and `end_call` while the others return at once; the body's fan-outs fork the other threads as a caller's would.
+- The next call, a drain and a free first await any dispatch in flight, which waits at most for the tail of thread 0's slice.
+- The body meets its own arguments again in `submitted`, recognised by `holding_call.arguments`, and runs in place; `call_outcome_t` records into `holding_call.recorded`.
+- `end_call` lowers the counts, gives back the claim, then publishes the message and the status.
+- Drains and frees only wait on the claim; VRAM verbs all run at submission, since each reads its device results back before it ends.
 
 ## NVMe
 

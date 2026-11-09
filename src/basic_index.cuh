@@ -233,7 +233,7 @@ handle_type_* make_basic_cpu_handle(typename handle_type_::traits_t::geometry_t&
 template <typename arguments_type_>
 void basic_init_ram(arguments_type_* arguments) noexcept {
     using handle_t = handle_of<arguments_type_>;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     typename handle_t::traits_t::geometry_t geometry;
     if (!handle_t::traits_t::state(*arguments, geometry, outcome)) return;
@@ -340,7 +340,7 @@ handle_type_* make_basic_vram_handle(typename handle_type_::traits_t::geometry_t
 /** Places a GPU index on the devices the arguments name, refusing what no device kit serves. */
 template <typename arguments_type_>
 void basic_init_vram(arguments_type_* arguments) noexcept {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
 #if USEARCH_ARCH_CUDA_
     using handle_t = handle_of<arguments_type_>;
@@ -361,7 +361,7 @@ template <auto verb_, typename arguments_type_, typename checkpoint_type_>
 void basic_load_ram(arguments_type_* arguments, checkpoint_type_ checkpoint) noexcept {
     using handle_t = handle_of<arguments_type_>;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
@@ -391,7 +391,7 @@ inline bool accepts_host_checkpoint(std::string_view, usearch_outcome_t*) noexce
 template <auto verb_, typename arguments_type_, typename checkpoint_type_>
 void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_type_ checkpoint) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
 #if USEARCH_ARCH_CUDA_
     using handle_t = handle_of<arguments_type_>;
@@ -415,7 +415,7 @@ void basic_load_vram(arguments_type_* arguments, [[maybe_unused]] checkpoint_typ
 template <typename arguments_type_>
 void basic_view_ram(arguments_type_* arguments) noexcept {
     using handle_t = handle_of<arguments_type_>;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     std::string_view const path = as_text(arguments->path);
     typename handle_t::traits_t::geometry_t geometry;
@@ -435,7 +435,7 @@ template <auto verb_, typename arguments_type_>
 void basic_view_nvme(arguments_type_* arguments) noexcept {
     using handle_t = handle_of<arguments_type_>;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->index = nullptr;
     if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
@@ -466,17 +466,18 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     if (index) *arguments->index = index;
 }
 
-/** Frees an index, a cursor or a refinement once no deferred call names it. */
+/** Frees an index, a cursor or a refinement once no executor call names it. */
 template <typename handle_type_>
 void basic_free(handle_type_* handle) noexcept {
-    finish_calls_using(handle);
+    if (!handle) return;
+    wait_named_calls(handle->named_calls);
     delete handle;
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_reserve(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     visit_basic(*arguments->index, [&](auto punned) noexcept {
         propagate_error(
             punned.verbs.reserve(punned.variant, handle_of<arguments_type_>::traits_t::capacity_of(*arguments)),
@@ -487,7 +488,7 @@ void basic_reserve(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_clear(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     visit_basic(*arguments->index,
                 [&](auto punned) noexcept { propagate_error(punned.verbs.clear(punned.variant), outcome); });
 }
@@ -510,7 +511,7 @@ bool accepts_basic_variants(handle_type_ const* index, punned_basic_index<traits
         if (!typed || !punned.verbs.matches(punned.variant, typed))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Every handle must share the index's residency, class and geometry");
-        finish_calls_using(other);
+        wait_named_calls(other->named_calls);
     }
     return true;
 }
@@ -596,7 +597,7 @@ template <auto verb_, typename arguments_type_>
 void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** donors, std::size_t count,
                        handle_of<arguments_type_>* const* receivers, std::size_t receivers_count, u64_t seed) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     if (arguments->report) *arguments->report = {};
     if (count && !donors)
@@ -641,7 +642,7 @@ template <auto verb_, typename arguments_type_>
 void basic_refinement_init(arguments_type_* arguments) noexcept {
     using refinement_t = std::remove_pointer_t<std::remove_pointer_t<decltype(arguments->refinement)>>;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->refinement = nullptr;
     if (!arguments->executor)
         return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -707,7 +708,7 @@ void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outco
 template <auto verb_, typename arguments_type_>
 void basic_refinement_next(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->reselected) *arguments->reselected = 0;
     if (arguments->changed) *arguments->changed = 0;
     if (arguments->stats) *arguments->stats = {};
@@ -726,7 +727,7 @@ template <auto verb_, typename arguments_type_>
 void basic_refinement_finish(arguments_type_* arguments) noexcept {
     using refinement_t = std::remove_pointer_t<decltype(arguments->refinement)>;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     if (arguments->report) *arguments->report = {};
     // Freed whatever the call answers; a plan dying unfinished reopens its index.
@@ -745,7 +746,7 @@ void basic_refinement_finish(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_describe(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     handle_of<arguments_type_> const& index = *arguments->index;
     visit_basic(index, [&](auto punned) noexcept {
         typename handle_of<arguments_type_>::traits_t::description_t& description = *arguments->description;
@@ -759,7 +760,7 @@ void basic_describe(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_health(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->reachability = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_executor_handle_t call_executor;
@@ -777,7 +778,7 @@ void basic_health(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_count(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->key_stats = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_executor_handle_t call_executor;
@@ -792,7 +793,7 @@ template <auto verb_, typename arguments_type_>
 void basic_insert(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     std::size_t const count = arguments->count;
     if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
@@ -820,7 +821,7 @@ template <auto verb_, typename arguments_type_>
 void basic_search(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const count = arguments->count, wanted = arguments->wanted;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
@@ -869,7 +870,7 @@ template <auto verb_, typename arguments_type_>
 void basic_within(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const count = arguments->count;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
@@ -909,7 +910,7 @@ template <auto verb_, typename arguments_type_>
 void basic_get(arguments_type_* arguments) noexcept {
     using traits_t = typename handle_of<arguments_type_>::traits_t;
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     *traits_t::output_of(*arguments) = {};
     if (arguments->written) *arguments->written = 0;
     if constexpr (requires { traits_t::exports(*arguments, outcome); })
@@ -937,7 +938,7 @@ void basic_get(arguments_type_* arguments) noexcept {
 template <typename arguments_type_>
 void basic_cursor_init(arguments_type_* arguments) noexcept {
     using cursor_handle_t = std::remove_pointer_t<std::remove_pointer_t<decltype(arguments->cursor)>>;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->cursor = nullptr;
     if (arguments->starts_count && !arguments->starts)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
@@ -962,7 +963,7 @@ void basic_cursor_init(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_cursor_next(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
     *arguments->written = 0;
@@ -1005,7 +1006,7 @@ void basic_cursor_next(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_save(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     std::string_view const path = as_text(arguments->path);
     if (path.empty()) return propagate_error(usearch_status_invalid_argument_k, outcome, "The path is empty"), void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
@@ -1022,7 +1023,7 @@ void basic_save(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_save_buffer(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     *arguments->monolith = {};
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
@@ -1047,7 +1048,7 @@ void basic_save_buffer(arguments_type_* arguments) noexcept {
 template <auto verb_, typename arguments_type_>
 void basic_sample(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     reset_sample(*arguments);
     if (!accepts_sample(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
@@ -1084,7 +1085,7 @@ void basic_split(arguments_type_* arguments) noexcept {
     if (arguments->count >= 2 && arguments->receivers)
         return basic_refine_once<verb_>(arguments, nullptr, 0, arguments->receivers, arguments->count, arguments->seed);
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->report) *arguments->report = {};
     if (arguments->stats) *arguments->stats = {};
     propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more");
@@ -1095,7 +1096,7 @@ void basic_split(arguments_type_* arguments) noexcept {
 template <auto verb_, typename traits_type_, typename arguments_type_, typename checkpoint_type_>
 void basic_metadata_read(arguments_type_* arguments, checkpoint_type_ checkpoint) noexcept {
     if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->metadata = {};
     if (checkpoint.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();

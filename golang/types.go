@@ -24,9 +24,7 @@ import (
 #cgo darwin LDFLAGS: -lc++
 #cgo windows LDFLAGS: -lstdc++
 
-// Every verb here retains nothing and takes no callback, so each claims both promises. A drain
-// runs the deferred calls an executor without threads of its own still holds, whose callbacks
-// re-enter Go, so it claims `noescape` alone.
+// Every verb here retains nothing and takes no callback, so each claims both promises.
 #cgo noescape usearch_executor_for_ram
 #cgo nocallback usearch_executor_for_ram
 #cgo noescape usearch_executor_on_pool
@@ -36,6 +34,7 @@ import (
 #cgo noescape usearch_executor_for_nvme
 #cgo nocallback usearch_executor_for_nvme
 #cgo noescape usearch_executor_drain
+#cgo nocallback usearch_executor_drain
 #cgo noescape usearch_arena_init
 #cgo nocallback usearch_arena_init
 #cgo noescape usearch_arena_describe
@@ -85,8 +84,8 @@ const (
 	StatusUninitialized Status = C.usearch_status_uninitialized_k
 	// StatusConfigMismatch means the request contradicts an already-frozen configuration.
 	StatusConfigMismatch Status = C.usearch_status_config_mismatch_k
-	// StatusContended means the call was refused rather than waited for, like a submission to a
-	// full deferred table, or an arena still serving another call.
+	// StatusContended means the call was refused rather than waited for, like a submission to an
+	// executor another call holds, or an arena still serving another call.
 	StatusContended Status = C.usearch_status_contended_k
 	// StatusCancelled means a progress handler asked the operation to stop; it unwound and published
 	// nothing, so the handle carries whatever it did before the call.
@@ -569,11 +568,11 @@ func (call *call) callback(value any) unsafe.Pointer {
 //
 // A nil *Executor is the null executor: it owns nothing, and every call handed it runs on the
 // calling goroutine - single-threaded on RAM, on the handle's device and default stream on VRAM.
-// Calls on one executor run in submission order, while handles stay freely concurrent - it is the
-// executor that orders.
+// One call holds an executor at a time, while handles stay freely concurrent - it is the executor
+// that serializes. A second call finding it held finishes StatusContended, and nothing queues.
 //
-// Every constructor takes a deferredLimit sizing its table of deferred calls, where zero takes the
-// default; a deferred submission finding the table full finishes StatusContended.
+// A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone
+// finishes it; a single thread or a VRAM executor runs it at submission.
 type Executor struct {
 	handle C.usearch_executor_t
 }
@@ -721,15 +720,14 @@ func (class GPUClass) String() string {
 // Zero threads takes seven eighths of the cores those domains carry, since full occupancy starves
 // the ordered publication path. A pinned cpuClass narrows the workers' waiters and atomics to that
 // class's.
-func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
+func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads uint) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{}
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
-		executor:       pin(&lent.call, &executor.handle),
-		outcome:        lent.outcome,
-		ram:            lent.ram(memoryDomains, cpuClass),
-		threads:        C.size_t(threads),
-		deferred_limit: C.size_t(deferredLimit),
+		executor: pin(&lent.call, &executor.handle),
+		outcome:  lent.outcome,
+		ram:      lent.ram(memoryDomains, cpuClass),
+		threads:  C.size_t(threads),
 	})
 	lent.result = func() *Executor { return executor }
 	return block(lent)
@@ -738,15 +736,14 @@ func ExecutorForRam(memoryDomains []int32, cpuClass CPUClass, threads, deferredL
 // ExecutorOnPool creates a RAM executor over a borrowed ForkUnion fu_pool_t, so several
 // libraries in one process share one set of threads while each keeps its own scratch. The pool
 // must outlive the executor, and keeps its lender's mood.
-func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointer, deferredLimit uint) (*Executor, error) {
+func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointer) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{}
 	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
-		executor:       pin(&lent.call, &executor.handle),
-		outcome:        lent.outcome,
-		ram:            lent.ram(memoryDomains, cpuClass),
-		pool:           pool,
-		deferred_limit: C.size_t(deferredLimit),
+		executor: pin(&lent.call, &executor.handle),
+		outcome:  lent.outcome,
+		ram:      lent.ram(memoryDomains, cpuClass),
+		pool:     pool,
 	})
 	lent.result = func() *Executor { return executor }
 	return block(lent)
@@ -757,15 +754,14 @@ func ExecutorOnPool(memoryDomains []int32, cpuClass CPUClass, pool unsafe.Pointe
 // submission lock-free: a thread owns its queue outright.
 //
 // Zero threads derives from those devices' queue capabilities.
-func ExecutorForNvme(paths []string, cpuClass CPUClass, threads, deferredLimit uint) (*Executor, error) {
+func ExecutorForNvme(paths []string, cpuClass CPUClass, threads uint) (*Executor, error) {
 	lent := open[*Executor]()
 	executor := &Executor{}
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
-		executor:       pin(&lent.call, &executor.handle),
-		outcome:        lent.outcome,
-		nvme:           lent.nvme(paths, cpuClass),
-		threads:        C.size_t(threads),
-		deferred_limit: C.size_t(deferredLimit),
+		executor: pin(&lent.call, &executor.handle),
+		outcome:  lent.outcome,
+		nvme:     lent.nvme(paths, cpuClass),
+		threads:  C.size_t(threads),
 	})
 	lent.result = func() *Executor { return executor }
 	return block(lent)
@@ -779,7 +775,7 @@ func ExecutorForNvme(paths []string, cpuClass CPUClass, threads, deferredLimit u
 // executor. Zero scratchLimit lets scratch grow as geometry asks. A pinned gpuClass the devices do
 // not run is refused with StatusUnsupported.
 func ExecutorForVram(
-	devices []int32, gpuClass GPUClass, streams []unsafe.Pointer, scratchLimit, deferredLimit uint,
+	devices []int32, gpuClass GPUClass, streams []unsafe.Pointer, scratchLimit uint,
 ) (*Executor, error) {
 	// The library reads one stream per device from any non-nil pointer, so only this side sees a short list.
 	if len(streams) != 0 && len(streams) != len(devices) {
@@ -788,19 +784,19 @@ func ExecutorForVram(
 	lent := open[*Executor]()
 	executor := &Executor{}
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
-		executor:       pin(&lent.call, &executor.handle),
-		outcome:        lent.outcome,
-		vram:           lent.vram(devices, gpuClass),
-		streams:        lend(&lent.call, streams),
-		scratch_limit:  C.size_t(scratchLimit),
-		deferred_limit: C.size_t(deferredLimit),
+		executor:      pin(&lent.call, &executor.handle),
+		outcome:       lent.outcome,
+		vram:          lent.vram(devices, gpuClass),
+		streams:       lend(&lent.call, streams),
+		scratch_limit: C.size_t(scratchLimit),
 	})
 	lent.result = func() *Executor { return executor }
 	return block(lent)
 }
 
-// Drain waits for every call submitted to this executor, then adopts mood whenever it next goes
-// idle. A failure is the executor's own, such as a lost device, never one of a drained call.
+// Drain waits until no call holds this executor, then adopts mood until the next call; it only
+// waits and never runs a call itself. A failure is the executor's own, such as a lost device,
+// never one of a drained call.
 func (executor *Executor) Drain(mood Mood) error {
 	handle, refusal := executor.lower()
 	if refusal != nil {
@@ -812,9 +808,9 @@ func (executor *Executor) Drain(mood Mood) error {
 	return err
 }
 
-// Close drains every thread or stream and releases them, waiting for every deferred call naming
-// the executor. It is idempotent, and a closed executor must not be used again. The host arenas
-// it made stay valid, while its GPU arenas must be closed first.
+// Close waits out the call holding the executor, then releases its threads or streams. It is
+// idempotent, and a closed executor must not be used again. The host arenas it made stay valid,
+// while its GPU arenas must be closed first.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil

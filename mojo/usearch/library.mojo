@@ -66,6 +66,7 @@ from usearch.types import (
     ExecutorForVram,
     ExecutorOnPool,
     FromName,
+    FromNameStatus,
     Mood,
     NameOf,
     Outcome,
@@ -138,7 +139,7 @@ struct Symbols:
     """`usearch_outcome_status`."""
     var status_name: NameOf
     """`usearch_status_name`."""
-    var status_from_name: FromName
+    var status_from_name: FromNameStatus
     """`usearch_status_from_name`."""
     var scalar_name: NameOf
     """`usearch_scalar_name`."""
@@ -146,15 +147,15 @@ struct Symbols:
     """`usearch_scalar_from_name`."""
     var residency_name: NameOf
     """`usearch_residency_name`."""
-    var residency_from_name: FromName
+    var residency_from_name: FromNameStatus
     """`usearch_residency_from_name`."""
     var traversal_name: NameOf
     """`usearch_traversal_name`."""
-    var traversal_from_name: FromName
+    var traversal_from_name: FromNameStatus
     """`usearch_traversal_from_name`."""
     var mood_name: NameOf
     """`usearch_mood_name`."""
-    var mood_from_name: FromName
+    var mood_from_name: FromNameStatus
     """`usearch_mood_from_name`."""
     var cpu_class_name: NameOf
     """`usearch_cpu_class_name`."""
@@ -273,15 +274,15 @@ struct Symbols:
         self.outcome_wait = _resolve[OutcomeStatus](handle, "usearch_outcome_wait")
         self.outcome_status = _resolve[OutcomeStatus](handle, "usearch_outcome_status")
         self.status_name = _resolve[NameOf](handle, "usearch_status_name")
-        self.status_from_name = _resolve[FromName](handle, "usearch_status_from_name")
+        self.status_from_name = _resolve[FromNameStatus](handle, "usearch_status_from_name")
         self.scalar_name = _resolve[NameOf](handle, "usearch_scalar_name")
         self.scalar_from_name = _resolve[FromName](handle, "usearch_scalar_from_name")
         self.residency_name = _resolve[NameOf](handle, "usearch_residency_name")
-        self.residency_from_name = _resolve[FromName](handle, "usearch_residency_from_name")
+        self.residency_from_name = _resolve[FromNameStatus](handle, "usearch_residency_from_name")
         self.traversal_name = _resolve[NameOf](handle, "usearch_traversal_name")
-        self.traversal_from_name = _resolve[FromName](handle, "usearch_traversal_from_name")
+        self.traversal_from_name = _resolve[FromNameStatus](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
-        self.mood_from_name = _resolve[FromName](handle, "usearch_mood_from_name")
+        self.mood_from_name = _resolve[FromNameStatus](handle, "usearch_mood_from_name")
         self.cpu_class_name = _resolve[NameOf](handle, "usearch_cpu_class_name")
         self.gpu_class_name = _resolve[NameOf](handle, "usearch_gpu_class_name")
         self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
@@ -422,9 +423,9 @@ struct Library(ImplicitlyCopyable):
         """
         return text_at(self.symbols().status_name(c_int(status.code)))
 
-    def status_from_name(self, name: StringSlice) -> Status:
-        """Reads a spelling back; `INVALID_ARGUMENT` when unrecognized. Calls `usearch_status_from_name`."""
-        return Status.of(self.symbols().status_from_name(BytesView.of(name).arguments()))
+    def status_from_name(self, name: StringSlice) raises Error -> Status:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_status_from_name`."""
+        return Status.of(self._read_named(self.symbols().status_from_name, name, "usearch_status_from_name"))
 
     def scalar_name(self, scalar: ScalarKind) -> String:
         """The engine's spelling of a scalar kind, as `F32` spells "f32". Calls `usearch_scalar_name`."""
@@ -438,17 +439,17 @@ struct Library(ImplicitlyCopyable):
         """The engine's spelling of a residency, as `RAM` spells "ram". Calls `usearch_residency_name`."""
         return text_at(self.symbols().residency_name(residency.code))
 
-    def residency_from_name(self, name: StringSlice) -> Residency:
-        """Reads a spelling back; `RAM` when unrecognized. Calls `usearch_residency_from_name`."""
-        return Residency(self.symbols().residency_from_name(BytesView.of(name).arguments()))
+    def residency_from_name(self, name: StringSlice) raises Error -> Residency:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_residency_from_name`."""
+        return Residency(self._read_named(self.symbols().residency_from_name, name, "usearch_residency_from_name"))
 
     def traversal_name(self, traversal: Traversal) -> String:
         """The engine's spelling of a traversal, as `SCAN` spells "scan". Calls `usearch_traversal_name`."""
         return text_at(self.symbols().traversal_name(traversal.code))
 
-    def traversal_from_name(self, name: StringSlice) -> Traversal:
-        """Reads a spelling back; `WALK` when unrecognized. Calls `usearch_traversal_from_name`."""
-        return Traversal(self.symbols().traversal_from_name(BytesView.of(name).arguments()))
+    def traversal_from_name(self, name: StringSlice) raises Error -> Traversal:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_traversal_from_name`."""
+        return Traversal(self._read_named(self.symbols().traversal_from_name, name, "usearch_traversal_from_name"))
 
     def cpu_class_name(self, cpu_class: CPUClass) -> String:
         """The engine's spelling of a CPU class, as dispatch reports it. Calls `usearch_cpu_class_name`."""
@@ -462,9 +463,17 @@ struct Library(ImplicitlyCopyable):
         """The engine's spelling of a mood, as `PARKED` spells "parked". Calls `usearch_mood_name`."""
         return text_at(self.symbols().mood_name(mood.code))
 
-    def mood_from_name(self, name: StringSlice) -> Mood:
-        """Reads a spelling back; `PARKED` when unrecognized. Calls `usearch_mood_from_name`."""
-        return Mood(self.symbols().mood_from_name(BytesView.of(name).arguments()))
+    def mood_from_name(self, name: StringSlice) raises Error -> Mood:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` for one it refuses. Calls `usearch_mood_from_name`."""
+        return Mood(self._read_named(self.symbols().mood_from_name, name, "usearch_mood_from_name"))
+
+    def _read_named(self, parse: FromNameStatus, name: StringSlice, symbol: StaticString) raises Error -> c_int:
+        """The enumerator a status-answering reader writes for `name`, or `INVALID_ARGUMENT` when it refuses."""
+        var code = stack_allocation[1, c_int]().unsafe_origin_cast[MutAnyOrigin]()
+        code[unsafe_offset=0] = c_int(0)
+        if parse(BytesView.of(name).arguments(), code) != c_int(0):
+            raise Error(Status.INVALID_ARGUMENT, symbol)
+        return code[unsafe_offset=0]
 
     def dense_metric_name(self, metric: DenseMetric) -> String:
         """The engine's spelling of a metric kind, as `INNER` spells "inner". Calls `usearch_dense_metric_name`."""

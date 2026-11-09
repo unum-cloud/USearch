@@ -221,6 +221,10 @@ struct vram_gathered_row_t {
 };
 static_assert(sizeof(vram_gathered_row_t) == 8, "A gather lists its rows in eight bytes each");
 
+/** How the last load from a path read its parts onto the device: none yet, through host memory,
+ *  or every part straight onto the device through cuFile. */
+enum class vram_load_path_t : u8_t { none_k, host_copy_k, cufile_k };
+
 #pragma region Kernel Symbols
 
 /** The GPU kernels basic graphs and every design launch, the first template argument of each

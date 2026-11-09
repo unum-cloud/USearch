@@ -5,10 +5,12 @@ Mojo 1.1 has no `mojo test` subcommand and no test discovery, so every check bel
 rest exercise the C ABI directly and are skipped when nothing is on the loader path.
 """
 
+from std.atomic import Atomic
 from std.ffi import c_size_t
 from std.math import exp, sqrt
 from std.memory import stack_allocation
 from std.testing import TestSuite, assert_almost_equal, assert_equal, assert_false, assert_true
+from std.time import perf_counter_ns
 
 from usearch import (
     Admission,
@@ -625,7 +627,7 @@ def test_predicate_filters_keys() raises:
 
 
 def test_deferred_calls_wait_until_final() raises:
-    """A deferred call reads `DEFERRED` right after submission, and its wait answers repeatedly."""
+    """A deferred call reads `DEFERRED` until final, and its wait answers repeatedly."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -635,7 +637,10 @@ def test_deferred_calls_wait_until_final() raises:
     var query = [Float32(0), 1]
     var arena = Arena(executor)
     var call = index.deferred(executor).search(RowsView.of(query, 2), 1, arena)
-    assert_true(call.status() == Status.DEFERRED, "pending right after submission")
+    assert_true(
+        call.status() == Status.DEFERRED or call.status() == Status.SUCCESS,
+        "pending or already finished by the pool's thread 0",
+    )
     assert_true(call.wait().query_keys(0)[0] == Key(integer=1), "the nearest entry")
     assert_true(call.status() == Status.SUCCESS, "final once waited")
     assert_true(call.wait().query_keys(0)[0] == Key(integer=1), "and the same answer when asked again")
@@ -676,9 +681,40 @@ def test_deferred_refusals_finish_at_submission() raises:
     assert_true(call.status() == Status.SHAPE_MISMATCH, "two keys never name one row")
 
 
+struct _Gate(Movable):
+    """Holds the call reporting to it at its last progress report until the test releases it, so the
+    test meets the call while it still holds its arena; a call run at submission stops waiting after
+    a few seconds, since its submitter cannot release it."""
+
+    var entered: Atomic[Int]
+    var released: Atomic[Int]
+
+    def __init__(out self):
+        self.entered = Atomic[Int](0)
+        self.released = Atomic[Int](0)
+
+    def entered_soon(mut self) -> Bool:
+        """Whether its call arrived within a few seconds."""
+        var deadline = perf_counter_ns() + 3_000_000_000
+        while self.entered.load() == 0 and perf_counter_ns() < deadline:
+            pass
+        return self.entered.load() != 0
+
+
+def _hold_until_released(completed: Int, total: Int, mut gate: _Gate) -> Continuation:
+    """Lets the test know at the last report, then waits for it to release the call."""
+    if completed != total:
+        return Continuation.CONTINUE
+    gate.entered.store(1)
+    var deadline = perf_counter_ns() + 3_000_000_000
+    while gate.released.load() == 0 and perf_counter_ns() < deadline:
+        pass
+    return Continuation.CONTINUE
+
+
 def test_deferred_results_borrow_the_callers_arena() raises:
-    """A deferred export holds the caller's arena until final, so a call meeting it is refused without
-    retiring the export; a later call on that arena does retire it, and a deferred insertion publishes."""
+    """A deferred search holds the caller's arena until final, so a call meeting it is refused without
+    retiring the matches; a later call on that arena does retire them, and a deferred insertion publishes."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -689,21 +725,36 @@ def test_deferred_results_borrow_the_callers_arena() raises:
     var keys = [Key(integer=8)]
     var deferred = index.deferred(executor)
     var inserted = deferred.insert(keys, RowsView.of(rows, 2))
+    _ = inserted.wait()  # one call holds the executor at a time
     var arena = Arena(executor)
-    var exported = deferred.get[DType.float32](Key(integer=1), arena)
+    var gate = _Gate()
+    var query = [Float32(1), 1]
+    var searched = deferred.search(
+        RowsView.of(query, 2),
+        1,
+        arena,
+        DenseSearchConfig(
+            progress=ProgressArguments.of[_hold_until_released](
+                Pointer(to=gate).unsafe_origin_cast[MutAnyOrigin](), steps=1
+            )
+        ),
+    )
+    assert_true(gate.entered_soon(), "the deferred search reaches its progress handler")
     var status = Status.SUCCESS
     try:
         _ = index.get[DType.float32](Key(integer=0), arena)
     except error:
         status = error.status
-    assert_true(status == Status.CONTENDED, "the arena serves the deferred export alone")
-    _ = inserted.wait()
-    assert_equal(exported.wait()[0][1], Float32(1), "the refused call left the holder's view readable")
+    assert_true(status == Status.CONTENDED, "the arena serves the deferred search alone")
+    gate.released.store(1)
+    assert_true(searched.wait().query_keys(0)[0] == Key(integer=8), "the refused call left the holder's view readable")
+    # The handler reaches the gate by address, which is not a use, so it is kept past the wait.
+    _ = gate^
 
     _ = index.get[DType.float32](Key(integer=0), arena)
     status = Status.SUCCESS
     try:
-        _ = exported.wait()[0]
+        _ = searched.wait().query_keys(0)
     except error:
         status = error.status
     assert_true(status == Status.UNINITIALIZED, "a later call on the arena retires the deferred view")

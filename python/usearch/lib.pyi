@@ -168,7 +168,7 @@ class Status(IntEnum):
     CONFIG_MISMATCH = 13
     """The request contradicts an already-frozen configuration."""
     CONTENDED = 14
-    """The call was refused rather than waited for, like a submission to a full deferred table."""
+    """The call was refused rather than waited for, like a submission to an executor another call holds."""
     CANCELLED = 15
     """A progress handler stopped the call, which published nothing."""
     UNSUPPORTED = 16
@@ -179,9 +179,9 @@ class Status(IntEnum):
 class Mood(IntEnum):
     """What an executor's idle workers do: sleep, or stay hot."""
 
-    PARKED = 1
-    """Idle workers sleep; the next call pays a wake-up."""
-    SPINNING = 2
+    PARKED = 0
+    """Idle workers sleep; the next call pays a wake-up. The default."""
+    SPINNING = 1
     """Idle workers stay hot, trading power for the next call's latency."""
 
 class Scalar(IntEnum):
@@ -360,7 +360,7 @@ class ConfigMismatchError(Error, ValueError):
     """The request contradicts an already-frozen configuration."""
 
 class ContendedError(Error):
-    """An executor's deferred table, an arena, or a walk is already serving another call."""
+    """An executor, an arena, or a walk is already serving another call."""
 
 class CancelledError(Error):
     """A progress handler stopped the call, which published nothing."""
@@ -403,7 +403,6 @@ class Executor:
         threads: int = 0,
         *,
         memory_domains: Sequence[int] | None = None,
-        deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Spawns host worker threads for a RAM-resident index."""
@@ -416,16 +415,13 @@ class Executor:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Drives RAM-resident indexes on a thread pool the caller owns."""
         ...
 
     @classmethod
-    def for_vram(
-        cls, *, devices: Sequence[int] | None = None, deferred_limit: int = 0, gpu_class: GPUClass | None = None
-    ) -> Executor:
+    def for_vram(cls, *, devices: Sequence[int] | None = None, gpu_class: GPUClass | None = None) -> Executor:
         """Opens one stream per device for a VRAM-resident index."""
         ...
 
@@ -435,7 +431,6 @@ class Executor:
         threads: int = 0,
         *,
         paths: Sequence[_PathLike] | None = None,
-        deferred_limit: int = 0,
         nvme_class: NVMeClass | None = None,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
@@ -443,7 +438,7 @@ class Executor:
         ...
 
     def drain(self, mood: Mood = ...) -> None:
-        """Waits for every call submitted before it, then sets what idle workers do."""
+        """Waits until no call holds the executor, then sets what idle workers do."""
         ...
 
     @property
@@ -1719,7 +1714,7 @@ class DenseMetadata(structseq[Any], tuple[int, DenseMetric, Scalar, int]):
         ...
 
 @final
-class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, CPUClass | None, GPUClass | None, int]):
+class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, CPUClass | None, GPUClass | None, int, str]):
     """A live index's frozen metadata and current counters."""
 
     __match_args__: Final = (
@@ -1730,6 +1725,7 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
         "cpu_class",
         "gpu_class",
         "shards_count",
+        "load_path",
     )
 
     @property
@@ -1765,6 +1761,11 @@ class DenseIndexDescription(structseq[Any], tuple[DenseMetadata, int, int, int, 
     @property
     def shards_count(self) -> int:
         """Live shards."""
+        ...
+
+    @property
+    def load_path(self) -> str:
+        """How the last load from a path read the parts onto the devices: none, host-copy or cufile."""
         ...
 
 @final

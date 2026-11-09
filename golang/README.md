@@ -117,7 +117,7 @@ The index runs it on the calling goroutine, `index.On(executor)` blocks on an ex
 
 ```go
 matches, err := index.Search(queries, 10, arena, nil)              // the calling goroutine
-matches, err = index.On(executor).Search(queries, 10, arena, nil) // blocking, after every earlier submission
+matches, err = index.On(executor).Search(queries, 10, arena, nil) // blocking, holding the executor until it returns
 call := index.Deferred(executor).Search(queries, 10, arena, nil)   // *usearch.Deferred[usearch.MatchesView]
 ```
 
@@ -139,27 +139,28 @@ Go needs nothing more: a goroutine that wants to overlap the wait simply calls `
 A failure this binding catches before the call crosses arrives through the same `Status` and `Wait`, as the engine's own refusals do.
 A `Deferred` dropped without `Wait` or `Close` is released by the collector once its call is final, which checks it again at every later collection rather than blocking on it.
 
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `StatusContended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `StatusContended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `Status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
 The slices a deferred verb is handed must not change until it is final, since the library reads them until then.
 
 ## Executors
 
 An index owns entries; an executor owns the threads or device streams a verb runs on, so one executor serves several indexes and the cost of spawning shows at the line that spawns it.
-There is a constructor per C one, each taking every argument its own hardware has, and ending with the `deferredLimit` sizing its table of deferred calls:
+There is a constructor per C one, each taking every argument its own hardware has:
 
 ```go
-usearch.ExecutorForRam(memoryDomains, cpuClass, threads, deferredLimit)
-usearch.ExecutorOnPool(memoryDomains, cpuClass, forkUnionPool, deferredLimit)  // borrows a fu_pool_t
-usearch.ExecutorForVram(devices, gpuClass, streams, scratchLimit, deferredLimit) // one host thread, a stream per device
-usearch.ExecutorForNvme(paths, cpuClass, threads, deferredLimit)                 // one submission ring per thread
+usearch.ExecutorForRam(memoryDomains, cpuClass, threads)
+usearch.ExecutorOnPool(memoryDomains, cpuClass, forkUnionPool)    // shares the threads another library spawned
+usearch.ExecutorForVram(devices, gpuClass, streams, scratchLimit) // one host thread, a stream per device
+usearch.ExecutorForNvme(paths, cpuClass, threads)                 // one submission ring per thread
 ```
 
 Zero for any count derives it, and zero threads in `ExecutorForRam` takes 7/8 of the logical cores, since full occupancy starves the ordered publication path.
 A placement names hardware and nothing else, and an executor's residency must match that of the indexes it drives, or the engine reports `StatusDevice`.
 A nil `*Executor` owns nothing, and every call handed it runs on the calling goroutine.
-Calls on one executor start in submission order, so goroutines that genuinely overlap take one apiece.
-`Drain(mood)` waits for every submitted call and picks whether the workers park or spin once idle, and `Close` releases them.
+One call holds an executor at a time, so goroutines that genuinely overlap take one apiece.
+`Drain(mood)` waits until no call holds the executor and picks whether the workers park or spin once idle, and `Close` releases them.
 
 Constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `Executor` in their config, and run on the calling goroutine without one.
 
@@ -612,5 +613,5 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 - __Deferred calls use the language's own idioms.__ `Status` polls through `usearch_outcome_status` and `Wait` blocks through `usearch_outcome_wait`; a goroutine calling `Wait` overlaps the wait, and a `select` reaches it through a channel that goroutine closes.
 - __No life of its own.__ The binding starts no goroutines and keeps no queues; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
 - __Arenas are lent and reused, never shared.__ Every output whose length scales with the call lands in an arena the caller passes; each rewind bumps the arena's generation, so a stale view answers `StatusUninitialized`.
-- __Nothing costs anything until it is used.__ Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+- __Nothing costs anything until it is used.__ Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Types and configs are the header's.__ Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.

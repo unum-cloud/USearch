@@ -18,9 +18,9 @@
  *  - <tt>open_shard_for_part(shards, part)</tt>, the shard a load's part goes to, placed or
  *    opened;
  *  - <tt>reserve(shards, shard, entries)</tt>, growing a shard ahead of a load;
- *  - where a residency reads files itself, @c sources and <tt>open_sources(mappings)</tt>, which opens one
- *    source per mapped part before its shards open, so its plans read the parts' bytes from the
- *    part that holds them.
+ *  - on device residencies, <tt>open_sources(mappings)</tt> before the shards open, which opens one
+ *    source per mapped part where the residency reads files itself, so its plans read the parts'
+ *    bytes from the part that holds them, and records how the load reads the parts.
  *
  *  A residency whose plans copy nodes in order is driven through
  *  @ref unum::usearch::utilities::serial_executor_t. A checkpoint in one buffer leads with the
@@ -394,7 +394,7 @@ status_t load_shards(shards_type_& shards, residency_type_ residency, std::strin
     if (status_t const listed = safegraphs_catalog(path, mappings, parts, extra_columns, shards.allocator());
         failed(listed))
         return listed;
-    if constexpr (requires { residency.sources; })
+    if constexpr (requires { residency.open_sources(to_writable_span(mappings)); })
         if (status_t const opened = residency.open_sources(to_writable_span(mappings)); failed(opened)) return opened;
     return load_parts_(shards, residency, to_span(parts), codec, executor, config, progress);
 }

@@ -555,6 +555,7 @@ void usearch_dense_describe(usearch_dense_describe_t* arguments) {
         usearch_cpu_class_serial_k,
         usearch_gpu_class_unknown_k,
         index.shards(),
+        usearch_load_path_none_k,
     };
 }
 
@@ -911,7 +912,7 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(fu::standard_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
@@ -919,7 +920,7 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
         return distance(index.options.metric, first, second);
     };
     pull_walk(*arguments, cursor, score, *arena, outcome);
-    fu::standard_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_dense_cursor_free(usearch_dense_cursor_t handle) {
@@ -991,14 +992,14 @@ void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* argume
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     matches_outputs_t outputs {};
     if (!arena || !carve_ranked(*arena, 1, arguments->wanted, outputs, outcome)) return;
-    if (reject_if(fu::standard_atomic_ref<u32_t>(stream.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<u32_t>(stream.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the stream", outcome))
         return;
     std::span<match_t const> const remaining = std::span<match_t const>(stream.ranked).subspan(stream.position);
     outputs.write(0, remaining);
     stream.position += outputs.counts[0];
     *arguments->matches = outputs.view();
-    fu::standard_atomic_ref<u32_t>(stream.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<u32_t>(stream.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_dense_search_stream_free(usearch_dense_search_stream_t handle) {

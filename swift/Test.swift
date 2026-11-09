@@ -203,7 +203,7 @@ struct VocabularyTests {
     }
 
     @Test func executorFactoriesTakeOnlyTheirOwnPlacement() throws {
-        let executor = try Executor.forRam(memoryDomains: [], threads: 2, deferredLimit: 4)
+        let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain(mood: .spinning)
         // The streams cross behind a pointer that carries no count, so the binding counts them.
         #expect(failureStatus(of: try Executor.forVram(devices: [0, 1], streams: [nil])) == .shapeMismatch)
@@ -600,21 +600,22 @@ struct DeferredTests {
         let blocking = try index.on(executor).search(queries, wanted: 3, arena: try Arena(on: executor))
 
         let call = try index.deferred(executor).search(queries, wanted: 3, arena: try Arena(on: executor))
-        #expect(call.status == .deferred)
+        #expect(call.status == .deferred || call.status == .success)
         let deferred = try call.wait()
         #expect(call.status == .success)
         #expect(deferred.map { $0.map(\.key) } == blocking.map { $0.map(\.key) })
         #expect(try call.wait().map { $0.map(\.distance) } == blocking.map { $0.map(\.distance) })
     }
 
-    /// A blocking call on the same executor runs the deferred calls submitted before it first.
-    @Test func aBlockingCallRunsTheDeferredOnesBeforeIt() throws {
+    /// Pool thread 0 runs a deferred call in the caller's place, so polling alone finishes it,
+    /// and a caller reading it final may submit to the executor at once.
+    @Test func pollingAloneFinishesADeferredCall() throws {
         let index = try triangle()
         let executor = try executor()
         let call = try index.deferred(executor).count(key: 3)
-        #expect(call.status == .deferred)
-        #expect(try index.on(executor).count(key: 1) == 1)
+        while call.status == .deferred {}
         #expect(call.status == .success)
+        #expect(try index.on(executor).count(key: 1) == 1)
         #expect(try call.wait() == 1)
     }
 
@@ -624,7 +625,6 @@ struct DeferredTests {
         let executor = try executor()
         let query = try rows([Float](arrayLiteral: 1, 0), columns: 2)
         let call = try index.deferred(executor).search(query, wanted: 1, arena: try Arena(on: executor))
-        #expect(call.status == .deferred)
         let matches = try await call.value
         #expect(matches[0].map(\.key) == [1])
     }
@@ -644,16 +644,26 @@ struct DeferredTests {
         #expect(call.status == .configMismatch)
     }
 
-    /// A submission finding the deferred table full finishes at once, without waiting for a slot.
-    @Test func aFullDeferredTableRefusesAtOnce() throws {
+    /// A call finding the executor held finishes at once, as nothing queues, and the holder still
+    /// runs on the pool's thread 0.
+    @Test func aHeldExecutorRefusesAtOnce() throws {
         let index = try triangle()
-        let executor = try Executor.forRam(deferredLimit: 1)
-        let held = try index.deferred(executor).count(key: 1)
+        let executor = try Executor.forRam(threads: 2)
+        let gate = DispatchSemaphore(value: 0)
+        let held = try index.deferred(executor).search(
+            try rows([Float](arrayLiteral: 1, 0), columns: 2),
+            wanted: 1,
+            arena: try Arena(on: executor),
+            config: DenseSearchConfig(progress: { _, _ in
+                gate.wait()
+                return .continue
+            })
+        )
         let refused = try index.deferred(executor).count(key: 2)
-        #expect(held.status == .deferred)
         #expect(refused.status == .contended)
         #expect(failureStatus(of: try refused.wait()) == .contended)
-        #expect(try held.wait() == 1)
+        gate.signal()
+        #expect(try held.wait()[0].map(\.key) == [1])
     }
 
     /// A deferred call borrows its arena as a blocking one does, so a call on the same arena
@@ -663,8 +673,9 @@ struct DeferredTests {
         let index = try triangle()
         let executor = try executor()
         let arena = try Arena(on: executor)
-        let gate = DispatchSemaphore(value: 0)
+        let (entered, gate) = (DispatchSemaphore(value: 0), DispatchSemaphore(value: 0))
         let held = DenseSearchConfig(progress: { _, _ in
+            entered.signal()
             gate.wait()
             return .continue
         })
@@ -674,6 +685,8 @@ struct DeferredTests {
             arena: arena,
             config: held
         )
+        // Progress runs only once the body has claimed the arena on the pool's thread 0.
+        entered.wait()
         #expect(failureStatus(of: try index.get(key: 2, as: Float.self, arena: arena)) == .contended)
         #expect(try index.deferred(executor).get(key: 2, as: Float.self, arena: arena).status == .contended)
         gate.signal()

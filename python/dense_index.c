@@ -401,7 +401,7 @@ static void DenseIndex_dealloc(DenseIndex* self) {
 static char const doc_DenseIndex_on[] =                                                        //
     "on(executor) -> On[DenseIndex]\n"                                                         //
     "\n"                                                                                       //
-    "A receiver whose verbs block on `executor`, after every call submitted to it before.\n"   //
+    "A receiver whose verbs block on `executor`, refused while another call holds it.\n"       //
     "It offers every verb the index does, with the same arguments and answers. Python-only.\n" //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
@@ -537,13 +537,14 @@ static PyStructSequence_Field DenseIndexDescription_fields[] = {
     {"cpu_class", "The `CPUClass` dispatch picked on this machine, or None."},
     {"gpu_class", "The `GPUClass` dispatch picked on the index's devices, or None for a host index."},
     {"shards_count", "Live shards."},
+    {"load_path", "How the last load from a path read the parts onto the devices: none, host-copy or cufile."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc usearch_py_dense_index_description_desc = {
     "usearch.DenseIndexDescription",
     "A live index's frozen metadata and current counters, as `usearch_dense_index_description_t` holds them.",
-    DenseIndexDescription_fields, 7};
+    DenseIndexDescription_fields, 8};
 
 PyTypeObject DenseIndexDescriptionType;
 
@@ -666,15 +667,16 @@ static void describe_submit(void* call) { usearch_dense_describe(&((describe_cal
 
 static PyObject* describe_answer(void* erased) {
     usearch_dense_index_description_t const* const description = &((describe_call_t*)erased)->description;
-    PyObject* fields[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    PyObject* fields[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = metadata_to_object(&description->metadata)) &&
            (fields[1] = PyLong_FromSize_t(description->size)) &&
            (fields[2] = PyLong_FromSize_t(description->capacity)) &&
            (fields[3] = PyLong_FromSize_t(description->memory_usage)) &&
            (fields[4] = class_to_object(&usearch_py_cpu_class, (int)description->cpu_class)) &&
            (fields[5] = class_to_object(&usearch_py_gpu_class, (int)description->gpu_class)) &&
-           (fields[6] = PyLong_FromSize_t(description->shards_count)));
-    return usearch_py_struct_sequence_steal(&DenseIndexDescriptionType, fields, 7);
+           (fields[6] = PyLong_FromSize_t(description->shards_count)) &&
+           (fields[7] = PyUnicode_FromString(usearch_load_path_name(description->load_path))));
+    return usearch_py_struct_sequence_steal(&DenseIndexDescriptionType, fields, 8);
 }
 
 static usearch_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,

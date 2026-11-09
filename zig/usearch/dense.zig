@@ -775,6 +775,7 @@ const usearch_dense_index_description_t = extern struct {
     cpu_class: types.abi.cpu_class_t = 0,
     gpu_class: types.abi.gpu_class_t = 0,
     shards_count: usize = 0,
+    load_path: c_int = 0,
 };
 
 const usearch_dense_describe_t = extern struct {
@@ -910,7 +911,7 @@ pub const DenseIndex = extern struct {
     /// The opaque `usearch_dense_index_t` the ABI hands back.
     handle: ?*anyopaque,
 
-    /// Every verb of the index, blocking on an executor after every call submitted there before it.
+    /// Every verb of the index, blocking on an executor, refused while another call holds it.
     pub const On = Receiver(.blocking, void);
 
     /// Every verb of the index, submitted to an executor into a `Deferred(Call)` the caller holds,
@@ -2630,26 +2631,23 @@ test "a scan scores every entry, so every query finds itself first" {
     try std.testing.expectEqual(@as(usize, 2), (try nibbles.row(Scalar.U4x2, 0)).len);
 }
 
-test "a deferred call is the same verb, final only once waited on" {
+test "a deferred call is the same verb, final once waited on" {
     const dimensions = 2;
     var executor = try Executor.forRam(.{});
     defer executor.deinit();
     var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean }, &.{});
     defer index.deinit();
 
+    // One call holds the executor at a time, so each is waited on before the next is submitted.
     var reserving: Deferred(DenseReserve) = undefined;
     try index.deferred(executor, &reserving).reserve(4);
     defer reserving.deinit();
+    try reserving.wait();
     const slab = [_]f32{ 1, 0, 0, 1 };
     const keys = [_]Key{ .fromInteger(1), .fromInteger(2) };
     var inserting: Deferred(DenseInsert) = undefined;
     try index.deferred(executor, &inserting).insert(&keys, try .of(f32, &slab, dimensions), .{});
     defer inserting.deinit();
-
-    // Both are submitted rather than run, and a wait finishes each, in submission order.
-    try std.testing.expectEqual(types.Status.deferred, reserving.status());
-    try std.testing.expectEqual(types.Status.deferred, inserting.status());
-    try reserving.wait();
     try inserting.wait();
     try std.testing.expectEqual(types.Status.success, inserting.status());
     try std.testing.expectEqualStrings("", inserting.message());
@@ -2666,24 +2664,51 @@ test "a deferred call is the same verb, final only once waited on" {
 
     // The arena is borrowed as a blocking call borrows it, so a second call while one holds it is
     // refused as contended and leaves the holder's views alone, and the next call retires them.
-    var holding: Deferred(DenseGet) = undefined;
-    try index.deferred(executor, &holding).get(keys[0], .f32, &arena);
+    // The search waits at its last report until released, so the test meets it holding the arena.
+    const Gate = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+
+        fn holdUntilReleased(gate: *@This(), completed: usize, total: usize) types.Continuation {
+            if (completed != total) return .@"continue";
+            gate.entered.store(true, .release);
+            _ = awaitSoon(&gate.released);
+            return .@"continue";
+        }
+
+        fn awaitSoon(flag: *const std.atomic.Value(bool)) bool {
+            const deadline = std.Io.Clock.awake.now(std.testing.io).addDuration(.fromSeconds(3));
+            while (!flag.load(.acquire) and std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline.nanoseconds) {}
+            return flag.load(.acquire);
+        }
+    };
+    var gate: Gate = .{};
+    var holding: Deferred(DenseSearch) = undefined;
+    try index.deferred(executor, &holding).search(try .ofRow(f32, slab[0..dimensions]), 1, &arena, .{
+        .progress = .of(&gate, Gate.holdUntilReleased),
+        .progress_steps = 1,
+    });
     defer holding.deinit();
     try std.testing.expectError(Error.Uninitialized, vectors.row(f32, 0));
+    try std.testing.expect(Gate.awaitSoon(&gate.entered));
     try std.testing.expectError(Error.Contended, index.get(keys[1], .f32, &arena));
     var contending: Deferred(DenseGet) = undefined;
     try index.deferred(executor, &contending).get(keys[1], .f32, &arena);
     defer contending.deinit();
     try std.testing.expectEqual(types.Status.contended, contending.status());
     try std.testing.expectError(Error.Contended, contending.wait());
+    gate.released.store(true, .release);
     const held = try holding.wait();
-    try std.testing.expectEqualSlices(f32, &.{ 1, 0 }, try held.row(f32, 0));
+    try std.testing.expectEqualSlices(Key, keys[0..1], (try held.query(0)).keys);
     _ = try index.get(keys[1], .f32, &arena);
-    try std.testing.expectError(Error.Uninitialized, held.row(f32, 0));
+    try std.testing.expectError(Error.Uninitialized, held.query(0));
 
-    // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted.
+    // Storage is the caller's, so a batch of calls is an array and a reused slot is resubmitted;
+    // an executor runs one call at a time, so each call running at once takes its own.
     var counting: [2]Deferred(DenseCount) = undefined;
-    for (&counting, keys) |*slot, key| try index.deferred(executor, slot).count(key);
+    var executors: [2]Executor = .{ try Executor.forRam(.{}), try Executor.forRam(.{}) };
+    defer for (&executors) |*own| own.deinit();
+    for (&counting, &executors, keys) |*slot, own, key| try index.deferred(own, slot).count(key);
     for (&counting) |*slot| try std.testing.expectEqual(@as(usize, 1), try slot.wait());
     for (&counting) |*slot| slot.deinit();
     try index.deferred(executor, &counting[0]).count(.fromInteger(99));

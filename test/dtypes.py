@@ -249,7 +249,6 @@ class _ExecutorForNVMe(ctypes.Structure):
         ("outcome", ctypes.c_void_p),
         ("nvme", _NVMeOptions),
         ("threads", ctypes.c_size_t),
-        ("deferred_limit", ctypes.c_size_t),
         ("nvme_class", ctypes.c_int),
     ]
 
@@ -278,6 +277,7 @@ class _DenseIndexDescription(ctypes.Structure):
         ("cpu_class", ctypes.c_int),
         ("gpu_class", ctypes.c_int),
         ("shards_count", ctypes.c_size_t),
+        ("load_path", ctypes.c_int),
     ]
 
 

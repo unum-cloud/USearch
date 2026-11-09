@@ -353,7 +353,6 @@ pub struct usearch_executor_for_ram_t {
     pub outcome: *mut usearch_outcome_t,
     pub ram: usearch_ram_options_t,
     pub threads: usize,
-    pub deferred_limit: usize,
 }
 
 #[repr(C)]
@@ -362,7 +361,6 @@ pub struct usearch_executor_on_pool_t {
     pub outcome: *mut usearch_outcome_t,
     pub ram: usearch_ram_options_t,
     pub pool: *mut c_void,
-    pub deferred_limit: usize,
 }
 
 #[repr(C)]
@@ -372,7 +370,6 @@ pub struct usearch_executor_for_vram_t {
     pub vram: usearch_vram_options_t,
     pub streams: *const *mut c_void,
     pub scratch_limit: usize,
-    pub deferred_limit: usize,
 }
 
 #[repr(C)]
@@ -381,11 +378,11 @@ pub struct usearch_executor_for_nvme_t {
     pub outcome: *mut usearch_outcome_t,
     pub nvme: usearch_nvme_options_t,
     pub threads: usize,
-    pub deferred_limit: usize,
     pub nvme_class: usearch_nvme_class_t,
 }
 
 pub type usearch_mood_t = c_int;
+pub type usearch_load_path_t = c_int;
 
 #[repr(C)]
 pub struct usearch_executor_drain_t {
@@ -410,15 +407,22 @@ extern "C" {
     pub fn usearch_arena_describe(arguments: *mut usearch_arena_describe_t);
 
     pub fn usearch_status_name(status: usearch_status_t) -> *const c_char;
-    pub fn usearch_status_from_name(name: usearch_bytes_view_t) -> usearch_status_t;
+    pub fn usearch_status_from_name(name: usearch_bytes_view_t, status: *mut usearch_status_t) -> usearch_status_t;
     pub fn usearch_scalar_name(scalar: usearch_scalar_t) -> *const c_char;
     pub fn usearch_scalar_from_name(name: usearch_bytes_view_t) -> usearch_scalar_t;
     pub fn usearch_residency_name(residency: usearch_residency_t) -> *const c_char;
-    pub fn usearch_residency_from_name(name: usearch_bytes_view_t) -> usearch_residency_t;
+    pub fn usearch_residency_from_name(
+        name: usearch_bytes_view_t,
+        residency: *mut usearch_residency_t,
+    ) -> usearch_status_t;
     pub fn usearch_traversal_name(traversal: usearch_traversal_t) -> *const c_char;
-    pub fn usearch_traversal_from_name(name: usearch_bytes_view_t) -> usearch_traversal_t;
+    pub fn usearch_traversal_from_name(
+        name: usearch_bytes_view_t,
+        traversal: *mut usearch_traversal_t,
+    ) -> usearch_status_t;
     pub fn usearch_mood_name(mood: usearch_mood_t) -> *const c_char;
-    pub fn usearch_mood_from_name(name: usearch_bytes_view_t) -> usearch_mood_t;
+    pub fn usearch_load_path_name(load_path: usearch_load_path_t) -> *const c_char;
+    pub fn usearch_mood_from_name(name: usearch_bytes_view_t, mood: *mut usearch_mood_t) -> usearch_status_t;
 
     pub fn usearch_version_name() -> *const c_char;
     pub fn usearch_capabilities_compiled() -> *const c_char;
@@ -576,7 +580,8 @@ pub enum Status {
     Uninitialized = 12,
     /// The request contradicts an already-frozen configuration.
     ConfigMismatch = 13,
-    /// The call was refused rather than waited for, like a submission to a full deferred table.
+    /// The call was refused rather than waited for, like a submission to an executor another call
+    /// holds.
     Contended = 14,
     /// A progress handler stopped the call; what the finished increments leave behind is each
     /// verb's own contract.
@@ -627,9 +632,7 @@ impl FromStr for Status {
     /// Reads a status back from the name `Display` writes, refusing "success", which names no
     /// failure.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, usearch_status_from_name, usearch_status_name, |value| {
-            Status::from_raw(value).err()
-        })
+        read_named(text, usearch_status_from_name, |value| Status::from_raw(value).err())
     }
 }
 
@@ -699,6 +702,20 @@ pub(crate) fn read_spelling<Value>(
         false => None,
     }
     .ok_or(fail(Status::InvalidArgument, "no enumerator is spelled that way"))
+}
+
+/// Reads `text` through a parser that answers a status, then lifts the enumerator it wrote.
+pub(crate) fn read_named<Value>(
+    text: &str,
+    from_name: unsafe extern "C" fn(usearch_bytes_view_t, *mut c_int) -> usearch_status_t,
+    lift: fn(c_int) -> Option<Value>,
+) -> Result<Value> {
+    let mut value: c_int = 0;
+    let status = unsafe { from_name(text.as_bytes().into(), &mut value) };
+    (status == usearch_status_success_k)
+        .then(|| lift(value))
+        .flatten()
+        .ok_or(fail(Status::InvalidArgument, "no enumerator is spelled that way"))
 }
 
 /// The version of the linked library.
@@ -1674,16 +1691,16 @@ pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callba
 pub enum Mood {
     /// Idle threads sleep; the next call pays a wake-up.
     #[default]
-    Parked = 1,
+    Parked = 0,
     /// Idle threads stay hot, trading power for the next call's latency.
-    Spinning = 2,
+    Spinning = 1,
 }
 
 impl Mood {
     fn from_raw(value: usearch_mood_t) -> Option<Self> {
         match value {
-            1 => Some(Mood::Parked),
-            2 => Some(Mood::Spinning),
+            0 => Some(Mood::Parked),
+            1 => Some(Mood::Spinning),
             _ => None,
         }
     }
@@ -1700,9 +1717,7 @@ impl FromStr for Mood {
     type Err = Error;
 
     /// Reads a mood back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, usearch_mood_from_name, usearch_mood_name, Mood::from_raw)
-    }
+    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_mood_from_name, Mood::from_raw) }
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
@@ -1740,14 +1755,7 @@ impl FromStr for Residency {
     type Err = Error;
 
     /// Reads a residency back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            usearch_residency_from_name,
-            usearch_residency_name,
-            Residency::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_residency_from_name, Residency::from_raw) }
 }
 
 /// How a search reaches the indexed entries it scores.
@@ -1783,14 +1791,7 @@ impl FromStr for Traversal {
     type Err = Error;
 
     /// Reads a traversal back from the name `Display` writes, refusing any other.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            usearch_traversal_from_name,
-            usearch_traversal_name,
-            Traversal::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_named(text, usearch_traversal_from_name, Traversal::from_raw) }
 }
 
 /// The host threads or device streams an [`On`] runs its calls on, and the traversal scratch each
@@ -1803,10 +1804,10 @@ impl FromStr for Traversal {
 /// [`Executor::default`] is the null executor: it owns nothing, and every call
 /// handed it runs on the calling thread.
 ///
-/// Calls on one executor start in submission order, so threads wanting to overlap take one apiece;
-/// it is `Send` but not `Sync`.
-/// Every constructor takes a `deferred_limit` sizing its table of deferred calls, where zero takes
-/// the default; a deferred submission finding the table full fails with [`Status::Contended`].
+/// One call holds an executor at a time, and a second call finding it held fails with
+/// [`Status::Contended`], as nothing queues, so threads wanting to overlap take one apiece; it is
+/// `Send` but not `Sync`. A deferred call on a caller-exclusive pool runs on the pool's thread 0,
+/// so polling alone finishes it, while a single thread or a VRAM executor runs it at submission.
 /// [`Arena::new_in`] places an arena where it computes: a host arena may outlive it, while a GPU
 /// arena holds it until the arena drops.
 /// Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so.
@@ -1841,12 +1842,7 @@ impl Executor {
     /// the ordered publication path.
     ///
     /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    pub fn for_ram(
-        memory_domains: &[i32],
-        cpu_class: Option<CPUClass>,
-        threads: usize,
-        deferred_limit: usize,
-    ) -> Result<Self> {
+    pub fn for_ram(memory_domains: &[i32], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1855,7 +1851,6 @@ impl Executor {
                 outcome: &mut outcome,
                 ram: ram_options(memory_domains, cpu_class),
                 threads,
-                deferred_limit,
             })
         };
         let executor = Executor::adopt(handle);
@@ -1867,12 +1862,7 @@ impl Executor {
     ///
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(
-        memory_domains: &[i32],
-        cpu_class: Option<CPUClass>,
-        pool: *mut c_void,
-        deferred_limit: usize,
-    ) -> Result<Self> {
+    pub unsafe fn on_pool(memory_domains: &[i32], cpu_class: Option<CPUClass>, pool: *mut c_void) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
@@ -1880,7 +1870,6 @@ impl Executor {
             outcome: &mut outcome,
             ram: ram_options(memory_domains, cpu_class),
             pool,
-            deferred_limit,
         });
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
@@ -1892,12 +1881,7 @@ impl Executor {
     /// Zero `threads` derives from those devices' queue capabilities.
     ///
     /// A pinned `cpu_class` narrows the threads' waiters and atomics to that class's.
-    pub fn for_nvme(
-        paths: &[impl AsRef<Path>],
-        cpu_class: Option<CPUClass>,
-        threads: usize,
-        deferred_limit: usize,
-    ) -> Result<Self> {
+    pub fn for_nvme(paths: &[impl AsRef<Path>], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
         let views = path_views(paths)?;
         let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
@@ -1907,7 +1891,6 @@ impl Executor {
                 outcome: &mut outcome,
                 nvme: nvme_options(&views, cpu_class),
                 threads,
-                deferred_limit,
                 nvme_class: 0,
             })
         };
@@ -1929,7 +1912,6 @@ impl Executor {
         gpu_class: Option<GPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
-        deferred_limit: usize,
     ) -> Result<Self> {
         if !streams.is_empty() && streams.len() != devices.len() {
             return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
@@ -1946,14 +1928,13 @@ impl Executor {
                 false => streams.as_ptr(),
             },
             scratch_limit,
-            deferred_limit,
         });
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
-    /// Waits for every call submitted to this executor, then adopts `mood` whenever it next goes
-    /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
+    /// Waits until no call holds this executor, then adopts `mood` until the next call; a failure
+    /// is the executor's own, such as a lost device, never one of a drained call.
     pub fn drain(&self, mood: Mood) -> Result<()> {
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -2470,13 +2451,13 @@ mod tests {
         assert_eq!(local.describe()?, host);
         assert!(local.host().is_ok());
 
-        let executor = Executor::for_ram(&[], None, 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
         assert_eq!(placed.describe()?, host, "an arena outlives its executor");
 
         // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
-        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], 0, 0) }) else {
+        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], 0) }) else {
             return Ok(());
         };
         let device = Arena::new_in(&gpu)?;
@@ -2573,8 +2554,8 @@ mod tests {
         assert_eq!(offset_of!(usearch_nvme_options_t, cpu_class), 2 * word);
         assert_eq!(size_of::<usearch_nvme_options_t>(), 3 * word);
         assert_eq!(offset_of!(usearch_executor_for_nvme_t, threads), 5 * word);
-        assert_eq!(offset_of!(usearch_executor_for_nvme_t, nvme_class), 7 * word);
-        assert_eq!(size_of::<usearch_executor_for_nvme_t>(), 8 * word);
+        assert_eq!(offset_of!(usearch_executor_for_nvme_t, nvme_class), 6 * word);
+        assert_eq!(size_of::<usearch_executor_for_nvme_t>(), 7 * word);
     }
 
     /// Arrow's structures keep the offsets Arrow's C data interface freezes on 64-bit hosts.

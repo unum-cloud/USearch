@@ -26,30 +26,39 @@
  *
  *  @section types_asynchrony Asynchrony
  *
- *  Every call names its @c completion, and synchronous and deferred calls share one shape.
- *  A blocking call, the default, returns with its final status stored and every output readable.
- *  A deferred call returns once submitted, as an io_uring entry does, and finishes on its executor.
- *  A call with a @c NULL executor runs on the calling thread and is final when it returns.
- *  Submission copies the structure; everything it points to stays borrowed until final.
+ *  Every call names its @c completion, and blocking and deferred calls share one shape. A blocking
+ *  call, the default, returns with its final status stored and every output readable. A call with a
+ *  @c NULL executor runs on the calling thread and is final on return, whatever its completion.
  *
- *  - @c outcome->status reads @c usearch_status_deferred_k until final, even for a call refused at
- *    submission.
- *  - The message, then the final status, are stored with release ordering and a wake.
- *  - The caller reads the status with acquire ordering, polling through @c usearch_outcome_status
- *    or waiting through @c usearch_outcome_wait.
- *  - A GPU executor stores the final status from a host callback that still fires after a device fault.
- *  - Executors own their streams, so a caller orders dependent calls by waiting on the first.
- *  - A submission finding the deferred table full, sized by @c deferred_limit, finishes @c usearch_status_contended_k.
- *  - A call stops early only when its progress handler returns @c usearch_cancel_k.
+ *  An executor runs one call at a time. A call that finds another one holding its executor, from
+ *  any thread, finishes @c usearch_status_contended_k without running.
+ *
+ *  A deferred call on a caller-exclusive executor returns once handed to the executor's thread 0,
+ *  which runs it there, forks included, and finishes it, so polling alone sees it final. A deferred
+ *  call on a caller-inclusive executor, whose threads need their caller, or on a VRAM executor,
+ *  whose caller stages and feeds its devices, runs at submission and is final on return. Submission
+ *  copies the structure; everything it points to stays borrowed until final, and @c outcome->status
+ *  reads @c usearch_status_deferred_k until then.
+ *
+ *  A call lets go of its arena and of the handles it names, then of its executor, and only then
+ *  stores the message and the final status with release ordering. A caller that reads the status
+ *  final with acquire ordering may reuse the arena, submit the next call or free any handle at
+ *  once. Waits, drains and frees only wait: the executor's own threads finish every call. A free
+ *  waits for the calls naming its handle, so one issued from a callback of such a call waits on
+ *  itself. A call stops early only when its progress handler returns @c usearch_cancel_k.
+ *
+ *  One thread keeps several executors busy by giving each a deferred call and polling the statuses.
+ *  A VRAM call is final when it returns, so a manager submits it last:
  *
  *  @code{.c}
- *  usearch_outcome_t outcomes[4] = {0};
- *  for (size_t shard = 0; shard != 4; ++shard) {
- *      searches[shard].outcome = &outcomes[shard];
- *      searches[shard].completion = usearch_completion_deferred_k;
- *      usearch_dense_search(&searches[shard]);
- *  }
- *  for (size_t shard = 0; shard != 4; ++shard) usearch_outcome_wait(&outcomes[shard]);
+ *  usearch_outcome_t ram_outcome = {0}, nvme_outcome = {0};
+ *  ram_search.outcome = &ram_outcome, ram_search.completion = usearch_completion_deferred_k;
+ *  nvme_search.outcome = &nvme_outcome, nvme_search.completion = usearch_completion_deferred_k;
+ *  usearch_dense_search(&ram_search);  // on a RAM executor
+ *  usearch_dense_search(&nvme_search); // on an NVMe executor
+ *  while (usearch_outcome_status(&ram_outcome) == usearch_status_deferred_k ||
+ *         usearch_outcome_status(&nvme_outcome) == usearch_status_deferred_k)
+ *      prepare_next_batch();
  *  @endcode
  *
  *  @section types_memory Memory
@@ -74,7 +83,7 @@
  *    pages for calls on the calling thread. A GPU arena keeps the rule @ref usearch_arena_t notes.
  *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views
  *    into it. Any verb may reuse any arena of its residency, one call at a time.
- *  - Blocking calls borrow the arena; deferred calls hold it until final.
+ *  - A call holds the arena from its start until just before its final status.
  *  - An Arrow export reads the arena's outputs until the arena's next call.
  *
  *  Outputs are views the call writes, so none carries a capacity or a stride for the caller to
@@ -192,17 +201,12 @@ typedef struct usearch_keys_view_t {
  *  same status the engine would if it could see the same thing. The set describes the project's
  *  failures, not this implementation's exits, so unused enumerators are deliberate.
  *
- *  The failures fall into five categories. Resources: @c usearch_status_out_of_memory_k,
- *  @c usearch_status_device_k and @c usearch_status_io_k. Input:
- *  @c usearch_status_shape_mismatch_k, @c usearch_status_unsupported_layout_k,
- *  @c usearch_status_unknown_kind_k, @c usearch_status_malformed_k and
- *  @c usearch_status_invalid_argument_k. State: @c usearch_status_uninitialized_k,
- *  @c usearch_status_config_mismatch_k, @c usearch_status_read_only_k,
- *  @c usearch_status_overflow_k, @c usearch_status_contended_k and
- *  @c usearch_status_unsupported_k. Interruptions: @c usearch_status_cancelled_k and
- *  @c usearch_status_deferred_k. Defects: @c usearch_status_internal_k. Any verb that allocates,
- *  binds a device or touches a file may also return a Resources status; any verb taking a progress
- *  callback may return @c usearch_status_cancelled_k. A verb's own block lists only what its
+ *  Statuses fall into five categories: resources, for memory, I/O and devices; input, for shapes,
+ *  layouts, kinds, malformed data and invalid arguments; state, for missing reservations, frozen
+ *  configurations, read-only handles, exhausted ID spaces, held executors and arenas, and
+ *  unsupported verbs; interruptions, for cancellation and deferral; and defects. Any verb that
+ *  allocates, binds a device or touches a file may also return a resources status, and any verb
+ *  taking a progress callback may be cancelled. Each verb's own block lists only the statuses its
  *  contract adds.
  */
 typedef enum usearch_status_t {
@@ -253,7 +257,8 @@ typedef enum usearch_status_t {
      *  a different geometry. */
     usearch_status_config_mismatch_k = 13,
 
-    /** The call was refused rather than waited for, like a submission to a full deferred table. */
+    /** The call was refused rather than waited for: another call holds its executor or its arena,
+     *  or a drain came from inside a callback of the call it would wait on. */
     usearch_status_contended_k = 14,
 
     /** A progress handler asked the operation to stop; it unwound and
@@ -672,7 +677,7 @@ typedef struct usearch_gpu_device_t {
  */
 typedef enum usearch_residency_t {
 
-    /** No residency named, which is what @c usearch_residency_from_name reads unknown text as. */
+    /** No residency named. */
     usearch_residency_unknown_k = 0,
 
     /** Volatile-memory index traversed by CPU threads - the concurrent baseline. */
@@ -1010,18 +1015,18 @@ typedef enum usearch_completion_t {
  *  quantizations and metrics. It grows to the widest geometry asked of it, is rewound per call,
  *  and is kept between calls, so a steady workload allocates once.
  *
- *  Calls on one executor start in submission order, and handles stay freely concurrent - it is the
- *  executor that orders, never the index. A blocking call runs alone: after every earlier call
- *  finishes, and before any later one starts. An executor without threads of its own -
- *  caller-inclusive, single-thread, or WebAssembly - runs a deferred call at submission or holds it
- *  until its wait, its executor's next drain or blocking call, or the free of a handle it names.
+ *  One call holds an executor at a time, blocking or deferred, and handles stay freely concurrent -
+ *  it is the executor that serializes, never the index. A call submitted while another holds the
+ *  executor finishes @c usearch_status_contended_k at once, and nothing queues, so submitting never
+ *  allocates. A caller-exclusive pool runs a deferred call on its own thread 0, which forks the
+ *  other threads as the caller would, so the call finishes without its caller. An executor without
+ *  threads of its own - caller-inclusive, single-thread, or WebAssembly - runs a deferred call at
+ *  submission, final when it returns, and so does every VRAM verb.
  *
- *  Every executor tracks its deferred calls in a fixed table of @c deferred_limit slots, so
- *  submitting never allocates. A deferred submission that finds the table full finishes
- *  @c usearch_status_contended_k, and blocking calls take no slot.
- *
- *  A blocking verb or @c usearch_executor_drain called from inside a progress handler or a predicate
- *  of a call on the same executor reports @c usearch_status_contended_k rather than waiting on itself.
+ *  Progress handlers and predicates of a deferred call run on the pool's threads. A blocking verb
+ *  called from inside one of them on the same executor reports @c usearch_status_contended_k, and
+ *  so does @c usearch_executor_drain on the thread running the call's body; a drain from any other
+ *  of its threads would wait on itself.
  *
  *  Every verb accepts a @c NULL executor and then runs on the caller's thread, blocking whatever
  *  its @c completion says: RAM work runs single-threaded, VRAM work runs on the handle's device and
@@ -1054,14 +1059,11 @@ typedef struct usearch_executor_for_ram_t {
 
     /** Threads to spawn; zero takes 7/8 of the cores those domains carry. */
     size_t threads;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
 } usearch_executor_for_ram_t;
 
 /**
- *  @brief Spawns host threads for RAM-resident indexes, interleaved across the compute domains
- *      local to the named memory domains, or borrows an existing ForkUnion pool.
+ *  @brief Creates an executor of host threads for RAM-resident indexes, interleaved across the
+ *      compute domains local to the named memory domains, or borrows an existing ForkUnion pool.
  *
  *  Passing the very placement the indexes were built with is what makes compute and memory domains
  *  agree, leaving no second place to name hardware and no way for the two to disagree.
@@ -1087,9 +1089,6 @@ typedef struct usearch_executor_on_pool_t {
 
     /** The ForkUnion @c fu_pool_t to borrow; it must outlive the executor, and keeps its lender's mood. */
     void* pool;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
 } usearch_executor_on_pool_t;
 
 /**
@@ -1122,9 +1121,6 @@ typedef struct usearch_executor_for_vram_t {
      *  from, past which a call reports @c usearch_status_out_of_memory_k; zero lets the run grow as
      *  the geometry asks. */
     size_t scratch_limit;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
 } usearch_executor_for_vram_t;
 
 /**
@@ -1212,9 +1208,6 @@ typedef struct usearch_executor_for_nvme_t {
     /** Threads to spawn, one submission ring apiece; zero derives from the devices' queue capabilities. */
     size_t threads;
 
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
-
     /** The I/O engine every ring submits through, opened exactly or refused with the reason its
      *  setup gave; @c usearch_nvme_class_unknown_k tries io_uring, then AIO, then blocking reads.
      *  Passthrough and SPDK open only when named, since one needs character devices and the other
@@ -1223,8 +1216,8 @@ typedef struct usearch_executor_for_nvme_t {
 } usearch_executor_for_nvme_t;
 
 /**
- *  @brief Spawns host threads for NVMe-resident indexes, one submission ring apiece, interleaved
- *      across the compute domains local to the devices the paths name.
+ *  @brief Creates an executor of host threads for NVMe-resident indexes, one submission ring
+ *      apiece, interleaved across the compute domains local to the devices the paths name.
  *
  *  One ring per thread is what keeps submission lock-free: a thread owns its ring outright, so
  *  an external-memory walk never coordinates with a sibling to issue a read. A ring reports its
@@ -1241,61 +1234,52 @@ typedef struct usearch_executor_for_nvme_t {
  */
 USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments);
 
-/** What an executor does with its threads or streams once it goes idle. */
+/** How a load from a path read the parts onto the devices, as @c describe reports. */
+typedef enum usearch_load_path_t {
+
+    /** Never loaded from a path, or an index on RAM or NVMe. */
+    usearch_load_path_none_k = 0,
+
+    /** Through host memory, since some part's file took no cuFile registration. */
+    usearch_load_path_host_copy_k = 1,
+
+    /** Every part straight onto the device through cuFile. */
+    usearch_load_path_cufile_k = 2,
+} usearch_load_path_t;
+
+/** What an executor's threads do between a drain and its next call. */
 typedef enum usearch_mood_t {
 
-    /** No mood named, which derives parked. */
-    usearch_mood_unknown_k = 0,
+    /** Sleep in the kernel until the next call, freeing the cores. */
+    usearch_mood_parked_k = 0,
 
-    /** Idle threads sleep; the next call pays a wake-up. */
-    usearch_mood_parked_k = 1,
-
-    /** Idle threads stay hot, trading power for the next call's latency. */
-    usearch_mood_spinning_k = 2,
+    /** Keep polling, trading the cores for the lowest wake-up latency. */
+    usearch_mood_spinning_k = 1,
 } usearch_mood_t;
 
 /** The arguments of @c usearch_executor_drain. */
 typedef struct usearch_executor_drain_t {
 
-    /** The executor whose submitted calls are awaited. */
+    /** The executor whose call is awaited. */
     usearch_executor_t executor;
 
-    /** Output for an executor-level failure, such as a lost device; never one of a drained call. */
+    /** Output for an executor-level failure, such as a device fault; never one of
+     *  a drained call. */
     usearch_outcome_t* outcome;
 
-    /** What the executor does whenever it next goes idle; the last drain wins. */
+    /** What the executor's threads do until its next call. */
     usearch_mood_t mood;
 } usearch_executor_drain_t;
 
-/**
- *  @brief Waits for every call submitted to the executor before the drain began, then sets the
- *      mood it adopts whenever it next goes idle.
- *
- *  The drain reads the submission ticket on entry and waits up to it, so calls submitted while it
- *  waits can't keep it waiting forever. Every call reports its own failure through its own
- *  @c outcome, so a drain reports only what befell the executor itself.
- *
- *  Parked means futex waits on RAM, blocking-sync events on VRAM, and ring waits on NVMe; spinning
- *  polls each of them instead. A borrowed pool keeps its lender's mood.
- *
- *  @par Statuses:
- *  - @c usearch_status_contended_k A call running on the executor holds it, as for a drain from
- *    that call's own progress handler, predicate or host function.
- *  - @c usearch_status_device_k A GPU executor with no vendor behind it.
- */
+/** Waits until no call holds the executor and its devices finished their work, then applies the
+ *  mood. Reports only executor-level failures, and @c usearch_status_contended_k from a callback of
+ *  the call it would wait on. */
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
-/**
- *  @brief Drains every call, releases the scratch and the streams it owns, and frees the executor;
- *      @c NULL is safe, and it cannot fail, so takes no outcome.
- *  @param[in,out] executor The handle to be freed; invalid afterwards.
- *
- *  Waits until every deferred call naming the handle is final.
- *  Waits until every call running on the executor, blocking or deferred, is final.
- *  Never call it from inside a progress handler, a predicate, or a host function the executor
- *  runs, since it would drain itself. Host arenas it made stay valid, each keeping its memory
- *  until freed; GPU arenas keep the rule @ref usearch_arena_t notes.
- */
+/** Waits until no call holds the executor, releases the scratch and the streams it owns, returns
+ *  borrowed pools, and frees the executor; @c NULL is safe, and it cannot fail, so it takes no
+ *  outcome. Host arenas it made stay valid until freed, and GPU arenas keep the rule
+ *  @ref usearch_arena_t notes. */
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
 
 /**
@@ -1313,11 +1297,11 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  *  - A call whose inputs point into the arena it is about to rewind reports
  *    @c usearch_status_invalid_argument_k.
  *  - An arena serves one call at a time; a second call naming it finishes
- *    @c usearch_status_contended_k, and a deferred one does so at submission.
+ *    @c usearch_status_contended_k.
  *  - A call on another residency or device than the arena's, or a call naming a GPU arena with
  *    another executor than the one that made it, @c NULL included, reports
  *    @c usearch_status_device_k.
- *  - A blocking call borrows the arena until it returns, and a deferred one holds it until final.
+ *  - A call holds the arena from its start until just before its final status.
  *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
  *
  *  @note A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
@@ -1354,7 +1338,7 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
  *      outcome.
  *  @param[in,out] arena The arena to be freed; invalid afterwards.
  *
- *  Waits until every deferred call naming the handle is final.
+ *  Waits out every executor call naming the handle; never call it from their callbacks.
  *  Free a GPU arena once the caller's own device work on its outputs has finished, keeping the
  *  rule @ref usearch_arena_t notes.
  */
@@ -1402,8 +1386,8 @@ USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments);
  */
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
 
-/** Reads a status back; @c usearch_status_invalid_argument_k when unrecognized. */
-USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name);
+/** Reads a status back into @p status, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name, usearch_status_t* status);
 
 /** The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
 USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar);
@@ -1414,20 +1398,23 @@ USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t na
 /** The canonical spelling of a residency, as @c usearch_residency_ram_k spells "ram". */
 USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency);
 
-/** Reads a residency back; @c usearch_residency_ram_k when unrecognized. */
-USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name);
+/** Reads a residency back into @p residency, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_residency_from_name(usearch_bytes_view_t name, usearch_residency_t* residency);
 
 /** The canonical spelling of a traversal, as @c usearch_traversal_scan_k spells "scan". */
 USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal);
 
-/** Reads a traversal back; @c usearch_traversal_walk_k when unrecognized. */
-USEARCH_EXPORT usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name);
+/** Reads a traversal back into @p traversal, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_traversal_from_name(usearch_bytes_view_t name, usearch_traversal_t* traversal);
 
 /** The canonical spelling of a mood, as @c usearch_mood_parked_k spells "parked". */
 USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood);
 
-/** Reads a mood back; @c usearch_mood_parked_k when unrecognized. */
-USEARCH_EXPORT usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name);
+/** Reads a mood back into @p mood, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name, usearch_mood_t* mood);
+
+/** The canonical spelling of a load path, as @c usearch_load_path_cufile_k spells "cufile". */
+USEARCH_EXPORT char const* usearch_load_path_name(usearch_load_path_t load_path);
 
 /** The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class);

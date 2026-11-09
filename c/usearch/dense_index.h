@@ -668,7 +668,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
  *      takes no outcome.
  *  @param[in,out] index The handle to be freed; invalid afterwards.
  *
- *  Waits until every deferred call naming the handle is final.
+ *  Waits out every executor call naming the handle; never call it from their callbacks.
  */
 USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index);
 
@@ -1571,7 +1571,7 @@ typedef struct usearch_dense_cursor_next_t {
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
 
 /** Releases the cursor; @c NULL is safe.
- *  Waits until every deferred call naming the handle is final. */
+ *  Waits out every executor call naming the handle; never call it from their callbacks. */
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
 
 /** The arguments of @c usearch_dense_sample. */
@@ -1740,7 +1740,7 @@ typedef struct usearch_dense_search_stream_next_t {
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments);
 
 /** Releases the stream and the walk state it keeps; @c NULL is safe.
- *  Waits until every deferred call naming the handle is final. */
+ *  Waits out every executor call naming the handle; never call it from their callbacks. */
 USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t stream);
 
 /** The arguments of @c usearch_dense_save. */
@@ -1945,6 +1945,9 @@ typedef struct usearch_dense_index_description_t {
     /** Live shards, each a graph of its own; a fresh index has one per memory domain or device it
      *  was placed on. */
     size_t shards_count;
+
+    /** How the last load from a path read the parts onto the devices. */
+    usearch_load_path_t load_path;
 } usearch_dense_index_description_t;
 
 /** The arguments of @c usearch_dense_describe. */

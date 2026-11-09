@@ -16,9 +16,9 @@
  *    opened;
  *  - <tt>open_shard_load(shards, shard, rows)</tt>, one shard's own load at its watermark;
  *  - <tt>end_save(shards)</tt>, once a save finished or died;
- *  - where a residency reads files itself, @c sources and <tt>open_sources(mappings)</tt>, which
- *    opens one source per mapped part before its shards open, so its plans read a step's host
- *    bytes from the part that holds them.
+ *  - on device residencies, <tt>open_sources(mappings)</tt> before the shards open, which opens one
+ *    source per mapped part where the residency reads files itself, so its plans read a step's
+ *    host bytes from the part that holds them, and records how the load reads the parts.
  *
  *  Every shard keeps its own keys: a save reads them through the shard's <tt>keys()</tt>, and a
  *  load copies them with each step's rows through its shard plan's <tt>load</tt>, files them
@@ -682,7 +682,7 @@ struct [[nodiscard]] shard_load_plan {
                                                        shards.allocator());
             failed(listed))
             return {{}, listed};
-        if constexpr (requires { plan.residency_.sources; })
+        if constexpr (requires { plan.residency_.open_sources(to_writable_span(plan.mappings_)); })
             if (status_t const opened = plan.residency_.open_sources(to_writable_span(plan.mappings_)); failed(opened))
                 return {{}, opened};
         if (status_t const opened = plan.open_shards_(config); failed(opened)) return {{}, opened};

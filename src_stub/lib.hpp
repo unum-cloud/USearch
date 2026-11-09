@@ -65,14 +65,20 @@ struct usearch_arena_handle_t {
     us::utilities::growing_arena<> memory {us::utilities::global_allocator};
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
-     *  before its final status; null while free. Touched through @c fu::standard_atomic_ref, since
-     *  a held call finishes on any thread. */
+     *  before its final status; null while free. Touched through @c serial_atomic_ref, since calls
+     *  on several threads may name it. */
     usearch_outcome_t const* holder = nullptr;
 };
 
 namespace unum {
 namespace usearch {
 namespace stub {
+
+/** The serial class's atomic reference and waiter, as @c src/lib.hpp picks them, since a stand-in
+ *  dispatches to no other class. */
+template <typename value_type_>
+using serial_atomic_ref = fu::standard_atomic_ref<value_type_>;
+using serial_waiter_t = fu::standard_yield_t;
 using namespace unum::usearch::utilities;
 
 #pragma region Vocabulary and Outcomes
@@ -108,7 +114,7 @@ inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
 /** Marks @p outcome deferred - every verb's first act, so a waiter never reads a stale status. */
 inline void propagate_deferred(usearch_outcome_t* outcome) {
     if (outcome)
-        fu::standard_atomic_ref<usearch_status_t>(outcome->status)
+        serial_atomic_ref<usearch_status_t>(outcome->status)
             .store(usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
@@ -117,7 +123,7 @@ inline void propagate_deferred(usearch_outcome_t* outcome) {
 inline void propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) {
     if (!outcome) return;
     outcome->message = status == usearch_status_success_k ? nullptr : message;
-    fu::standard_atomic_ref<usearch_status_t>(outcome->status).store(status, std::memory_order_release);
+    serial_atomic_ref<usearch_status_t>(outcome->status).store(status, std::memory_order_release);
 }
 
 /**
@@ -142,7 +148,7 @@ class deferred_outcome_t {
         // Only the holder lets go, so a call refused as contended leaves the other call's hold alone.
         usearch_outcome_t const* holder = published_;
         if (arena_)
-            fu::standard_atomic_ref<usearch_outcome_t const*>(arena_->holder)
+            serial_atomic_ref<usearch_outcome_t const*>(arena_->holder)
                 .compare_exchange_strong(holder, nullptr, std::memory_order_release, std::memory_order_relaxed);
         propagate_error(recorded_.status, published_, recorded_.message);
     }
@@ -300,16 +306,13 @@ struct executor_t {
 
     /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
     std::size_t threads = 1;
-
-    /** Submissions beyond this many finish @c usearch_status_contended_k. */
-    std::size_t deferred_limit = 64;
 };
 
-/** A call given to an executor, waiting to run or running on some caller's thread. */
+/** A call running on its caller's thread. */
 struct call_t {
 
-    /** The executor whose deferred slot the call holds; null for a blocking call, which takes none. */
-    executor_t const* deferred_on;
+    /** The executor the call holds while it runs. */
+    executor_t const* held_executor;
 
     /** A copy of the arguments with a null executor, so running them goes straight to the verb's body. */
     call_arguments_t arguments;
@@ -320,18 +323,11 @@ struct call_t {
     std::vector<void const*> handles;
 };
 
-/** Holds a deferred @p call until its executor drains, or finishes it contended once that executor
- *  holds @c deferred_limit calls that are not yet final, answering whether it was held. */
-bool submit_deferred(call_t call, usearch_outcome_t* outcome);
+/** Runs @p call on the calling thread, listed so a free of a handle it uses waits, or refuses it
+ *  into @p outcome with @c usearch_status_contended_k while a running call holds its executor. */
+void run_holding(call_t call, usearch_outcome_t* outcome);
 
-/** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle it uses waits. */
-void run_blocking(call_t call);
-
-/** Runs every deferred call held for @p executor, oldest first, on the calling thread. */
-void drain(executor_t const* executor);
-
-/** Returns once no call uses @p handle, draining the executors that still hold one - what every wait
- *  and every free does first. */
+/** Returns once no running call uses @p handle - what every wait and every free does first. */
 void wait_for_calls_using(void const* handle);
 
 /** Collects @c call_t::handles from a verb's @p arguments. An output slot - a pointer to a handle
@@ -355,35 +351,23 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
 inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) {
     if (!arena) return true;
     usearch_outcome_t const* holder = nullptr;
-    return fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
+    return serial_atomic_ref<usearch_outcome_t const*>(arena->holder)
                .compare_exchange_strong(holder, call, std::memory_order_acquire, std::memory_order_acquire) ||
            holder == call;
 }
 
 /** Every verb's first act. A call without an executor answers false and runs the verb's body in
- *  place. A call with one is copied without it and answers true: a deferred copy holds its arena
- *  and is held for the executor, a blocking one runs right after the deferred calls submitted before it. */
+ *  place. A call with one is copied without it, runs at submission whatever its completion, as the
+ *  stand-in's executor has no threads of its own, and answers true. */
 template <auto verb_, typename arguments_>
 bool through_executor(arguments_* arguments) {
     executor_t* const executor = arguments->executor;
     if (!executor) return false;
     arguments_ copy = *arguments;
     copy.executor = nullptr;
-    call_t call {nullptr, copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); },
+    call_t call {executor, copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); },
                  handles_used_by(*arguments)};
-    if (arguments->completion != usearch_completion_deferred_k)
-        return drain(executor), run_blocking(std::move(call)), true;
-    call.deferred_on = executor;
-    usearch_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    if (!hold_arena(arena, arguments->outcome))
-        return propagate_error(usearch_status_contended_k, arguments->outcome, "The arena serves another call"), true;
-    // A refused submission never runs, so nothing else would let go of the arena it took.
-    usearch_outcome_t const* holder = arguments->outcome;
-    if (!submit_deferred(std::move(call), arguments->outcome) && arena)
-        fu::standard_atomic_ref<usearch_outcome_t const*>(arena->holder)
-            .compare_exchange_strong(holder, nullptr, std::memory_order_release, std::memory_order_relaxed);
-    return true;
+    return run_holding(std::move(call), arguments->outcome), true;
 }
 
 /** Claims @p arena for the call whose outcome is @p call and rewinds it, which frees the previous

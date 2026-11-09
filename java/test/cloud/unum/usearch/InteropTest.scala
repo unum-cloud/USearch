@@ -26,7 +26,7 @@ class InteropTest {
   def batchesTakeScalaArrays(): Unit = {
     val options = new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16)
     Using.resources(
-      Executor.forRam(Array.emptyIntArray, null, 2, 0),
+      Executor.forRam(Array.emptyIntArray, null, 2),
       DenseIndex.initRam(options, Array.emptyIntArray)
     ) { (pool, index) =>
       val receiver = index.on(pool)

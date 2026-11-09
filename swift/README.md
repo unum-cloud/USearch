@@ -47,7 +47,7 @@ assert(matches[0][0].key == Key(42))
 ## Receivers & Deferred Calls
 
 The receiver chooses where a verb runs and how it completes, and the verb stays the same.
-Called on the index, a verb runs on the calling thread; on `index.on(executor)` it blocks on that executor, after every call submitted there before it; on `index.deferred(executor)` it submits there and answers a `Deferred` at once.
+Called on the index, a verb runs on the calling thread; on `index.on(executor)` it blocks on that executor, refused while another call holds it; on `index.deferred(executor)` it submits there and answers a `Deferred` at once.
 `DenseIndex`, `DenseIndexOn` and `DenseIndexDeferredOn` take each verb with the same arguments, and a blocking call takes no executor or completion, with a default config deriving every knob.
 
 ```swift
@@ -73,7 +73,8 @@ let matches = try await call.value  // or: try call.wait()
 ```
 
 A failure this binding catches before the call crosses throws at submission, and one the library catches arrives through `status` and `wait`.
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `contended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `contended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
 Rows built over a `Tensor` stay alive with the call, while memory borrowed through a `MatrixView` or a softmax carry must outlive it.
 The constructors that the C interface lets fan out take an `executor` in their config and run on the calling thread without one.
@@ -85,18 +86,18 @@ One executor serves any number of handles, so several categories of index share 
 Its kind is fixed by the factory that spawned it and must match every handle it drives; a mismatch reports `device`.
 
 ```swift
-let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0, deferredLimit: 0)
+let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0)
 let submissionRings = try Executor.forNvme(paths: ["/mnt/nvme0"], threads: 8)
 let deviceStreams = try Executor.forVram(devices: [0, 1], streams: nil, scratchLimit: 1 << 30)
 ```
 
 Each factory takes every argument its C constructor has, and only those.
-`deferredLimit` sizes the table of deferred calls an executor tracks, and `forVram` can borrow your CUDA streams, one per device, or cap per-device scratch.
+`forVram` can borrow your CUDA streams, one per device, or cap per-device scratch.
 A thread count of zero derives from the hardware: 7/8 of the cores those memory domains carry, since full occupancy starves the ordered publication path, and for NVMe the devices' queue capabilities.
 `forVram` takes no thread count at all: one host thread drives one stream per device, so there is no count to name.
 
-Calls on one executor run in submission order, and index handles stay freely shareable.
-`Executor.onPool(memoryDomains:cpuClass:pool:deferredLimit:)` borrows an existing ForkUnion pool instead of spawning threads, and `drain(mood:)` waits for the executor's calls and picks whether its threads park or spin once idle.
+One call holds an executor at a time, and index handles stay freely shareable.
+`Executor.onPool(memoryDomains:cpuClass:pool:)` borrows an existing ForkUnion pool instead of spawning threads, and `drain(mood:)` waits until no call holds the executor and picks whether its threads park or spin once idle.
 
 ## Arenas
 
@@ -428,6 +429,6 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; a view remembers which call wrote it and traps once a later one did.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__
   Each wrapper's documentation names the C function it calls or says it is binding-only, and a verb's argument structure becomes its `Dense*Config`.

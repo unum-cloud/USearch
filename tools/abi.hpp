@@ -618,7 +618,6 @@ inline session_t open_session(settings_t const& settings, usearch_cpu_class_t pi
                                                .outcome = &outcome,
                                                .nvme = session.nvme_options(),
                                                .threads = settings.threads.value,
-                                               .deferred_limit = 0,
                                                .nvme_class = settings.nvme_class};
         usearch_executor_for_nvme(&placement);
         if (report_failure(outcome, "Opening the NVMe executor")) return session;

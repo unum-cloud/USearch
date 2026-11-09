@@ -25,13 +25,12 @@
 #include <algorithm>   // `std::sort`, `std::unique`, `std::any_of`, `std::find` - the dispensed IDs, draws, cursors
 #include <array>       // `std::array` - one latent point of the sign sketches
 #include <bit>         // `std::bit_cast` - the units in the last place of `error_stats_t`
-#include <chrono>      // `std::chrono::microseconds` - the flaky waiter's oversleep
 #include <limits>      // `std::numeric_limits` - the unbounded allocation budget
 #include <optional>    // `std::optional` - a yielded key's minted offset
 #include <span>        // `std::span` - the dispensed-ID density check
 #include <string>      // `std::string` - a cell's checkpoint stem
 #include <string_view> // `std::string_view` - the stream names
-#include <thread>      // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <thread>      // `std::this_thread::yield` - bounded spins and the flaky waiter's stalls
 #include <vector>      // `std::vector` - the gathered predicate items
 
 #include <fmt/format.h>
@@ -421,24 +420,18 @@ auto make_scalar(unsigned value) noexcept {
     else return scalar_(value);
 }
 
-/** Waiter that misbehaves on purpose: mostly yields, but occasionally oversleeps for
- *  hundreds of microseconds, stretching the lock & watermark contention windows far beyond
- *  anything hardware timing produces - a poor man's schedule fuzzer. */
+/** Waiter that misbehaves on purpose: mostly yields once, but one wait in 64 yields thousands of
+ *  times, stretching the lock & watermark contention windows far beyond anything hardware timing
+ *  produces - a poor man's schedule fuzzer. The draw hashes the watched word, its value and the
+ *  thread, so a stalled wait stays stalled on every retry until another thread moves the word. */
 struct flaky_waiter_t {
     template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
-    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
-        misbehave_();
-    }
-
-  private:
-    static void misbehave_() noexcept {
-        // A deliberate exception to the no-thread-locals rule: the index constructs its
-        // waiter as a stateless temporary at every wait site, so a persistent per-thread
-        // fuzz stream has nowhere else to live until the waiter surface takes instances.
-        static thread_local splitmix64_t random_generator {0xF1A6ull};
-        if (uniform_below<u32_t> {64}(random_generator) == 0)
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
-        else std::this_thread::yield();
+    void operator()(value_type_ const* watched, value_type_ observed, thread_index_type_ thread,
+                    bound_type_ = {}) const noexcept {
+        splitmix64_t draw {reinterpret_cast<u64_t>(watched) ^ static_cast<u64_t>(observed) ^
+                           (static_cast<u64_t>(thread) << 48)};
+        std::size_t const yields = uniform_below<u32_t> {64}(draw) == 0 ? 4096 : 1;
+        for (std::size_t yielded = 0; yielded != yields; ++yielded) std::this_thread::yield();
     }
 };
 

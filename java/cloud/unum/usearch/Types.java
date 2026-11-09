@@ -282,7 +282,7 @@ public final class Types {
         UNINITIALIZED(12),
         /** The request contradicts an already-frozen configuration. */
         CONFIG_MISMATCH(13),
-        /** A synchronization contract was violated - a full deferred table, or a busy arena. */
+        /** A synchronization contract was violated - a held executor, or a busy arena. */
         CONTENDED(14),
         /**
          * A progress handler asked the operation to stop; it unwound and published nothing, so the
@@ -441,10 +441,10 @@ public final class Types {
     /** What an executor does with its threads or streams once it goes idle. */
     public enum Mood {
 
-        /** Idle threads sleep; the next call pays a wake-up. */
-        PARKED(1),
+        /** Idle threads sleep; the next call pays a wake-up. The default. */
+        PARKED(0),
         /** Idle threads stay hot, trading power for the next call's latency. */
-        SPINNING(2);
+        SPINNING(1);
 
         private final int code;
 
@@ -647,15 +647,18 @@ public final class Types {
      * One factory per C constructor, each taking every argument its own kind takes: memory domains
      * and a thread count for RAM, a borrowed ForkUnion pool, device ordinals and optional streams for
      * VRAM, where a single host thread drives one stream per device, and device paths and a thread
-     * count for NVMe. Naming no hardware derives it, a zero deferred limit takes the default size of
-     * the deferred-call table, and the kind must match the residency of every handle it drives.
+     * count for NVMe. Naming no hardware derives it, and the kind must match the residency of every
+     * handle it drives.
      *
      * <p>
      * A receiver names the executor its verbs run on, and the index alone runs them on the caller's
-     * thread. Calls on one executor run in submission order; handles stay freely concurrent.
+     * thread. One call holds an executor at a time, and a second finding it held finishes
+     * CONTENDED, as nothing queues; handles stay freely concurrent. A deferred call on a
+     * caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, while a single
+     * thread or a VRAM executor runs it at submission.
      *
      * <pre>{@code
-     * try (Executor pool = Executor.forRam(new int[] {0, 1}, null, 16, 0);
+     * try (Executor pool = Executor.forRam(new int[] {0, 1}, null, 16);
      *         DenseIndex index = DenseIndex.initRam(new DenseOptions().dimensions(256), new int[0])) {
      *     index.on(pool).insert(keys, vectors);
      *     pool.drain(Mood.PARKED);
@@ -683,17 +686,14 @@ public final class Types {
          *     CPU's own.
          * @param threads Workers to spawn; zero takes 7/8 of the cores those domains carry, since full
          *     occupancy starves the ordered publication path.
-         * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          * @throws USearchException INVALID_ARGUMENT on a negative count, and OUT_OF_MEMORY when the
          *     scratch cannot be claimed.
          */
-        public static Executor forRam(
-                int[] memoryDomains, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
+        public static Executor forRam(int[] memoryDomains, @Nullable CPUClass cpuClass, long threads) {
             return spawn(FOR_RAM, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.pinned("ram", cpuClass);
                 call.size("threads", unsigned(threads));
-                call.size("deferred_limit", unsigned(deferredLimit));
             });
         }
 
@@ -709,15 +709,12 @@ public final class Types {
          * @param memoryDomains NUMA node ids of the indexes it will drive; an empty list derives them.
          * @param cpuClass the class whose waiters and atomics the pool's threads use, or {@code null}
          *     for the CPU's own.
-         * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          */
-        public static Executor onPool(
-                MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClass, long deferredLimit) {
+        public static Executor onPool(MemorySegment pool, int[] memoryDomains, @Nullable CPUClass cpuClass) {
             return spawn(ON_POOL, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.pinned("ram", cpuClass);
                 call.pointer("pool", pool);
-                call.size("deferred_limit", unsigned(deferredLimit));
             });
         }
 
@@ -735,17 +732,12 @@ public final class Types {
          * @param streams No streams, or one borrowed CUDA stream per device in {@code devices} order,
          *     each outliving the executor.
          * @param scratchLimit The ceiling on scratch bytes per device; zero lets scratch grow.
-         * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          * @throws USearchException SHAPE_MISMATCH when the streams are neither absent nor one per
          *     device, DEVICE when a named device does not answer, and OUT_OF_MEMORY when the scratch
          *     cannot be claimed.
          */
         public static Executor forVram(
-                int[] devices,
-                @Nullable GPUClass gpuClass,
-                MemorySegment[] streams,
-                long scratchLimit,
-                long deferredLimit) {
+                int[] devices, @Nullable GPUClass gpuClass, MemorySegment[] streams, long scratchLimit) {
             // The C side reads one stream per device from any non-null pointer, so only this side sees a short list.
             if (streams.length != 0 && streams.length != devices.length) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "pass no streams or one per device");
@@ -761,7 +753,6 @@ public final class Types {
                     call.pointer("streams", borrowed);
                 }
                 call.size("scratch_limit", unsigned(scratchLimit));
-                call.size("deferred_limit", unsigned(deferredLimit));
             });
         }
 
@@ -782,23 +773,21 @@ public final class Types {
          * @param cpuClass the class whose waiters and atomics the workers use, or {@code null} for the
          *     CPU's own.
          * @param threads Workers to spawn; zero derives from those devices' queue capabilities.
-         * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          * @throws USearchException INVALID_ARGUMENT on a negative count, and OUT_OF_MEMORY when the
          *     scratch cannot be claimed.
          */
-        public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClass, long threads, long deferredLimit) {
+        public static Executor forNvme(String[] paths, @Nullable CPUClass cpuClass, long threads) {
             return spawn(FOR_NVME, call -> {
                 call.paths("nvme", paths);
                 call.pinned("nvme", cpuClass);
                 call.size("threads", unsigned(threads));
-                call.size("deferred_limit", unsigned(deferredLimit));
             });
         }
 
         /**
-         * Waits for every call submitted before the drain began, then sets what the executor does
-         * whenever it next goes idle; the last drain wins. Every call reports its own failure, so this
-         * reports only what befell the executor itself.
+         * Waits until no call holds the executor, then sets what its threads do until the next call;
+         * the last drain wins. Every call reports its own failure, so this reports only what befell the
+         * executor itself.
          *
          * <p>
          * Calls {@code usearch_executor_drain}.
@@ -2004,8 +1993,7 @@ public final class Types {
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
                     Library.placement("ram"),
-                    Library.SIZE.withName("threads"),
-                    Library.SIZE.withName("deferred_limit")));
+                    Library.SIZE.withName("threads")));
 
     /** {@code usearch_executor_on_pool_t}. */
     private static final Verb ON_POOL = new Verb(
@@ -2014,8 +2002,7 @@ public final class Types {
                     Library.POINTER.withName("executor"),
                     Library.POINTER.withName("outcome"),
                     Library.placement("ram"),
-                    Library.POINTER.withName("pool"),
-                    Library.SIZE.withName("deferred_limit")));
+                    Library.POINTER.withName("pool")));
 
     /** {@code usearch_executor_for_vram_t}. */
     private static final Verb FOR_VRAM = new Verb(
@@ -2025,8 +2012,7 @@ public final class Types {
                     Library.POINTER.withName("outcome"),
                     Library.placement("vram"),
                     Library.POINTER.withName("streams"),
-                    Library.SIZE.withName("scratch_limit"),
-                    Library.SIZE.withName("deferred_limit")));
+                    Library.SIZE.withName("scratch_limit")));
 
     /** {@code usearch_executor_for_nvme_t}. */
     private static final Verb FOR_NVME = new Verb(
@@ -2036,7 +2022,6 @@ public final class Types {
                     Library.POINTER.withName("outcome"),
                     Library.placement("nvme"),
                     Library.SIZE.withName("threads"),
-                    Library.SIZE.withName("deferred_limit"),
                     Library.ENUM.withName("nvme_class"),
                     Library.padding()));
 

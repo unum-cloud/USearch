@@ -3,11 +3,10 @@
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief What every modality's C surface shares: the outcome and progress crossings, the CPU
- *      classes, the executor and arena handles, and the deferred calls every verb enters through.
+ *      classes, the executor and arena handles, and the one entry every verb's call goes through.
  *
  *  Each modality's dispatch unit includes this, so one verb reads the same on every modality. The
- *  registry of deferred calls and the executor, arena and outcome verbs are defined once, in
- *  @c dense_index.cuh, so a wait or a free finds the calls of every modality naming its handle.
+ *  executor, arena and outcome verbs are defined once, in @c dense_index.cuh.
  */
 #pragma once
 
@@ -19,9 +18,10 @@
 #include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <memory>           // `std::unique_ptr` - the executor's topology
-#include <mutex>            // `std::lock_guard` over the ticks' lock and the deferred tables
+#include <mutex>            // `std::lock_guard` over the ticks' lock
 #include <span>             // `std::span` - key batches crossing the ABI
 #include <string_view>      // `std::string_view` - checkpoint paths
+#include <thread>           // `std::this_thread::get_id` - the thread running the holding call's body
 #include <type_traits>      // `std::is_same_v` - the residency discrimination
 #include <variant>          // `std::variant`, `std::visit`
 
@@ -69,6 +69,15 @@ inline nk_dtype_t nk_dtype_of(usearch_scalar_t scalar) noexcept {
     return nk_dtype_unknown_k;
 }
 
+/** The C spelling of how an index's last load from a path read its parts. */
+inline usearch_load_path_t usearch_load_path_of(vram_load_path_t load_path) noexcept {
+    switch (load_path) {
+    case vram_load_path_t::host_copy_k: return usearch_load_path_host_copy_k;
+    case vram_load_path_t::cufile_k: return usearch_load_path_cufile_k;
+    default: return usearch_load_path_none_k;
+    }
+}
+
 inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
     for (scalar_dtype_pair_t const& pair : scalar_dtype_pairs_k)
         if (pair.dtype == dtype) return pair.scalar;
@@ -79,8 +88,14 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
  *  call apart. */
 inline constexpr std::size_t default_progress_steps_k = 10;
 
-/** The verbs over the words a call's waiters watch - its outcome's status and the deferred
- *  registry's count of finished calls - lowered onto one CPU class's reference and waiter. A
+/** Whether a call holds an executor: taken by exchange, given back by a store. */
+enum class call_claim_t : u32_t {
+    free_k = 0,
+    held_k = 1,
+};
+
+/** The verbs over the words a call's waiters watch - its outcome's status, its executor's claim
+ *  and the named-call counts of its handles - lowered onto one CPU class's reference and waiter. A
  *  release store is the same instruction on every class; the wait is what differs, and it watches
  *  the address, so no store notifies. */
 struct outcome_verbs_t {
@@ -90,11 +105,23 @@ struct outcome_verbs_t {
     /** Loops on the class waiter while the status reads deferred. */
     usearch_status_t (*wait)(usearch_outcome_t const*) noexcept;
 
-    /** Counts one more finished call, with a release. */
-    void (*count_finished)(u32_t*) noexcept;
+    /** Exchanges the claim to held with an acquire, answering what it read. */
+    call_claim_t (*take_claim)(call_claim_t*) noexcept;
 
-    /** Waits while the count still reads the value seen. */
-    void (*wait_finished)(u32_t const*, u32_t) noexcept;
+    /** Stores the claim free with a release. */
+    void (*release_claim)(call_claim_t*) noexcept;
+
+    /** Loops on the class waiter while the claim reads held. */
+    void (*wait_claim)(call_claim_t const*) noexcept;
+
+    /** Counts one more call naming a handle; the claim's acquire orders it. */
+    void (*raise_named)(u32_t*) noexcept;
+
+    /** Counts one call naming a handle off, with a release. */
+    void (*lower_named)(u32_t*) noexcept;
+
+    /** Loops on the class waiter until the count reads zero. */
+    void (*wait_named)(u32_t const*) noexcept;
 };
 
 /** The row of the newest class this machine admits, picked once by the CPU ladder walk. */
@@ -1187,12 +1214,14 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noex
     return {ceiling, runs && compiled ? status_t::success_k : status_t::unsupported_k};
 }
 
-/** One class's outcome row: its reference over the status and the finish count, its waiter between
- *  their loads. */
+/** One class's outcome row: its reference over the status, the claim and the named-call counts,
+ *  its waiter between their loads. */
 template <cpu_class_t cpu_class_>
 outcome_verbs_t outcome_verbs_of() noexcept {
     using status_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<usearch_status_t>;
     using status_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<usearch_status_t const>;
+    using claim_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<call_claim_t>;
+    using claim_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<call_claim_t const>;
     using count_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>;
     using count_reader_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t const>;
     using wait_t = waiter_of<cpu_class_>;
@@ -1210,10 +1239,23 @@ outcome_verbs_t outcome_verbs_of() noexcept {
                 wait_t {}(&outcome->status, seen, 0u, fu::wait_capped_t {});
             return seen;
         },
-        [](u32_t* count) noexcept { count_ref_t(*count).add(1, std::memory_order_release); },
-        [](u32_t const* count, u32_t seen) noexcept {
-            count_reader_t const finished {*count};
-            while (finished.load(std::memory_order_acquire) == seen) wait_t {}(count, seen, 0u, fu::wait_capped_t {});
+        [](call_claim_t* claim) noexcept {
+            return claim_ref_t(*claim).exchange(call_claim_t::held_k, std::memory_order_acquire);
+        },
+        [](call_claim_t* claim) noexcept {
+            claim_ref_t(*claim).store(call_claim_t::free_k, std::memory_order_release);
+        },
+        [](call_claim_t const* claim) noexcept {
+            claim_reader_t const held {*claim};
+            for (call_claim_t observed; (observed = held.load(std::memory_order_acquire)) == call_claim_t::held_k;)
+                wait_t {}(claim, observed, 0u, fu::wait_capped_t {});
+        },
+        [](u32_t* count) noexcept { count_ref_t(*count).add(1, std::memory_order_relaxed); },
+        [](u32_t* count) noexcept { count_ref_t(*count).sub(1, std::memory_order_release); },
+        [](u32_t const* count) noexcept {
+            count_reader_t const named {*count};
+            for (u32_t observed; (observed = named.load(std::memory_order_acquire)) != 0;)
+                wait_t {}(count, observed, 0u, fu::wait_capped_t {});
         },
     };
 }
@@ -1629,9 +1671,12 @@ static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_cl
 
 #pragma region Calls
 
-/** Every argument structure that names an executor, so a deferred submission keeps its call by
+/** Every argument structure that names an executor, so a delegated call keeps its arguments by
  *  value; whatever the copy points to stays the caller's until final. */
 using deferred_arguments_t = std::variant< //
+
+    /* No call */
+    std::monostate, //
 
     /* Loading */
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
@@ -1654,7 +1699,7 @@ using deferred_arguments_t = std::variant< //
     usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
     usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
     usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
-    usearch_geospatial_split_t,                                                                                //
+    usearch_geospatial_split_t, usearch_dense_compact_t,                                                       //
 
     /* Refinements */
     usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t,          //
@@ -1687,45 +1732,45 @@ using deferred_arguments_t = std::variant< //
     /* Products */
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
 
-/** Where one slot of a deferred table stands. */
-enum class deferred_stage_t : unsigned char {
+/** The counts of the handles a call names - its index or target, cursor, refinement and arena -
+ *  each raised at its entry and lowered at its end; null where it names none. */
+using named_calls_t = std::array<u32_t*, 5>;
 
-    /** Nothing in it; a submission may take it. */
-    free_k,
+/** The one call that holds a USearch executor, from its claim to its end. */
+struct holding_call_t {
 
-    /** A submitted call waits in it for its wait, a drain, a blocking call or a free. */
-    held_k,
+    /** Free, or held by the call from its claim to its end. */
+    call_claim_t claim = call_claim_t::free_k;
 
-    /** Some thread took the call and runs it. */
-    running_k,
+    /** The holding call's arguments; the entry runs the body when it meets this address again. */
+    void const* arguments = nullptr;
+
+    /** A delegated call's copy, which pool thread 0 runs, since the caller's structure may go out
+     *  of scope. */
+    deferred_arguments_t delegated_arguments;
+
+    /** The caller's outcome, published last. */
+    usearch_outcome_t* outcome = nullptr;
+
+    /** The status the body recorded, which @c end_call publishes. */
+    usearch_outcome_t recorded {usearch_status_internal_k, "The call finished without reporting a status"};
+
+    /** The counts the entry raised, which @c end_call lowers. */
+    named_calls_t named_calls {};
+
+    /** The thread running the body: an eager call's caller, or a delegated one's pool thread 0. */
+    std::thread::id body_thread;
 };
-
-/** One slot of an executor's deferred table: the copied call, the verb that runs it, and its place
- *  in line. */
-struct deferred_call_t {
-    deferred_arguments_t arguments;
-    void (*verb)(void*) = nullptr;
-
-    /** Submission order, counted from one across every executor. */
-    std::size_t ticket = 0;
-    deferred_stage_t stage = deferred_stage_t::free_k;
-};
-
-/** Slots a deferred table holds when its constructor names no limit. */
-inline constexpr std::size_t deferred_limit_default_k = 64;
 
 /** The state behind @c usearch_executor_t: the discovered topology a RAM or NVMe executor was
- *  spawned over, its deferred table, and one residency's executor; the variant is the kind tag, so
+ *  spawned over, the call holding it, and one residency's executor; the variant is the kind tag, so
  *  no second word can disagree. The executor is declared last, so its pool dies before the
  *  topology. */
 struct usearch_executor_handle_t {
     std::unique_ptr<void, decltype(&fu_topology_delete)> topology {nullptr, &fu_topology_delete};
 
-    /** One slot per call it tracks at once, sized at creation, so a submission never allocates. */
-    growing_buffer<deferred_call_t> deferred {global_allocator};
-
-    /** The next listed executor, so a wait or a free finds the calls naming its handle. */
-    usearch_executor_handle_t* next_listed = nullptr;
+    /** The one call that holds the executor, from its claim to its end. */
+    holding_call_t holding_call;
 
     std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
@@ -1761,24 +1806,37 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     return &handle;
 }
 
-/** The fewest hardware queues of any disk or SPDK controller under @p paths, opened as views open
- *  them; zero when none answers. */
-inline std::size_t nvme_fewest_queues(std::span<usearch_bytes_view_t const> paths) noexcept {
-    std::size_t fewest = 0;
-    for (usearch_bytes_view_t const path : paths) {
-        std::string_view const named {reinterpret_cast<char const*>(path.data), path.length};
+/** What an NVMe executor spawns by: the fewest hardware queues of any disk or SPDK controller under
+ *  its paths, zero when none answers, and the memory domain every one of them sits nearest, or
+ *  @c no_memory_domain_k when they differ or none is known. */
+struct nvme_media_shape_t {
+    std::size_t fewest_queues = 0;
+    fu_memory_domain_id_t memory_domain = no_memory_domain_k;
+};
+
+/** The shape of the media under @p paths, opened as views open them. */
+inline nvme_media_shape_t nvme_media_shape(std::span<usearch_bytes_view_t const> paths) noexcept {
+    nvme_media_shape_t shape;
+    for (std::size_t position = 0; position != paths.size(); ++position) {
+        std::string_view const named {reinterpret_cast<char const*>(paths[position].data), paths[position].length};
         io_device_queues_t queues;
+        fu_memory_domain_id_t domain = no_memory_domain_k;
 #if USEARCH_WITH_LINUX_SPDK
         if (names_transport_id(named)) {
             auto [name_space, open_status] = spdk_medium_t::open<fu::standard_yield_t>(named);
-            if (succeeded(open_status)) queues = device_queues_of(name_space);
+            if (succeeded(open_status)) queues = device_queues_of(name_space), domain = memory_domain_of(name_space);
             name_space.release<fu::standard_yield_t>();
         }
 #endif
-        if (!names_transport_id(named)) queues = device_queues_of(file_medium_t::open(named).value);
-        if (queues.hardware_queues && (!fewest || queues.hardware_queues < fewest)) fewest = queues.hardware_queues;
+        if (!names_transport_id(named)) {
+            file_medium_t const medium = file_medium_t::open(named).value;
+            queues = device_queues_of(medium), domain = memory_domain_of(medium);
+        }
+        if (queues.hardware_queues && (!shape.fewest_queues || queues.hardware_queues < shape.fewest_queues))
+            shape.fewest_queues = queues.hardware_queues;
+        shape.memory_domain = !position || shape.memory_domain == domain ? domain : no_memory_domain_k;
     }
-    return fewest;
+    return shape;
 }
 
 /** The threads an NVMe executor spawns when its caller names none: ForkUnion's default, capped by
@@ -1801,14 +1859,22 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
     if (fu_topology_new(&topology) != fu_success_k)
         return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
     handle.topology.reset(topology);
-    std::size_t const queues = nvme_fewest_queues(paths);
+    nvme_media_shape_t const shape = nvme_media_shape(paths);
+    std::size_t const queues = shape.fewest_queues;
     // Each SPDK thread holds a queue pair of its own, and a controller grants only so many.
     if (config.transport == io_transport_t::linux_spdk_k && queues && threads > queues)
         return propagate_error(usearch_status_config_mismatch_k, outcome,
                                "More threads than the SPDK controller granted I/O queue pairs"),
                nullptr;
     if (!threads) threads = nvme_default_threads(topology, queues);
-    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling));
+    // Drives on one socket keep their issuers there; drives on several spread them machine-wide.
+    std::size_t domains_count = 0;
+    fu_memory_domain_id_t const near_domain = fu_memory_domains_count(topology, &domains_count) == fu_success_k &&
+                                                      domains_count > 1
+                                                  ? shape.memory_domain
+                                                  : no_memory_domain_k;
+    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config, forkunion_allowed_of(ceiling),
+                                                    near_domain);
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
     request_tile_state(ceiling);
@@ -1912,10 +1978,12 @@ struct usearch_arena_handle_t {
     /** Where the memory lives: host pages, or a device's VRAM. */
     arena_residency_t residency = ram_residency_k;
 
-    /** The outcome of the call holding the arena, from its claim or deferred submission until just
-     *  before its final store; touched through a reference, since a held call finishes on whichever
-     *  thread runs it. */
+    /** The outcome of the call holding the arena, from its claim until just before its final store;
+     *  touched through a reference, since a delegated call finishes on a pool thread. */
     usearch_outcome_t const* holder = nullptr;
+
+    /** Executor calls naming the arena that have not ended, which its free waits out. */
+    u32_t named_calls = 0;
 };
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
@@ -2035,9 +2103,30 @@ inline status_t drained(usearch_arena_handle_t& arena, status_t status) noexcept
     return failed(status) ? status : waited;
 }
 
+/** The arena @p arguments name for their outputs, or null for a verb that names none. */
+template <typename arguments_type_>
+inline usearch_arena_t arena_of(arguments_type_ const& arguments) noexcept {
+    if constexpr (requires(usearch_arena_t named) { named = arguments.arena; }) return arguments.arena;
+    else return nullptr;
+}
+
+/** The executor whose holding call @p arguments are, so the body records for @c end_call; null
+ *  for a call without an executor or one that never claimed it. */
+template <typename arguments_type_>
+inline usearch_executor_t holding_executor_of(arguments_type_ const& arguments) noexcept {
+    if constexpr (requires(usearch_executor_t named) { named = arguments.executor; }) {
+        usearch_executor_t const executor = arguments.executor;
+        if (!executor) return nullptr;
+        void const* const holding =
+            fu::standard_atomic_ref<void const*>(executor->holding_call.arguments).load(std::memory_order_relaxed);
+        return holding == &arguments ? executor : nullptr;
+    }
+    else return nullptr;
+}
+
 /**
- *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
- *      records into a private one, and the end lets go of the arena before the one final store.
+ *  @brief A verb's outcome while it runs: every step records into a private one, and the end lets
+ *      go of the arena, then publishes the record itself, or leaves it to @c end_call.
  *
  *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the
  *  arena at once. A path that forgot to report finishes @c usearch_status_internal_k rather than
@@ -2045,13 +2134,15 @@ inline status_t drained(usearch_arena_handle_t& arena, status_t status) noexcept
  */
 class call_outcome_t {
   public:
-    explicit call_outcome_t(usearch_outcome_t* published, usearch_arena_t arena = nullptr) noexcept
-        : published_(published), arena_(arena) {
-        propagate_pending(published_);
+    template <typename arguments_type_>
+    explicit call_outcome_t(arguments_type_ const& arguments) noexcept
+        : published_(arguments.outcome), holding_(holding_executor_of(arguments)), arena_(arena_of(arguments)) {
+        if (!holding_) propagate_pending(published_);
     }
     ~call_outcome_t() noexcept {
         release_arena(arena_, published_);
-        propagate_error(recorded_.status, published_, recorded_.message);
+        if (holding_) holding_->holding_call.recorded = recorded_;
+        else propagate_error(recorded_.status, published_, recorded_.message);
     }
     call_outcome_t(call_outcome_t const&) = delete;
     call_outcome_t& operator=(call_outcome_t const&) = delete;
@@ -2061,6 +2152,9 @@ class call_outcome_t {
 
   private:
     usearch_outcome_t* published_;
+
+    /** The executor the call holds, whose @c end_call publishes the record, or null. */
+    usearch_executor_t holding_;
     usearch_arena_t arena_;
     usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
 };
@@ -2315,190 +2409,125 @@ inline bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
 
 #pragma endregion Calls
 
-#pragma region Deferred Calls
+#pragma region Holding Calls
 
-/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds
- *  the calls naming its handle without asking each executor. */
-struct deferred_registry_t {
-    std::mutex guard;
-
-    /** Counted up as each taken call becomes final, under @c guard; waiters read it unlocked. */
-    u32_t finished = 0;
-
-    /** The last ticket handed out. */
-    std::size_t tickets = 0;
-
-    /** The newest listed executor. */
-    usearch_executor_handle_t* executors = nullptr;
-};
-
-/** The one registry every modality's calls list in, defined beside the executor verbs. */
-extern deferred_registry_t deferred_registry;
-
-/** The held call whose arguments this thread passes back into their verb, which then runs them in
- *  place rather than holding them again. */
-extern thread_local void const* resuming_call;
-
-/** Sizes @p executor 's deferred table at @p limit slots, zero taking the default, and lists it. */
-inline status_t list_executor(usearch_executor_handle_t& executor, std::size_t limit) noexcept {
-    if (failed(executor.deferred.resize(limit ? limit : deferred_limit_default_k))) return status_t::bad_alloc_k;
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    executor.next_listed = deferred_registry.executors;
-    deferred_registry.executors = &executor;
-    return status_t::success_k;
+/** The host threads behind @p executor, or null for a VRAM one, which has none. */
+inline forkunion_executor_t* threads_of(usearch_executor_handle_t& executor) noexcept {
+    if (forkunion_executor_t* const threads = std::get_if<forkunion_executor_t>(&executor.executor)) return threads;
+    if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor.executor)) return &nvme->threads();
+    return nullptr;
 }
 
-/** Takes @p executor off the list; the caller already finished every call it held. */
-inline void delist_executor(usearch_executor_handle_t& executor) noexcept {
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    for (usearch_executor_handle_t** link = &deferred_registry.executors; *link; link = &(*link)->next_listed)
-        if (*link == &executor) {
-            *link = executor.next_listed;
-            return;
-        }
+/** Whether @p executor hands deferred calls to its thread 0: a caller-exclusive pool does, while an
+ *  inclusive one, a single thread, WebAssembly and a VRAM executor run them at submission. */
+inline bool delegates(usearch_executor_handle_t& executor) noexcept {
+    forkunion_executor_t const* const threads = threads_of(executor);
+    return threads && threads->exclusivity() == fu_caller_exclusive_k;
 }
 
-/** Whether the call in @p slot reads or writes @p handle: its outcome, its executor, or an index,
- *  cursor, stream or arena it names. An output slot for a handle the call creates holds nothing
- *  yet. */
-inline bool deferred_uses(deferred_call_t const& slot, void const* handle) noexcept {
-    return std::visit(
-        [&](auto const& arguments) noexcept {
-            auto const names = [&](auto named) noexcept {
-                if constexpr (std::is_pointer_v<std::remove_pointer_t<decltype(named)>>) return false;
-                else return static_cast<void const*>(named) == handle;
-            };
-            bool used = static_cast<void const*>(arguments.outcome) == handle ||
-                        static_cast<void const*>(arguments.executor) == handle;
-            if constexpr (requires { arguments.index; }) used = used || names(arguments.index);
-            if constexpr (requires { arguments.cursor; }) used = used || names(arguments.cursor);
-            if constexpr (requires { arguments.refinement; }) used = used || names(arguments.refinement);
-            if constexpr (requires { arguments.stream; }) used = used || names(arguments.stream);
-            if constexpr (requires { arguments.arena; }) used = used || names(arguments.arena);
-            return used;
-        },
-        slot.arguments);
+/** Whether the calling thread runs @p executor 's holding call body, as a callback the body calls
+ *  on its own thread does. */
+inline bool runs_holding_call(usearch_executor_handle_t& executor) noexcept {
+    std::thread::id const body_thread =
+        fu::standard_atomic_ref<std::thread::id>(executor.holding_call.body_thread).load(std::memory_order_relaxed);
+    return body_thread == std::this_thread::get_id();
 }
 
-/** Runs every call @p executor holds with a ticket up to @p last on this thread, oldest first. */
-inline void run_held(usearch_executor_handle_t& executor, std::size_t last) noexcept {
-    for (;;) {
-        deferred_call_t* oldest = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(deferred_registry.guard);
-            for (deferred_call_t& slot : executor.deferred)
-                if (slot.stage == deferred_stage_t::held_k && slot.ticket <= last &&
-                    (!oldest || slot.ticket < oldest->ticket))
-                    oldest = &slot;
-            if (!oldest) return;
-            oldest->stage = deferred_stage_t::running_k;
-        }
-        std::visit(
-            [&](auto& arguments) noexcept {
-                resuming_call = &arguments;
-                oldest->verb(&arguments);
-            },
-            oldest->arguments);
-        std::lock_guard<std::mutex> lock(deferred_registry.guard);
-        oldest->stage = deferred_stage_t::free_k;
-        host_outcome_verbs().count_finished(&deferred_registry.finished);
-    }
+/** Waits out the tail of the last delegated call's slice on thread 0, after its status went out. */
+inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
+    if (forkunion_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
 }
 
-/** Waits until no call @p executor took with a ticket up to @p last still runs on another
- *  thread. */
-inline void wait_running(usearch_executor_handle_t& executor, std::size_t last) noexcept {
-    for (;;) {
-        u32_t seen = 0;
-        {
-            std::lock_guard<std::mutex> lock(deferred_registry.guard);
-            bool running = false;
-            for (deferred_call_t const& slot : executor.deferred)
-                running = running || (slot.stage == deferred_stage_t::running_k && slot.ticket <= last);
-            if (!running) return;
-            seen = deferred_registry.finished;
-        }
-        host_outcome_verbs().wait_finished(&deferred_registry.finished, seen);
-    }
+/** Raises the count of every handle @p arguments name and answers where they are, so @c end_call
+ *  lowers the same ones; an output slot for a handle the call creates names nothing yet. */
+template <typename arguments_type_>
+inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcept {
+    named_calls_t named {};
+    u32_t** next = named.data();
+    auto const name = [&](auto* handle) noexcept {
+        if (!handle) return;
+        host_outcome_verbs().raise_named(&handle->named_calls);
+        *next++ = &handle->named_calls;
+    };
+    if constexpr (requires { arguments.index->named_calls; }) name(arguments.index);
+    if constexpr (requires { arguments.target->named_calls; }) name(arguments.target);
+    if constexpr (requires { arguments.cursor->named_calls; }) name(arguments.cursor);
+    if constexpr (requires { arguments.refinement->named_calls; }) name(arguments.refinement);
+    if constexpr (requires { arguments.arena->named_calls; }) name(arguments.arena);
+    return named;
 }
 
-/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
- *  together with every call held before them on the same executor - what every wait and every free
- *  does first. */
-inline void finish_calls_using(void const* handle) noexcept {
-    if (!handle) return;
-    std::unique_lock<std::mutex> lock(deferred_registry.guard);
-    for (;;) {
-        usearch_executor_handle_t* holding = nullptr;
-        std::size_t last = 0, running = 0;
-        for (usearch_executor_handle_t* executor = deferred_registry.executors; executor && !holding;
-             executor = executor->next_listed)
-            for (deferred_call_t const& slot : executor->deferred)
-                if (slot.stage == deferred_stage_t::held_k && deferred_uses(slot, handle))
-                    holding = executor, last = max_of(last, slot.ticket);
-                else if (slot.stage == deferred_stage_t::running_k && deferred_uses(slot, handle)) ++running;
-        if (holding) {
-            // Running a held call takes this lock itself, so it runs outside it.
-            lock.unlock();
-            run_held(*holding, last);
-            lock.lock();
-        }
-        else if (running) {
-            u32_t const seen = deferred_registry.finished;
-            lock.unlock();
-            host_outcome_verbs().wait_finished(&deferred_registry.finished, seen);
-            lock.lock();
-        }
-        else return;
-    }
+/** Returns once no executor call naming the handle that owns @p named_calls is left: what every
+ *  free and every consumed donor waits for. */
+inline void wait_named_calls(u32_t const& named_calls) noexcept { host_outcome_verbs().wait_named(&named_calls); }
+
+/** Ends the call holding @p executor: its handle counts, the executor claim, then its status. A
+ *  delegated call ends inside thread 0's slice, so the next call awaits that dispatch first. */
+inline void end_call(usearch_executor_handle_t& executor) noexcept {
+    holding_call_t& call = executor.holding_call;
+    usearch_outcome_t* const outcome = call.outcome;
+    usearch_outcome_t const recorded = call.recorded;
+    for (u32_t* const named : call.named_calls)
+        if (named) host_outcome_verbs().lower_named(named);
+    fu::standard_atomic_ref<void const*>(call.arguments).store(nullptr, std::memory_order_relaxed);
+    fu::standard_atomic_ref<std::thread::id>(call.body_thread).store(std::thread::id {}, std::memory_order_relaxed);
+    call.delegated_arguments.template emplace<std::monostate>();
+    host_outcome_verbs().release_claim(&call.claim);
+    propagate_error(recorded.status, outcome, recorded.message);
+}
+
+/** Marks @p arguments as @p call 's body, run on the calling thread. */
+inline void hold_body(holding_call_t& call, void const* arguments) noexcept {
+    fu::standard_atomic_ref<void const*>(call.arguments).store(arguments, std::memory_order_relaxed);
+    fu::standard_atomic_ref<std::thread::id>(call.body_thread)
+        .store(std::this_thread::get_id(), std::memory_order_relaxed);
 }
 
 /**
- *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table,
- *      holding its arena, and answers true; a blocking one first runs the calls the executor holds
- *      and answers false.
+ *  @brief Every verb's entry. A call on an executor claims it and runs its body now, or dispatches
+ *      a copy to thread 0 when it is deferred on a caller-exclusive pool; either way it answers
+ *      true, and @c end_call publishes the status.
  *
- *  A call the runner of a held call passes back answers false at once, so the verb runs it in
- *  place, and so does a call with no executor, which is final when it returns whatever its
- *  completion says.
+ *  The body itself, met again under its own arguments, answers false, so the verb runs it in place.
+ *  So does a call with no executor, which is final when it returns, whatever its completion says.
+ *  A second call on a held executor finishes @c usearch_status_contended_k, and nothing queues.
  */
 template <auto verb_, typename arguments_type_>
 inline bool submitted(arguments_type_* arguments) noexcept {
-    if (resuming_call == arguments) return resuming_call = nullptr, false;
     usearch_executor_t const executor = arguments->executor;
-    if (!executor) return false;
-    if (arguments->completion != usearch_completion_deferred_k) return run_held(*executor, ~std::size_t {0}), false;
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
-    usearch_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    if (!hold_arena(arena, outcome))
-        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), true;
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    for (deferred_call_t& slot : executor->deferred)
-        if (slot.stage == deferred_stage_t::free_k) {
-            slot.arguments.template emplace<arguments_type_>(*arguments);
-            slot.verb = [](void* erased) { verb_(static_cast<arguments_type_*>(erased)); };
-            slot.ticket = ++deferred_registry.tickets;
-            slot.stage = deferred_stage_t::held_k;
-            return true;
-        }
-    // A refused submission never runs, so nothing else would let go of the arena it took.
-    release_arena(arena, outcome);
-    propagate_error(usearch_status_contended_k, outcome, "The deferred table is full");
+    if (!executor || holding_executor_of(*arguments)) return false;
+    holding_call_t& call = executor->holding_call;
+    if (host_outcome_verbs().take_claim(&call.claim) == call_claim_t::held_k)
+        return propagate_error(usearch_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
+    await_delegated_call(*executor);
+    call.outcome = arguments->outcome;
+    call.named_calls = raise_named_calls(*arguments);
+    // Before the body or the dispatch, never after, so it never overwrites a final status.
+    propagate_pending(arguments->outcome);
+    if (arguments->completion != usearch_completion_deferred_k || !delegates(*executor)) {
+        hold_body(call, arguments);
+        verb_(arguments);
+        return end_call(*executor), true;
+    }
+    arguments_type_& copy = call.delegated_arguments.template emplace<arguments_type_>(*arguments);
+    fu::standard_atomic_ref<void const*>(call.arguments).store(&copy, std::memory_order_relaxed);
+    fu_for_threads_t const delegated_body = [](fu_lambda_context_t context, std::size_t thread, std::size_t) noexcept {
+        if (thread) return;
+        usearch_executor_handle_t& held = *static_cast<usearch_executor_t>(context);
+        arguments_type_* const delegated = std::get_if<arguments_type_>(&held.holding_call.delegated_arguments);
+        hold_body(held.holding_call, delegated);
+        verb_(delegated);
+        end_call(held);
+    };
+    if (failed(threads_of(*executor)->unsafe_for_threads(delegated_body, executor)))
+        return call.recorded = {usearch_status_contended_k, "The pool runs another dispatch"}, end_call(*executor),
+               true;
     return true;
 }
 
-/** Lists a spawned @p executor with a deferred table of @p deferred_limit slots and hands it out
- *  through @p output, or frees it once @p outcome records why not. */
-inline void hand_out_executor(usearch_executor_t executor, std::size_t deferred_limit, usearch_executor_t* output,
-                              usearch_outcome_t* outcome) noexcept {
-    if (failed(list_executor(*executor, deferred_limit)))
-        return delete executor,
-               propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"),
-               void();
-    *output = executor;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+/** Returns once no call holds @p executor, on the class waiter. */
+inline void wait_while_claimed(usearch_executor_handle_t& executor) noexcept {
+    host_outcome_verbs().wait_claim(&executor.holding_call.claim);
 }
 
-#pragma endregion Deferred Calls
+#pragma endregion Holding Calls

@@ -51,7 +51,7 @@ The index runs it on the calling thread, `index.on(executor)` blocks on an execu
 
 ```js
 const matches = index.search(queries, 10, arena);                 // the calling thread
-const onPool = index.on(executor).search(queries, 10, arena);     // blocking, after every earlier submission
+const onPool = index.on(executor).search(queries, 10, arena);     // blocking, holding the executor until it returns
 const call = index.deferred(executor).search(queries, 10, arena); // Deferred<Matches>
 ```
 
@@ -75,7 +75,8 @@ Both answer the same cached result, or throw the same failure, however often the
 `using call = ...` waits for the call before its block ends, and one dropped unfinished is handed back to the collector until it is final, so nothing it borrowed is freed under the library.
 Refusals this binding catches before the call crosses, like keys that do not match the rows, throw at submission.
 
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `Status.Contended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `Status.Contended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread, WebAssembly or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
 The arrays a deferred verb is handed must not change until it is final, since the library reads them until then.
 
@@ -96,10 +97,10 @@ const diskPool = usearch.Executor.forNvme({ threads: 4, paths: ['/mnt/nvme0', '/
 `forVram` opens one CUDA stream per named ordinal, absent taking one free device, or borrows the `streams` given as `BigInt` addresses, one per device.
 It takes no thread count because one host thread drives one stream per device, so the device list is what sizes the work rather than a number of workers.
 `forNvme` opens one submission ring per worker over the named device or directory paths, absent deriving them.
-Each factory's config holds only what its own C structure takes: `memoryDomains` for RAM, `devices` for VRAM, `paths` for NVMe, and a `deferredLimit` for the deferred calls it tracks, absent taking a default.
+Each factory's config holds only what its own C structure takes: `memoryDomains` for RAM, `devices` for VRAM, and `paths` for NVMe.
 
-`drain(mood)` waits for every call submitted so far, then idles the workers in a `usearch.Mood`: `Parked` threads sleep, and `Spinning` ones stay hot for the next call's latency.
-The collector frees an executor eventually, and `free()` runs what it holds and joins its workers now; a freed executor is refused by every later call.
+`drain(mood)` waits until no call holds the executor, then idles the workers in a `usearch.Mood`: `Parked` threads sleep, and `Spinning` ones stay hot for the next call's latency.
+The collector frees an executor eventually, and `free()` waits out the call holding it and joins its workers now; a freed executor is refused by every later call.
 
 ## Arenas
 
@@ -501,6 +502,6 @@ The same reasoning excludes the progress handlers every long verb takes.
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; a rewind detaches the buffers under the previous call's views, so a stale one throws rather than reading another call's memory.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Every wrapper names its C symbol.__
   Each wrapper's documentation names the C function it calls, or says it is binding-only, as `contains`, `keyAt` and `RowsView.of` are.

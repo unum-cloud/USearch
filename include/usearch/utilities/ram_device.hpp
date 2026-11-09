@@ -157,29 +157,32 @@ struct forkunion_executor_t {
 
     /** Deletes the pool and every arena, unless @ref release reclaimed the pool first. */
     ~forkunion_executor_t() noexcept {
-        if (pool_) fu_pool_delete(pool_);
+        if (threads_) fu_pool_delete(threads_);
     }
 
     void swap(forkunion_executor_t& other) noexcept {
         std::swap(arenas_per_thread_, other.arenas_per_thread_);
-        std::swap(pool_, other.pool_);
+        std::swap(threads_, other.threads_);
         std::swap(topology_, other.topology_);
+        std::swap(exclusivity_, other.exclusivity_);
     }
 
     /**
-     *  Takes over @p pool, owned and deleted here from now on - even on failure. Colocates
-     *  one arena with each thread's memory domain.
+     *  @brief Takes over @p taken, owned and deleted here from now on - even on failure. Colocates
+     *      one arena with each thread's memory domain.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The pool has no workers.
      *  - @c contended_k The pool is running another dispatch.
      */
-    static expected<forkunion_executor_t> acquire(fu_topology_t topology, fu_pool_t pool) noexcept {
+    static expected<forkunion_executor_t> acquire(fu_topology_t topology, fu_pool_t taken) noexcept {
         forkunion_executor_t executor;
-        executor.pool_ = pool;
+        executor.threads_ = taken;
         executor.topology_ = topology;
         std::size_t threads = 0;
-        if (fu_pool_threads_count(pool, &threads) != fu_success_k)
+        if (fu_pool_threads_count(taken, &threads) != fu_success_k)
+            return {std::move(executor), status_t::uninitialized_k};
+        if (fu_pool_caller_exclusivity(taken, &executor.exclusivity_) != fu_success_k)
             return {std::move(executor), status_t::uninitialized_k};
         // Each thread names its own memory domain; the arenas are then placed on those in order.
         growing_buffer<fu_memory_domain_id_t> domains {global_allocator};
@@ -206,7 +209,7 @@ struct forkunion_executor_t {
     fu_pool_t release() noexcept {
         arenas_per_thread_.clear();
         topology_ = nullptr;
-        return std::exchange(pool_, nullptr);
+        return std::exchange(threads_, nullptr);
     }
 
     /** The thread count a zero ask means: every core but one in @ref idle_cores_denominator_k, or
@@ -327,6 +330,28 @@ struct forkunion_executor_t {
     /** The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology() const noexcept { return topology_; }
 
+    /** Whether the caller runs a slice of every fan-out or stays out, read once from the pool. */
+    fu_caller_exclusivity_t exclusivity() const noexcept { return exclusivity_; }
+
+    /**
+     *  @brief Starts @p callback on every thread with @p context and returns at once; a fan-out
+     *      from thread 0's slice forks the other threads, and @ref unsafe_await ends the dispatch.
+     *
+     *  @par Statuses:
+     *  - @c contended_k The pool is running another dispatch, and nothing ran.
+     */
+    status_t unsafe_for_threads(fu_for_threads_t callback, void* context) noexcept {
+        // Thread 0 may end the call before this returns, so no other caller may read the token.
+        fu_generation_t generation = 0;
+        return dispatch_status_(fu_pool_unsafe_for_threads(threads_, callback, context, &generation));
+    }
+
+    /** Waits until the dispatch in flight, if any, is over; an inclusive pool never has one. */
+    void unsafe_await() noexcept { fu_pool_unsafe_join(threads_, 0); }
+
+    /** Parks the idle threads in the kernel until the next fan-out wakes them. */
+    void park() noexcept { fu_pool_sleep(threads_, 0); }
+
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
     status_t wait() noexcept { return status_t::success_k; }
 
@@ -340,12 +365,12 @@ struct forkunion_executor_t {
      */
     template <typename callback_type_>
     status_t for_threads(callback_type_&& callback) noexcept {
-        if (!pool_) return status_t::uninitialized_k;
+        if (!threads_) return status_t::uninitialized_k;
         fu_for_threads_t const trampoline = [](fu_lambda_context_t context, std::size_t thread,
                                                std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(thread, compute_domain);
         };
-        return dispatch_status_(fu_pool_for_threads(pool_, trampoline, &callback));
+        return dispatch_status_(fu_pool_for_threads(threads_, trampoline, &callback));
     }
 
     /** Runs @p callback over @p tasks items, stolen dynamically, with the task index, the thread
@@ -358,13 +383,13 @@ struct forkunion_executor_t {
      */
     template <typename callback_type_>
     status_t for_tasks(std::size_t tasks, callback_type_&& callback) noexcept {
-        if (!pool_) return status_t::uninitialized_k;
+        if (!threads_) return status_t::uninitialized_k;
         if (!tasks) return status_t::success_k;
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
                                             std::size_t compute_domain) {
             (*static_cast<std::remove_reference_t<callback_type_>*>(context))(task, thread, compute_domain);
         };
-        return dispatch_status_(fu_pool_for_n_dynamic(pool_, tasks, trampoline, &callback));
+        return dispatch_status_(fu_pool_for_n_dynamic(threads_, tasks, trampoline, &callback));
     }
 
   private:
@@ -378,6 +403,7 @@ struct forkunion_executor_t {
         case fu_not_spawned_k: return status_t::uninitialized_k;
         case fu_invalid_argument_k: return status_t::invalid_argument_k;
         case fu_unsupported_k: return status_t::unsupported_k;
+        case fu_config_mismatch_k: return status_t::config_mismatch_k;
         default: return status_t::internal_k;
         }
     }
@@ -390,10 +416,13 @@ struct forkunion_executor_t {
     fu::spin_mutex_t held_;
 
     /** The pool every fan-out dispatches on, owned outright and deleted here. */
-    fu_pool_t pool_ = nullptr;
+    fu_pool_t threads_ = nullptr;
 
     /** The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology_ = nullptr;
+
+    /** The pool's exclusivity, read once at @ref acquire. */
+    fu_caller_exclusivity_t exclusivity_ = fu_caller_inclusive_k;
 };
 
 #pragma endregion Executor

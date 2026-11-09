@@ -241,7 +241,7 @@ public sealed class DenseIndexTests : IDisposable
     [Fact]
     public void ExecutorsDrainAndRefuseEveryVerbOnceDisposed()
     {
-        Executor pool = Executor.ForRam(threads: 1, memoryDomains: [0], deferredLimit: 4);
+        Executor pool = Executor.ForRam(threads: 1, memoryDomains: [0]);
         pool.Drain(Mood.Spinning);
         pool.Dispose();
         pool.Dispose();
@@ -279,15 +279,16 @@ public sealed class DenseIndexTests : IDisposable
     #region Deferred Calls
 
     [Fact]
-    public void DeferredCallsStayDeferredUntilWaitedFor()
+    public void DeferredCallsOnOneThreadAreFinalAtSubmission()
     {
         using DenseIndex index = SmallIndex();
         DenseIndexDeferredOn deferred = index.Deferred(this._pool);
 
+        // A single-thread executor runs a deferred call at submission, since it has no thread to hand it to.
         using Deferred inserted = deferred.Insert(KeysOf(1, 2), Rows([.. RowOf(1f), .. RowOf(2f)]));
         using Deferred<Matches> searched = deferred.Search(Rows(RowOf(2f)), wanted: 1, this._arena);
-        Assert.Equal(Status.Deferred, inserted.Status);
-        Assert.Equal(Status.Deferred, searched.Status);
+        Assert.Equal(Status.Success, inserted.Status);
+        Assert.Equal(Status.Success, searched.Status);
 
         Matches found = searched.Wait();
         Assert.Equal(Status.Success, searched.Status);

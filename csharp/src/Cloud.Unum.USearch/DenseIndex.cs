@@ -665,8 +665,8 @@ public sealed unsafe class DenseIndex : IDisposable
         return DenseMetadata.Lift(lowered);
     }
 
-    /// <summary>The receiver whose verbs block on <paramref name="executor"/>, after every call
-    /// submitted there before them. Binding-only.</summary>
+    /// <summary>The receiver whose verbs block on <paramref name="executor"/>, contended while
+    /// another call holds it. Binding-only.</summary>
     /// <param name="executor">The executor the verbs run on.</param>
     /// <returns>The receiver, holding nothing but the two references.</returns>
     public DenseIndexOn On(Executor executor) => new(this, executor);
@@ -969,7 +969,7 @@ public sealed unsafe class DenseIndex : IDisposable
 
 /// <summary>
 /// A dense index bound to the executor its verbs block on, as <c>index.On(executor)</c> makes it.
-/// The verbs are the index's own, called after every call submitted to that executor before them.
+/// The verbs are the index's own, each refused while another call holds that executor.
 /// </summary>
 /// <remarks>Binding-only; it holds two references and allocates nothing.</remarks>
 public readonly struct DenseIndexOn
@@ -2601,6 +2601,7 @@ internal struct NativeDenseDescription
     public int CpuClass;
     public int GpuClass;
     public nuint ShardsCount;
+    public int LoadPath;
 }
 
 /// <summary>Traversal telemetry, fully overwritten by the call it is passed to.</summary>

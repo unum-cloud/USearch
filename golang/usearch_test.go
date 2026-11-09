@@ -1,3 +1,9 @@
+// Tests from outside the package, as its users import it.
+//
+// File: golang/usearch_test.go
+// Author: Ash Vardanian
+// Date: May 3, 2023
+
 // The consumer's view: everything here reaches the package through its import path alone, so
 // an accidental reliance on an unexported helper breaks this file rather than passing quietly.
 
@@ -149,7 +155,7 @@ func ExampleDenseIndex_Deferred() {
 		log.Fatal(err)
 	}
 	defer index.Close()
-	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0, 0)
+	executor, err := usearch.ExecutorForRam(nil, usearch.CPUClassUnknown, 0)
 	if err != nil {
 		log.Fatal(err)
 	}

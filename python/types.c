@@ -58,7 +58,7 @@ static struct {
     {usearch_status_config_mismatch_k, "usearch.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts an already-frozen configuration."},
     {usearch_status_contended_k, "usearch.ContendedError", NULL,
-     "An executor's deferred table, an arena, or a walk is already serving another call."},
+     "An executor, an arena, or a walk is already serving another call."},
     {usearch_status_cancelled_k, "usearch.CancelledError", NULL,
      "A progress handler stopped the call, which published nothing."},
     {usearch_status_unsupported_k, "usearch.UnsupportedError", &PyExc_NotImplementedError,
@@ -1900,9 +1900,9 @@ static char const doc_On[] =                                                    
     "\n"                                                                                       //
     "An index bound to the executor its verbs block on, as `index.on(executor)` answers it.\n" //
     "\n"                                                                                       //
-    "Offers the verbs of the index with the same arguments and answers; each call runs on\n"   //
-    "the executor after every call submitted to it before. It holds the index and the\n"       //
-    "executor, so it may outlive the names they were bound to.\n"                              //
+    "Offers the verbs of the index with the same arguments and answers; each call holds\n"     //
+    "the executor while it runs, and one finding it held raises `ContendedError`. It\n"        //
+    "holds the index and the executor, so it may outlive the names they were bound to.\n"      //
     "\n"                                                                                       //
     "Example:\n"                                                                               //
     "  >>> pool = usearch.Executor.for_ram(threads=2)\n"                                       //
@@ -1917,7 +1917,8 @@ static char const doc_DeferredOn[] =                                            
     "\n"                                                                                      //
     "Offers the verbs of the index with the same arguments, each answering a `Deferred` at\n" //
     "once. Arguments the binding refuses raise at the call, while the engine's refusals,\n"   //
-    "`ContendedError` from a full deferred table included, raise at `await` or `wait()`.\n"   //
+    "`ContendedError` from an executor another call holds included, raise at `await` or\n"    //
+    "`wait()`. Its `progress` and `predicate` callbacks run on the pool's threads.\n"         //
     "`cursor` and `search_stream` answer iterators whose every step blocks, so it lacks them.";
 
 int usearch_py_receiver_from_object(PyObject* self, usearch_py_receiver_t* receiver) {
@@ -2086,7 +2087,7 @@ static char const doc_Deferred_wait[] =                                         
     "\n"                                                                                     //
     "Raises:\n"                                                                              //
     "  Error: What the blocking verb would have raised, `ContendedError` included when\n"    //
-    "    the executor's deferred table was full.";
+    "    another call held the executor.";
 
 static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     deferred_block(self);
@@ -2197,11 +2198,12 @@ static char const doc_Executor[] =                                              
     "Construct one through the residency it drives - `for_ram`, `on_pool`, `for_vram` or\n"  //
     "`for_nvme` - since each spawns something different and takes different arguments.\n"    //
     "Its residency must match that of every index it is handed to. A receiver names it:\n"   //
-    "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. Calls\n"   //
-    "start in submission order, a blocking one after every earlier submission finishes,\n"   //
-    "and a deferred one finding its `deferred_limit` table full raises `ContendedError`\n"   //
-    "once waited for. Used in a `with` block, it waits for its calls and closes on exit,\n"  //
-    "or leaves both to the last GPU arena it made that is still alive.\n"                    //
+    "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. One\n"     //
+    "call holds it at a time, and nothing queues: a second call raises `ContendedError`,\n"  //
+    "a deferred one once waited for. A deferred call on a caller-exclusive pool runs on\n"   //
+    "the pool's thread 0, so polling alone finishes it, while a single thread or a VRAM\n"   //
+    "executor runs it at submission. Used in a `with` block, it waits for its calls and\n"   //
+    "closes on exit, or leaves both to the last GPU arena it made that is still alive.\n"    //
     "\n"                                                                                     //
     "Example:\n"                                                                             //
     "  >>> from array import array\n"                                                        //
@@ -2232,7 +2234,7 @@ static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* k
     return NULL;
 }
 
-/** Frees @p handle, waiting in C for every deferred call naming it; NULL is safe. */
+/** Frees @p handle, waiting in C for the call holding it; NULL is safe. */
 static void executor_free(usearch_executor_t handle) {
     if (!handle) return;
     Py_BEGIN_ALLOW_THREADS;
@@ -2301,41 +2303,38 @@ int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* execut
     return 0;
 }
 
-static char const doc_Executor_for_ram[] =                                                           //
-    "``for_ram(threads=0, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor``\n" //
-    "\n"                                                                                             //
-    "Spawns host worker threads for a RAM-resident index.\n"                                         //
-    "Calls `usearch_executor_for_ram`.\n"                                                            //
-    "\n"                                                                                             //
-    "Args:\n"                                                                                        //
-    "  threads (int, optional): Workers to spawn; 0 derives from the hardware.\n"                    //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs the workers stay local\n"             //
-    "    to; None derives every node the process may allocate on.\n"                                 //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"         //
-    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers use;\n"       //
-    "    None derives the CPU's own.\n"                                                              //
-    "\n"                                                                                             //
-    "Example:\n"                                                                                     //
-    "  >>> with usearch.Executor.for_ram(threads=8) as pool:\n"                                      //
+static char const doc_Executor_for_ram[] =                                                     //
+    "``for_ram(threads=0, *, memory_domains=None, cpu_class=None) -> Executor``\n"             //
+    "\n"                                                                                       //
+    "Spawns host worker threads for a RAM-resident index.\n"                                   //
+    "Calls `usearch_executor_for_ram`.\n"                                                      //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  threads (int, optional): Workers to spawn; 0 derives from the hardware.\n"              //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs the workers stay local\n"       //
+    "    to; None derives every node the process may allocate on.\n"                           //
+    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers use;\n" //
+    "    None derives the CPU's own.\n"                                                        //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
+    "  >>> with usearch.Executor.for_ram(threads=8) as pool:\n"                                //
     "  ...     pool.drain()";
 
 static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
-    PyObject *threads_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
+    PyObject *threads_object, *memory_domains_object, *cpu_class_object;
     usearch_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"memory_domains", &memory_domains_object},
-        {"deferred_limit", &deferred_limit_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t threads = 0, deferred_limit = 0;
+    size_t threads = 0;
     int cpu_class = usearch_cpu_class_unknown_k;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (usearch_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(threads_object, "threads", &threads) != 0 ||
-        usearch_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         (cpu_class_object && cpu_class_object != Py_None &&
          usearch_py_enum_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0) ||
         usearch_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
@@ -2348,8 +2347,7 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
         .executor = &handle,
         .outcome = &outcome,
         .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
-        .threads = threads,
-        .deferred_limit = deferred_limit};
+        .threads = threads};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_ram(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -2359,40 +2357,36 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
     return executor_adopt(type, handle, usearch_residency_ram_k);
 }
 
-static char const doc_Executor_on_pool[] =                                                         //
-    "``on_pool(pool, /, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor``\n" //
-    "\n"                                                                                           //
-    "Drives RAM-resident indexes on a ForkUnion pool another library already spawned, so\n"        //
-    "one process runs one set of threads while each library keeps its own scratch. The\n"          //
-    "pool keeps its own threads and its lender's mood.\n"                                          //
-    "Calls `usearch_executor_on_pool`.\n"                                                          //
-    "\n"                                                                                           //
-    "Args:\n"                                                                                      //
-    "  pool (int): The address of the `fu_pool_t` to borrow, as `ctypes` and `cffi` hand\n"        //
-    "    pointers over; the pool must outlive the executor.\n"                                     //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the indexes it will\n"           //
-    "    drive; None derives every node the process may allocate on.\n"                            //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"       //
-    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers use;\n"     //
-    "    None derives the CPU's own.\n"                                                            //
-    "\n"                                                                                           //
-    "Example:\n"                                                                                   //
+static char const doc_Executor_on_pool[] =                                                     //
+    "``on_pool(pool, /, *, memory_domains=None, cpu_class=None) -> Executor``\n"               //
+    "\n"                                                                                       //
+    "Drives RAM-resident indexes on a ForkUnion pool another library already spawned, so\n"    //
+    "one process runs one set of threads while each library keeps its own scratch. The\n"      //
+    "pool keeps its own threads and its lender's mood.\n"                                      //
+    "Calls `usearch_executor_on_pool`.\n"                                                      //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  pool (int): The address of the `fu_pool_t` to borrow, as `ctypes` and `cffi` hand\n"    //
+    "    pointers over; the pool must outlive the executor.\n"                                 //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of the indexes it will\n"       //
+    "    drive; None derives every node the process may allocate on.\n"                        //
+    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers use;\n" //
+    "    None derives the CPU's own.\n"                                                        //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
     "  >>> pool = usearch.Executor.on_pool(fu_pool_address)   # doctest: +SKIP";
 
 static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
-    PyObject *pool_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
+    PyObject *pool_object, *memory_domains_object, *cpu_class_object;
     usearch_py_argument_t const arguments[] = {
         {"pool", &pool_object},
         {"memory_domains", &memory_domains_object},
-        {"deferred_limit", &deferred_limit_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t deferred_limit = 0;
     int cpu_class = usearch_cpu_class_unknown_k;
     if (usearch_py_arguments_parse("on_pool", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         (cpu_class_object && cpu_class_object != Py_None &&
          usearch_py_enum_from_object(cpu_class_object, "cpu_class", &usearch_py_cpu_class, &cpu_class) != 0))
         return NULL;
@@ -2415,8 +2409,7 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
         .executor = &handle,
         .outcome = &outcome,
         .ram = {memory_domains, memory_domains_count, 0, (usearch_cpu_class_t)cpu_class},
-        .pool = pool,
-        .deferred_limit = deferred_limit};
+        .pool = pool};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_on_pool(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -2427,7 +2420,7 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
 }
 
 static char const doc_Executor_for_vram[] =                                              //
-    "for_vram(*, devices=None, deferred_limit=0, gpu_class=None) -> Executor\n"          //
+    "for_vram(*, devices=None, gpu_class=None) -> Executor\n"                            //
     "\n"                                                                                 //
     "Opens one stream per device for a VRAM-resident index.\n"                           //
     "\n"                                                                                 //
@@ -2438,8 +2431,6 @@ static char const doc_Executor_for_vram[] =                                     
     "Args:\n"                                                                            //
     "  devices (Sequence[int], optional): CUDA ordinals to drive; None derives one\n"    //
     "    free device.\n"                                                                 //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a\n"      //
-    "    default.\n"                                                                     //
     "  gpu_class (GPUClass, optional): A class the devices must run, refused with\n"     //
     "    UnsupportedError otherwise; None takes the devices' own.\n"                     //
     "\n"                                                                                 //
@@ -2448,19 +2439,16 @@ static char const doc_Executor_for_vram[] =                                     
 
 static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *devices_object, *deferred_limit_object, *gpu_class_object;
+    PyObject *devices_object, *gpu_class_object;
     usearch_py_argument_t const arguments[] = {
         {"devices", &devices_object},
-        {"deferred_limit", &deferred_limit_object},
         {"gpu_class", &gpu_class_object},
     };
-    size_t deferred_limit = 0;
     int gpu_class = usearch_gpu_class_unknown_k;
     int32_t* devices = NULL;
     size_t devices_count = 0;
     if (usearch_py_arguments_parse("for_vram", args, positional_args_count, args_names_tuple, 0, 0, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
-        usearch_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         (gpu_class_object && gpu_class_object != Py_None &&
          usearch_py_enum_from_object(gpu_class_object, "gpu_class", &usearch_py_gpu_class, &gpu_class) != 0) ||
         usearch_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
@@ -2471,8 +2459,7 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
     usearch_executor_for_vram_t executor_arguments = {
         .executor = &handle,
         .outcome = &outcome,
-        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class},
-        .deferred_limit = deferred_limit};
+        .vram = {devices, devices_count, 0, (usearch_gpu_class_t)gpu_class}};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_vram(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -2482,45 +2469,40 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
     return executor_adopt(type, handle, usearch_residency_vram_k);
 }
 
-static char const doc_Executor_for_nvme[] =                                               //
-    "``for_nvme(threads=0, *, paths=None, deferred_limit=0, nvme_class=None,\n"           //
-    "cpu_class=None) -> Executor``\n"                                                     //
-    "\n"                                                                                  //
-    "Opens one submission ring per worker for an NVMe-resident index.\n"                  //
-    "Calls `usearch_executor_for_nvme`.\n"                                                //
-    "\n"                                                                                  //
-    "Args:\n"                                                                             //
-    "  threads (int, optional): Rings to open; 0 derives from the hardware.\n"            //
-    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"   //
-    "    stripe shards across; None leaves every shard where its manifest points. A\n"    //
-    "    path may name a kernel device, a transport identifier, or a FUSE mount.\n"       //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a\n"       //
-    "    default.\n"                                                                      //
-    "  nvme_class (NVMeClass, optional): The engine to submit through; None derives\n"    //
-    "    the newest the host and the media admit.\n"                                      //
-    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers\n" //
-    "    use; None derives the CPU's own.\n"                                              //
-    "\n"                                                                                  //
-    "Example:\n"                                                                          //
+static char const doc_Executor_for_nvme[] =                                                 //
+    "``for_nvme(threads=0, *, paths=None, nvme_class=None, cpu_class=None) -> Executor``\n" //
+    "\n"                                                                                    //
+    "Opens one submission ring per worker for an NVMe-resident index.\n"                    //
+    "Calls `usearch_executor_for_nvme`.\n"                                                  //
+    "\n"                                                                                    //
+    "Args:\n"                                                                               //
+    "  threads (int, optional): Rings to open; 0 derives from the hardware.\n"              //
+    "  paths (Sequence[str | bytes | PathLike], optional): Devices or directories to\n"     //
+    "    stripe shards across; None leaves every shard where its manifest points. A\n"      //
+    "    path may name a kernel device, a transport identifier, or a FUSE mount.\n"         //
+    "  nvme_class (NVMeClass, optional): The engine to submit through; None derives\n"      //
+    "    the newest the host and the media admit.\n"                                        //
+    "  cpu_class (CPUClass, optional): The class whose waiters and atomics the workers\n"   //
+    "    use; None derives the CPU's own.\n"                                                //
+    "\n"                                                                                    //
+    "Example:\n"                                                                            //
     "  >>> pool = usearch.Executor.for_nvme(threads=8, paths=['/mnt/nvme0'])  # doctest: +SKIP";
 
 static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *threads_object, *paths_object, *deferred_limit_object, *nvme_class_object, *cpu_class_object;
+    PyObject *threads_object, *paths_object, *nvme_class_object, *cpu_class_object;
     usearch_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"paths", &paths_object},
-        {"deferred_limit", &deferred_limit_object},
         {"nvme_class", &nvme_class_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t threads = 0, deferred_limit = 0;
+    size_t threads = 0;
     int nvme_class = usearch_nvme_class_unknown_k, cpu_class = usearch_cpu_class_unknown_k;
     usearch_py_paths_t paths;
     if (usearch_py_arguments_parse("for_nvme", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         usearch_py_size_from_object(threads_object, "threads", &threads) != 0 ||
-        usearch_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         (nvme_class_object && nvme_class_object != Py_None &&
          usearch_py_enum_from_object(nvme_class_object, "nvme_class", &usearch_py_nvme_class, &nvme_class) != 0) ||
         (cpu_class_object && cpu_class_object != Py_None &&
@@ -2535,7 +2517,6 @@ static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py
         .outcome = &outcome,
         .nvme = {paths.views, paths.count, (usearch_cpu_class_t)cpu_class},
         .threads = threads,
-        .deferred_limit = deferred_limit,
         .nvme_class = (usearch_nvme_class_t)nvme_class};
     Py_BEGIN_ALLOW_THREADS;
     usearch_executor_for_nvme(&executor_arguments);
@@ -2546,20 +2527,20 @@ static PyObject* Executor_for_nvme(PyTypeObject* type, PyObject* const* args, Py
     return executor_adopt(type, handle, usearch_residency_nvme_k);
 }
 
-static char const doc_Executor_drain[] =                                                  //
-    "drain(mood=Mood.PARKED) -> None\n"                                                   //
-    "\n"                                                                                  //
-    "Waits for every call submitted to this executor before the drain began, then sets\n" //
-    "what it does with its workers whenever it next goes idle; the last drain wins.\n"    //
-    "Calls `usearch_executor_drain`.\n"                                                   //
-    "\n"                                                                                  //
-    "Args:\n"                                                                             //
-    "  mood (Mood, optional): `Mood.PARKED` lets idle workers sleep, so the next call\n"  //
-    "    pays a wake-up; `Mood.SPINNING` keeps them hot, trading power for the next\n"    //
-    "    call's latency. A borrowed pool keeps its lender's mood.\n"                      //
-    "\n"                                                                                  //
-    "Raises:\n"                                                                           //
-    "  Error: What befell the executor itself, such as a lost device; every call\n"       //
+static char const doc_Executor_drain[] =                                                   //
+    "drain(mood=Mood.PARKED) -> None\n"                                                    //
+    "\n"                                                                                   //
+    "Waits until no call holds this executor, then sets what it does with its workers\n"   //
+    "until the next call; the last drain wins. It only waits, never runs a call itself.\n" //
+    "Calls `usearch_executor_drain`.\n"                                                    //
+    "\n"                                                                                   //
+    "Args:\n"                                                                              //
+    "  mood (Mood, optional): `Mood.PARKED` lets idle workers sleep, so the next call\n"   //
+    "    pays a wake-up; `Mood.SPINNING` keeps them hot, trading power for the next\n"     //
+    "    call's latency. A borrowed pool keeps its lender's mood.\n"                       //
+    "\n"                                                                                   //
+    "Raises:\n"                                                                            //
+    "  Error: What befell the executor itself, such as a lost device; every call\n"        //
     "    reports its own failure through its own verb.";
 
 static PyObject* Executor_drain(Executor* executor, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -4029,7 +4010,6 @@ PyObject* api_layouts(PyObject* self, PyObject* unused) {
     layout_field_t const executor_for_nvme[] = {
         {"nvme", offsetof(usearch_executor_for_nvme_t, nvme)},
         {"threads", offsetof(usearch_executor_for_nvme_t, threads)},
-        {"deferred_limit", offsetof(usearch_executor_for_nvme_t, deferred_limit)},
         {"nvme_class", offsetof(usearch_executor_for_nvme_t, nvme_class)},
     };
     layout_field_t const stats[] = {
@@ -4046,6 +4026,7 @@ PyObject* api_layouts(PyObject* self, PyObject* unused) {
         {"cpu_class", offsetof(usearch_dense_index_description_t, cpu_class)},
         {"gpu_class", offsetof(usearch_dense_index_description_t, gpu_class)},
         {"shards_count", offsetof(usearch_dense_index_description_t, shards_count)},
+        {"load_path", offsetof(usearch_dense_index_description_t, load_path)},
     };
     PyObject* layouts = PyDict_New();
     if (layouts && (layout_add(layouts, "usearch_ram_options_t", sizeof(usearch_ram_options_t), ram,

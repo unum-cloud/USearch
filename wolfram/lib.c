@@ -499,15 +499,14 @@ static usearch_status_t call_size(call_t* call, MArgument argument, size_t* want
     return usearch_status_success_k;
 }
 
-/** Reads a traversal by name; the lift answers @c walk for a name it does not recognize, so only a
- *  round trip tells a misspelling from a deliberate @c walk. */
+/** Reads a traversal by name, refusing one the library does not spell. */
 static usearch_status_t call_traversal(WolframLibraryData library_data, call_t* call, MArgument argument,
                                        usearch_traversal_t* traversal) {
     char* traversal_text = MArgument_getUTF8String(argument);
-    *traversal = usearch_traversal_from_name(bytes_from_text(traversal_text));
-    int const named = traversal_text && strcmp(traversal_text, usearch_traversal_name(*traversal)) == 0;
+    usearch_status_t const parsed = usearch_traversal_from_name(bytes_from_text(traversal_text), traversal);
     library_data->UTF8String_disown(traversal_text);
-    if (!named) return call_refuse(call, usearch_status_unknown_kind_k, "the traversal is neither walk nor scan");
+    if (parsed != usearch_status_success_k)
+        return call_refuse(call, usearch_status_unknown_kind_k, "the traversal is neither walk nor scan");
     return usearch_status_success_k;
 }
 
@@ -778,13 +777,11 @@ EXTERN_C DLLEXPORT int ExecutorDrain(WolframLibraryData library_data, mint argum
     usearch_executor_t const executor = executor_find(MArgument_getInteger(arguments[0]));
     if (!executor)
         return answer_failure(library_data, usearch_status_uninitialized_k, "the Executor was released", result);
-    // The lift answers `parked` for a name it does not recognize, so only a round trip tells a
-    // misspelling from a deliberate `parked`.
     char* mood_text = MArgument_getUTF8String(arguments[1]);
-    usearch_mood_t const mood = usearch_mood_from_name(bytes_from_text(mood_text));
-    int const named = mood_text && strcmp(mood_text, usearch_mood_name(mood)) == 0;
+    usearch_mood_t mood = usearch_mood_parked_k;
+    usearch_status_t const parsed = usearch_mood_from_name(bytes_from_text(mood_text), &mood);
     library_data->UTF8String_disown(mood_text);
-    if (!named)
+    if (parsed != usearch_status_success_k)
         return answer_failure(library_data, usearch_status_invalid_argument_k,
                               "the mood is neither parked nor spinning", result);
 

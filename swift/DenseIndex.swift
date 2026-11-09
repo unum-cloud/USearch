@@ -1156,7 +1156,7 @@ public final class DenseIndex: @unchecked Sendable {
         try callState.read { () throws(USearchError) in DenseIndex(raw: try created(index), residency: residency) }
     }
 
-    /// The same verbs, blocking on `executor` after every call submitted there before them.
+    /// The same verbs, blocking on `executor`, each refused while another call holds it.
     /// Binding-only: names the executor every call passes.
     public func on(_ executor: Executor) -> DenseIndexOn { DenseIndexOn(index: self, executor: executor) }
 
@@ -1371,8 +1371,8 @@ public final class DenseIndex: @unchecked Sendable {
 
 // MARK: - Receivers
 
-/// An index's verbs on an executor, each blocking until final after every call submitted there
-/// before it; see `DenseIndex.on(_:)` and the index's own verbs for what each one does.
+/// An index's verbs on an executor, each blocking until final and refused while another call holds
+/// it; see `DenseIndex.on(_:)` and the index's own verbs for what each one does.
 ///
 /// A blocking call borrows the arena it is given, and its result reads it until the arena's next
 /// call.

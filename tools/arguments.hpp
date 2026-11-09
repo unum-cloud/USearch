@@ -278,6 +278,17 @@ template <typename enumeration_type_>
     return argument_status_t::parsed_k;
 }
 
+/** Writes the enumerator a status-answering @p from_name reads @p value as into @p destination. */
+template <typename enumeration_type_>
+[[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
+                                              usearch_status_t (*from_name)(usearch_bytes_view_t,
+                                                                            enumeration_type_*)) noexcept {
+    enumeration_type_ parsed {};
+    if (from_name(bytes_view(value), &parsed) != usearch_status_success_k) return argument_status_t::unknown_name_k;
+    destination = parsed;
+    return argument_status_t::parsed_k;
+}
+
 [[nodiscard]] inline argument_status_t assign_(flag_t const& flag, std::string_view value) noexcept {
     if (std::string_view* const* text = std::get_if<std::string_view*>(&flag.destination)) {
         **text = value;
@@ -308,7 +319,7 @@ template <typename enumeration_type_>
         return argument_status_t::parsed_k;
     }
     if (usearch_residency_t* const* residency = std::get_if<usearch_residency_t*>(&flag.destination))
-        return assign_named_(value, **residency, usearch_residency_from_name, usearch_residency_name);
+        return assign_named_(value, **residency, usearch_residency_from_name);
     if (usearch_cpu_class_t* const* cpu_class = std::get_if<usearch_cpu_class_t*>(&flag.destination))
         return assign_named_(value, **cpu_class, usearch_cpu_class_from_name, usearch_cpu_class_name);
     if (usearch_gpu_class_t* const* gpu_class = std::get_if<usearch_gpu_class_t*>(&flag.destination))
@@ -316,7 +327,7 @@ template <typename enumeration_type_>
     if (usearch_nvme_class_t* const* nvme_class = std::get_if<usearch_nvme_class_t*>(&flag.destination))
         return assign_named_(value, **nvme_class, usearch_nvme_class_from_name, usearch_nvme_class_name);
     if (usearch_traversal_t* const* traversal = std::get_if<usearch_traversal_t*>(&flag.destination))
-        return assign_named_(value, **traversal, usearch_traversal_from_name, usearch_traversal_name);
+        return assign_named_(value, **traversal, usearch_traversal_from_name);
     if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.destination)) return parse_bytes(value, **bytes);
     return argument_status_t::unexpected_value_k;
 }

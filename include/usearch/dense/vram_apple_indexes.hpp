@@ -221,6 +221,9 @@ struct vram_apple_indexes {
     /** Shards in the index, in placement order. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
 
+    /** How the last load from a path read its parts onto the devices. */
+    vram_load_path_t loaded_through() const noexcept { return loaded_through_; }
+
     /** The shard at @p shard, in placement order. */
     index_t& shard(std::size_t shard) noexcept { return *shards_[shard].index; }
 
@@ -1592,6 +1595,13 @@ struct vram_apple_indexes {
         /** The index a load closes; a save names it too. */
         vram_apple_indexes* owner = nullptr;
 
+        /** Records that a load from a path copies the parts through host memory, as this vendor
+         *  reads no file itself. */
+        status_t open_sources(std::span<mapped_file_t>) noexcept {
+            owner->loaded_through_ = vram_load_path_t::host_copy_k;
+            return status_t::success_k;
+        }
+
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
         typename executor_t::claim_t streams;
 
@@ -2390,6 +2400,9 @@ struct vram_apple_indexes {
     /** The shards, the keys of their rows, their routing, the commit word every reader snapshots by
      *  and the epoch every reader brackets itself with. */
     shards_t shards_;
+
+    /** How the last load from a path read its parts, which @c describe reports. */
+    vram_load_path_t loaded_through_ = vram_load_path_t::none_k;
 
     /** The metric every shard this index builds or accepts scores by. */
     nk_kernel_kind_t kernel_;

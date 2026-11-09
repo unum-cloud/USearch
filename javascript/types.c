@@ -50,12 +50,18 @@ static char const* usearch_js_metric_spell(int metric) {
     return usearch_dense_metric_name((usearch_dense_metric_t)metric);
 }
 
-static int usearch_js_mood_parse(char const* name) { return (int)usearch_mood_from_name(usearch_js_name_view(name)); }
+static int usearch_js_mood_parse(char const* name) {
+    usearch_mood_t mood = usearch_mood_parked_k;
+    return usearch_mood_from_name(usearch_js_name_view(name), &mood) == usearch_status_success_k ? (int)mood : -1;
+}
 
 static char const* usearch_js_mood_spell(int mood) { return usearch_mood_name((usearch_mood_t)mood); }
 
 static int usearch_js_traversal_parse(char const* name) {
-    return (int)usearch_traversal_from_name(usearch_js_name_view(name));
+    usearch_traversal_t traversal = usearch_traversal_unknown_k;
+    return usearch_traversal_from_name(usearch_js_name_view(name), &traversal) == usearch_status_success_k
+               ? (int)traversal
+               : -1;
 }
 
 static char const* usearch_js_traversal_spell(int traversal) {
@@ -646,7 +652,7 @@ static bool usearch_js_arguments(napi_env env, napi_callback_info info, size_t w
     return true;
 }
 
-/** @c forRam({memoryDomains, threads, deferredLimit, cpuClass}) → host workers over NUMA nodes. */
+/** <tt>forRam({memoryDomains, threads, cpuClass})</tt> → host workers over NUMA nodes. */
 static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -655,8 +661,6 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     int32_t* ordinals = NULL;
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
-        !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
-                                    &for_ram.deferred_limit) ||
         !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "memoryDomains"), "memoryDomains",
                                         &ordinals, &for_ram.ram.memory_domains_count))
@@ -667,8 +671,7 @@ static napi_value usearch_js_executor_for_ram(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c onPool(pool, {memoryDomains, deferredLimit, cpuClass}) → an executor borrowing a ForkUnion
- *  pool. */
+/** <tt>onPool(pool, {memoryDomains, cpuClass})</tt> → an executor borrowing a ForkUnion pool. */
 static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2] = {NULL, NULL};
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -677,8 +680,6 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     int32_t* ordinals = NULL;
     if (!usearch_js_arguments(env, info, 2, arguments) ||
         !usearch_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !usearch_js_size_from_value(env, usearch_js_property(env, arguments[1], "deferredLimit"), "deferredLimit",
-                                    &on_pool.deferred_limit) ||
         !usearch_js_cpu_class_from_value(env, usearch_js_property(env, arguments[1], "cpuClass"),
                                          &on_pool.ram.cpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
@@ -690,8 +691,7 @@ static napi_value usearch_js_executor_on_pool(napi_env env, napi_callback_info i
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c forVram({devices, streams, scratchLimit, deferredLimit, gpuClass}) → one stream per
- *  device. */
+/** <tt>forVram({devices, streams, scratchLimit, gpuClass})</tt> → one stream per device. */
 static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -701,8 +701,6 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "scratchLimit"), "scratchLimit",
                                     &for_vram.scratch_limit) ||
-        !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
-                                    &for_vram.deferred_limit) ||
         !usearch_js_gpu_class_from_value(env, usearch_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
         !usearch_js_ordinals_from_value(env, usearch_js_property(env, config, "devices"), "devices", &ordinals,
                                         &for_vram.vram.devices_count))
@@ -749,7 +747,7 @@ static napi_value usearch_js_executor_for_vram(napi_env env, napi_callback_info 
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c forNvme({paths, threads, deferredLimit, cpuClass}) → one submission ring per worker. */
+/** <tt>forNvme({paths, threads, cpuClass})</tt> → one submission ring per worker. */
 static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     usearch_outcome_t outcome = {usearch_status_success_k, NULL};
@@ -758,8 +756,6 @@ static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info 
     usearch_js_paths_arena_t paths = {NULL, 0};
     if (!usearch_js_arguments(env, info, 1, &config) ||
         !usearch_js_size_from_value(env, usearch_js_property(env, config, "threads"), "threads", &for_nvme.threads) ||
-        !usearch_js_size_from_value(env, usearch_js_property(env, config, "deferredLimit"), "deferredLimit",
-                                    &for_nvme.deferred_limit) ||
         !usearch_js_cpu_class_from_value(env, usearch_js_property(env, config, "cpuClass"), &for_nvme.nvme.cpu_class) ||
         !usearch_js_paths_from_value(env, usearch_js_property(env, config, "paths"), "paths", &paths))
         return NULL;
@@ -769,7 +765,7 @@ static napi_value usearch_js_executor_for_nvme(napi_env env, napi_callback_info 
     return usearch_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c drain(mood) - waits for every call submitted so far, then idles in @p mood; absent parks. */
+/** @c drain(mood) - waits until no call holds the executor, then idles in @p mood; absent parks. */
 static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info info) {
     size_t arguments_count = 1;
     napi_value argument = NULL;
@@ -791,7 +787,7 @@ static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info inf
     return usearch_js_undefined(env);
 }
 
-/** @c free() - runs every deferred call and joins the workers now; a second call is a no-op. */
+/** @c free() - waits out the holding call and joins the workers now; a second call is a no-op. */
 static napi_value usearch_js_executor_release(napi_env env, napi_callback_info info) {
     usearch_js_executor_t* const executor = (usearch_js_executor_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!executor) return NULL;

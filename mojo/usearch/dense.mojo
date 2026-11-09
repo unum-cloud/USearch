@@ -329,6 +329,7 @@ struct DenseIndexDescriptionOutputs(Defaultable, ImplicitlyCopyable):
     var cpu_class: CPUClass
     var gpu_class: GPUClass
     var shards_count: c_size_t
+    var load_path: c_int
 
     def __init__(out self):
         """Zeroes every field, so an unwritten slot reads as an empty index."""
@@ -339,6 +340,7 @@ struct DenseIndexDescriptionOutputs(Defaultable, ImplicitlyCopyable):
         self.cpu_class = CPUClass.UNKNOWN
         self.gpu_class = GPUClass.UNKNOWN
         self.shards_count = c_size_t(0)
+        self.load_path = c_int(0)
 
 
 @fieldwise_init
@@ -2303,7 +2305,7 @@ struct DenseIndex(DenseVerbs, Movable):
 
     Insertions and searches overlap freely on one handle: a search never writes to the graph, and
     an insertion publishes an entry only once it is reachable, so a concurrent walk sees a consistent
-    graph at every instant. Calls on one executor run in submission order.
+    graph at every instant. One call holds an executor at a time.
 
     Verbs called on the index run on the calling thread; `index.on(executor)` runs the same verbs
     blocking on an executor, and `index.deferred(executor)` submits them there. The cursor and the
@@ -2718,7 +2720,7 @@ struct DenseIndex(DenseVerbs, Movable):
     # region Receivers
 
     def on(ref self, ref executor: Executor) -> DenseIndexOn[ImmOrigin(origin_of(self, executor))]:
-        """The same verbs, blocking on `executor` after every call submitted there before them. Binding-only.
+        """The same verbs, blocking on `executor`, refused while another call holds it. Binding-only.
 
         Args:
             executor: The executor every verb runs on; its kind must match the handle's residency.
@@ -3254,7 +3256,7 @@ struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
         self.executor = executor
 
     def _route[C: Call](self, var call: C) raises Error -> C.Result:
-        """Runs `call` on the bound executor, after every call submitted there before it."""
+        """Runs `call` on the bound executor, refused while another call holds it."""
         return _block(self.index[].library, call^, self.index[].address, self.executor)
 
     def cursor(self) raises Error -> DenseCursor[Self.origin]:

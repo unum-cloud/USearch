@@ -292,6 +292,8 @@ export interface DenseIndexDescription {
   gpuClass: string;
   /** Live shards. */
   shardsCount: number;
+  /** How the last load from a path read the parts: "none", "host-copy" or "cufile". */
+  loadPath: string;
 }
 
 /** One reachability audit: the population it judged, and how much of it a search reaches. */
@@ -965,8 +967,8 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 }
 
-/** The verbs of one index, blocking on one executor: `index.on(executor)`. Every call starts after
- *  every earlier submission to that executor, and returns with its outputs written. */
+/** The verbs of one index, blocking on one executor: `index.on(executor)`. Every call returns with
+ *  its outputs written, or contended while another call holds that executor. */
 export class DenseIndexOn extends DenseVerbs<"blocking"> {
   /** Made by `index.on(executor)`, never directly. */
   constructor(compiled: CompiledIndex, executor: Executor | undefined) {
@@ -1052,7 +1054,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
   }
 
   /**
-   *  The same verbs, each blocking on `executor`, after every earlier submission to it. Binding-only.
+   *  The same verbs, blocking on `executor` and refused while another call holds it. Binding-only.
    *  @param executor - The workers to run on; its residency must match the index's.
    */
   on(executor: Executor): DenseIndexOn {

@@ -21,8 +21,7 @@ import (
 //
 // `nocallback` says the C function can never re-enter Go, and cgo then skips the machinery that
 // makes a Go-to-C-to-Go crossing safe. It is claimed only where the argument structure carries no
-// callback and no executor: a verb naming an executor without threads of its own first runs the
-// deferred calls it holds, whose callbacks re-enter Go on the calling thread.
+// callback and no executor.
 //
 // `noescape` says the call retains none of its pointer arguments, so Go may leave them on the
 // stack. Submission copies the argument structure, and everything the structure names is pinned,

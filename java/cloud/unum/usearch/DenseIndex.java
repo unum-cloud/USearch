@@ -70,7 +70,7 @@ import cloud.unum.usearch.Types.Verb;
  *
  * <pre>{@code
  * DenseOptions options = new DenseOptions().dimensions(2);
- * try (Executor pool = Executor.forRam(new int[0], null, 0, 0);
+ * try (Executor pool = Executor.forRam(new int[0], null, 0);
  *         Arena arena = new Arena(pool);
  *         DenseIndex index = DenseIndex.initRam(options, new int[0])) {
  *     index.reserve(2);
@@ -1394,7 +1394,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
     }
 
-    /** The receiver whose verbs block on an executor, after the calls submitted there before them. */
+    /** The receiver whose verbs block on an executor, contended while another call holds it. */
     public static final class On extends DenseVerbs {
 
         private final DenseIndex index;
@@ -1588,8 +1588,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     }
 
     /**
-     * The receiver whose verbs block on {@code executor}, after the calls submitted there before
-     * them. Binding-only.
+     * The receiver whose verbs block on {@code executor}, contended while another call holds it.
+     * Binding-only.
      */
     public On on(Executor executor) {
         return new On(this, executor);
@@ -1920,7 +1920,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             Library.SIZE.withName("memory_usage"),
             Library.ENUM.withName("cpu_class"),
             Library.ENUM.withName("gpu_class"),
-            Library.SIZE.withName("shards_count"));
+            Library.SIZE.withName("shards_count"),
+            Library.ENUM.withName("load_path"),
+            Library.padding());
 
     /** Spells a {@code usearch_cpu_class_t} and a {@code usearch_gpu_class_t}. */
     private static final MethodHandle CPU_CLASS_NAME = Library.namer("usearch_cpu_class_name");

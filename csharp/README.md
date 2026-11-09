@@ -53,7 +53,7 @@ double distance = found[0].Distances[0];
 
 The receiver chooses where a verb runs, and the verb stays the same.
 Called on the index, a verb runs on the caller's own thread, single-threaded on RAM and on the handle's device and default stream on VRAM.
-On `index.On(executor)` it blocks on that executor, after every call submitted there before it.
+On `index.On(executor)` it blocks on that executor, refused while another call holds it.
 On `index.Deferred(executor)` it submits there and answers a `Deferred<TResult>` at once.
 
 ```csharp
@@ -79,7 +79,8 @@ Waiting again answers the same result or raises the same failure.
 Disposing a call nobody waited for waits for it, discards what it produced, and lets its arena serve the next call.
 One left unfinished and unreachable keeps its outputs and pins alive until a collection finds it final, rather than freeing memory the library still writes.
 Disposing an index or an arena that a deferred call names waits for that call first.
-A submission finding the executor's deferred table full finishes at once with `Status.Contended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `Status.Contended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
 
 ## Executors
@@ -95,7 +96,7 @@ using Executor rings = Executor.ForNvme(threads: 4);              // One submiss
 using Executor streams = Executor.ForVram(scratchLimit: 1 << 30); // One stream per device
 using Executor shared = Executor.OnPool(forkUnionPool);           // Borrows another library's threads
 
-threads.Drain(Mood.Spinning);                                     // Awaits every call, then keeps spinning
+threads.Drain(Mood.Spinning);                                     // Waits out the holding call, then keeps spinning
 ```
 
 Each factory also names where its shards go, which is how a dual-socket or multi-GPU box is reached.
@@ -106,8 +107,7 @@ using Executor devices = Executor.ForVram([0, 1], cudaStreams);        // Borrow
 using Executor striped = Executor.ForNvme(paths: ["/mnt/nvme0", "/mnt/nvme1"]);
 ```
 
-Every factory also takes a `deferredLimit`, the deferred calls it tracks at once, where zero takes a default.
-Calls on one executor run in submission order, while handles stay freely concurrent, so a caller wanting genuine concurrency gives each thread its own executor.
+One call holds an executor at a time, while handles stay freely concurrent, so a caller wanting genuine concurrency gives each thread its own executor.
 
 ## Arenas
 
@@ -404,7 +404,7 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; a view the arena's next call outdated throws rather than reading rewound memory.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay on the stack.__
   A blocking call keeps its outputs on the stack, fixes its buffers in place without a pinning handle, and answers a view by value; a deferred one allocates its handle and one pinned outputs struct.
 - __Exceptions never cross the native boundary.__

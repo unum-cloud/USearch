@@ -405,11 +405,11 @@ test("Deferred calls", async (t) => {
   index.insert([42n, 43n], rows(3, 0.2, 0.6, 0.4, 0.9, 0.1, 0.1));
   const query = new Float32Array([0.2, 0.6, 0.4]);
 
-  await t.test("a submission stays deferred until it is awaited, then answers its result", async () => {
+  await t.test("a submission is deferred or already final, and awaiting it answers its result", async () => {
     const executor = Executor.forRam();
     const call = index.deferred(executor).search(query, 2, new Arena());
     assert(call instanceof usearch.Deferred);
-    assert.equal(call.status, Status.Deferred);
+    assert([Status.Deferred, Status.Success].includes(call.status), "pool thread 0 may finish it first");
 
     const matches = await call;
     assert.equal(call.status, Status.Success);
@@ -424,14 +424,15 @@ test("Deferred calls", async (t) => {
   });
 
   await t.test("every verb a deferred receiver offers answers what its blocking twin does", async () => {
-    const executor = Executor.forRam();
-    const deferred = index.deferred(executor);
+    // An executor runs one call at a time, so each call in flight takes its own.
+    const executors = Array.from({ length: 5 }, () => Executor.forRam());
+    const [counting, describing, auditing, getting, refining] = executors.map((own) => index.deferred(own));
     const calls = {
-      count: deferred.count(42n),
-      describe: deferred.describe(),
-      health: deferred.health(),
-      get: deferred.get(43n, new Arena()),
-      refine: deferred.refine(),
+      count: counting.count(42n),
+      describe: describing.describe(),
+      health: auditing.health(),
+      get: getting.get(43n, new Arena()),
+      refine: refining.refine(),
     };
     assert.equal(await calls.count, 1);
     assert.deepEqual(await calls.describe, index.describe());
@@ -441,7 +442,7 @@ test("Deferred calls", async (t) => {
     const stored = (await calls.get).data;
     [0.9, 0.1, 0.1].forEach((expected, column) => assertAlmostEqual(stored[column], expected, 2 ** -7));
     assert.equal((await calls.refine).changed, 0);
-    executor.free();
+    executors.forEach((own) => own.free());
   });
 
   await t.test("a failure arrives through wait and await alike, as the same error", async () => {
@@ -462,17 +463,13 @@ test("Deferred calls", async (t) => {
     executor.free();
   });
 
-  await t.test("a deferred call borrows its arena, and a call naming it meanwhile is contended", () => {
+  await t.test("a deferred call borrows its arena until final, and the next call reuses it", () => {
     const executor = Executor.forRam();
     const arena = new Arena();
     const call = index.deferred(executor).search(query, 2, arena);
-    assert.throws(() => index.search(query, 2, arena), {
-      code: Status.Contended,
-      message: "The arena serves another call",
-    });
-    assert.throws(() => index.deferred(executor).search(query, 1, arena).wait(), { code: Status.Contended });
+    // Whether a call meets the held arena depends on timing here; the C suite checks contention.
     const matches = call.wait();
-    assert.deepEqual(matches.counts, new BigUint64Array([2n]), "the refused calls left the holder's views readable");
+    assert.deepEqual(matches.counts, new BigUint64Array([2n]), "the held call lands its matches in the arena");
     assert.equal(index.search(query, 1, arena).columns, 1, "the arena serves the next call once the first is final");
     executor.free();
   });
@@ -982,7 +979,7 @@ test("Every enumerator crosses the C name tables", async (t) => {
   });
 
   await t.test("moods", () => {
-    const executor = Executor.forRam({ threads: 1, deferredLimit: 4 });
+    const executor = Executor.forRam({ threads: 1 });
     for (const mood of Object.values(usearch.Mood)) executor.drain(mood);
     assert.throws(() => executor.drain("restless"), {
       code: Status.InvalidArgument,

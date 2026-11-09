@@ -26,15 +26,15 @@ extern fn usearch_arena_free(arena: ?*anyopaque) void;
 extern fn usearch_arena_describe(arguments: *usearch_arena_describe_t) void;
 
 extern fn usearch_status_name(status: Status) [*:0]const u8;
-extern fn usearch_status_from_name(name: BytesView) Status;
+extern fn usearch_status_from_name(name: BytesView, status: *Status) Status;
 extern fn usearch_scalar_name(scalar: Scalar) [*:0]const u8;
 extern fn usearch_scalar_from_name(name: BytesView) Scalar;
 extern fn usearch_residency_name(residency: Residency) [*:0]const u8;
-extern fn usearch_residency_from_name(name: BytesView) Residency;
+extern fn usearch_residency_from_name(name: BytesView, residency: *Residency) Status;
 extern fn usearch_traversal_name(traversal: Traversal) [*:0]const u8;
-extern fn usearch_traversal_from_name(name: BytesView) Traversal;
+extern fn usearch_traversal_from_name(name: BytesView, traversal: *Traversal) Status;
 extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
-extern fn usearch_mood_from_name(name: BytesView) Mood;
+extern fn usearch_mood_from_name(name: BytesView, mood: *Mood) Status;
 
 extern fn usearch_version_name() [*:0]const u8;
 extern fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) [*:0]const u8;
@@ -81,7 +81,7 @@ pub const Status = enum(c_int) {
     uninitialized = 12,
     /// The request contradicts an already-frozen configuration.
     config_mismatch = 13,
-    /// The call was refused rather than waited for - a full deferred table, or an arena serving another call.
+    /// The call was refused rather than waited for - an executor or an arena serving another call.
     contended = 14,
     /// A progress handler asked the operation to stop.
     cancelled = 15,
@@ -98,7 +98,8 @@ pub const Status = enum(c_int) {
 
     /// Reads a spelling back, or null when no status spells it. Calls `usearch_status_from_name`.
     pub fn fromName(text: []const u8) ?Status {
-        return spelled(Status, usearch_status_from_name(.of(text)), text);
+        var status: Status = undefined;
+        return if (usearch_status_from_name(.of(text), &status) == .success) status else null;
     }
 };
 
@@ -371,7 +372,8 @@ pub const Residency = enum(c_int) {
 
     /// Reads a spelling back, or null when no residency spells it. Calls `usearch_residency_from_name`.
     pub fn fromName(text: []const u8) ?Residency {
-        return spelled(Residency, usearch_residency_from_name(.of(text)), text);
+        var residency: Residency = undefined;
+        return if (usearch_residency_from_name(.of(text), &residency) == .success) residency else null;
     }
 };
 
@@ -389,7 +391,8 @@ pub const Traversal = enum(c_int) {
 
     /// Reads a spelling back, or null when no traversal spells it. Calls `usearch_traversal_from_name`.
     pub fn fromName(text: []const u8) ?Traversal {
-        return spelled(Traversal, usearch_traversal_from_name(.of(text)), text);
+        var traversal: Traversal = undefined;
+        return if (usearch_traversal_from_name(.of(text), &traversal) == .success) traversal else null;
     }
 };
 
@@ -742,10 +745,10 @@ pub const Completion = enum(c_int) {
 
 /// What an executor does with its threads or streams once it goes idle. Mirrors `usearch_mood_t`.
 pub const Mood = enum(c_int) {
-    /// Park them; the next call pays a wake-up.
-    parked = 1,
+    /// Park them; the next call pays a wake-up. The default.
+    parked = 0,
     /// Keep them spinning, trading power for the next call's latency.
-    spinning = 2,
+    spinning = 1,
 
     /// The canonical spelling, as `.parked` spells "parked". Calls `usearch_mood_name`.
     pub fn name(self: Mood) [:0]const u8 {
@@ -754,7 +757,8 @@ pub const Mood = enum(c_int) {
 
     /// Reads a spelling back, or null when no mood spells it. Calls `usearch_mood_from_name`.
     pub fn fromName(text: []const u8) ?Mood {
-        return spelled(Mood, usearch_mood_from_name(.of(text)), text);
+        var mood: Mood = undefined;
+        return if (usearch_mood_from_name(.of(text), &mood) == .success) mood else null;
     }
 };
 
@@ -763,7 +767,6 @@ const usearch_executor_for_ram_t = extern struct {
     outcome: *Outcome,
     ram: usearch_ram_options_t,
     threads: usize,
-    deferred_limit: usize,
 };
 
 const usearch_executor_on_pool_t = extern struct {
@@ -771,7 +774,6 @@ const usearch_executor_on_pool_t = extern struct {
     outcome: *Outcome,
     ram: usearch_ram_options_t,
     pool: ?*anyopaque,
-    deferred_limit: usize,
 };
 
 const usearch_executor_for_vram_t = extern struct {
@@ -780,7 +782,6 @@ const usearch_executor_for_vram_t = extern struct {
     vram: usearch_vram_options_t,
     streams: ?[*]const ?*anyopaque,
     scratch_limit: usize,
-    deferred_limit: usize,
 };
 
 const usearch_executor_for_nvme_t = extern struct {
@@ -788,7 +789,6 @@ const usearch_executor_for_nvme_t = extern struct {
     outcome: *Outcome,
     nvme: usearch_nvme_options_t,
     threads: usize,
-    deferred_limit: usize,
     nvme_class: usearch_nvme_class_t = 0,
 };
 
@@ -821,8 +821,6 @@ pub const ExecutorForRamConfig = struct {
     memory_domains: []const i32 = &.{},
     /// Threads to spawn; zero takes 7/8 of the cores those domains carry.
     threads: usize = 0,
-    /// Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
-    deferred_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -831,8 +829,6 @@ pub const ExecutorForRamConfig = struct {
 pub const ExecutorOnPoolConfig = struct {
     /// The memory domains of the indexes it will drive; empty derives every node the process may use.
     memory_domains: []const i32 = &.{},
-    /// Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
-    deferred_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -845,8 +841,6 @@ pub const ExecutorForVramConfig = struct {
     streams: ?[]const ?*anyopaque = null,
     /// The ceiling on scratch bytes per device; zero lets scratch grow as geometry asks.
     scratch_limit: usize = 0,
-    /// Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
-    deferred_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -857,8 +851,6 @@ pub const ExecutorForNvmeConfig = struct {
     paths: []const BytesView = &.{},
     /// Threads to spawn, one submission ring apiece; zero derives from the devices' queue capabilities.
     threads: usize = 0,
-    /// Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
-    deferred_limit: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -870,15 +862,16 @@ pub const ExecutorForNvmeConfig = struct {
 /// produced it: it must match the residency of every handle it drives, or the call reports
 /// `Error.Device`. A verb called on the index itself takes no executor and runs on the calling thread.
 ///
-/// Calls on one executor run in submission order; handles stay freely concurrent - it is the
-/// executor that orders, never the index. An executor without threads of its own holds a deferred
-/// call until its wait, its next `drain` or blocking call, or the free of a handle it names.
+/// One call holds an executor at a time, and a second finding it held fails with `Error.Contended`,
+/// as nothing queues; handles stay freely concurrent, since the executor serializes, not the index.
+/// A deferred call on a caller-exclusive pool runs on its thread 0, so polling alone finishes it,
+/// while a single thread, WebAssembly or a VRAM executor runs it at submission.
 pub const Executor = struct {
     /// The opaque `usearch_executor_t` the ABI hands back.
     handle: ?*anyopaque,
 
-    /// Spawns host threads for RAM-resident indexes across the domains local to `memory_domains`,
-    /// which should be the very slice the indexes were placed with.
+    /// Creates an executor of host threads for RAM-resident indexes across the domains local to
+    /// `memory_domains`, which should be the very slice the indexes were placed with.
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, because full occupancy starves
     /// the ordered publication path. Calls `usearch_executor_for_ram`.
@@ -890,7 +883,6 @@ pub const Executor = struct {
             .outcome = &outcome,
             .ram = .of(config.memory_domains),
             .threads = config.threads,
-            .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_ram(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -907,14 +899,13 @@ pub const Executor = struct {
             .outcome = &outcome,
             .ram = .of(config.memory_domains),
             .pool = pool,
-            .deferred_limit = config.deferred_limit,
         };
         usearch_executor_on_pool(&arguments);
         return adopt(handle, outcome, config.diagnostics);
     }
 
-    /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
-    /// domains local to the devices `paths` names. Calls `usearch_executor_for_nvme`.
+    /// Creates an executor of host threads for NVMe-resident indexes, one submission ring apiece,
+    /// across the domains local to the devices `paths` names. Calls `usearch_executor_for_nvme`.
     pub fn forNvme(config: ExecutorForNvmeConfig) Error!Executor {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
@@ -923,7 +914,6 @@ pub const Executor = struct {
             .outcome = &outcome,
             .nvme = .of(config.paths),
             .threads = config.threads,
-            .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_nvme(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -944,7 +934,6 @@ pub const Executor = struct {
             .vram = .of(config.devices),
             .streams = if (config.streams) |borrowed| borrowed.ptr else null,
             .scratch_limit = config.scratch_limit,
-            .deferred_limit = config.deferred_limit,
         };
         usearch_executor_for_vram(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -956,8 +945,8 @@ pub const Executor = struct {
         return .{ .handle = handle };
     }
 
-    /// Waits for every call submitted before the drain began, then sets the mood the executor
-    /// adopts whenever it next goes idle. Reports only what befell the executor itself.
+    /// Waits until no call holds the executor, then sets the mood its threads take until the next
+    /// call. Reports only what befell the executor itself.
     /// Calls `usearch_executor_drain`.
     pub fn drain(self: Executor, mood: Mood) Error!void {
         var outcome: Outcome = .{};
@@ -966,9 +955,9 @@ pub const Executor = struct {
         try outcome.check();
     }
 
-    /// Drains every call, releases the scratch and the streams it owns, and frees the executor,
-    /// which is invalid afterwards; the host arenas it made keep their memory, while its GPU arenas
-    /// must be freed first. Calls `usearch_executor_free`.
+    /// Waits out the call holding it, releases the scratch and the streams it owns, and frees the
+    /// executor, which is invalid afterwards; the host arenas it made keep their memory, while its
+    /// GPU arenas must be freed first. Calls `usearch_executor_free`.
     pub fn deinit(self: *Executor) void {
         usearch_executor_free(self.handle);
         self.* = undefined;

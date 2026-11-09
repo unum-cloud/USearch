@@ -64,7 +64,7 @@ import asyncio
 async def nearest(pool):
     here, there = usearch.Arena(), usearch.Arena(pool)
     matches = index.search(queries, 10, here)  # the calling thread
-    matches = index.on(pool).search(queries, 10, there)  # blocking, after every earlier submission
+    matches = index.on(pool).search(queries, 10, there)  # blocking, holding the pool until it returns
     call = index.deferred(pool).search(queries, 10, there)  # a usearch.Deferred, submitted now
     call.status  # usearch.Status.DEFERRED until final
     return await call  # or: call.wait()
@@ -101,9 +101,9 @@ pool.drain(usearch.Mood.SPINNING)  # Waits, then keeps idle workers hot
 `for_nvme` opens one submission ring per worker, striping shards across the `paths` it is given.
 `for_vram` takes no thread count at all: one host thread drives one stream per device, so the width of that pool is the device list rather than a worker count.
 `on_pool` borrows a ForkUnion `fu_pool_t` another library spawned, passed as an integer address the way `ctypes` and `cffi` hand pointers over, and the pool must outlive the executor.
-Every factory takes `deferred_limit=`, the deferred calls it tracks at once, with zero taking a default.
-A submission that finds that table full finishes with `Status.CONTENDED` and raises `ContendedError` once awaited.
-`drain` waits for everything submitted before it, then lets idle workers sleep with `Mood.PARKED` or keeps them hot with `Mood.SPINNING`.
+One call holds an executor at a time, and nothing queues: a second call finishes with `Status.CONTENDED` and raises `ContendedError`, a deferred one once awaited.
+A deferred call on a caller-exclusive pool, which `for_ram` and `for_nvme` spawn for more than one thread, runs on the pool's thread 0, so polling `status` alone finishes it, and its `progress` and `predicate` callbacks run on the pool's threads under the GIL; a single thread or a VRAM executor runs it at submission.
+`drain` waits until no call holds the executor, then lets idle workers sleep with `Mood.PARKED`, the default, or keeps them hot with `Mood.SPINNING`.
 Used as a context manager, an executor waits for its calls and closes on exit, after which a receiver naming it raises `UninitializedError`.
 Calling `usearch.Executor()` raises a `TypeError` naming the factories, since what a pool spawns cannot be derived from nothing.
 
@@ -450,7 +450,7 @@ print(stats.mean_recall, stats.mean_efficiency)
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; an exported buffer pins its arena until released, and a view over a rewound one raises `UninitializedError`.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__
   `index.search(queries, 10, arena)` takes no executor, completion or receiver argument and returns its result; nothing about asynchrony reaches a caller who never asks for it.
 - __Language idioms over parallel APIs.__

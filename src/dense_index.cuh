@@ -20,7 +20,6 @@
 
 #include <bit>              // `std::bit_cast` - the softmax carry crossing the ABI
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
-#include <mutex>            // `std::lock_guard` over the ticks' lock and the deferred tables
 #include <memory>           // `std::unique_ptr` - the executor's topology
 #include <new>              // `std::nothrow`
 #include <span>             // `std::span` - key batches crossing the ABI
@@ -63,6 +62,9 @@ struct usearch_dense_index_handle_t {
      *  serves, which only that table's entries cast back to their type. */
     dense_variant_tables_t tables;
     void* index = nullptr;
+
+    /** Executor calls naming the handle that have not ended, which its free waits out. */
+    u32_t named_calls = 0;
 
     usearch_dense_index_handle_t(dense_variant_tables_t picked, void* created) noexcept
         : tables(picked), index(created) {}
@@ -483,6 +485,9 @@ struct usearch_dense_cursor_handle_t {
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     u32_t busy = 0;
 
+    /** Executor calls naming the cursor that have not ended, which its free waits out. */
+    u32_t named_calls = 0;
+
     usearch_dense_cursor_handle_t(dense_variant_tables_t picked, usearch_dense_index_handle_t const* index) noexcept
         : tables(picked), opened_on(index) {}
     usearch_dense_cursor_handle_t(usearch_dense_cursor_handle_t const&) = delete;
@@ -506,6 +511,9 @@ struct usearch_dense_refinement_handle_t {
     /** The caller's donor array, @c count slots. */
     usearch_dense_index_t* donors = nullptr;
     std::size_t count = 0;
+
+    /** Executor calls naming the refinement that have not ended, which its free waits out. */
+    u32_t named_calls = 0;
 
     usearch_dense_refinement_handle_t(dense_variant_tables_t picked, usearch_dense_index_handle_t const* index,
                                       usearch_executor_t executor, usearch_dense_index_t* slots,
@@ -604,7 +612,7 @@ static bool accepts_dense_variants(punned_dense_index<residency_> const& punned,
         if (!same_punned_index(punned, *other))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
                                    "Every handle must share the index's residency, scalar and class");
-        if (other != self) finish_calls_using(other);
+        if (other != self) wait_named_calls(other->named_calls);
     }
     return true;
 }
@@ -671,17 +679,12 @@ static usearch_matches_tape_view_t tape_view_of(products_tape_t const& tape, std
             written ? tape.scores.data() : nullptr, tape.offsets.data()};
 }
 
-/** The one registry and resuming slot @c lib.hpp declares for every modality's calls, defined
- *  beside the executor, arena and outcome verbs that drain them. */
-deferred_registry_t deferred_registry;
-thread_local void const* resuming_call = nullptr;
-
 extern "C" {
 
 #pragma region Lifetime
 
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
@@ -693,7 +696,7 @@ USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) 
 }
 
 USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
@@ -705,7 +708,7 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
 }
 
 USEARCH_EXPORT void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->index = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome,
                     "RAM shards copy a checkpoint in and cannot serve a mapping in place yet");
@@ -713,7 +716,7 @@ USEARCH_EXPORT void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) 
 
 USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
     if (submitted<usearch_dense_view_nvme>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->index = nullptr;
     if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
@@ -743,13 +746,14 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
 }
 
 USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index) {
-    finish_calls_using(index);
+    if (!index) return;
+    wait_named_calls(index->named_calls);
     delete index;
 }
 
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
     if (submitted<usearch_dense_reserve>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_dense_index_handle_t const& handle = *arguments->index;
     std::visit(
         [&](auto const* verbs) noexcept {
@@ -760,7 +764,7 @@ USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments) {
     if (submitted<usearch_dense_clear>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_dense_index_handle_t const& handle = *arguments->index;
     std::visit([&](auto const* verbs) noexcept { propagate_error(verbs->clear(handle.index), outcome); },
                handle.tables);
@@ -792,7 +796,7 @@ USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_byt
 
 USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) {
     if (submitted<usearch_dense_describe>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_dense_index_handle_t const& handle = *arguments->index;
     visit_punned(handle, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
         usearch_dense_index_description_t& description = *arguments->description;
@@ -806,13 +810,14 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
         description.cpu_class = static_cast<usearch_cpu_class_t>(punned.verbs.cpu_class);
         description.gpu_class = static_cast<usearch_gpu_class_t>(punned.verbs.gpu_class);
         description.shards_count = punned.verbs.shards_count(punned.index);
+        description.load_path = punned.verbs.load_path(punned.index);
     });
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     if (submitted<usearch_dense_count>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     us::utilities::uuid_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
     visit_punned(
@@ -843,7 +848,7 @@ static bool rejects_columns(usearch_dense_index_handle_t const& index, std::size
 
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     if (submitted<usearch_dense_insert>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_traversal_stats_t* const stats = arguments->stats;
     usearch_keys_view_t const keys = arguments->keys;
     usearch_rows_view_t const vectors = arguments->vectors;
@@ -880,7 +885,7 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     if (submitted<usearch_dense_refine>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_traversal_stats_t* const stats = arguments->stats;
     if (stats) *stats = {};
     if (arguments->report) *arguments->report = {};
@@ -905,7 +910,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
     if (submitted<usearch_dense_health>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->reachability = {};
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
@@ -922,7 +927,7 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (submitted<usearch_dense_search>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const count = arguments->count, wanted = arguments->wanted;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
@@ -970,7 +975,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (submitted<usearch_dense_get>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     us::utilities::uuid_t const key = uuid_of(arguments->key);
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
@@ -1011,28 +1016,26 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->stream = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome, "No residency streams matches yet");
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments) {
     if (submitted<usearch_dense_search_stream_next>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     *arguments->matches = {};
     propagate_error(usearch_status_unsupported_k, outcome, "No residency streams matches yet");
 }
 
-USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t stream) {
-    finish_calls_using(stream);
-}
+USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t) {}
 
 #pragma endregion Insertion and Search
 
 #pragma region Cursors and Absorbing
 
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->cursor = nullptr;
     if (arguments->starts_count && !arguments->starts)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The starts must name keys"), void();
@@ -1058,7 +1061,7 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
 
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     if (submitted<usearch_dense_cursor_next>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const wanted = arguments->wanted;
     *arguments->written = 0;
     *arguments->keys = {};
@@ -1113,13 +1116,14 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
 }
 
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
-    finish_calls_using(cursor);
+    if (!cursor) return;
+    wait_named_calls(cursor->named_calls);
     delete cursor;
 }
 
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     if (submitted<usearch_dense_absorb>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     if (arguments->report) *arguments->report = {};
     if (arguments->count && !arguments->donors)
@@ -1154,10 +1158,8 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
-    // Outside the deferred table, so even a deferred call runs in place, behind the calls held
-    // before it.
-    if (arguments->executor) run_held(*arguments->executor, ~std::size_t {0});
-    call_outcome_t outcome(arguments->outcome);
+    if (submitted<usearch_dense_compact>(arguments)) return;
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     if (arguments->report) *arguments->report = {};
     if (arguments->count && !arguments->sources)
@@ -1195,7 +1197,7 @@ USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
     if (submitted<usearch_dense_refinement_init>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->refinement = nullptr;
     if (!arguments->executor)
         return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -1239,7 +1241,7 @@ USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_
 
 USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
     if (submitted<usearch_dense_refinement_next>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->reselected) *arguments->reselected = 0;
     if (arguments->changed) *arguments->changed = 0;
     if (arguments->stats) *arguments->stats = {};
@@ -1274,7 +1276,7 @@ USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_
 
 USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments) {
     if (submitted<usearch_dense_refinement_finish>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->stats) *arguments->stats = {};
     if (arguments->report) *arguments->report = {};
     // Freed whatever the call answers; a plan dying unfinished reopens its index.
@@ -1301,7 +1303,7 @@ USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_fin
 
 USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     if (submitted<usearch_dense_sample>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     reset_sample(*arguments);
     if (!accepts_sample(*arguments, outcome)) return;
     visit_punned(
@@ -1336,7 +1338,7 @@ USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments) {
     if (submitted<usearch_dense_split>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (arguments->report) *arguments->report = {};
     if (arguments->stats) *arguments->stats = {};
     if (arguments->count < 2 || !arguments->receivers)
@@ -1370,7 +1372,7 @@ USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     if (submitted<usearch_dense_multiply>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const count = arguments->count;
     *arguments->products = {};
     if (arguments->written) *arguments->written = 0;
@@ -1433,7 +1435,7 @@ static_assert(sizeof(us::dense::softmax_state_t) == sizeof(usearch_dense_softmax
 
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (submitted<usearch_dense_attend>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     usearch_dense_softmax_state_t* const carry = arguments->carry;
     std::size_t const count = arguments->count, head_count = max_of<std::size_t>(arguments->head_count, 1);
     usearch_scalar_t const outputs_scalar = arguments->outputs_scalar ? arguments->outputs_scalar
@@ -1500,7 +1502,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (submitted<usearch_dense_maxsim>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     std::size_t const count = arguments->count, rows_per_query = arguments->rows_per_query;
     if (arguments->stats) *arguments->stats = {};
     *arguments->matches = {};
@@ -1603,28 +1605,28 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
     if (submitted<usearch_dense_load_ram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     load_dense_index(as_text(arguments->path), arguments->ram, arguments->connectivity, arguments->executor,
                      arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (submitted<usearch_dense_load_vram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     load_dense_index(as_text(arguments->path), arguments->vram, 0, arguments->executor, arguments->progress,
                      arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     load_dense_index(checkpoint_source_t {as_bytes(arguments->buffer)}, arguments->ram, arguments->connectivity,
                      arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     // A VRAM `usearch_dense_save_buffer` leaves its checkpoint on the device, where it is read.
     load_dense_index(checkpoint_source_of(as_bytes(arguments->buffer)), arguments->vram, 0, arguments->executor,
                      arguments->progress, arguments->index, outcome);
@@ -1632,7 +1634,7 @@ USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffe
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
     if (submitted<usearch_dense_save>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     visit_punned(
@@ -1648,7 +1650,7 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
 
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
     if (submitted<usearch_dense_save_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     *arguments->monolith = {};
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
@@ -1671,7 +1673,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
 
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
     if (submitted<usearch_dense_metadata_read>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     // Through the medium a view reads, since a generic char node maps nothing and reports no size.
@@ -1683,7 +1685,7 @@ USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* a
 
 USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments) {
     if (submitted<usearch_dense_metadata_read_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (!arguments->buffer.data || !arguments->buffer.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The buffer must not be empty"), void();
     auto const [source, status] = safegraphs_read_metadata(as_bytes(arguments->buffer));
@@ -1697,7 +1699,6 @@ USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_re
 #pragma region Executors
 
 USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome) {
-    finish_calls_using(outcome);
     return host_outcome_verbs().wait(outcome);
 }
 
@@ -1706,7 +1707,7 @@ USEARCH_EXPORT usearch_status_t usearch_outcome_status(usearch_outcome_t* outcom
 }
 
 USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->arena = nullptr;
     usearch_arena_t const arena = new (std::nothrow) usearch_arena_handle_t {};
     if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
@@ -1723,12 +1724,13 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) {
-    finish_calls_using(arena);
+    if (!arena) return;
+    wait_named_calls(arena->named_calls);
     delete arena;
 }
 
 USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_arena_t const arena = arguments->arena;
     if (!arena || !arguments->description)
         return propagate_error(usearch_status_invalid_argument_k, outcome,
@@ -1739,7 +1741,7 @@ USEARCH_EXPORT void usearch_arena_describe(usearch_arena_describe_t* arguments) 
 }
 
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
     auto const [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class);
     if (failed(pick_status))
@@ -1749,17 +1751,18 @@ USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* argumen
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     if (!spawn_ram_executor(*executor, arguments->threads, ceiling, arguments->ram, outcome))
         return delete executor, void();
-    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
+    *arguments->executor = executor;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome, "Borrowed pools are not wired yet");
 }
 
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->executor = nullptr;
     usearch_vram_options_t const& vram = arguments->vram;
     if (arguments->streams)
@@ -1790,11 +1793,12 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     executor->executor = std::move(spawned);
-    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
+    *arguments->executor = executor;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     std::span<gpu_device_t const> const listed = gpu_devices();
     std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
     for (std::size_t position = 0; position != copied; ++position) {
@@ -1813,7 +1817,7 @@ USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->executor = nullptr;
     if (nvme.paths_count && !nvme.paths)
@@ -1874,37 +1878,30 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     if (!spawn_nvme_executor(*executor, arguments->threads, {nvme.paths, nvme.paths_count}, config, ceiling, outcome))
         return delete executor, void();
-    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
+    *arguments->executor = executor;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     // A null executor runs every call to completion before returning, so nothing waits behind it.
     if (!arguments->executor) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
     usearch_executor_handle_t& executor = *arguments->executor;
-    // A drain from a callback meets the claim of the call running it, and answers contended rather
-    // than waiting on itself.
-    auto const claimable = [](auto& typed) noexcept { return typed.claim().status; };
-    if (status_t const claimed = visit_executor(executor, claimable); failed(claimed))
-        return propagate_error(claimed, outcome), void();
-    std::size_t last = 0;
-    {
-        std::lock_guard<std::mutex> lock(deferred_registry.guard);
-        last = deferred_registry.tickets;
-    }
-    run_held(executor, last);
-    wait_running(executor, last);
-    auto const drain = [](auto& typed) noexcept {
-        auto const [claim, status] = typed.claim();
-        return failed(status) ? status : typed.wait();
-    };
-    propagate_error(visit_executor(executor, drain), outcome);
+    if (runs_holding_call(executor))
+        return propagate_error(usearch_status_contended_k, outcome, "A callback cannot drain its executor"), void();
+    await_delegated_call(executor);
+    wait_while_claimed(executor);
+    // Threads spin after every dispatch already, so only parking needs a word to them.
+    if (forkunion_executor_t* const threads = threads_of(executor);
+        threads && arguments->mood != usearch_mood_spinning_k)
+        threads->park();
+    propagate_error(visit_executor(executor, [](auto& typed) noexcept { return typed.wait(); }), outcome);
 }
 
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
     if (!executor) return;
-    finish_calls_using(executor);
-    delist_executor(*executor);
+    await_delegated_call(*executor);
+    wait_while_claimed(*executor);
     if (nvme_executor_t* const nvme = std::get_if<nvme_executor_t>(&executor->executor)) nvme->release();
     delete executor;
 }

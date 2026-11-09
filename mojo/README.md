@@ -52,7 +52,7 @@ The index runs it on the calling thread, `index.on(executor)` blocks on an execu
 
 ```mojo
 index.search(queries, 10, arena)                               # the calling thread
-index.on(executor).search(queries, 10, arena)                  # blocking, after every earlier submission
+index.on(executor).search(queries, 10, arena)                  # blocking, holding the executor until it returns
 var call = index.deferred(executor).search(queries, 10, arena)  # Deferred[...], final once waited
 ```
 
@@ -79,19 +79,19 @@ Calls depending on each other are ordered by waiting on the first before submitt
 
 One executor serves any number of indexes, and its residency must match the one their handles were built for.
 `Executor(library)` owns nothing and runs every call handed it on the calling thread, whatever the handle's residency.
-There is a constructor per C one, each taking every argument its own hardware has and ending with the `deferred_limit` sizing its table of deferred calls, where zero takes a default:
+There is a constructor per C one, each taking every argument its own hardware has:
 
 ```mojo
 var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
 var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
 var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
 var rings = Executor.for_nvme(library, threads=4)                             # one submission ring per thread
-threads.drain(Mood.SPINNING)                                                # waits for every call, then keeps spinning
+threads.drain(Mood.SPINNING)                                                # waits out the holding call, then keeps spinning
 ```
 
-Calls on one executor start in submission order, while index handles stay freely concurrent, so threads that genuinely overlap take one executor apiece.
-A submission finding the executor's deferred table full finishes at once with `Status.CONTENDED`.
-An executor without threads of its own holds a deferred call until its `wait`, the executor's next `drain` or blocking call, or the free of a handle it names.
+One call holds an executor at a time, while index handles stay freely concurrent, so threads that genuinely overlap take one executor apiece.
+A second call finding the executor held finishes at once with `Status.CONTENDED`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 
 ## Arenas
 
@@ -420,7 +420,7 @@ print(library.version_name(), library.capabilities_available())
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; the binding stamps each arena with a counter that every view checks before reading, and keeps no call counts.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls live on the stack.__
   A blocking call keeps its outcome and outputs in stack slots and allocates nothing of its own; a deferred one moves those slots to one heap allocation it frees once final.
 - __`ScalarKind`, not `Scalar`.__

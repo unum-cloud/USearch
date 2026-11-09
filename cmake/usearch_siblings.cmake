@@ -61,7 +61,7 @@ usearch_sibling(
 )
 usearch_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION forkunion::header https://github.com/ashvardanian/ForkUnion
-    954c867d9045e8aad4a7beff39ca66e7643fcdb9
+    1bd5eaeee9588d9c6df33206cc7627377f18fb1c
 )
 usearch_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA stringzilla::header https://github.com/ashvardanian/StringZilla

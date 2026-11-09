@@ -35,12 +35,13 @@ use crate::types::{
     ram_options, read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t,
     usearch_completion_blocking_k, usearch_completion_t, usearch_cpu_class_name, usearch_cpu_class_t,
     usearch_executor_t, usearch_gpu_class_name, usearch_gpu_class_t, usearch_key_t, usearch_keys_tape_view_t,
-    usearch_keys_view_t, usearch_matches_tape_view_t, usearch_matches_tape_view_to_arrow, usearch_matches_view_t,
-    usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t, usearch_ram_options_t,
-    usearch_rows_view_t, usearch_rows_view_to_arrow, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
-    values_of, vram_options, Accepts, Arena, ArrowDeviceArray, ArrowExport, ArrowSchema, Blocking, CPUClass, Callbacks,
-    Calling, Completion, Deferring, Element, Error, Executor, Exported, GPUClass, Handles, Key, Matches, On, Predicate,
-    ProgressCallback, QueryMatches, Residency, Result, RowsView, Scalar, Status, Traversal,
+    usearch_keys_view_t, usearch_load_path_name, usearch_load_path_t, usearch_matches_tape_view_t,
+    usearch_matches_tape_view_to_arrow, usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t,
+    usearch_predicate_t, usearch_progress_t, usearch_ram_options_t, usearch_rows_view_t, usearch_rows_view_to_arrow,
+    usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t, values_of, vram_options, Accepts, Arena,
+    ArrowDeviceArray, ArrowExport, ArrowSchema, Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Element,
+    Error, Executor, Exported, GPUClass, Handles, Key, Matches, On, Predicate, ProgressCallback, QueryMatches,
+    Residency, Result, RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -402,6 +403,7 @@ pub struct usearch_dense_index_description_t {
     pub cpu_class: usearch_cpu_class_t,
     pub gpu_class: usearch_gpu_class_t,
     pub shards_count: usize,
+    pub load_path: usearch_load_path_t,
 }
 
 impl Default for usearch_dense_index_description_t {
@@ -414,6 +416,7 @@ impl Default for usearch_dense_index_description_t {
             cpu_class: 0,
             gpu_class: 0,
             shards_count: 0,
+            load_path: 0,
         }
     }
 }
@@ -696,6 +699,8 @@ pub struct DenseIndexDescription {
     pub gpu_class: &'static str,
     /// Live shards.
     pub shards_count: usize,
+    /// How the last load from a path read the parts: "none", "host-copy" or "cufile".
+    pub load_path: &'static str,
 }
 
 // endregion: Geometry
@@ -1507,7 +1512,7 @@ impl<'arena> DenseBatch<'arena> {
 /// index.insert(&keys, &rows(&slab, 4)?)?;
 ///
 /// let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
-/// let executor = Executor::for_ram(&[], None, 0, 0)?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
 /// for query in matches.iter()? {
@@ -1539,7 +1544,7 @@ impl DenseIndex {
         }
     }
 
-    /// The receiver whose verbs block on `executor`, after the calls submitted there before them.
+    /// The receiver whose verbs block on `executor`, contended while another call holds it.
     ///
     /// Rust-only.
     pub fn on<'index>(&'index self, executor: &'index Executor) -> On<'index, DenseIndex> {
@@ -1560,7 +1565,7 @@ impl DenseIndex {
     /// use usearch::*;
     ///
     /// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 4, ..DenseOptions::default() }, &[])?;
-    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let query = [0.0f32; 4];
     /// let call = index.deferred(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;
@@ -1573,7 +1578,7 @@ impl DenseIndex {
     /// use usearch::*;
     ///
     /// let index = DenseIndex::init_ram(&DenseOptions { dimensions: 4, ..DenseOptions::default() }, &[])?;
-    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let call = index.deferred(&executor).get::<f32>(Key::from(1u64), &mut arena)?;
     /// let vectors = call.wait()?;
@@ -2321,6 +2326,7 @@ impl Calling for DenseDescribe {
             cpu_class: unsafe { static_string(usearch_cpu_class_name(self.description.cpu_class)) },
             gpu_class: unsafe { static_string(usearch_gpu_class_name(self.description.gpu_class)) },
             shards_count: self.description.shards_count,
+            load_path: unsafe { static_string(usearch_load_path_name(self.description.load_path)) },
         })
     }
 }
@@ -3207,8 +3213,8 @@ mod tests {
 
     fn sequential_keys(count: usize) -> Vec<Key> { (0..count as u64).map(Key::from).collect() }
 
-    /// One executor per test, since an executor orders the calls submitted to it.
-    fn executor() -> Executor { Executor::for_ram(&[], None, 0, 0).expect("the executor must spawn") }
+    /// One executor per test, since an executor runs one call at a time.
+    fn executor() -> Executor { Executor::for_ram(&[], None, 0).expect("the executor must spawn") }
 
     fn empty_index(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<DenseIndex> {
         let options = DenseOptions {
@@ -3220,6 +3226,17 @@ mod tests {
         let index = DenseIndex::init_ram(&options, &[])?;
         index.reserve(1024)?;
         Ok(index)
+    }
+
+    /// An empty index, or `None` when this build leaves its quantization out.
+    fn empty_index_or_skip(dimensions: usize, metric: DenseMetric, quantization: Scalar) -> Result<Option<DenseIndex>> {
+        match empty_index(dimensions, metric, quantization) {
+            Err(error) if error.status == Status::Unsupported => {
+                eprintln!("skipped: this build leaves {quantization:?} out");
+                Ok(None)
+            }
+            built => built.map(Some),
+        }
     }
 
     fn populated_index(
@@ -3345,7 +3362,9 @@ mod tests {
             offset_of!(usearch_dense_index_description_t, shards_count),
             cpu_class + 8
         );
-        assert_eq!(size_of::<usearch_dense_index_description_t>(), cpu_class + 8 + word);
+        let load_path = offset_of!(usearch_dense_index_description_t, load_path);
+        assert_eq!(load_path, cpu_class + 8 + word);
+        assert_eq!(size_of::<usearch_dense_index_description_t>(), load_path + word);
     }
 
     #[test]
@@ -3414,9 +3433,8 @@ mod tests {
             Scalar::U4x2,
             Scalar::U1x8,
         ] {
-            let index = match empty_index(64, DenseMetric::Inner, quantization) {
-                Err(error) if error.status == Status::Unsupported => continue,
-                built => built?,
+            let Some(index) = empty_index_or_skip(64, DenseMetric::Inner, quantization)? else {
+                continue;
             };
             let described = index.describe()?;
             assert_eq!(described.metadata.dimensions, 64, "{quantization:?}");
@@ -3433,7 +3451,10 @@ mod tests {
             (DenseMetric::Hamming, Scalar::U1x8),
             (DenseMetric::Jaccard, Scalar::U1x8),
         ] {
-            let described = empty_index(64, metric, quantization)?.describe()?;
+            let Some(index) = empty_index_or_skip(64, metric, quantization)? else {
+                continue;
+            };
+            let described = index.describe()?;
             assert_eq!(described.metadata.metric, metric);
             assert_eq!(metric.to_string().parse(), Ok(metric), "the library spells it back");
         }
@@ -3749,7 +3770,9 @@ mod tests {
     #[test]
     fn packed_bit_rows_cross_as_one_byte_per_eight_dimensions() -> Result<()> {
         const DIMENSIONS: usize = 8;
-        let index = empty_index(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)?;
+        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)? else {
+            return Ok(());
+        };
         let stored = bit_rows(&[0b0000_1111, 0b1111_0000]);
         let keys = [Key::from(42u64), Key::from(43u64)];
         index.insert(keys, &rows(&stored, DIMENSIONS)?)?;
@@ -3770,7 +3793,9 @@ mod tests {
     #[test]
     fn gets_sub_byte_rows_at_their_logical_width() -> Result<()> {
         const DIMENSIONS: usize = 16;
-        let index = empty_index(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)?;
+        let Some(index) = empty_index_or_skip(DIMENSIONS, DenseMetric::Hamming, Scalar::U1x8)? else {
+            return Ok(());
+        };
         let key = Key::from(5u64);
         index.insert([key], &rows(&bit_rows(&[0b1010_1010, 0b0000_0101]), DIMENSIONS)?)?;
 
@@ -4336,6 +4361,9 @@ mod tests {
     fn reads_metadata_without_loading() -> Result<()> {
         const DIMENSIONS: usize = 16;
         let path = scratch_path("reads_metadata_without_loading");
+        if empty_index_or_skip(DIMENSIONS, DenseMetric::Euclidean, Scalar::I8)?.is_none() {
+            return Ok(());
+        }
         let (index, _, _) = populated_index(8, DIMENSIONS, DenseMetric::Euclidean, Scalar::I8)?;
         index.save(&path)?;
 
@@ -4688,7 +4716,7 @@ mod tests {
         let keys = sequential_keys(COUNT);
         let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
 
-        let executor = Executor::for_ram(&[], None, THREADS, 0)?;
+        let executor = Executor::for_ram(&[], None, THREADS)?;
         let receiver = index.on(&executor);
         let vectors = rows(&slab, DIMENSIONS)?;
         receiver.insert(&keys, &vectors)?;
@@ -4735,10 +4763,10 @@ mod tests {
         // The first half lands serially, so the reader below traverses a populated graph.
         index.insert(&keys[..HALF], &rows(&slab[..HALF * DIMENSIONS], DIMENSIONS)?)?;
 
-        // Calls on one executor run in order, so genuinely overlapping calls need one apiece -
+        // One call holds an executor at a time, so genuinely overlapping calls need one apiece -
         // the writer's and the reader's, on two threads sharing the handle.
-        let writer = Executor::for_ram(&[], None, THREADS, 0)?;
-        let reader = Executor::for_ram(&[], None, THREADS, 0)?;
+        let writer = Executor::for_ram(&[], None, THREADS)?;
+        let reader = Executor::for_ram(&[], None, THREADS)?;
         let known: HashSet<Key> = keys.iter().copied().collect();
         let strangers = AtomicUsize::new(0);
 
@@ -4801,7 +4829,7 @@ mod tests {
         let call = index.deferred(&executor).search(queries, WANTED, &mut arena)?;
         requires_send::<Deferred<'static, DenseSearch<'static, 'static, Matrix<f32>>>>();
         requires_send::<Matches<'static>>();
-        assert_eq!(call.status(), Err(Status::Deferred));
+        assert!(matches!(call.status(), Err(Status::Deferred) | Ok(())));
         let deferred = call.wait()?;
 
         let mut blocking_arena = Arena::new()?;
@@ -4827,12 +4855,14 @@ mod tests {
     fn a_leaked_deferred_call_keeps_its_arena_busy() -> Result<()> {
         use std::sync::atomic::AtomicBool;
 
+        static ENTERED: AtomicBool = AtomicBool::new(false);
         static RELEASED: AtomicBool = AtomicBool::new(false);
         const DIMENSIONS: usize = 8;
         let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
         let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
         // The handler holds the call until released, so it is still running when the arena is named again.
         let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
+            ENTERED.store(true, Ordering::Release);
             while !RELEASED.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -4846,6 +4876,9 @@ mod tests {
             ..DenseSearchConfig::from(3)
         };
         core::mem::forget(index.deferred(&executor).search(queries, config, &mut arena)?);
+        while !ENTERED.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
         assert!(matches!(
             index.get::<f32>(keys[0], &mut arena),
             Err(Error {
@@ -4858,9 +4891,65 @@ mod tests {
         Ok(())
     }
 
-    /// Awaiting a deferred call stays pending while it is not final and answers what `wait` would.
+    /// A call meeting a running one on its executor finishes contended without running, and the
+    /// executor serves the next call once the first is final.
     #[test]
-    fn an_awaited_call_is_pending_until_final() -> Result<()> {
+    fn a_running_call_holds_its_executor() -> Result<()> {
+        use std::sync::atomic::AtomicBool;
+
+        static ENTERED: AtomicBool = AtomicBool::new(false);
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+        const DIMENSIONS: usize = 8;
+        let (index, keys, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
+        // A deferred call borrows its handler for as long as it may run, so the gate is leaked.
+        let gate: &'static mut ProgressCallback<'static> = Box::leak(Box::new(|_, _| {
+            ENTERED.store(true, Ordering::Release);
+            while !RELEASED.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            ControlFlow::Continue(())
+        }));
+
+        let executor = executor();
+        let mut arena = Arena::new_in(&executor)?;
+        let config = DenseSearchConfig {
+            progress: Some(gate),
+            ..DenseSearchConfig::from(3)
+        };
+        let held = index.deferred(&executor).search(queries, config, &mut arena)?;
+        while !ENTERED.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            index.on(&executor).count(keys[0]),
+            Err(Error {
+                status: Status::Contended,
+                ..
+            })
+        ));
+        RELEASED.store(true, Ordering::Release);
+        assert_eq!(held.wait()?.query(0)?.keys.len(), 3);
+        assert_eq!(index.on(&executor).count(keys[0])?, 1);
+        Ok(())
+    }
+
+    /// A drain leaves idle threads in the mood it names, and the next call runs in either.
+    #[test]
+    fn a_drain_sets_the_mood() -> Result<()> {
+        let (index, keys, _) = populated_index(4, 4, DenseMetric::Angular, Scalar::BF16)?;
+        let executor = executor();
+        for mood in [Mood::Spinning, Mood::Parked] {
+            executor.drain(mood)?;
+            assert_eq!(index.on(&executor).count(keys[0])?, 1);
+        }
+        Ok(())
+    }
+
+    /// Polling an awaited deferred call alone finishes it, since pool thread 0 runs it in the
+    /// caller's place, and the answer is what `wait` would give.
+    #[test]
+    fn an_awaited_call_finishes_by_polling() -> Result<()> {
         use core::future::{Future, IntoFuture};
         use core::pin::pin;
         use core::task::{Context, Poll, Waker};
@@ -4872,10 +4961,10 @@ mod tests {
         let mut arena = Arena::new_in(&executor)?;
         let mut awaited = pin!(index.deferred(&executor).search(queries, 3, &mut arena)?.into_future());
         let mut context = Context::from_waker(Waker::noop());
-        assert!(awaited.as_mut().poll(&mut context).is_pending());
-        executor.drain(Mood::Parked)?;
-        let Poll::Ready(matches) = awaited.as_mut().poll(&mut context) else {
-            panic!("a drained call must be final");
+        let matches = loop {
+            if let Poll::Ready(matches) = awaited.as_mut().poll(&mut context) {
+                break matches;
+            }
         };
         assert_eq!(
             matches?.query(0),
@@ -4887,18 +4976,18 @@ mod tests {
         Ok(())
     }
 
-    /// Deferred calls in flight together each borrow their own arena, which their results borrow in turn.
+    /// Deferred calls running together each borrow an arena, which their results borrow in turn.
     #[test]
     fn deferred_calls_borrow_their_arenas() -> Result<()> {
         const DIMENSIONS: usize = 4;
         let (index, keys, slab) = populated_index(4, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let executor = executor();
-        let receiver = index.deferred(&executor);
+        // One call holds an executor at a time, so calls running together take one apiece.
+        let (finder, saver, counter) = (executor(), executor(), executor());
 
-        let (mut first, mut second) = (Arena::new_in(&executor)?, Arena::new_in(&executor)?);
-        let found = receiver.get::<f32>(keys[2], &mut first)?;
-        let buffer = receiver.save_buffer(&mut second)?;
-        let counted = receiver.count(keys[3])?;
+        let (mut first, mut second) = (Arena::new_in(&finder)?, Arena::new_in(&saver)?);
+        let found = index.deferred(&finder).get::<f32>(keys[2], &mut first)?;
+        let buffer = index.deferred(&saver).save_buffer(&mut second)?;
+        let counted = index.deferred(&counter).count(keys[3])?;
         assert!(close_rows(
             &flattened(found.wait()?.view()?),
             &slab[DIMENSIONS * 2..DIMENSIONS * 3]
@@ -4922,27 +5011,7 @@ mod tests {
 
         let executor = executor();
         let call = index.deferred(&executor).insert(sequential_keys(COUNT), vectors)?;
-        assert_eq!(call.status(), Err(Status::Deferred));
         drop(call);
-        assert_eq!(index.describe()?.size, COUNT);
-        Ok(())
-    }
-
-    /// A submission finding the executor's deferred table full is refused rather than waited for.
-    #[test]
-    fn a_full_deferred_table_answers_contended() -> Result<()> {
-        const DIMENSIONS: usize = 8;
-        const COUNT: usize = 16;
-        let index = empty_index(DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
-        let slab = seeded_rows(COUNT, DIMENSIONS, SEED);
-        let vectors = || Matrix::<f32>::from_slice(&slab, &[COUNT, DIMENSIONS]).unwrap();
-
-        let executor = Executor::for_ram(&[], None, 1, 1)?;
-        let receiver = index.deferred(&executor);
-        let first = receiver.insert(sequential_keys(COUNT), vectors())?;
-        let second = receiver.insert(sequential_keys(COUNT), vectors())?;
-        assert_eq!(second.status(), Err(Status::Contended));
-        first.wait()?;
         assert_eq!(index.describe()?.size, COUNT);
         Ok(())
     }

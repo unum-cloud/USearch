@@ -137,11 +137,11 @@ using row_kit_of = typename row_kit_for_cpu_class<cpu_class_>::type;
 
 #pragma region Fan Outs
 
-/** Runs @p per_task over @p tasks taken in ascending order by the executor's threads; a refused
- *  fan-out runs them all on the calling thread, since a dispensed entry must still land. */
+/** Runs @p per_task over @p tasks taken in ascending order by the executor's threads, answering the
+ *  fan-out's refusal rather than running them on one thread, which would hide a held executor. */
 template <template <typename> class atomic_ref_template_, typename per_task_type_>
-void drain_in_order(forkunion_executor_t& executor, std::size_t tasks, per_task_type_&& per_task) noexcept {
-    if (!tasks) return;
+status_t drain_in_order(forkunion_executor_t& executor, std::size_t tasks, per_task_type_&& per_task) noexcept {
+    if (!tasks) return status_t::success_k;
     // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(default_alignment_k) std::size_t cursor = 0;
     auto drain = [&](std::size_t thread, std::size_t) noexcept {
@@ -150,7 +150,7 @@ void drain_in_order(forkunion_executor_t& executor, std::size_t tasks, per_task_
              task = next.fetch_add(1, std::memory_order_relaxed))
             per_task(task, thread);
     };
-    if (failed(executor.for_threads(drain))) drain(0, 0);
+    return executor.for_threads(drain);
 }
 
 /** The metric a factory of @p make_metric_type_ builds over a thread's arena. */
@@ -244,24 +244,28 @@ expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_vi
         values.push_back_reserved(std::make_obj_using_allocator<value_t>(index.get_allocator()));
     }
     status_t built = status_t::success_k;
-    drain_in_order<indexes_type_::template atomic_ref>(
+    status_t const forked = drain_in_order<indexes_type_::template atomic_ref>(
         executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
             if (succeeded(typename indexes_type_::template atomic_ref<status_t>(built).load(std::memory_order_relaxed)))
                 keep_first_failure<indexes_type_::template atomic_ref>(built,
                                                                        build(entries, offset, values[offset], thread));
         });
+    if (failed(forked)) return {{}, forked};
     if (failed(built)) return {{}, built};
 
     auto [plan, plan_status] = index.plan_insert(count);
     if (failed(plan_status)) return {{}, plan_status};
     basic::keep_diverse_t const selector {connectivity};
     typename indexes_type_::insert_config_t const config {expansion};
-    drain_in_order<indexes_type_::template atomic_ref>(
-        executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
-            plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
-                        scratch.metrics[thread], scratch.traversals[thread], selector, config);
-            [[maybe_unused]] continuation_t const heard = ticks(offset);
-        });
+    if (status_t const inserted = drain_in_order<indexes_type_::template atomic_ref>(
+            executor, count,
+            [&](std::size_t offset, std::size_t thread) noexcept {
+                plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
+                            scratch.metrics[thread], scratch.traversals[thread], selector, config);
+                [[maybe_unused]] continuation_t const heard = ticks(offset);
+            });
+        failed(inserted))
+        return {{}, inserted};
     if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
     return {scratch.telemetry(), status_t::success_k};
 }
@@ -309,7 +313,7 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
                 status_t const ran = plan.run(steps[position], scratch.metrics[thread], scratch.traversals[thread],
                                               selector);
         };
-        if (failed(executor.for_threads(drain))) drain(0, 0);
+        if (status_t const forked = executor.for_threads(drain); failed(forked)) return forked;
         plan.taken = taken = 0;
         bool const following = plan.advance();
         // Progress moves once per tile, past the barrier, so a cancel resumes at the tile's merge;
@@ -412,7 +416,7 @@ expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t c
         predicate, scratch.round_capacity, executor,
         [&]<typename admits_of_type_>(admits_of_type_&& admits_of) noexcept {
             using admits_t = std::invoke_result_t<admits_of_type_&, std::size_t>;
-            drain_in_order<indexes_type_::template atomic_ref>(
+            status_t const forked = drain_in_order<indexes_type_::template atomic_ref>(
                 executor, count, [&](std::size_t query_index, std::size_t thread) noexcept {
                     if (failed(typename indexes_type_::template atomic_ref<status_t>(searched).load(
                             std::memory_order_relaxed)))
@@ -443,6 +447,7 @@ expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t c
                     if (ticks(query_index) == continuation_t::cancel_k)
                         keep_first_failure<indexes_type_::template atomic_ref>(searched, status_t::cancelled_k);
                 });
+            keep_first_failure<indexes_type_::template atomic_ref>(searched, forked);
         });
     if (failed(asked)) return {{}, asked};
     if (failed(searched)) return {{}, searched};
@@ -1111,6 +1116,9 @@ struct specialized_variant {
         if constexpr (requires { typed.index.live_shards_count(); })
             description.shards_count = typed.index.live_shards_count();
         else description.shards_count = typed.index.shards_count();
+        description.load_path = usearch_load_path_none_k;
+        if constexpr (requires { typed.index.loaded_through(); })
+            description.load_path = usearch_load_path_of(typed.index.loaded_through());
         bodies_t::describe(typed, description);
     }
     static status_t count(void* variant, usearch_key_t key, typename traits_t::key_stats_t& stats,

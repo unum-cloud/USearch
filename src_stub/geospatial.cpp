@@ -590,6 +590,7 @@ void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
         usearch_cpu_class_serial_k,
         usearch_gpu_class_unknown_k,
         index.shards(),
+        usearch_load_path_none_k,
     };
 }
 
@@ -969,12 +970,12 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     usearch_geospatial_index_handle_t& index = *arguments->index;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
-    if (reject_if(fu::standard_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
+    if (reject_if(serial_atomic_ref<u32_t>(cursor.pulling).fetch_test_and_set_bit(0, std::memory_order_acquire),
                   usearch_status_contended_k, "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     pull_walk(*arguments, cursor, chord_between, *arena, outcome);
-    fu::standard_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
+    serial_atomic_ref<u32_t>(cursor.pulling).clear_bits(1, std::memory_order_release);
 }
 
 void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) {

@@ -103,15 +103,15 @@ Every call reports through its `outcome` and names its `completion` in the same 
 A thread pool, a GPU stream or a remote server can serve the same verbs without changing a call site.
 
 Submission copies the argument struct, but everything it points to stays borrowed until the outcome is final.
-So many calls can be deferred at once, each with its own outcome and its own arena, which it holds until then:
+One call holds an executor at a time, so calls overlap by running on different executors, each with its own outcome and arena:
 
 ```c
-usearch_matches_view_t matches[4];
-usearch_outcome_t outcomes[4] = {{0}};
-for (size_t shard = 0; shard != 4; ++shard)
+usearch_matches_view_t matches[2];
+usearch_outcome_t outcomes[2] = {{0}};
+for (size_t shard = 0; shard != 2; ++shard)
     usearch_dense_search(&(usearch_dense_search_t) {
         .index = shards[shard],
-        .executor = executor,
+        .executor = executors[shard],
         .outcome = &outcomes[shard],
         .completion = usearch_completion_deferred_k,
         .count = 32,
@@ -119,7 +119,9 @@ for (size_t shard = 0; shard != 4; ++shard)
         .matches = &matches[shard],
         .arena = arenas[shard],
         .wanted = 10});
-for (size_t shard = 0; shard != 4; ++shard) usearch_outcome_wait(&outcomes[shard]);
+while (usearch_outcome_status(&outcomes[0]) == usearch_status_deferred_k ||
+       usearch_outcome_status(&outcomes[1]) == usearch_status_deferred_k)
+    do_other_work(); // polling alone finishes both
 ```
 
 The status reads `usearch_status_deferred_k` until the call is final, even for a call refused at submission.
@@ -127,18 +129,28 @@ Then the library stores the message and the final status with release ordering, 
 The caller reads it with acquire ordering: `usearch_outcome_status` polls and `usearch_outcome_wait` blocks on an atomic wait, both returning the status.
 Those two are the only safe readers of a deferred outcome, since the status word is atomic only by their contract.
 Never wait on a call's own outcome from inside its progress handler or predicate, since the call finishes only after they return.
-Executors own their streams, so a caller orders dependent calls by waiting on the first.
+A call ends in one order: its arena and the counts of the handles it names, then the pool, then the executor, then the message and the status.
+So a caller that reads success may resubmit on the same executor or free a handle at once.
 
-Each executor tracks its deferred calls in a fixed table of `deferred_limit` slots, set when it is created, zero taking a default.
-A deferred submission that finds the table full finishes at once with `usearch_status_contended_k`, so submitting never allocates, and blocking calls take no slot at all.
-Every `*_free` waits until each deferred call naming its handle is final, so a handle may be dropped at any moment.
+A call submitted while another holds the executor finishes at once with `usearch_status_contended_k`, and nothing queues, so submitting never allocates.
+Every `*_free` waits until each executor call naming its handle has ended, so a handle may be dropped at any moment, though never from a callback of a call naming it.
+Waits, drains and frees only wait: none of them runs another thread's call.
+
+## Inclusive and Exclusive Executors
+
+A caller-inclusive pool, a single thread or a WebAssembly build needs its caller to make progress, so a deferred call on it runs at submission and is final when the verb returns.
+A caller-exclusive pool, which `usearch_executor_for_ram` and `usearch_executor_for_nvme` spawn whenever they spawn more than one OS thread, delegates a deferred call to its own thread 0.
+That thread runs the call in the caller's place and forks the other threads as the caller would, so the call finishes while the caller does something else, one call per executor at a time.
+Progress handlers and predicates of a delegated call therefore run on the pool's threads.
+VRAM executors run every verb at submission, since each verb reads its device results back on the host before it ends.
+Together these let one manager thread in `int main()` overlap a RAM, an NVMe and a VRAM executor: it submits a deferred call to each and polls their outcomes.
 
 ## Executors
 
 An executor owns the threads or device streams that run calls, the traversal scratch they walk with, and the pinned bounce buffer staging passes through.
 One executor serves any number of indexes, of any quantization and metric, since its scratch is sized from geometry, grown to the widest asked of it, and kept between calls.
 A VRAM executor's `scratch_limit` caps each stream's run, which every call's walk scratch and outputs carve from, and a call needing more reports `usearch_status_out_of_memory_k`.
-Calls on one executor start in submission order, while a handle admits any number of concurrent callers: the executor orders, never the index.
+One call holds an executor at a time, while a handle admits any number of concurrent callers: the executor serializes, never the index.
 
 ```c
 int32_t const sockets[2] = {0, 1};
@@ -155,10 +167,10 @@ An executor's kind must match the residency of every handle it drives, and a mis
 
 A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, final when it returns whatever its `completion`, which suits size lookups and other short calls.
 The exception is a VRAM verb that takes an arena: that arena must be a GPU arena on the index's first device, and it serves only calls on the executor that made it.
-A blocking call on an executor runs after every earlier call finishes and before any later one starts, so callers wanting real parallelism give each thread its own executor.
-`usearch_executor_drain` waits for everything submitted before it, then sets the executor's idle mood: `usearch_mood_parked_k` lets idle threads sleep, `usearch_mood_spinning_k` keeps them hot.
-A blocking verb or a drain called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k` rather than waiting on itself.
-`usearch_executor_free` drains every call before it releases the threads; host arenas the executor made stay valid until freed, and GPU arenas it made must be freed before it.
+A second call on a held executor finishes `usearch_status_contended_k`, so callers wanting real parallelism give each thread its own executor.
+`usearch_executor_drain` waits until no call holds the executor, then sets its threads' mood until the next call: `usearch_mood_parked_k`, the default, lets idle threads sleep in the kernel, `usearch_mood_spinning_k` keeps them hot.
+A blocking verb called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k`, and so does a drain on the thread running that call's body; a drain from any other of its threads would wait on itself.
+`usearch_executor_free` waits out the call holding the executor before it releases the threads; host arenas the executor made stay valid until freed, and GPU arenas it made must be freed before it.
 
 ## Arenas
 
@@ -192,7 +204,7 @@ usearch_arena_free(arena);
 
 Any verb may reuse any arena of its residency, so a search and a get can share one, as long as the first call's views are not read after the second starts.
 To keep one call's outputs alive past the next, pass the next call another arena.
-An arena serves one call at a time: a blocking call borrows it, a deferred call holds it until final, and a second call naming it meanwhile finishes `usearch_status_contended_k`.
+An arena serves one call at a time: a call holds it until just before its final status, and a second call naming it meanwhile finishes `usearch_status_contended_k`.
 A `NULL` arena, or inputs pointing into the arena a call is about to rewind, refuse with `usearch_status_invalid_argument_k`, and a call that fails leaves its outputs `NULL`.
 A GPU arena grows, fills and frees on the first stream of the executor that made it, so it serves only calls on that executor, and any other executor, `NULL` included, is refused with `usearch_status_device_k`.
 Free a GPU arena before the executor that made it.
@@ -222,7 +234,7 @@ The statuses worth branching on:
 
 - `usearch_status_unsupported_k`: the verb is declared but this residency or build does not implement it, so no retry can help.
 - `usearch_status_read_only_k`: a mutating verb on a viewed handle.
-- `usearch_status_contended_k`: refused rather than waited for, like a full deferred table, an arena serving another call, an insertion meeting a refinement, absorption or clear of its index, or a second VRAM insertion beside the first.
+- `usearch_status_contended_k`: refused rather than waited for, like an executor or an arena serving another call, an insertion meeting a refinement, absorption or clear of its index, or a second VRAM insertion beside the first.
 - `usearch_status_cancelled_k`: a progress handler stopped the call, which published nothing.
 - `usearch_status_device_k`: an executor, arena or handle on another residency or device than the call needs, or a GPU arena named with another executor than the one that made it.
 - `usearch_status_invalid_argument_k`: a required pointer left `NULL`, inputs inside the arena the call rewinds, a name no table spells.
@@ -531,7 +543,7 @@ do {
 ```
 
 Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighbors in place and admits no overlapping search.
-Insertions never overlap a refinement: one in flight refuses it with `usearch_status_contended_k`, one arriving meanwhile is refused the same way and lands nothing, and so on VRAM is a save, which holds the handle the same way for its own duration.
+Insertions never overlap a refinement: one running refuses it with `usearch_status_contended_k`, one arriving meanwhile is refused the same way and lands nothing, and so on VRAM is a save, which holds the handle the same way for its own duration.
 Nothing waits, so a service schedules refinements between its insertion bursts and retries a refused call.
 
 A refinement that must continue where a cancel stopped is a handle the caller holds instead.
@@ -546,7 +558,7 @@ It reports the running totals, the nodes re-selected so far, those whose neighbo
 Donors are consumed and nulled as they go, so the array itself says which handles the caller still owns and must free, and a cancel stops only the closing refinement, answering `usearch_status_cancelled_k`.
 Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its nodes across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every node no earlier one links to.
 A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
-An insertion in flight on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
+An insertion running on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
 A VRAM-built donor joins a RAM index through a save and a load.
 
 `usearch_dense_split` is the inverse, emptying one index into `count` receivers, empty handles of its residency, scalar, class, metric, geometry and shard count.
@@ -810,11 +822,11 @@ The stand-in scans every entry exactly, keeps the doubles inserted, refuses ever
 - __Deferred calls report through the same outcome.__
   `usearch_outcome_status` polls and `usearch_outcome_wait` blocks, both with the acquire ordering the final store pairs with.
 - __No life of its own.__
-  Threads live only in executors and deferred calls only in each executor's fixed table; every `*_free` waits for the calls naming its handle first.
+  Threads live only in executors, and a deferred call only on its executor's thread 0; every `*_free` waits for the calls naming its handle first.
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; each call rewinds it, so the previous call's views go stale the moment the next one starts.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __One shape for every call.__
   Each verb takes one struct set by designator, so a call names only what it changes and the struct grows without breaking source.
 - __Failures are statuses.__

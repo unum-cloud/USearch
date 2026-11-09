@@ -52,7 +52,7 @@ _ = try index.on(executor).search(try .of(f32, &query, 4), 10, &arena, .{}); // 
 ## Receivers & Deferred Calls
 
 The receiver chooses where a verb runs and how it completes, and the verb stays the same.
-The index runs it on the calling thread, `index.on(executor)` blocks on an executor after every call submitted there before it, and `index.deferred(executor, &call)` submits it there into a `usearch.Deferred` you hold:
+The index runs it on the calling thread, `index.on(executor)` blocks on an executor, refused while another call holds it, and `index.deferred(executor, &call)` submits it there into a `usearch.Deferred` you hold:
 
 ```zig
 const here = try index.search(queries, 10, &arena, .{});               // the calling thread
@@ -85,24 +85,25 @@ Zig has no async keyword left to lean on, so a deferred call is waited on and no
 `deinit` waits the same way, and the slot can then hold another call.
 A `Deferred` has one owner: `wait` and `deinit` never run on two threads at once, while `status` reads from any.
 `message` answers the static detail of the final status, empty until the call is final and on success.
-A submission finding the executor's deferred table full finishes at once with `Error.Contended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `Error.Contended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread, WebAssembly or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
 A shape only the binding can check, like a key run longer than its rows, is refused before anything is submitted, so the submitting call itself fails and the slot holds nothing to `deinit`.
 
 ## Executors
 
 One executor serves any number of indexes, and its kind must match the residency their handles were built for.
-There is a constructor per C one, each taking a config of exactly what its C structure takes, and each ending with a `deferred_limit` sizing its table of deferred calls, where zero takes the default:
+There is a constructor per C one, each taking a config of exactly what its C structure takes:
 
 ```zig
-var sockets = try usearch.Executor.forRam(.{ .memory_domains = &.{ 0, 1 }, .threads = 0, .deferred_limit = 0 });
+var sockets = try usearch.Executor.forRam(.{ .memory_domains = &.{ 0, 1 }, .threads = 0 });
 var shared = try usearch.Executor.onPool(fork_union_pool, .{ .memory_domains = &.{0} }); // borrows a `fu_pool_t`
 var gpus = try usearch.Executor.forVram(.{ .devices = &.{ 0, 1 }, .streams = null, .scratch_limit = 0 });
 var drives = try usearch.Executor.forNvme(.{ .paths = &.{.of("/mnt/nvme0")}, .threads = 0 });
 ```
 
 Zero threads takes 7/8 of the cores, since full occupancy starves the ordered publication path; `forVram` takes no thread count at all, driving one stream per device from the calling thread, either its own or one of the CUDA streams you lend.
-`drain(mood)` waits for everything submitted before it, then lets the threads go `.parked` or stay `.spinning` once idle.
+`drain(mood)` waits until no call holds the executor, then lets the threads go `.parked` or stay `.spinning` once idle.
 
 ## Arenas
 
@@ -494,7 +495,7 @@ std.debug.print("{d} of {d} entries reachable\n", .{ reachability.reachable, rea
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; each view carries the arena's generation, and reads after the arena serves another call answer `Error.Uninitialized`.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Layouts are declared, not translated.__
   An `extern struct` already has the ABI's layout and an `enum(c_int)` its width, so no call site casts what a translated header would hand back as `c_uint` or `?*anyopaque`.
 - __Callbacks are `comptime` functions.__

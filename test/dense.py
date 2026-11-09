@@ -18,7 +18,7 @@ import weakref
 from collections.abc import Callable
 from itertools import pairwise
 from operator import attrgetter
-from threading import Thread
+from threading import Event, Thread
 
 import numpy as np
 import numpy.typing as npt
@@ -183,7 +183,7 @@ def test_ram_executor_takes_memory_domain_ordinals():
 
 def test_drain_takes_a_mood():
     """The idle mood is a `Mood`, and neither a name nor another integer is guessed at."""
-    pool = Executor.for_ram(threads=1, deferred_limit=4)
+    pool = Executor.for_ram(threads=1)
     pool.drain(Mood.SPINNING)
     pool.drain()
     with pytest.raises(TypeError):
@@ -332,7 +332,6 @@ def test_receivers_answer_alike(executor):
     on_executor = keys_to_integers(index.on(executor).search(vectors[:4], 5, Arena(executor)).keys)
     call = index.deferred(executor).search(vectors[:4], 5, Arena(executor))
     assert isinstance(call, Deferred)
-    assert call.status == Status.DEFERRED
     deferred = keys_to_integers(call.wait().keys)
     assert np.array_equal(on_caller, on_executor)
     assert np.array_equal(on_caller, deferred)
@@ -343,10 +342,10 @@ def test_deferred_call_is_deferred_until_waited(executor):
     index = DenseIndex.init_ram(16, DenseMetric.ANGULAR, Scalar.BF16)
     index.reserve(8)
     call = index.deferred(executor).insert(np.arange(8), random_vectors(8, 16))
-    assert call.status is Status.DEFERRED
-    assert repr(call) == "Deferred(status=deferred)"
+    assert call.status in (Status.DEFERRED, Status.SUCCESS), "pool thread 0 may finish it before this reads"
     assert call.wait() is None
     assert call.status is Status.SUCCESS
+    assert repr(call) == "Deferred(status=success)"
     assert call.wait() is None, "a final call answers as many times as it is asked"
     assert len(index) == 8
 
@@ -357,7 +356,6 @@ def test_deferred_call_owns_its_inputs(executor):
     index.reserve(4)
     rows = random_vectors(4, 16)
     call = index.deferred(executor).insert(list(range(4)), rows.copy())
-    assert call.status == Status.DEFERRED
     call.wait()
     assert np.allclose(np.asarray(index.get(2, Arena())), rows[2:3], rtol=BF16_EPSILON, atol=BF16_EPSILON)
 
@@ -368,7 +366,7 @@ def test_deferred_call_raises_at_wait(executor):
     with pytest.raises(ShapeMismatchError):
         index.deferred(executor).insert([1, 2, 3], vectors[:2])
     call = index.deferred(executor).search(vectors[:1, :4], 1, Arena(executor))
-    assert call.status == Status.DEFERRED
+    assert call.status in (Status.DEFERRED, Status.SHAPE_MISMATCH)
     for _ in range(2):
         with pytest.raises(ShapeMismatchError) as raised:
             call.wait()
@@ -382,32 +380,35 @@ def test_deferred_call_awaits(executor):
 
     async def search() -> Matches:
         call = index.deferred(executor).search(vectors[:2], 3, Arena(executor))
-        assert call.status == Status.DEFERRED
         return await call
 
     matches = asyncio.run(search())
     assert keys_to_integers(matches.keys)[:, 0].tolist() == [0, 1]
 
 
-def test_blocking_call_runs_after_earlier_deferred_ones(executor):
-    """Calls on one executor start in submission order, so a blocking one sees what a deferred one wrote."""
+def test_polling_alone_finishes_a_deferred_call(executor):
+    """Pool thread 0 runs a deferred call in the caller's place, and a caller reading it final may resubmit at once."""
     index = DenseIndex.init_ram(8, DenseMetric.ANGULAR, Scalar.BF16)
     index.reserve(4)
     call = index.deferred(executor).insert([7], random_vectors(1, 8))
-    assert index.on(executor).count(7) == 1
+    while call.status is Status.DEFERRED:
+        pass
     assert call.status is Status.SUCCESS
+    assert index.on(executor).count(7) == 1
 
 
-def test_full_deferred_table_answers_contended():
-    """A submission finding the deferred table full finishes `CONTENDED` at once, and the earlier call still runs."""
+def test_held_executor_answers_contended():
+    """A call finding the executor held finishes `CONTENDED` at once, as nothing queues, and the holder still runs."""
     index, vectors = build_index(16, 8, Executor.for_ram(threads=1))
-    pool = Executor.for_ram(threads=1, deferred_limit=1)
-    first = index.deferred(pool).count(3)
+    pool = Executor.for_ram(threads=2)
+    released = Event()
+    first = index.deferred(pool).search(vectors[:1], 1, Arena(pool), predicate=lambda key: released.wait(10))
     second = index.deferred(pool).count(4)
     assert second.status is Status.CONTENDED
     with pytest.raises(ContendedError):
         second.wait()
-    assert first.wait() == 1
+    released.set()
+    assert keys_to_integers(first.wait().keys)[0, 0] == 0
 
 
 def test_dropping_an_unfinished_deferred_waits(executor):
@@ -415,7 +416,6 @@ def test_dropping_an_unfinished_deferred_waits(executor):
     index = DenseIndex.init_ram(8, DenseMetric.ANGULAR, Scalar.BF16)
     index.reserve(4)
     call = index.deferred(executor).insert([1, 2], random_vectors(2, 8))
-    assert call.status is Status.DEFERRED
     del call
     assert len(index) == 2
 
@@ -438,12 +438,15 @@ def test_deferred_call_borrows_its_arena(executor):
     """A deferred call borrows its arena as a blocking one does, refusing a second call until it is final."""
     index, vectors = build_index(4, 8, executor)
     arena = Arena(executor)
-    call = index.deferred(executor).get(1, arena)
-    assert call.status == Status.DEFERRED
+    entered, released = Event(), Event()
+    call = index.deferred(executor).search(
+        vectors[:1], 1, arena, predicate=lambda key: (entered.set(), released.wait(10))[1]
+    )
+    assert entered.wait(10), "the call holds its arena once its body runs on pool thread 0"
     with pytest.raises(ContendedError):
         index.get(2, arena)
-    rows = call.wait()
-    assert np.allclose(np.asarray(rows), vectors[1:2], rtol=BF16_EPSILON, atol=BF16_EPSILON)
+    released.set()
+    assert keys_to_integers(call.wait().keys)[0, 0] == 0
     assert np.asarray(index.get(2, arena)).shape == (1, 8)
 
 
@@ -721,7 +724,7 @@ def test_arrow_columns_read_as_pyarrow_writes_them(executor):
     compacted = pa.array(matches)
     assert compacted.type == pa.large_list(compacted.type.value_field)
     assert compacted.offsets.to_pylist() == [0, 2, 4]
-    assert pa.array(matches.distances).type == pa.list_(pa.float64(), 2)
+    assert pa.array(matches.distances).type == pa.list_(pa.field("item", pa.float64(), nullable=False), 2)
 
 
 def test_search_reuses_one_arena(executor):

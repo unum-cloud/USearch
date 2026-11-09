@@ -43,7 +43,7 @@ export enum Status {
   Uninitialized = "uninitialized",
   /** The request contradicts a frozen configuration, like re-reserving with another geometry. */
   ConfigMismatch = "config-mismatch",
-  /** The call was refused rather than waited for, like a submission to a full deferred table. */
+  /** The call was refused rather than waited for, like a submission to a held executor. */
   Contended = "contended",
   /** A progress handler asked the operation to stop; it published nothing. */
   Cancelled = "cancelled",
@@ -360,24 +360,20 @@ export function crossing(rows: RowsView | Vector): CompiledRows {
   return [view.data, view.rows, view.columns, view.stride, scalarCodes[view.scalar]];
 }
 
-/** Where the host threads of a RAM executor are placed, how many there are, and how many deferred calls it tracks. */
+/** Where the host threads of a RAM executor are placed, and how many there are. */
 export interface ExecutorForRamConfig {
   /** NUMA node IDs the workers are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
   /** Workers to spawn; absent takes 7/8 of the cores the domains carry. */
   threads?: number;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
   /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
 
-/** Where the borrowed pool of a RAM executor is placed, and how many deferred calls it tracks. */
+/** Where the borrowed pool of a RAM executor is placed. */
 export interface ExecutorOnPoolConfig {
   /** NUMA node IDs of the indexes it will drive; absent derives every node. */
   memoryDomains?: number[];
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
   /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
@@ -390,8 +386,6 @@ export interface ExecutorForVramConfig {
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as geometry asks. */
   scratchLimit?: number;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
   /** The GPU class to dispatch as by its canonical name; absent dispatches as the devices. */
   gpuClass?: string;
 }
@@ -402,8 +396,6 @@ export interface ExecutorForNvmeConfig {
   paths?: string[];
   /** Workers to spawn, one submission ring apiece; absent derives from the devices' queue capabilities. */
   threads?: number;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
   /** The CPU class to dispatch as by its canonical name; absent dispatches as the machine. */
   cpuClass?: string;
 }
@@ -415,13 +407,13 @@ export interface ExecutorForNvmeConfig {
  *  line that spawns it. The collector frees it eventually; `free` joins the workers now. */
 export interface Executor extends Disposable {
   /**
-   *  Waits for every call submitted to this executor so far, then idles in `mood`.
+   *  Waits until no call holds this executor, then idles in `mood`.
    *
    *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood?: Mood): void;
 
-  /** Runs every deferred call and joins the workers now; a freed executor refuses every later
+  /** Waits out the call holding it and joins the workers now; a freed executor refuses every later
    *  call, and a second `free` does nothing. Refuses with {@link Status.Contended} while a GPU
    *  arena made on it is live. */
   free(): void;
@@ -432,7 +424,7 @@ export interface ExecutorConstructor {
   /**
    *  Spawns host worker threads for a RAM-resident index.
    *
-   *  @param config - The NUMA nodes, the thread count and the deferred limit.
+   *  @param config - The NUMA nodes and the thread count.
    *  @returns The pool, which must outlive every call it runs.
    */
   forRam(config?: ExecutorForRamConfig): Executor;
@@ -441,7 +433,7 @@ export interface ExecutorConstructor {
    *  Borrows a caller's thread pool for a RAM-resident index, keeping its lender's mood.
    *
    *  @param pool - The pool's address; it must outlive the executor.
-   *  @param config - The NUMA nodes and the deferred limit.
+   *  @param config - The NUMA nodes.
    *  @returns The executor over the borrowed pool.
    */
   onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
@@ -449,7 +441,7 @@ export interface ExecutorConstructor {
   /**
    *  Opens one stream per device for a VRAM-resident index, driven from a single host thread.
    *
-   *  @param config - The devices, borrowed streams, scratch ceiling and deferred limit.
+   *  @param config - The devices, borrowed streams and scratch ceiling.
    *  @returns The streams, which must outlive every call they run.
    */
   forVram(config?: ExecutorForVramConfig): Executor;
@@ -457,7 +449,7 @@ export interface ExecutorConstructor {
   /**
    *  Opens one submission ring per worker for an NVMe-resident index.
    *
-   *  @param config - The device or directory paths, the thread count and the deferred limit.
+   *  @param config - The device or directory paths and the thread count.
    *  @returns The pool, which must outlive every call it runs.
    */
   forNvme(config?: ExecutorForNvmeConfig): Executor;

@@ -617,7 +617,7 @@ USEARCH_EXPORT void usearch_geospatial_view_nvme(usearch_geospatial_view_nvme_t*
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
  *  no outcome.
- *  Waits until every deferred call naming the handle is final. */
+ *  Waits out every executor call naming the handle; never call it from their callbacks. */
 USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index);
 
 /** The arguments of @c usearch_geospatial_reserve. */
@@ -1474,7 +1474,7 @@ typedef struct usearch_geospatial_cursor_next_t {
 USEARCH_EXPORT void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments);
 
 /** Releases the cursor; @c NULL is safe.
- *  Waits until every deferred call naming the handle is final. */
+ *  Waits out every executor call naming the handle; never call it from their callbacks. */
 USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor);
 
 /** The arguments of @c usearch_geospatial_sample. */
@@ -1761,6 +1761,9 @@ typedef struct usearch_geospatial_index_description_t {
     /** Live shards, each a graph of its own; a fresh index has one per memory domain or device it
      *  was placed on. */
     size_t shards_count;
+
+    /** How the last load from a path read the parts onto the devices. */
+    usearch_load_path_t load_path;
 } usearch_geospatial_index_description_t;
 
 /** The arguments of @c usearch_geospatial_describe. */

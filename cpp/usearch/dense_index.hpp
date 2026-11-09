@@ -116,8 +116,7 @@ class executor_t {
     }
 
     /**
-     *  Waits for every call submitted before the drain began, then sets the mood the executor
-     *  adopts whenever it next goes idle.
+     *  @brief Waits until no call holds the executor, then sets its threads' idle mood.
      *
      *  @par Statuses:
      *  - @c usearch_status_contended_k A call running on the executor holds it, as for a drain from

@@ -113,7 +113,7 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime CONFIG_MISMATCH = Self(13)
     """The request contradicts an already-frozen configuration."""
     comptime CONTENDED = Self(14)
-    """The call was refused rather than waited for, like a submission to a full deferred table."""
+    """The call was refused rather than waited for, like a submission to an executor another call holds."""
     comptime CANCELLED = Self(15)
     """A progress handler stopped the operation; it published nothing."""
     comptime UNSUPPORTED = Self(16)
@@ -465,9 +465,9 @@ struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
     var code: c_int
     """The raw `usearch_mood_t` value the ABI exchanges."""
-    comptime PARKED = Self(1)
-    """Idle threads sleep; the next call pays a wake-up."""
-    comptime SPINNING = Self(2)
+    comptime PARKED = Self(0)
+    """Idle threads sleep; the next call pays a wake-up. The default."""
+    comptime SPINNING = Self(1)
     """Idle threads stay hot, trading power for the next call's latency."""
 
 
@@ -1032,6 +1032,9 @@ comptime NameOf = def(c_int) thin abi("C") -> Optional[CString]
 comptime FromName = def(BytesView[ImmUntrackedOrigin]) thin abi("C") -> c_int
 """The `_from_name` family: reads a spelling back into its enumerator."""
 
+comptime FromNameStatus = def(BytesView[ImmUntrackedOrigin], Pointer[c_int, MutAnyOrigin]) thin abi("C") -> c_int
+"""The `_from_name` readers that answer a status, writing the enumerator through their pointer."""
+
 comptime ExecutorForRam = Verb[ExecutorForRamArguments]
 """`usearch_executor_for_ram`."""
 comptime ExecutorOnPool = Verb[ExecutorOnPoolArguments]
@@ -1238,7 +1241,6 @@ struct ExecutorForRamArguments(ImplicitlyCopyable):
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var threads: c_size_t
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1249,7 +1251,6 @@ struct ExecutorOnPoolArguments(ImplicitlyCopyable):
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var pool: Address
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1261,7 +1262,6 @@ struct ExecutorForVramArguments(ImplicitlyCopyable):
     var vram: VramOptions[ImmUntrackedOrigin]
     var streams: Address
     var scratch_limit: c_size_t
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1272,7 +1272,6 @@ struct ExecutorForNvmeArguments(ImplicitlyCopyable):
     var outcome: Pointer[Outcome, MutUntrackedOrigin]
     var nvme: NvmeOptions[ImmUntrackedOrigin]
     var threads: c_size_t
-    var deferred_limit: c_size_t
     var nvme_class: NVMeClass
 
 
@@ -1314,8 +1313,11 @@ struct Executor:
 
     `Executor(library)` owns nothing: every verb handed it runs on the calling thread -
     single-threaded on RAM, on the handle's device and default stream on VRAM. The spawning
-    constructors fix a kind that must match the residency of every handle they drive. Calls on one
-    executor start in submission order, so threads that genuinely overlap take one apiece.
+    constructors fix a kind that must match the residency of every handle they drive. One call holds
+    an executor at a time, and a second finding it held finishes `Status.CONTENDED`, as nothing
+    queues, so threads that genuinely overlap take one apiece. A deferred call on a caller-exclusive
+    pool runs on the pool's thread 0, so polling alone finishes it, while a single thread or a VRAM
+    executor runs it at submission.
     """
 
     var library: Library
@@ -1347,12 +1349,7 @@ struct Executor:
     @staticmethod
     def for_ram[
         ram_origin: ImmOrigin, //
-    ](
-        library: Library,
-        ram: RamOptions[ram_origin] = RamOptions(),
-        threads: Int = 0,
-        deferred_limit: Int = 0,
-    ) raises Error -> Self:
+    ](library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0) raises Error -> Self:
         """Spawns host workers for RAM-resident indexes. Calls `usearch_executor_for_ram`.
 
         Passing the very options the indexes were built with is what makes compute and memory
@@ -1365,7 +1362,6 @@ struct Executor:
             library: The loaded engine, kept so the shared object stays mapped.
             ram: The same options the indexes were initialized with; copied, not borrowed.
             threads: Worker threads; zero takes 7/8 of the cores those domains carry.
-            deferred_limit: Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
 
         Returns:
             An executor that may drive RAM-resident handles and no others.
@@ -1383,7 +1379,6 @@ struct Executor:
             outcome.unsafe_origin_cast[MutUntrackedOrigin](),
             ram.arguments(),
             c_size_t(threads),
-            c_size_t(deferred_limit),
         )
         library.symbols().executor_for_ram(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_ram")
@@ -1395,12 +1390,7 @@ struct Executor:
     @staticmethod
     def on_pool[
         ram_origin: ImmOrigin, //
-    ](
-        library: Library,
-        pool: Address,
-        ram: RamOptions[ram_origin] = RamOptions(),
-        deferred_limit: Int = 0,
-    ) raises Error -> Self:
+    ](library: Library, pool: Address, ram: RamOptions[ram_origin] = RamOptions()) raises Error -> Self:
         """Schedules onto a borrowed ForkUnion pool, so several libraries share one set of threads.
         Calls `usearch_executor_on_pool`.
 
@@ -1411,7 +1401,6 @@ struct Executor:
             library: The loaded engine, kept so the shared object stays mapped.
             pool: A live ForkUnion `fu_pool_t`, which must outlive the executor.
             ram: The same options the indexes were initialized with; copied, not borrowed.
-            deferred_limit: Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
 
         Returns:
             An executor that may drive RAM-resident handles and no others.
@@ -1429,7 +1418,6 @@ struct Executor:
             outcome.unsafe_origin_cast[MutUntrackedOrigin](),
             ram.arguments(),
             pool,
-            c_size_t(deferred_limit),
         )
         library.symbols().executor_on_pool(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_on_pool")
@@ -1441,12 +1429,7 @@ struct Executor:
     @staticmethod
     def for_nvme[
         nvme_origin: ImmOrigin, //
-    ](
-        library: Library,
-        nvme: NvmeOptions[nvme_origin] = NvmeOptions(),
-        threads: Int = 0,
-        deferred_limit: Int = 0,
-    ) raises Error -> Self:
+    ](library: Library, nvme: NvmeOptions[nvme_origin] = NvmeOptions(), threads: Int = 0) raises Error -> Self:
         """Spawns host workers for NVMe-resident indexes, one submission ring apiece.
         Calls `usearch_executor_for_nvme`.
 
@@ -1460,7 +1443,6 @@ struct Executor:
             library: The loaded engine, kept so the shared object stays mapped.
             nvme: The same options the indexes were initialized with; copied, not borrowed.
             threads: Worker threads; zero derives from the devices' queue capabilities.
-            deferred_limit: Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
 
         Returns:
             An executor that may drive NVMe-resident handles and no others.
@@ -1478,7 +1460,6 @@ struct Executor:
             outcome.unsafe_origin_cast[MutUntrackedOrigin](),
             nvme.arguments(),
             c_size_t(threads),
-            c_size_t(deferred_limit),
             NVMeClass.UNKNOWN,
         )
         library.symbols().executor_for_nvme(arguments.unsafe_origin_cast[MutAnyOrigin]())
@@ -1496,7 +1477,6 @@ struct Executor:
         vram: VramOptions[vram_origin] = VramOptions(),
         streams: Address = NULL_ADDRESS,
         scratch_limit: Int = 0,
-        deferred_limit: Int = 0,
     ) raises Error -> Self:
         """Opens one submission stream on every named device, all driven by the calling thread.
         Calls `usearch_executor_for_vram`.
@@ -1512,7 +1492,6 @@ struct Executor:
             vram: The same options the indexes were initialized with; copied, not borrowed.
             streams: Borrowed CUDA streams, one per device in `vram` order; `NULL_ADDRESS` creates its own.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as geometry asks.
-            deferred_limit: Deferred calls it tracks at once, sizing its deferred table; zero takes a default.
 
         Returns:
             An executor that may drive VRAM-resident handles and no others.
@@ -1531,7 +1510,6 @@ struct Executor:
             vram.arguments(),
             streams,
             c_size_t(scratch_limit),
-            c_size_t(deferred_limit),
         )
         library.symbols().executor_for_vram(arguments.unsafe_origin_cast[MutAnyOrigin]())
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_executor_for_vram")
@@ -1541,11 +1519,10 @@ struct Executor:
         )
 
     def drain(self, mood: Mood = Mood.PARKED) raises Error:
-        """Waits for every call submitted before the drain, then adopts `mood` whenever it next idles.
+        """Waits until no call holds the executor, then adopts `mood` until the next call.
         Calls `usearch_executor_drain`.
 
-        An executor without threads of its own holds a deferred call until its wait, the next drain
-        or blocking call, or the free of a handle it names, so this runs every call it still holds.
+        It only waits, never runs a call itself.
 
         Args:
             mood: What the threads or streams do once idle; the last drain wins.
@@ -1851,9 +1828,9 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     same way, so nothing the engine still writes is ever freed under it. The origins keep the index,
     the executor, the arena and every borrowed input alive for as long as this is.
 
-    An executor without threads of its own holds a deferred call until its wait, its executor's
-    next drain or blocking call, or the free of a handle it names, so a `wait` - or the last use of
-    the `Deferred`, which Mojo destroys at once - runs it there.
+    A caller-exclusive pool runs a deferred call on its own thread 0, so polling alone finishes it,
+    while an executor without threads of its own runs it at submission; a `wait` - or the last use
+    of the `Deferred`, which Mojo destroys at once - only waits.
 
     Parameters:
         C: The verb's crossing, which names the result.

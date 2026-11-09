@@ -569,11 +569,14 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::insert(usearch_k
         identities.push_back_reserved(uuid_of(key_at(keys, offset)));
         values.push_back_reserved(value_t {});
     }
-    drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
-        executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
-            f64_t const ground = terrain.ground_metres(observations[offset], sights[thread]);
-            values[offset] = us::geospatial::to_earth_observation(geodetic_of(observations[offset]), ground);
-        });
+    if (status_t const placed = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            executor, count,
+            [&](std::size_t offset, std::size_t thread) noexcept {
+                f64_t const ground = terrain.ground_metres(observations[offset], sights[thread]);
+                values[offset] = us::geospatial::to_earth_observation(geodetic_of(observations[offset]), ground);
+            });
+        failed(placed))
+        return {{}, placed};
     u32_t deviation = 0;
     for (value_t const& value : values) deviation = max_of<u32_t>(deviation, value.deviation_metres);
 
@@ -581,12 +584,15 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::insert(usearch_k
     if (failed(plan_status)) return {{}, plan_status};
     us::geospatial::surface_keep_octants_t const selector {geometry.connectivity};
     typename index_t::insert_config_t const config {breadth};
-    drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
-        executor, count, [&](std::size_t offset, std::size_t thread) noexcept {
-            plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
-                        scratch.metrics[thread], scratch.traversals[thread], selector, config);
-            [[maybe_unused]] continuation_t const heard = ticks(offset);
-        });
+    if (status_t const inserted = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            executor, count,
+            [&](std::size_t offset, std::size_t thread) noexcept {
+                plan.insert(offset, to_writable_span(values).subspan(offset, 1), to_span(identities).subspan(offset, 1),
+                            scratch.metrics[thread], scratch.traversals[thread], selector, config);
+                [[maybe_unused]] continuation_t const heard = ticks(offset);
+            });
+        failed(inserted))
+        return {{}, inserted};
     // Every shard's range is kept before the plan publishes and forgets them; a range the buffer
     // cannot keep goes undrawn, and the batch still publishes, as its entries are already inserted.
     growing_buffer<inserted_range_t, thread_allocator_t> ranges {caller};
@@ -612,7 +618,7 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, io
                                                               executor_t& executor) noexcept {
     std::size_t const draws = long_links();
     status_t linked = status_t::success_k;
-    drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+    status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
         executor, nodes.size(), [&](std::size_t position, std::size_t thread) noexcept {
             node_id_t const node = static_cast<node_id_t>(nodes.first + position);
             splitmix64_t generator = seeded_stream(static_cast<u64_t>(node));
@@ -620,7 +626,7 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, io
                                            us::geospatial::draw_long_links(shard, node, draws, scratch.metrics[thread],
                                                                            scratch.traversals[thread], generator));
         });
-    return linked;
+    return failed(forked) ? forked : linked;
 }
 
 template <cpu_class_t cpu_class_>
@@ -673,7 +679,7 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
     bool const scanning = search.traversal == traversal_t::scan_k;
     status_t const asked = with_key_predicates<scored_node_t>(
         predicate, scratch.round_capacity, executor, [&](auto&& admits_of) noexcept {
-            drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
                 executor, query_batch.observations.size(), [&](std::size_t query_index, std::size_t thread) noexcept {
                     if (failed(atomic_ref<status_t>(searched).load(std::memory_order_relaxed))) return;
                     line_of_sight_buffers_t& sight = sights[thread];
@@ -700,6 +706,7 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
                     if (ticks(query_index) == continuation_t::cancel_k)
                         keep_first_failure<atomic_ref>(searched, status_t::cancelled_k);
                 });
+            keep_first_failure<atomic_ref>(searched, forked);
         });
     if (failed(asked)) return {{}, asked};
     if (failed(searched)) return {{}, searched};
@@ -783,7 +790,7 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
         predicate, scratch.round_capacity, executor,
         [&]<typename admits_of_type_>(admits_of_type_&& admits_of) noexcept {
             using admits_t = std::invoke_result_t<admits_of_type_&, std::size_t>;
-            drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
+            status_t const forked = drain_in_order<atomic_ref_for_cpu_class<cpu_class_>::template type>(
                 executor, count, [&](std::size_t query_index, std::size_t thread) noexcept {
                     if (failed(atomic_ref<status_t>(walked).load(std::memory_order_relaxed))) return;
                     within_share_t& share = shares[thread];
@@ -830,6 +837,7 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
                     if (ticks(query_index) == continuation_t::cancel_k)
                         keep_first_failure<atomic_ref>(walked, status_t::cancelled_k);
                 });
+            keep_first_failure<atomic_ref>(walked, forked);
         });
     if (failed(asked)) return {{}, asked};
     if (failed(walked)) return {{}, walked};

@@ -531,7 +531,7 @@ struct ram_indexes {
                 shard_index.assign_key_(target.node, keys[task]);
                 shard_index.wire_(target.node, rows, task, traversals[thread], config_);
             };
-            drain_in_order_(count, insert_row);
+            if (status_t const drained = drain_in_order_(count, insert_row); failed(drained)) return drained;
             inserted_entries_ += count;
             for (traversal_context_t const& traversal : traversals) {
                 spent_.visited_members += traversal.visited_members;
@@ -601,12 +601,11 @@ struct ram_indexes {
         }
 
         /** Runs @p per_row over @p rows rows taken in ascending order by the executor's threads, so
-         *  a row's walk finds the rows of its range dispensed ahead of it mostly published; a
-         *  refused fan-out runs them all on the calling thread, since a dispensed row must still be
-         *  placed in order. */
+         *  a row's walk finds the rows of its range dispensed ahead of it mostly published. A
+         *  refused fan-out is answered, as one thread running them would hide a held executor. */
         template <typename per_row_type_>
-        void drain_in_order_(std::size_t rows, per_row_type_& per_row) noexcept {
-            if (!rows) return;
+        status_t drain_in_order_(std::size_t rows, per_row_type_& per_row) noexcept {
+            if (!rows) return status_t::success_k;
             // Every row bumps it, so it takes its own line, away from the locals every thread reads.
             alignas(default_alignment_k) std::size_t cursor = 0;
             auto drain = [&](std::size_t thread, std::size_t) noexcept {
@@ -615,7 +614,7 @@ struct ram_indexes {
                      row = next.fetch_add(1, std::memory_order_relaxed))
                     per_row(row, thread);
             };
-            if (failed(executor_->for_threads(drain))) drain(0, 0);
+            return executor_->for_threads(drain);
         }
 
         /** Every shard's capacity claim from the open shard generation's first in placement order,

@@ -72,7 +72,7 @@ import cloud.unum.usearch.Types.Scalar;
 public class Main {
     public static void main(String[] arguments) {
         DenseOptions options = new DenseOptions().dimensions(3).metric(DenseMetric.ANGULAR).quantization(Scalar.BF16);
-        try (Executor pool = Executor.forRam(new int[0], null, 0, 0);
+        try (Executor pool = Executor.forRam(new int[0], null, 0);
                 Arena arena = new Arena(pool);
                 DenseIndex index = DenseIndex.initRam(options, new int[0])) {
 
@@ -112,7 +112,8 @@ try (Arena arena = new Arena(pool);
 The first `join` frees the outcome and keeps what it answered or raised, so a later `status` or `join` repeats it; only a closed `Deferred` raises `IllegalStateException`.
 Closing an unfinished `Deferred` waits for the call before freeing what it lent, so a native slab lent to one must stay open until then.
 Dropping one never blocks the collector: what it lent stays reachable until the call is final, and only then is it freed.
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes with `Status.CONTENDED`.
+One call holds an executor at a time, so a second call finding it held finishes with `Status.CONTENDED`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling `status` alone finishes it, and its progress handler and predicate run on the pool's threads; a single thread or a VRAM executor runs it at submission.
 Calls depending on each other are ordered by joining the first before submitting the second, since no call carries an ordering field.
 
 ## Executors
@@ -122,14 +123,14 @@ Keeping them apart is what lets one pool serve several indexes, and what makes t
 Its residency must match the residency of every handle it drives.
 The index itself runs a call on the calling thread instead: single-threaded on RAM, on the handle's device and default stream on VRAM.
 
-There is one factory per C constructor, and each takes every argument its C twin takes, the last of them the `deferredLimit` sizing its table of deferred calls, where zero takes the default.
+There is one factory per C constructor, and each takes every argument its C twin takes.
 
 ```java
-Executor.forRam(new int[] {0, 1}, null, 16, 0);                        // two NUMA nodes, sixteen workers
-Executor.forRam(new int[0], CPUClass.INTEL_HASWELL, 0, 0);             // waiters and atomics of one class
-Executor.onPool(forkUnionPool, new int[0], null, 0);                   // a thread pool the caller already runs
-Executor.forVram(new int[] {0, 1, 2, 3}, null, new MemorySegment[0], 0, 0); // four devices, own streams
-Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, null, 8, 0);       // two drives, eight submission rings
+Executor.forRam(new int[] {0, 1}, null, 16);                        // two NUMA nodes, sixteen workers
+Executor.forRam(new int[0], CPUClass.INTEL_HASWELL, 0);             // waiters and atomics of one class
+Executor.onPool(forkUnionPool, new int[0], null);                   // a thread pool the caller already runs
+Executor.forVram(new int[] {0, 1, 2, 3}, null, new MemorySegment[0], 0); // four devices, own streams
+Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, null, 8);       // two drives, eight submission rings
 ```
 
 `forVram` takes no thread count: one host thread keeps every device fed, so the width of that pool is the device list itself.
@@ -137,7 +138,7 @@ It borrows one CUDA stream per device when given them, and caps scratch bytes pe
 Naming no hardware derives it: an empty domain list spreads over every memory domain the process may allocate on, an empty device list opens one free device, and an empty path list leaves every shard where its manifest already points.
 
 ```java
-try (Executor pool = Executor.forRam(new int[0], null, 16, 0)) {
+try (Executor pool = Executor.forRam(new int[0], null, 16)) {
     DenseIndex.On receiver = index.on(pool);
     receiver.insert(keys, vectors);
     Matches matches = receiver.search(queries, 10, arena);
@@ -146,8 +147,8 @@ try (Executor pool = Executor.forRam(new int[0], null, 16, 0)) {
 }
 ```
 
-Calls on one executor run in submission order, and handles themselves stay freely concurrent.
-`drain` also sets what the executor does once it goes idle: `Mood.PARKED` lets its threads sleep, `Mood.SPINNING` keeps them hot for the next call's latency.
+One call holds an executor at a time, and handles themselves stay freely concurrent.
+`drain` waits until no call holds the executor, then sets what it does once idle: `Mood.PARKED` lets its threads sleep, `Mood.SPINNING` keeps them hot for the next call's latency.
 
 ### Concurrency
 
@@ -501,7 +502,7 @@ Progress handlers stay unbound for the same reason, which is what makes an inser
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; each call closes the FFM scope the previous call's views read through, so a stale view throws instead of reading reused memory.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+  Submitting a call allocates nothing, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__
   `index.search(queries, 10, arena)` takes no executor, completion or callback and returns its result; nothing about asynchrony reaches a caller who never asks for it.
 - __Argument structures live in FFM arenas.__

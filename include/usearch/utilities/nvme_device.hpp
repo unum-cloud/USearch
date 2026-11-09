@@ -462,6 +462,9 @@ inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
 /** Whether reads on @p medium skip the page cache, as every handle opened unbuffered does. */
 inline bool reads_directly(file_medium_t const&) noexcept { return true; }
 
+/** The memory domain nearest the disk under @p medium, which only Linux reports. */
+inline fu_memory_domain_id_t memory_domain_of(file_medium_t const&) noexcept { return no_memory_domain_k; }
+
 #else
 
 inline file_medium_t::~file_medium_t() noexcept {
@@ -693,6 +696,20 @@ inline u64_t sysfs_number_(int directory, char const* name, u64_t* minor = nullp
     return parsed.ec == std::errc {} ? number : 0;
 }
 
+/** The memory domain nearest the PCI function behind the disk at @p disk, as its controller's
+ *  @c device/address names it; @c no_memory_domain_k off PCI or tied to no domain. */
+inline fu_memory_domain_id_t sysfs_memory_domain_(int disk) noexcept {
+    int const attribute = ::openat(disk, "device/address", O_RDONLY | O_CLOEXEC);
+    if (attribute < 0) return no_memory_domain_k;
+    char bus_id[32] = {};
+    ssize_t const length = ::read(attribute, bus_id, sizeof(bus_id) - 1);
+    ::close(attribute);
+    if (length <= 0) return no_memory_domain_k;
+    if (bus_id[length - 1] == '\n') bus_id[length - 1] = 0;
+    fu_memory_domain_id_t domain = no_memory_domain_k;
+    return fu_memory_domain_id_of_pci(bus_id, &domain) == fu_success_k ? domain : no_memory_domain_k;
+}
+
 /** Hardware queues the disk at @p disk spreads CPUs over: the entries of its @c mq/. */
 inline u32_t sysfs_hardware_queues_(int disk) noexcept {
     int const listed = ::openat(disk, "mq", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -846,6 +863,18 @@ inline bool reads_directly(file_medium_t const& medium) noexcept {
            (::fstat(medium.descriptor, &description) == 0 && S_ISCHR(description.st_mode));
 }
 
+/** The memory domain nearest the PCI function of the disk under @p medium, where its threads
+ *  belong; @c no_memory_domain_k off PCI or where the kernel ties it to none. */
+inline fu_memory_domain_id_t memory_domain_of(file_medium_t const& medium) noexcept {
+    struct stat description;
+    if (::fstat(medium.descriptor, &description) != 0) return no_memory_domain_k;
+    int const disk = sysfs_disk_of_(medium.descriptor, description);
+    if (disk < 0) return no_memory_domain_k;
+    fu_memory_domain_id_t const domain = sysfs_memory_domain_(disk);
+    ::close(disk);
+    return domain;
+}
+
 #elif !USEARCH_OS_WINDOWS_
 
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
@@ -873,6 +902,9 @@ inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
 /** Whether reads on @p medium skip the page cache; Apple's @c F_NOCACHE is a hint, so they may
  *  not, and no flag elsewhere asks for it. */
 inline bool reads_directly(file_medium_t const&) noexcept { return false; }
+
+/** The memory domain nearest the disk under @p medium, which only Linux reports. */
+inline fu_memory_domain_id_t memory_domain_of(file_medium_t const&) noexcept { return no_memory_domain_k; }
 
 #endif // USEARCH_OS_LINUX_
 
@@ -1193,6 +1225,19 @@ inline u64_t byte_base_of(spdk_medium_t const& medium) noexcept { return medium.
 
 /** Whether reads on @p medium skip the page cache, which a user-space driver never has. */
 inline bool reads_directly(spdk_medium_t const&) noexcept { return true; }
+
+/** The memory domain nearest the PCI function of the controller under @p medium; none off PCI. */
+inline fu_memory_domain_id_t memory_domain_of(spdk_medium_t const& medium) noexcept {
+    spdk_pci_device* const function = spdk_nvme_ctrlr_get_pci_device(spdk_nvme_ns_get_ctrlr(medium.name_space));
+    if (!function) return no_memory_domain_k;
+    spdk_pci_addr const address = spdk_pci_device_get_addr(function);
+    char bus_id[sizeof("0000:00:00.0") + 4];
+    std::snprintf(bus_id, sizeof(bus_id), "%04x:%02x:%02x.%x", static_cast<unsigned>(address.domain),
+                  static_cast<unsigned>(address.bus), static_cast<unsigned>(address.dev),
+                  static_cast<unsigned>(address.func));
+    fu_memory_domain_id_t domain = no_memory_domain_k;
+    return fu_memory_domain_id_of_pci(bus_id, &domain) == fu_success_k ? domain : no_memory_domain_k;
+}
 
 /** What the controller under @p medium granted this process, polled as SPDK always polls; its PCIe
  *  address stands for the disk, so a controller off PCIe reports none. */
@@ -3222,7 +3267,8 @@ class nvme_executor {
 
     /**
      *  @brief Spawns @p threads over @p topology under the ForkUnion facilities @p allowed names,
-     *      zero threads meaning @c forkunion_executor_t::default_threads.
+     *      zero threads meaning @c forkunion_executor_t::default_threads, on the compute domains
+     *      local to @p near_domain, or across the machine without one.
      *
      *  Each engine opens with @p config on its own thread, every one on the transport thread zero's
      *  engine picked. A nonzero @p config queue depth pins every call's depth, while zero leaves
@@ -3234,14 +3280,17 @@ class nvme_executor {
      *  - @c io_k The named engine's setup was refused.
      */
     static expected<nvme_executor> spawn(fu_topology_t topology, std::size_t threads, config_t const& config,
-                                         fu_capabilities_t allowed = fu_capabilities_all_k) noexcept {
+                                         fu_capabilities_t allowed = fu_capabilities_all_k,
+                                         fu_memory_domain_id_t near_domain = no_memory_domain_k) noexcept {
         nvme_executor executor;
         // The caller never runs a slice, so each thread index stays one OS thread, the single
         // issuer a ring wants.
-        auto [threads_executor, spawn_status] = forkunion_executor_t::spawn(
-            topology, threads,
-            (fu_comptime_capabilities() & fu_capability_os_threads_k) ? fu_caller_exclusive_k : fu_caller_inclusive_k,
-            allowed);
+        bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
+        auto [threads_executor, spawn_status] =
+            os_threads && near_domain != no_memory_domain_k
+                ? forkunion_executor_t::spawn_near(topology, near_domain, threads, allowed)
+                : forkunion_executor_t::spawn(topology, threads,
+                                              os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k, allowed);
         executor.threads_ = std::move(threads_executor);
         if (failed(spawn_status)) return {std::move(executor), spawn_status};
         if (status_t const sized = executor.engines_.resize(executor.threads_.size()); failed(sized))
@@ -3378,6 +3427,9 @@ class nvme_executor {
 
     /** Nothing is ever pending: every fan-out blocks inside, so a drain is a no-op. */
     status_t wait() noexcept { return threads_.wait(); }
+
+    /** The pool, its per-domain arenas and its one-caller hold. */
+    forkunion_executor_t& threads() noexcept { return threads_; }
 
     /** Threads this executor drives. */
     std::size_t size() const noexcept { return threads_.size(); }

@@ -248,6 +248,9 @@ struct vram_nvidia_indexes {
     /** Shards in the index, in placement order. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
 
+    /** How the last load from a path read its parts onto the devices. */
+    vram_load_path_t loaded_through() const noexcept { return loaded_through_; }
+
     /** The shard at @p shard, in placement order. */
     index_t& shard(std::size_t shard) noexcept { return *shards_[shard].index; }
 
@@ -1816,8 +1819,12 @@ struct vram_nvidia_indexes {
         /** Opens a source per mapped part, cuFile-registered where the file takes O_DIRECT. */
         status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
             if (failed(sources.resize(mappings.size()))) return status_t::bad_alloc_k;
-            for (std::size_t part = 0; part != mappings.size(); ++part)
+            bool every_part_registered = !mappings.empty();
+            for (std::size_t part = 0; part != mappings.size(); ++part) {
                 sources[part] = {linux_cufile_file_t::open(executor->api(), mappings[part]), mappings[part].view()};
+                every_part_registered = every_part_registered && sources[part].file;
+            }
+            owner->loaded_through_ = every_part_registered ? vram_load_path_t::cufile_k : vram_load_path_t::host_copy_k;
             return status_t::success_k;
         }
 
@@ -3034,6 +3041,9 @@ struct vram_nvidia_indexes {
     /** The shards, the keys of their rows, their routing, the commit word every reader snapshots by
      *  and the epoch every reader brackets itself with. */
     shards_t shards_;
+
+    /** How the last load from a path read its parts, which @c describe reports. */
+    vram_load_path_t loaded_through_ = vram_load_path_t::none_k;
 
     /** The metric every shard this index builds or accepts scores by. */
     nk_kernel_kind_t kernel_;

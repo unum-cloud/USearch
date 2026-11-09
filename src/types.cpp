@@ -124,11 +124,10 @@ USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {
     }
 }
 
-USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_status_success_k; code <= usearch_status_invalid_argument_k; ++code) {
-        usearch_status_t const status = static_cast<usearch_status_t>(code);
-        if (named(name, usearch_status_name(status))) return status;
-    }
+USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name, usearch_status_t* status) {
+    for (int code = usearch_status_success_k; code <= usearch_status_invalid_argument_k; ++code)
+        if (named(name, usearch_status_name(static_cast<usearch_status_t>(code))))
+            return *status = static_cast<usearch_status_t>(code), usearch_status_success_k;
     return usearch_status_invalid_argument_k;
 }
 
@@ -175,12 +174,11 @@ USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency)
     }
 }
 
-USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_residency_ram_k; code <= usearch_residency_nvme_k; ++code) {
-        usearch_residency_t const residency = static_cast<usearch_residency_t>(code);
-        if (named(name, usearch_residency_name(residency))) return residency;
-    }
-    return usearch_residency_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_residency_from_name(usearch_bytes_view_t name, usearch_residency_t* residency) {
+    for (int code = usearch_residency_ram_k; code <= usearch_residency_nvme_k; ++code)
+        if (named(name, usearch_residency_name(static_cast<usearch_residency_t>(code))))
+            return *residency = static_cast<usearch_residency_t>(code), usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal) {
@@ -191,9 +189,19 @@ USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal)
     }
 }
 
-USEARCH_EXPORT usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name) {
-    if (named(name, "walk")) return usearch_traversal_walk_k;
-    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_traversal_from_name(usearch_bytes_view_t name, usearch_traversal_t* traversal) {
+    if (named(name, "walk")) return *traversal = usearch_traversal_walk_k, usearch_status_success_k;
+    if (named(name, "scan")) return *traversal = usearch_traversal_scan_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
+}
+
+USEARCH_EXPORT char const* usearch_load_path_name(usearch_load_path_t load_path) {
+    switch (load_path) {
+    case usearch_load_path_none_k: return "none";
+    case usearch_load_path_host_copy_k: return "host-copy";
+    case usearch_load_path_cufile_k: return "cufile";
+    default: return "unknown";
+    }
 }
 
 USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
@@ -204,9 +212,10 @@ USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
     }
 }
 
-USEARCH_EXPORT usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
-    if (named(name, "parked")) return usearch_mood_parked_k;
-    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_unknown_k;
+USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name, usearch_mood_t* mood) {
+    if (named(name, "parked")) return *mood = usearch_mood_parked_k, usearch_status_success_k;
+    if (named(name, "spinning")) return *mood = usearch_mood_spinning_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {

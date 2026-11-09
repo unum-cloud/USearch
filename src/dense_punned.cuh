@@ -120,6 +120,9 @@ struct dense_verbs {
     /** Where shard @p shard computes. */
     arena_residency_t (*residency)(void const* index, std::size_t shard) noexcept;
     std::size_t (*shards_count)(void const* index) noexcept;
+
+    /** How the index's last load from a path read its parts. */
+    usearch_load_path_t (*load_path)(void const* index) noexcept;
     std::size_t (*size)(void const* index) noexcept;
     std::size_t (*capacity)(void const* index) noexcept;
     std::size_t (*memory_usage)(void const* index) noexcept;

@@ -158,12 +158,12 @@ usearch_dense_index_t create_index(size_t const dimensions) {
     return index;
 }
 
-/** A RAM executor tracking @p deferred_limit deferred calls, every other field derived. */
-usearch_executor_t create_executor(size_t const deferred_limit) {
+/** A RAM executor of @p threads threads, zero taking the default, every other field derived. */
+usearch_executor_t create_executor(size_t const threads) {
     usearch_outcome_t outcome = {0};
     usearch_executor_t executor = NULL;
     usearch_executor_for_ram(
-        &(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .deferred_limit = deferred_limit});
+        &(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = threads});
     expect(!outcome.message, outcome.message);
     return executor;
 }
@@ -1802,6 +1802,7 @@ void test_sequence_round_trip(void) {
     expect(!outcome.message, outcome.message);
     expect(description.size == 4 && description.metadata.metric == usearch_sequence_metric_levenshtein_bytes_k,
            "A loaded index describes the saved one");
+    expect(description.load_path == usearch_load_path_none_k, "A load into RAM names no device load path");
 
     // The same checkpoint served from storage answers reads as RAM does, refusing writes and saves.
     usearch_executor_t storage = NULL;
@@ -2373,6 +2374,7 @@ void test_shapes_round_trip(void) {
     expect(!outcome.message, outcome.message);
     expect(description.size == 3 && description.total_points == 12 && description.metadata.points == 4,
            "A loaded index describes the saved one");
+    expect(description.load_path == usearch_load_path_none_k, "A load into RAM names no device load path");
 
     // The same checkpoint served from storage answers reads as RAM does, refusing writes and saves.
     usearch_executor_t storage = NULL;
@@ -2683,6 +2685,7 @@ void test_geospatial_round_trip(void) {
                                                                   .description = &description});
     expect(!outcome.message, outcome.message);
     expect(description.size == 4 && description.metadata.connectivity == 12, "A loaded index describes the saved one");
+    expect(description.load_path == usearch_load_path_none_k, "A load into RAM names no device load path");
 
     // The same checkpoint served from storage judges every relation on the entries its walks read
     // and answers reads and containment as RAM does, refusing writes and saves.
@@ -3826,15 +3829,27 @@ static void expect_names(char const* what, named_value_t const* table, size_t co
 }
 
 static char const* status_name_of(int value) { return usearch_status_name((usearch_status_t)value); }
-static int status_from_name(usearch_bytes_view_t name) { return (int)usearch_status_from_name(name); }
+static int status_from_name(usearch_bytes_view_t name) {
+    usearch_status_t status = (usearch_status_t)0;
+    return usearch_status_from_name(name, &status) == usearch_status_success_k ? (int)status : -1;
+}
 static char const* scalar_name_of(int value) { return usearch_scalar_name((usearch_scalar_t)value); }
 static int scalar_from_name(usearch_bytes_view_t name) { return (int)usearch_scalar_from_name(name); }
 static char const* residency_name_of(int value) { return usearch_residency_name((usearch_residency_t)value); }
-static int residency_from_name(usearch_bytes_view_t name) { return (int)usearch_residency_from_name(name); }
+static int residency_from_name(usearch_bytes_view_t name) {
+    usearch_residency_t residency = (usearch_residency_t)0;
+    return usearch_residency_from_name(name, &residency) == usearch_status_success_k ? (int)residency : -1;
+}
 static char const* traversal_name_of(int value) { return usearch_traversal_name((usearch_traversal_t)value); }
-static int traversal_from_name(usearch_bytes_view_t name) { return (int)usearch_traversal_from_name(name); }
+static int traversal_from_name(usearch_bytes_view_t name) {
+    usearch_traversal_t traversal = (usearch_traversal_t)0;
+    return usearch_traversal_from_name(name, &traversal) == usearch_status_success_k ? (int)traversal : -1;
+}
 static char const* mood_name_of(int value) { return usearch_mood_name((usearch_mood_t)value); }
-static int mood_from_name(usearch_bytes_view_t name) { return (int)usearch_mood_from_name(name); }
+static int mood_from_name(usearch_bytes_view_t name) {
+    usearch_mood_t mood = (usearch_mood_t)0;
+    return usearch_mood_from_name(name, &mood) == usearch_status_success_k ? (int)mood : -1;
+}
 static char const* cpu_class_name_of(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
 static int cpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_cpu_class_from_name(name); }
 static char const* gpu_class_name_of(int value) { return usearch_gpu_class_name((usearch_gpu_class_t)value); }
@@ -3929,16 +3944,30 @@ void test_names(void) {
         {usearch_dense_metric_jaccard_k, "jaccard"},
     };
     size_t const row_bytes = sizeof(named_value_t);
-    expect_names("status", statuses, sizeof(statuses) / row_bytes, usearch_status_invalid_argument_k, "unrecognized",
-                 status_name_of, status_from_name);
+    // Parsers answering a status read a refused spelling as -1, which no enumerator holds.
+    expect_names("status", statuses, sizeof(statuses) / row_bytes, -1, "unrecognized", status_name_of,
+                 status_from_name);
     expect_names("scalar", scalars, sizeof(scalars) / row_bytes, usearch_scalar_unknown_k, "unknown", scalar_name_of,
                  scalar_from_name);
-    expect_names("residency", residencies, sizeof(residencies) / row_bytes, usearch_residency_unknown_k, "unknown",
-                 residency_name_of, residency_from_name);
-    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, usearch_traversal_unknown_k, "unknown",
-                 traversal_name_of, traversal_from_name);
-    expect_names("mood", moods, sizeof(moods) / row_bytes, usearch_mood_unknown_k, "unknown", mood_name_of,
-                 mood_from_name);
+    expect_names("residency", residencies, sizeof(residencies) / row_bytes, -1, "unknown", residency_name_of,
+                 residency_from_name);
+    expect_names("traversal", traversals, sizeof(traversals) / row_bytes, -1, "unknown", traversal_name_of,
+                 traversal_from_name);
+    expect_names("mood", moods, sizeof(moods) / row_bytes, -1, "unknown", mood_name_of, mood_from_name);
+    usearch_bytes_view_t const bogus = text_view("bogus", 5);
+    usearch_status_t status = usearch_status_success_k;
+    usearch_residency_t residency = usearch_residency_ram_k;
+    usearch_traversal_t traversal = usearch_traversal_walk_k;
+    usearch_mood_t mood = usearch_mood_parked_k;
+    expect_eq(usearch_status_from_name(bogus, &status), usearch_status_invalid_argument_k, "A bogus status is refused");
+    expect_eq(usearch_residency_from_name(bogus, &residency), usearch_status_invalid_argument_k,
+              "A bogus residency is refused");
+    expect_eq(usearch_traversal_from_name(bogus, &traversal), usearch_status_invalid_argument_k,
+              "A bogus traversal is refused");
+    expect_eq(usearch_mood_from_name(bogus, &mood), usearch_status_invalid_argument_k, "A bogus mood is refused");
+    expect(status == usearch_status_success_k && residency == usearch_residency_ram_k &&
+               traversal == usearch_traversal_walk_k && mood == usearch_mood_parked_k,
+           "A refused spelling leaves its output alone");
     expect_names("CPU class", cpu_classes, sizeof(cpu_classes) / row_bytes, usearch_cpu_class_unknown_k, "unknown",
                  cpu_class_name_of, cpu_class_from_name);
     expect_names("GPU class", gpu_classes, sizeof(gpu_classes) / row_bytes, usearch_gpu_class_unknown_k, "unknown",
@@ -3989,9 +4018,35 @@ usearch_dense_index_t create_filled_index(float const* rows, usearch_executor_t 
     return index;
 }
 
-/** Submits a search of every row of @p rows into @p outputs; its descriptor dies when this returns. */
-void search_every_row(usearch_dense_index_t index, usearch_executor_t executor, usearch_completion_t completion,
-                      float const* rows, search_outputs_t* outputs) {
+/** Holds the call reporting to it at its last progress report until the test releases it, so the
+ *  test meets the call while it still holds its executor; a call run at submission stops waiting
+ *  after a few seconds, since its submitter cannot release it. */
+typedef struct gate_t {
+    int volatile entered;
+    int volatile released;
+} gate_t;
+
+static usearch_continuation_t hold_until_released(size_t completed, size_t total, void* state) {
+    gate_t* const gate = (gate_t*)state;
+    if (completed != total) return usearch_continue_k;
+    gate->entered = 1;
+    time_t const deadline = time(NULL) + 3;
+    while (!gate->released && time(NULL) < deadline) {}
+    return usearch_continue_k;
+}
+
+/** Whether @p gate saw its call arrive within a few seconds. */
+static bool entered_soon(gate_t const* gate) {
+    time_t const deadline = time(NULL) + 3;
+    while (!gate->entered && time(NULL) < deadline) {}
+    return gate->entered;
+}
+
+/** Submits a search of every row of @p rows into @p outputs, held at @p gate unless it is NULL; its
+ *  descriptor dies when this returns. */
+void search_every_row_through(usearch_dense_index_t index, usearch_executor_t executor, usearch_completion_t completion,
+                              float const* rows, search_outputs_t* outputs, gate_t* gate) {
+    usearch_progress_t const progress = {gate ? hold_until_released : NULL, gate, 1};
     usearch_dense_search(&(usearch_dense_search_t) {
         .index = index,
         .executor = executor,
@@ -4001,13 +4056,20 @@ void search_every_row(usearch_dense_index_t index, usearch_executor_t executor, 
         .queries = {rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k},
         .matches = &outputs->matches,
         .arena = outputs->arena,
-        .wanted = deferred_wanted});
+        .wanted = deferred_wanted,
+        .progress = progress});
 }
 
-/** Waits for every call submitted to @p executor. */
-void drain(usearch_executor_t executor) {
+/** Submits a search of every row of @p rows into @p outputs; its descriptor dies on return. */
+void search_every_row(usearch_dense_index_t index, usearch_executor_t executor, usearch_completion_t completion,
+                      float const* rows, search_outputs_t* outputs) {
+    search_every_row_through(index, executor, completion, rows, outputs, NULL);
+}
+
+/** Waits until no call holds @p executor, then leaves its threads in @p mood. */
+void drain(usearch_executor_t executor, usearch_mood_t mood) {
     usearch_outcome_t outcome = {0};
-    usearch_executor_drain(&(usearch_executor_drain_t) {.executor = executor, .outcome = &outcome});
+    usearch_executor_drain(&(usearch_executor_drain_t) {.executor = executor, .outcome = &outcome, .mood = mood});
     expect(!outcome.message, outcome.message);
 }
 
@@ -4043,6 +4105,7 @@ void test_pins_and_fill(void) {
     expect_eq(description.size, (size_t)2, "The description counts the rows inserted");
     expect(description.cpu_class == usearch_cpu_class_serial_k, "A serial pin dispatches the serial class");
     expect(description.gpu_class == usearch_gpu_class_unknown_k, "A RAM index names no GPU class");
+    expect(description.load_path == usearch_load_path_none_k, "A RAM index names no load path");
     usearch_dense_free(index);
 
     usearch_executor_t storage = NULL;
@@ -4055,17 +4118,14 @@ void test_pins_and_fill(void) {
     printf("Test: Pins and Fill - PASSED\n");
 }
 
-/** A deferred search stays deferred until waited on, then lands what a blocking one does, though its
- *  descriptor died at submission; without an executor it is final when it returns. */
+/** A deferred search lands what a blocking one does, though its descriptor died at submission; one
+ *  thread is the caller's own, so it runs at submission, and so does a call without an executor. */
 void test_deferred_search(void) {
     printf("Test: Deferred Search\n");
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
     // Landmarks are drawn per thread, so only one as wide as a call without an executor
     // draws the same.
-    usearch_outcome_t spawned = {0};
-    usearch_executor_t executor = NULL;
-    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &spawned, .threads = 1});
-    expect(!spawned.message, spawned.message);
+    usearch_executor_t const executor = create_executor(1);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
     search_outputs_t blocking = {.arena = create_arena(executor)};
     search_outputs_t deferred = {.arena = create_arena(executor)};
@@ -4074,9 +4134,8 @@ void test_deferred_search(void) {
     expect(!blocking.outcome.message, blocking.outcome.message);
 
     search_every_row(index, executor, usearch_completion_deferred_k, rows, &deferred);
-    expect_eq(usearch_outcome_status(&deferred.outcome), usearch_status_deferred_k,
-              "A submitted call is deferred until waited on");
-    expect_eq(usearch_outcome_wait(&deferred.outcome), usearch_status_success_k, "A waited search must finish");
+    expect_eq(usearch_outcome_status(&deferred.outcome), usearch_status_success_k,
+              "A pool needing its caller runs a deferred call at submission");
     expect(same_matches(&blocking.matches, &deferred.matches),
            "A deferred search must land the matches a blocking one does");
 
@@ -4093,88 +4152,118 @@ void test_deferred_search(void) {
     printf("Test: Deferred Search - PASSED\n");
 }
 
-/** A submission past the deferred limit is refused at once, and a drain makes room again. */
-void test_deferred_limit(void) {
-    printf("Test: Deferred Limit\n");
+/** A deferred call on a pool of its own threads finishes while its submitter only polls. */
+void test_deferred_polling(void) {
+    printf("Test: Deferred Polling\n");
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
-    usearch_executor_t const executor = create_executor(1);
+    usearch_executor_t const executor = create_executor(2);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t first = {.arena = create_arena(executor)};
-    search_outputs_t second = {.arena = create_arena(executor)};
+    search_outputs_t outputs = {.arena = create_arena(executor)};
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, &first);
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, &second);
-    expect_eq(second.outcome.status, usearch_status_contended_k, "A full deferred table must refuse at once");
-    drain(executor);
-    expect_eq(first.outcome.status, usearch_status_success_k, "The earlier call must finish at the drain");
-    // The refused submission let go of its arena, so the retry may claim it.
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, &second);
-    drain(executor);
-    expect_eq(second.outcome.status, usearch_status_success_k, "A drained table takes a call again");
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
+    time_t const deadline = time(NULL) + 30;
+    while (usearch_outcome_status(&outputs.outcome) == usearch_status_deferred_k && time(NULL) < deadline) {}
+    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_success_k, "Polling alone finishes the call");
+    for (size_t row = 0; row != deferred_rows; ++row)
+        expect_eq(outputs.matches.counts[row], deferred_wanted, "A polled call lands its matches");
 
-    usearch_arena_free(second.arena);
-    usearch_arena_free(first.arena);
+    usearch_arena_free(outputs.arena);
     usearch_dense_free(index);
     usearch_executor_free(executor);
     free(rows);
-    printf("Test: Deferred Limit - PASSED\n");
+    printf("Test: Deferred Polling - PASSED\n");
 }
 
-/** Freeing an index finishes the deferred calls naming it before its memory goes. */
-void test_free_finishes_deferred(void) {
-    printf("Test: Free Finishes Deferred\n");
+/** While a deferred call holds its executor on a pool thread, a call from this thread is refused at
+ *  once rather than overlapping it, and the executor serves again once the first call ended. */
+void test_contended_from_another_thread(void) {
+    printf("Test: Contended From Another Thread\n");
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
-    usearch_executor_t const executor = create_executor(0);
+    usearch_executor_t const executor = create_executor(2);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t holding = {.arena = create_arena(executor)};
+    search_outputs_t second = {.arena = create_arena(executor)};
+    gate_t gate = {0, 0};
+
+    search_every_row_through(index, executor, usearch_completion_deferred_k, rows, &holding, &gate);
+    // An executor without threads of its own, as the stand-in's, ran the call at submission.
+    if (usearch_outcome_status(&holding.outcome) == usearch_status_deferred_k) {
+        expect(entered_soon(&gate), "A delegated call reaches its progress handler");
+        search_every_row(index, executor, usearch_completion_blocking_k, rows, &second);
+        expect_eq(second.outcome.status, usearch_status_contended_k, "A second call on a held executor is refused");
+        search_every_row(index, executor, usearch_completion_deferred_k, rows, &second);
+        expect_eq(second.outcome.status, usearch_status_contended_k, "A deferred one is refused at submission");
+        gate.released = 1;
+    }
+    expect_eq(usearch_outcome_wait(&holding.outcome), usearch_status_success_k, "The holding call finishes");
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, &second);
+    expect(!second.outcome.message, second.outcome.message);
+
+    usearch_arena_free(second.arena);
+    usearch_arena_free(holding.arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Contended From Another Thread - PASSED\n");
+}
+
+/** A drain returns once the deferred call ended, whichever mood it then leaves the threads in, and
+ *  the executor serves the next call after either. */
+void test_drain_then_mood(void) {
+    printf("Test: Drain Then Mood\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(2);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t outputs = {.arena = create_arena(executor)};
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
+    drain(executor, usearch_mood_parked_k);
+    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_success_k, "A drain waits out the call");
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
+    drain(executor, usearch_mood_spinning_k);
+    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_success_k, "Parked threads wake for a call");
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, &outputs);
+    expect(!outputs.outcome.message, outputs.outcome.message);
+
+    usearch_arena_free(outputs.arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Drain Then Mood - PASSED\n");
+}
+
+/** Freeing an index waits for the deferred call naming it before its memory goes. */
+void test_free_waits_for_named_call(void) {
+    printf("Test: Free Waits for Named Call\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(2);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
     search_outputs_t outputs = {.arena = create_arena(executor)};
 
     search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
     usearch_dense_free(index);
-    expect_eq(outputs.outcome.status, usearch_status_success_k, "A free must finish the calls naming the handle");
+    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_success_k,
+              "A free returns only once the calls naming the handle ended");
     for (size_t row = 0; row != deferred_rows; ++row)
-        expect_eq(outputs.matches.counts[row], deferred_wanted, "A call finished by a free lands its matches");
+        expect_eq(outputs.matches.counts[row], deferred_wanted, "A call a free waited for lands its matches");
 
     usearch_arena_free(outputs.arena);
     usearch_executor_free(executor);
     free(rows);
-    printf("Test: Free Finishes Deferred - PASSED\n");
+    printf("Test: Free Waits for Named Call - PASSED\n");
 }
 
-/** A blocking call on an executor runs every call submitted before it first. */
-void test_blocking_runs_after_earlier(void) {
-    printf("Test: Blocking Runs After Earlier\n");
-    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
-    usearch_executor_t const executor = create_executor(0);
-    usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t earlier = {.arena = create_arena(executor)};
-    search_outputs_t later = {.arena = create_arena(executor)};
-
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, &earlier);
-    search_every_row(index, executor, usearch_completion_blocking_k, rows, &later);
-    expect_eq(earlier.outcome.status, usearch_status_success_k, "An earlier deferred call must finish first");
-
-    usearch_arena_free(later.arena);
-    usearch_arena_free(earlier.arena);
-    usearch_dense_free(index);
-    usearch_executor_free(executor);
-    free(rows);
-    printf("Test: Blocking Runs After Earlier - PASSED\n");
-}
-
-/** A deferred call holds its arena from submission until final, so another call naming it meanwhile is
- *  refused, and the arena serves again once the deferred call is waited on. */
+/** A deferred call holds its arena until just before it is final, so another call naming it
+ *  meanwhile is refused, and the arena serves again once the deferred call ended. */
 void test_deferred_holds_arena(void) {
     printf("Test: Deferred Holds Arena\n");
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
-    usearch_executor_t const executor = create_executor(0);
+    usearch_executor_t const executor = create_executor(2);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
     search_outputs_t outputs = {.arena = create_arena(executor)};
+    gate_t gate = {0, 0};
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
-    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_deferred_k,
-              "A submitted call is deferred until waited on");
-
-    // Without an executor the get runs at once, draining nothing, so it meets the deferred call's hold.
+    search_every_row_through(index, executor, usearch_completion_deferred_k, rows, &outputs, &gate);
     usearch_outcome_t outcome = {0};
     usearch_rows_view_t vectors = {0};
     usearch_dense_get_t get = {.index = index,
@@ -4183,10 +4272,15 @@ void test_deferred_holds_arena(void) {
                                .vectors = &vectors,
                                .arena = outputs.arena,
                                .outputs_scalar = usearch_scalar_f32_k};
-    usearch_dense_get(&get);
-    expect_eq(outcome.status, usearch_status_contended_k, "An arena a deferred call holds refuses another call");
-    expect(vectors.data == NULL, "A refused call leaves its outputs NULL");
-
+    // An executor without threads of its own, as the stand-in's, ran the call at submission.
+    if (usearch_outcome_status(&outputs.outcome) == usearch_status_deferred_k) {
+        expect(entered_soon(&gate), "A delegated call reaches its progress handler");
+        // Without an executor the get runs at once, so it meets the deferred call's hold.
+        usearch_dense_get(&get);
+        expect_eq(outcome.status, usearch_status_contended_k, "An arena a deferred call holds refuses another call");
+        expect(vectors.data == NULL, "A refused call leaves its outputs NULL");
+        gate.released = 1;
+    }
     expect_eq(usearch_outcome_wait(&outputs.outcome), usearch_status_success_k, "A waited search must finish");
     expect_eq(outputs.matches.counts[0], deferred_wanted, "The deferred call lands its matches in the held arena");
     usearch_dense_get(&get);
@@ -4856,14 +4950,23 @@ int main(int argc, char* argv[]) {
     if (selected("vram_scan")) test_vram_scan(collection_sizes[1], dimension_counts[1]);
     if (selected("pins_and_fill")) test_pins_and_fill();
     if (selected("deferred_search")) test_deferred_search();
-    if (selected("deferred_limit")) test_deferred_limit();
-    if (selected("free_finishes_deferred")) test_free_finishes_deferred();
-    if (selected("blocking_runs_after_earlier")) test_blocking_runs_after_earlier();
+    if (selected("deferred_polling")) test_deferred_polling();
+    if (selected("contended_from_another_thread")) test_contended_from_another_thread();
+    if (selected("drain_then_mood")) test_drain_then_mood();
+    if (selected("free_waits_for_named_call")) test_free_waits_for_named_call();
     if (selected("deferred_holds_arena")) test_deferred_holds_arena();
-    if (selected("arrow_rows_and_keys")) test_arrow_rows_and_keys();
-    if (selected("arrow_refusals")) test_arrow_refusals();
-    if (selected("arrow_tapes")) test_arrow_tapes();
-    if (selected("arrow_matches")) test_arrow_matches();
+    // An implementation without Arrow, as the stand-in, answers every exchange unsupported.
+    struct ArrowSchema probed_schema = {0};
+    struct ArrowDeviceArray probed_array = {0};
+    if (usearch_rows_view_to_arrow((usearch_rows_view_t) {0}, 0, NULL, &probed_schema, &probed_array) ==
+        usearch_status_unsupported_k)
+        printf("Test: Arrow - SKIPPED: this build exchanges no Arrow\n");
+    else {
+        if (selected("arrow_rows_and_keys")) test_arrow_rows_and_keys();
+        if (selected("arrow_refusals")) test_arrow_refusals();
+        if (selected("arrow_tapes")) test_arrow_tapes();
+        if (selected("arrow_matches")) test_arrow_matches();
+    }
 
     printf("All tests passed!\n");
     return 0;

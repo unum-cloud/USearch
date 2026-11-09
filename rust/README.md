@@ -44,7 +44,7 @@ let keys = [Key::from(42u64), Key::from(43u64)];
 let slab: [f32; 8] = [0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2];
 index.insert(&keys, &rows(&slab, 4)?)?;
 
-let executor = Executor::for_ram(&[], None, 0, 0)?;
+let executor = Executor::for_ram(&[], None, 0)?;
 let mut arena = Arena::new_in(&executor)?;
 let query: [f32; 4] = [0.2, 0.1, 0.2, 0.1];
 let matches = index.on(&executor).search(&rows(&query, 4)?, 10, &mut arena)?;   // on an executor, into its arena
@@ -90,8 +90,8 @@ Lending `&[Key]` or `&MatrixView` fails to compile with "a deferred receiver nee
 A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
 The box is the crate's rather than yours, since a `Deferred` leaked without a wait would leave the library writing into storage you had reused.
 
-An executor without threads of its own may hold a deferred call until its `wait`, its next `drain` or blocking call, or the drop of what it names, so `drain` it before an `.await` there.
-A submission finding the executor's deferred table full finishes at once with `Status::Contended`.
+One call holds an executor at a time, so a second call finding it held finishes at once with `Status::Contended`, and nothing queues.
+A deferred call on a caller-exclusive pool runs on the pool's thread 0, so polling alone finishes it, and its progress handler and predicate run on the pool's threads; an inclusive pool, a single thread, WebAssembly and a VRAM executor run it at submission.
 Calls depending on each other are ordered by waiting on the first before submitting the second, since no call carries an ordering field.
 
 ## Executors
@@ -101,24 +101,23 @@ One executor serves any number of indexes, and its residency must match the one 
 There is a constructor per residency, each taking only what its own hardware has, and the placement lists are the ones the indexes were built with, which keeps compute and memory domains in agreement.
 
 ```rust
-let threads = Executor::for_ram(&[], None, 8, 0)?;                        // eight workers, where zero takes 7/8 of the cores
-let domains = Executor::for_ram(&[0, 1], None, 0, 0)?;                    // threads interleaved across two NUMA nodes
-let pinned = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0, 0)?; // waiters and atomics of one class
-let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4, 0)?;             // one submission ring apiece
-let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], 0, 0)? };   // one stream per device, scratch grown as asked
-let shared = unsafe { Executor::on_pool(&[], None, pool, 0)? };           // borrows a ForkUnion pool's threads
-let local = Executor::default();                                          // owns nothing, runs on the calling thread
+let threads = Executor::for_ram(&[], None, 8)?;                        // eight workers, where zero takes 7/8 of the cores
+let domains = Executor::for_ram(&[0, 1], None, 0)?;                    // threads interleaved across two NUMA nodes
+let pinned = Executor::for_ram(&[], Some(CPUClass::IntelHaswell), 0)?; // waiters and atomics of one class
+let rings = Executor::for_nvme(&["/mnt/nvme0"], None, 4)?;             // one submission ring apiece
+let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], 0)? };   // one stream per device, scratch grown as asked
+let shared = unsafe { Executor::on_pool(&[], None, pool)? };           // shares the threads another library spawned
+let local = Executor::default();                                       // owns nothing, runs on the calling thread
 
-threads.drain(Mood::Spinning)?;                                   // waits for every call, then keeps spinning
+threads.drain(Mood::Spinning)?;                                        // waits out the holding call, then keeps spinning
 ```
 
 `for_ram` and `for_nvme` take a thread count, where zero derives one.
 `for_vram` takes none, since one host thread drives one stream per device, and may borrow your CUDA streams, one per device.
 `for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; the engine wires neither borrowing yet and answers `Status::Unsupported`.
-Each constructor ends with a `deferred_limit` sizing its table of deferred calls, where zero takes the default.
 `Executor::default()` owns nothing and runs every call handed to it on the calling thread.
-Calls on one executor start in submission order, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
-`drain` waits for every submitted call and sets the `Mood` idle workers adopt, and dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
+One call holds an executor at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
+`drain` waits until no call holds the executor and sets the `Mood` idle workers adopt, and dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
 
 ## Arenas
 
@@ -219,7 +218,7 @@ The path extension picks the layout: a `.safegraphs` path is one monolith, and a
 ```rust
 index.on(&executor).save("index.safegraphs")?;
 let loaded = DenseIndex::load_ram("index.safegraphs")?;
-let gpu = unsafe { Executor::for_vram(&[0], None, &[], 0, 0)? };
+let gpu = unsafe { Executor::for_vram(&[0], None, &[], 0)? };
 let placed = DenseIndex::load_vram(DenseLoadVramConfig {
     executor: Some(&gpu),
     devices: &[0],
@@ -539,7 +538,7 @@ These C entry points also take a deferred completion, but the crate calls them b
 - __Arenas are lent and reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes; the result borrows it, so the borrow checker retires stale views at compile time.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table slot and allocate no box, and an arena allocates only when a call writes into it.
+  Blocking calls allocate no box, and an arena allocates only when a call writes into it.
 - __Callers lend memory, never an allocator.__
   No allocation callback crosses into the library: payload belongs to the index, placed by its constructor's residency, and scratch belongs to the executor.
 - __A deferred receiver refuses borrowed inputs at compile time.__

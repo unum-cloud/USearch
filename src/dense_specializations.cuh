@@ -357,6 +357,10 @@ struct specialized_index {
         else return ram_residency_k;
     }
     static std::size_t shards_count(void const* index) noexcept { return of(index).shards_count(); }
+    static usearch_load_path_t load_path(void const* index) noexcept {
+        if constexpr (requires { of(index).loaded_through(); }) return usearch_load_path_of(of(index).loaded_through());
+        else return usearch_load_path_none_k;
+    }
     static std::size_t size(void const* index) noexcept { return of(index).size(); }
     static std::size_t capacity(void const* index) noexcept { return of(index).capacity(); }
     static std::size_t memory_usage(void const* index) noexcept { return of(index).memory_usage(); }
@@ -769,6 +773,7 @@ struct specialized_index {
             .geometry = &geometry,
             .residency = &residency,
             .shards_count = &shards_count,
+            .load_path = &load_path,
             .size = &size,
             .capacity = &capacity,
             .memory_usage = &memory_usage,
