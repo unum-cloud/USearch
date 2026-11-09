@@ -251,6 +251,14 @@ void test_find_vector(size_t const collection_size, size_t const dimensions) {
     expect(!memcmp(keys, threaded_keys, collection_size * sizeof(usearch_key_t)), "Exact search differs by threads");
     expect(!memcmp(distances, threaded_distances, collection_size * sizeof(float)), "Exact search differs by threads");
 
+    // Exact search must fail cleanly when count exceeds dataset_count (#836)
+    usearch_exact_search(data, collection_size, stride, data, 1, stride, usearch_scalar_f32_k, dimensions,
+                         opts.metric_kind, collection_size + 1, 1, keys, sizeof(usearch_key_t), distances,
+                         sizeof(float), &error);
+    expect(error != NULL && strcmp(error, "You can't request more matches than in the dataset!") == 0,
+           "Expected error when count exceeds dataset size");
+    error = NULL;
+
     free(threaded_keys);
     free(threaded_distances);
     free(data);

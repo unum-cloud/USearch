@@ -965,6 +965,7 @@ void test_exact_search(std::size_t dataset_count, std::size_t queries_count, std
         (byte_t const*)dataset.data(), queries_count, dimensions * sizeof(scalar_at), //
         wanted_count, metric);
 
+    assert(results.cols() == (std::min)(wanted_count, dataset_count));
     for (std::size_t i = 0; i < results.size(); ++i)
         assert(results.at(i)[0].offset == i); // Validate the top match
 }
@@ -1641,7 +1642,7 @@ int main(int, char**) {
     std::printf("Testing exact search\n");
     for (std::size_t dataset_count : {10, 100})
         for (std::size_t queries_count : {1, 10})
-            for (std::size_t wanted_count : {1, 5}) {
+            for (std::size_t wanted_count : {1, 5, 20}) {
                 test_exact_search<f32_t>(dataset_count, queries_count, wanted_count);
                 test_exact_search<bf16_t>(dataset_count, queries_count, wanted_count);
                 test_exact_search<f16_t>(dataset_count, queries_count, wanted_count);
