@@ -34,6 +34,7 @@ from base import (
     bf16_words,
     build_index,
     distance_tolerances,
+    init_ram_or_skip,
     measured_recall,
     recall_floor,
 )
@@ -495,7 +496,7 @@ def test_insert_accepts_any_input_dtype(executor, input_dtype):
 
 def test_insert_accepts_packed_rows_by_logical_width(executor):
     """A `u1x8` row counts the bits it packs, so an eight-byte row is a sixty-four-bit vector."""
-    index = DenseIndex.init_ram(dimensions=64, metric=DenseMetric.HAMMING, quantization=Scalar.U1X8)
+    index = init_ram_or_skip(dimensions=64, metric=DenseMetric.HAMMING, quantization=Scalar.U1X8)
     index.reserve(16)
     rows = random_vectors(8, 64, metric=DenseMetric.HAMMING)
     assert rows.shape == (8, 8), "sixty-four bits pack into eight bytes"
@@ -1175,7 +1176,7 @@ def test_encoded_path_is_read_as_a_path(executor, tmp_path):
 
 def test_metadata_roundtrips_through_a_factory(executor, tmp_path):
     """The metadata fields are the geometry every factory takes, so they rebuild the handle."""
-    index = DenseIndex.init_ram(dimensions=48, metric=DenseMetric.EUCLIDEAN, quantization=Scalar.I8, connectivity=32)
+    index = init_ram_or_skip(dimensions=48, metric=DenseMetric.EUCLIDEAN, quantization=Scalar.I8, connectivity=32)
     index.reserve(8)
     index.on(executor).insert(np.arange(8), random_vectors(8, 48))
     path = str(tmp_path / "typed.safegraphs")

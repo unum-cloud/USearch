@@ -3,6 +3,10 @@
 Holds the matrices every module parametrizes over, the oracle it checks against, the recall
 floors it asserts, and the gate that skips a kernel family this machine cannot reach. Imported by
 name from each test module; only what pytest loads for itself lives in `conftest`.
+
+File: test/base.py
+Author: Ash Vardanian
+Date: August 16, 2026
 """
 
 import os
@@ -211,6 +215,14 @@ def requires_capability(codename: str):
 # region Builders
 
 
+def init_ram_or_skip(**options) -> DenseIndex:
+    """An index of *options*, or a skipped test when this build's `USEARCH_DENSE_DTYPES` left its quantization out."""
+    try:
+        return DenseIndex.init_ram(**options)
+    except UnsupportedError:
+        pytest.skip(f"this build leaves {options['quantization'].name} out")
+
+
 def build_index(
     count: int,
     dimensions: int,
@@ -227,10 +239,7 @@ def build_index(
     rows, integer-valued for `i8` and `u8` storage, or packed `uint8` bits for a bitwise *metric*,
     hence the generic dtype. Skips when this build's `USEARCH_DENSE_DTYPES` left *quantization* out.
     """
-    try:
-        index = DenseIndex.init_ram(dimensions=dimensions, metric=metric, quantization=quantization, **options)
-    except UnsupportedError:
-        pytest.skip(f"this build leaves {quantization.name} out")
+    index = init_ram_or_skip(dimensions=dimensions, metric=metric, quantization=quantization, **options)
     index.reserve(count)
     vectors = random_vectors(count, dimensions, metric=metric, seed=seed)
     # Integral storage is a saturating cast, so its rows must already be integers in range.

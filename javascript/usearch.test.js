@@ -568,7 +568,7 @@ test("Refinement leaves the graph searchable", () => {
   assert.equal(usearch.integerFromKey(index.search(new Float32Array([7, 8, 9, 10]), 1, new Arena()).get(0).keys), 7n);
 });
 
-test("Absorbing consumes only the donors it absorbed", () => {
+test("Absorbing consumes only the donors it absorbed", (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   index.reserve(2);
@@ -600,7 +600,8 @@ test("Absorbing consumes only the donors it absorbed", () => {
   });
   assert.equal(twice.describe().size, 0, "a refused absorb hands its donors back");
 
-  const other = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.I8 });
+  const other = initRamOrSkip(t, { metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.I8 });
+  if (!other) return;
   other.reserve(1);
   other.insert(3n, new Float32Array([3, 3]));
   try {
@@ -963,11 +964,11 @@ test("Serialization through memory", async (t) => {
 });
 
 test("Every enumerator crosses the C name tables", async (t) => {
-  await t.test("metrics", () => {
+  await t.test("metrics", (t) => {
     for (const metric of Object.values(DenseMetric)) {
       const bits = metric === DenseMetric.Hamming || metric === DenseMetric.Jaccard;
-      const index = DenseIndex.initRam({ metric, dimensions: 8, quantization: bits ? Scalar.U1x8 : Scalar.BF16 });
-      assert.equal(index.describe().metadata.metric, metric);
+      const index = initRamOrSkip(t, { metric, dimensions: 8, quantization: bits ? Scalar.U1x8 : Scalar.BF16 });
+      if (index) assert.equal(index.describe().metadata.metric, metric);
     }
   });
 
@@ -1026,8 +1027,9 @@ test("A scan scores every entry exactly, so each query finds itself first", () =
 });
 
 test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
-  await t.test("packed bits reach a Hamming index as u1x8", () => {
-    const index = DenseIndex.initRam({ metric: DenseMetric.Hamming, dimensions: 64, quantization: Scalar.U1x8 });
+  await t.test("packed bits reach a Hamming index as u1x8", (t) => {
+    const index = initRamOrSkip(t, { metric: DenseMetric.Hamming, dimensions: 64, quantization: Scalar.U1x8 });
+    if (!index) return;
     const packed = new Uint8Array([0b10101010, 0, 0, 0, 0, 0, 0, 0, 0b10101011, 0, 0, 0, 0, 0, 0, 0]);
     index.reserve(2);
     index.insert([1n, 2n], RowsView.of(packed, 64, Scalar.U1x8));

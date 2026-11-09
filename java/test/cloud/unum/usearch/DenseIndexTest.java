@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.File;
 import java.lang.foreign.MemorySegment;
@@ -84,6 +85,16 @@ public class DenseIndexTest {
 
     private static DenseIndex empty(DenseOptions options) {
         return DenseIndex.initRam(options, new int[0]);
+    }
+
+    /** An empty index, or an aborted test when this build's USEARCH_DENSE_DTYPES left its quantization out. */
+    private static DenseIndex emptyOrSkip(DenseOptions options) {
+        try {
+            return empty(options);
+        } catch (USearchException refused) {
+            assumeTrue(refused.status() != Status.UNSUPPORTED, "this build leaves the quantization out");
+            throw refused;
+        }
     }
 
     private static float[] floatsOf(DenseVectors vectors) {
@@ -826,7 +837,7 @@ public class DenseIndexTest {
                     assertThrows(USearchException.class, () -> index.absorb(index))
                             .status());
 
-            try (DenseIndex other = empty(twoDimensional().quantization(Scalar.I8))) {
+            try (DenseIndex other = emptyOrSkip(twoDimensional().quantization(Scalar.I8))) {
                 other.reserve(1);
                 other.insert(new Key[] {Key.of(30)}, RowsView.of(new float[] {1, 1}, 2));
                 try {
