@@ -284,6 +284,40 @@ def test_index_duplicates(batch_size):
     assert np.vstack(two_per_key).shape == (2 * batch_size, ndim)
 
 
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize(
+    "existing_keys, removed_keys, batch_size",
+    [
+        ([0, 1, 2], [0], 1),  # `len` drops below the largest key after a removal
+        ([0, 1, 2], [1], 2),  # only part of the generated batch collides
+        ([1], [], 1),  # an explicit key equals `len`
+    ],
+)
+def test_index_generated_keys_are_unique(multi, existing_keys, removed_keys, batch_size):
+    reset_randomness()
+
+    ndim = 8
+    index = Index(ndim=ndim, multi=multi)
+    index.add(existing_keys, random_vectors(count=len(existing_keys), ndim=ndim), threads=threads)
+    for key in removed_keys:
+        index.remove(key)
+    kept_keys = sorted(set(existing_keys) - set(removed_keys))
+
+    generated_keys = index.add(None, random_vectors(count=batch_size, ndim=ndim), threads=threads)
+    assert not set(generated_keys.tolist()) & set(kept_keys)
+    assert len(set(generated_keys.tolist())) == batch_size
+    assert np.all(index.count(kept_keys) == 1)
+    assert sorted(index.keys) == sorted(kept_keys + generated_keys.tolist())
+
+    # No free keys remain above the largest one, so the generated keys would wrap around to 0
+    index = Index(ndim=ndim, multi=multi)
+    near_max_keys = np.array([2, np.iinfo(np.uint64).max - 3], dtype=np.uint64)
+    index.add(near_max_keys, random_vectors(count=2, ndim=ndim), threads=threads)
+    with pytest.raises(ValueError):
+        index.add(None, random_vectors(count=3, ndim=ndim), threads=threads)
+    assert len(index) == 2
+
+
 @pytest.mark.parametrize("batch_size", [1, 7, 1024])
 def test_index_stats(batch_size):
     reset_randomness()
