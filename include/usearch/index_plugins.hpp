@@ -3394,11 +3394,12 @@ class exact_search_t {
         }
 
         // §3. Partial-sort every query result
+        std::size_t effective_wanted = (std::min)(wanted, dataset_count);
         executor.fixed(queries_count, [&](std::size_t, std::size_t query_idx) {
             auto start = keys_and_distances_per_query + dataset_count * query_idx;
-            if (wanted > 1) {
-                std::partial_sort(start, start + wanted, start + dataset_count, &smaller_distance);
-            } else {
+            if (effective_wanted > 1) {
+                std::partial_sort(start, start + effective_wanted, start + dataset_count, &smaller_distance);
+            } else if (effective_wanted == 1) {
                 auto min_it = std::min_element(start, start + dataset_count, &smaller_distance);
                 if (min_it != start)
                     std::swap(*min_it, *start);
@@ -3407,7 +3408,7 @@ class exact_search_t {
 
         // At the end report the latest numbers, because the reporter thread may be finished earlier
         progress(tasks_count, tasks_count);
-        return {keys_and_distances_per_query, wanted, queries_count,
+        return {keys_and_distances_per_query, effective_wanted, queries_count,
                 dataset_count * sizeof(exact_offset_and_distance_t)};
     }
 };
