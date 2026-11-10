@@ -23,10 +23,18 @@
     {
       "name": "clang",
       "hidden": true,
-      "description": "Clang, and `lld`, which links the template-heavy targets several times faster than `bfd`.",
+      "description": "Clang, linking through the platform's own linker.",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "llvm",
+      "hidden": true,
+      "inherits": "clang",
+      "description": "Clang and `lld`, which links the template-heavy targets several times faster than `bfd`.",
+      "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
         "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld"
       }
@@ -81,7 +89,7 @@
       "name": "debug",
       "inherits": [
         "base",
-        "clang"
+        "llvm"
       ],
       "displayName": "Host Debug - unit tests with sanitizers",
       "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
@@ -95,7 +103,7 @@
       "name": "check",
       "inherits": [
         "base",
-        "clang"
+        "llvm"
       ],
       "displayName": "Host Check - fastest compile cycle, warnings as errors",
       "description": "Does it still compile without a warning, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor.",
@@ -124,7 +132,7 @@
       "name": "relwithdebinfo",
       "inherits": [
         "base",
-        "clang"
+        "llvm"
       ],
       "displayName": "Host RelWithDebInfo - optimized tests with symbols",
       "description": "Optimized, with full DWARF for stepping through the suites.",
@@ -154,7 +162,7 @@
       "name": "profile",
       "inherits": [
         "base",
-        "clang"
+        "llvm"
       ],
       "displayName": "Host Profile - benchmarks under perf",
       "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
@@ -185,7 +193,7 @@
       "name": "cuda",
       "inherits": [
         "base",
-        "clang"
+        "llvm"
       ],
       "displayName": "CUDA RelWithDebInfo - everything, CUDA included",
       "description": "The iteration tree, and the only one covering the `.cu` units - so `.clangd` reads its database. Optimized enough to run, with line tables instead of full DWARF and the fat binary narrowed to the host GPU.",
@@ -229,7 +237,7 @@
       "inherits": [
         "base",
         "linux",
-        "clang"
+        "llvm"
       ],
       "description": "One machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "cacheVariables": {

@@ -11,7 +11,7 @@
  *  scenarios must carry it end to end.
  */
 #include <cmath>   // `std::sqrt` - the angular oracle
-#include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths
+#include <cstdio>  // `std::snprintf`, `std::remove` - the saved monoliths and manifests
 #include <cstring> // `std::memcpy` - the codec's views of stored entries
 
 #include <algorithm> // `std::find` - a query's saved keys
@@ -142,12 +142,12 @@ static_assert(value_codec<embedding_codec_t, embedding_t>);
 static_assert(interchange_value_codec<embedding_codec_t>);
 
 /** A UUID-keyed RAM index over the embeddings, the target every narrower key column widens into. */
-using widened_index_t =
-    ram_index<embedding_t, uuid_t, u32_t, f32_t, dummy_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+using widened_index_t = ram_index<embedding_t, us::utilities::uuid_t, u32_t, f32_t, dummy_waiter_t,
+                                  fu::standard_atomic_ref, counting_allocator_t>;
 
 /** A UUID-keyed view of the embeddings on storage. */
-using widened_view_t =
-    us::basic::nvme_indexes<embedding_codec_t, uuid_t, u32_t, f32_t, blocking_files_engine<fu::standard_yield_t>>;
+using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, us::utilities::uuid_t, u32_t, f32_t,
+                                               blocking_files_engine<fu::standard_yield_t>>;
 
 /**
  *  @brief A monolith of @p fixture_type_ 's keys widens into UUID keys on every reader.
@@ -168,16 +168,17 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
                   static_cast<unsigned>(stream_key(seed, label) ^ reinterpret_cast<std::uintptr_t>(&ledger)));
     std::vector<embedding_t> values = fixture_type_::make_values(nodes_k, stream_key(seed, label),
                                                                  counting_allocator_t {ledger});
-    std::vector<uuid_t> expected_keys(nodes_k * wanted_k);
+    std::vector<us::utilities::uuid_t> expected_keys(nodes_k * wanted_k);
     std::vector<f32_t> expected_distances(nodes_k * wanted_k);
     serial_executor_t serial;
     // A query ranks alike when its distances agree within noise and every key nearer than the
     // query's last distance is one the saved index ranked there too: ties at the cut may swap keys.
     error_stats_t distance_errors;
-    auto ranked_alike = [&](std::size_t query, std::span<uuid_t const> keys, std::span<f32_t const> distances) {
+    auto ranked_alike = [&](std::size_t query, std::span<us::utilities::uuid_t const> keys,
+                            std::span<f32_t const> distances) {
         std::size_t mismatches = 0;
-        std::span<uuid_t const> const wanted_keys = std::span<uuid_t const> {expected_keys}.subspan(query * wanted_k,
-                                                                                                    wanted_k);
+        std::span<us::utilities::uuid_t const> const wanted_keys =
+            std::span<us::utilities::uuid_t const> {expected_keys}.subspan(query * wanted_k, wanted_k);
         f32_t const last = expected_distances[query * wanted_k + wanted_k - 1];
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             distance_errors.add(distances[rank], expected_distances[query * wanted_k + rank]);
@@ -224,7 +225,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
                                   status_t::success_k);
             failures += expect(context.results.size() >= wanted_k);
             if (context.results.size() < wanted_k) continue;
-            std::array<uuid_t, wanted_k> keys;
+            std::array<us::utilities::uuid_t, wanted_k> keys;
             std::array<f32_t, wanted_k> distances;
             for (std::size_t rank = 0; rank != wanted_k; ++rank)
                 keys[rank] = widened.key_of(context.results[rank].node_id).value,
@@ -245,8 +246,9 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         failures += expect_eq(viewed.view(path, {}, embeddings_fixture_t::metric_k, executor), status_t::success_k);
         failures += expect_eq(viewed.size(), nodes_k);
         std::vector<std::size_t> entries(expected_keys.size());
-        failures += expect_eq(viewed.count(std::span<uuid_t const> {expected_keys}, std::span {entries}, executor),
-                              status_t::success_k);
+        failures += expect_eq(
+            viewed.count(std::span<us::utilities::uuid_t const> {expected_keys}, std::span {entries}, executor),
+            status_t::success_k);
         for (std::size_t const counted : entries) failures += expect_eq(counted, 1u);
         auto make_metric = [](auto const&, std::size_t) noexcept {
             return expected<angular_metric_t> {angular_metric_t {}, status_t::success_k};
@@ -256,15 +258,16 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         };
         widened_view_t::search_config_t search_config;
         search_config.expansion_factor = nodes_k;
-        std::vector<uuid_t> keys(nodes_k * wanted_k);
+        std::vector<us::utilities::uuid_t> keys(nodes_k * wanted_k);
         std::vector<f32_t> distances(nodes_k * wanted_k);
         std::vector<std::size_t> counts(nodes_k);
-        auto const [found, search_status] = viewed.search(nodes_k, make_metric, query_of, std::span<uuid_t> {keys},
-                                                          std::span<f32_t> {distances}, std::span<std::size_t> {counts},
-                                                          search_config, executor);
+        auto const [found, search_status] = viewed.search(
+            nodes_k, make_metric, query_of, std::span<us::utilities::uuid_t> {keys}, std::span<f32_t> {distances},
+            std::span<std::size_t> {counts}, search_config, executor);
         failures += expect_eq(search_status, status_t::success_k);
         for (std::size_t query = 0; query != nodes_k; ++query)
-            failures += ranked_alike(query, std::span<uuid_t const> {keys}.subspan(query * wanted_k, wanted_k),
+            failures += ranked_alike(query,
+                                     std::span<us::utilities::uuid_t const> {keys}.subspan(query * wanted_k, wanted_k),
                                      std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
     }
     fu_topology_delete(topology);
@@ -444,6 +447,34 @@ static std::size_t expect_view_reads_headers_alone(u64_t seed) {
     return failures + expect_eq(ledger.live_bytes, 0);
 }
 
+/** A manifest replaces the one before it whole, through a sibling that never stays behind, while
+ *  an address inside a device's span and a directory are refused, having no room for a sibling. */
+static std::size_t expect_manifest_replaced_durably(u64_t seed) {
+    char path[64], staged[72];
+    std::snprintf(path, sizeof(path), "/tmp/usearch-manifest-%08x.json", static_cast<unsigned>(seed));
+    std::snprintf(staged, sizeof(staged), "%s.tmp", path);
+    constexpr std::string_view names[] = {"part-0.safegraphs", "part-1.safegraphs", "part-2.safegraphs"};
+    auto part_at = [&](std::size_t part) noexcept { return safegraphs_part_t {names[part], 4096, 8, 0}; };
+    std::size_t failures = 0;
+    for (std::size_t const parts : {std::size_t {3}, std::size_t {2}}) {
+        failures += expect_eq(safegraphs_write_manifest(std::string_view {path}, parts, part_at), status_t::success_k);
+        auto [mapping, map_status] = mapped_file_t::read(path);
+        failures += expect_eq(map_status, status_t::success_k);
+        std::string_view const json {reinterpret_cast<char const*>(mapping.view().data()), mapping.size()};
+        failures += expect(json.find(names[parts - 1]) != std::string_view::npos);
+        failures += expect((json.find(names[2]) != std::string_view::npos) == (parts == 3));
+        failures += expect(failed(seekable_file_t::open(staged, file_access_t::read_only_k).status));
+    }
+    char based[80];
+    std::snprintf(based, sizeof(based), "%s@4096", path);
+    failures += expect_eq(safegraphs_write_manifest(std::string_view {based}, 2, part_at),
+                          status_t::invalid_argument_k);
+    failures += expect_eq(safegraphs_write_manifest(std::string_view {"/tmp"}, 2, part_at),
+                          status_t::invalid_argument_k);
+    std::remove(path);
+    return failures;
+}
+
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value column, which
  *  no modality unit has: monolith, hostile header battery, and the distributed form, each at every
  *  alignment and executor the scenarios cover - then the narrower key columns widening into UUIDs,
@@ -458,6 +489,7 @@ std::size_t test::utilities::check_safegraphs_format(settings_t const& settings)
     failures += expect_keys_widen<embeddings_fixture<u32_t, u32_t>>(settings.seed, "u32 keys");
     failures += expect_wide_nodes_refused(settings.seed);
     failures += expect_view_reads_headers_alone(settings.seed);
+    failures += expect_manifest_replaced_durably(settings.seed);
     return report("safegraphs format", failures);
 }
 

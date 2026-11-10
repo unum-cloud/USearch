@@ -49,8 +49,10 @@ inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
 
 /** Allocates on one ForkUnion memory domain, so storage is placed beside the threads that walk
  *  it; @c no_memory_domain_k means the plain heap, which also serves every block under a page, as
- *  per-entry packs and neighbor lists are. It claims 1 GiB pages for blocks of a GiB or more while
- *  the pool covers them, and base pages otherwise. */
+ *  per-entry packs and neighbor lists are, and every block where ForkUnion places nothing. It
+ *  claims 1 GiB pages for blocks of a GiB or more while the pool covers them, and base pages
+ *  otherwise. Every block of a page or more starts on a page, from the heap too, so a direct I/O
+ *  buffer is taken as placed. */
 template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
@@ -70,13 +72,18 @@ struct forkunion_allocator {
     constexpr forkunion_allocator(forkunion_allocator<other_type_> const& other) noexcept
         : memory_domain(other.memory_domain) {}
 
-    /** Every run starts on @c default_alignment_k: arenas slice on that boundary and size
-     *  themselves assuming an aligned base, so the heap fallback aligns like the domains do. */
+    /** Every run starts on @c default_alignment_k, and a run of a page or more on a page: arenas
+     *  slice on that boundary and size themselves assuming an aligned base, so the heap fallback
+     *  aligns like the domains do. */
     value_type_* allocate(std::size_t count) noexcept {
         std::size_t const bytes = aligned_bytes_(count);
-        if (heap_serves_(bytes)) return static_cast<value_type_*>(std::aligned_alloc(default_alignment_k, bytes));
+        if (heap_serves_(bytes)) {
+            std::size_t const alignment = bytes < fu::ram_page_size() ? default_alignment_k : fu::ram_page_size();
+            return static_cast<value_type_*>(
+                std::aligned_alloc(alignment, round_up_to_multiple<std::size_t>(bytes, alignment)));
+        }
         if constexpr (places_by_mmap_k) {
-            fu::domain_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
+            pages_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
             char* memory = nullptr;
             if (bytes >= fu::page_size_1g_k) memory = pages.allocate_at_least(bytes, fu::page_size_1g_k).ptr;
             if (!memory) memory = pages.allocate(mapped_bytes_(bytes), fu::ram_page_size());
@@ -90,7 +97,7 @@ struct forkunion_allocator {
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
         if (heap_serves_(aligned_bytes_(count))) return std::free(pointer);
         if constexpr (places_by_mmap_k)
-            return fu::domain_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
+            return pages_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
                 reinterpret_cast<char*>(pointer), mapped_bytes_(aligned_bytes_(count)));
         fu_free_on_domain_id(memory_domain, pointer, aligned_bytes_(count));
     }
@@ -105,10 +112,18 @@ struct forkunion_allocator {
         std::is_same_v<fu::domain_allocator_t, fu::linux_numa_allocator_t> ||
         std::is_same_v<fu::domain_allocator_t, fu::freebsd_numa_allocator_t>;
 
+    /** ForkUnion's placing allocator, named through the element type, so a platform whose
+     *  allocator takes no page size never compiles the mapped path. */
+    using pages_allocator_t = std::conditional_t<sizeof(value_type_) != 0, fu::domain_allocator_t, void>;
+
+    /** Whether ForkUnion places memory on domains here at all, rather than on its heap. */
+    inline static constexpr bool places_on_domains_k =
+        !std::is_same_v<fu::domain_allocator_t, fu::portable_aligned_allocator_t>;
+
     /** Whether the heap places a block of @p bytes: a domain maps a page and a syscall apiece, so
      *  a small block taking it costs a whole page and a page-splitting @c munmap to free. */
     bool heap_serves_(std::size_t bytes) const noexcept {
-        return memory_domain == no_memory_domain_k || bytes < fu::ram_page_size();
+        return !places_on_domains_k || memory_domain == no_memory_domain_k || bytes < fu::ram_page_size();
     }
 
     /** The byte count a run of @p count elements is claimed and released with. */
@@ -117,7 +132,8 @@ struct forkunion_allocator {
     }
 
     /** The length a block of @p bytes maps. The base-page fallback maps the same rounded length,
-     *  as @c munmap refuses part of a 1 GiB page and release cannot tell which it got. */
+     *  as @c munmap refuses part of a 1 GiB page and a release, handed only the count, cannot tell
+     *  which it got. */
     static std::size_t mapped_bytes_(std::size_t bytes) noexcept {
         return bytes < fu::page_size_1g_k ? bytes : round_up_to_multiple<std::size_t>(bytes, fu::page_size_1g_k);
     }

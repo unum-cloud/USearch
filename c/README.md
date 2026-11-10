@@ -254,7 +254,7 @@ The options name where an index lives, never who walks it.
 `usearch_ram_options_t` names NUMA nodes, one shard per node, so a dual-socket box gets two graphs whose walks stay local; payload blocks claim huge pages where a pool is provisioned.
 `usearch_vram_options_t` names device ordinals, one shard per device and never a replica, so an index outgrowing them fails rather than paging to the host.
 Both take a `shard_capacity`, the entries one shard may hold, zero meaning the 32-bit ID space: an insertion past it opens another generation of shards on the same nodes or devices, and only the newest generation takes insertions.
-`usearch_nvme_options_t` names paths: a filesystem path selects a kernel I/O engine, a transport identifier like `trtype:PCIe traddr:0000:5e:00.0` selects SPDK in a `-D USEARCH_WITH_SPDK=1` build, and a FUSE mount over a bucket reads as an ordinary path.
+`usearch_nvme_options_t` names paths: a filesystem path selects a kernel I/O engine, a transport identifier like `trtype:PCIe traddr:0000:5e:00.0` selects SPDK in a `-D USEARCH_WITH_LINUX_SPDK=1` build, and a FUSE mount over a bucket reads as an ordinary path.
 
 Memory follows residency: an index keeps its payload where its lifecycle verb put it, an executor keeps its scratch next to its threads or devices, and an arena lives where the executor that created it computes.
 So outputs come back in RAM from a RAM executor and in VRAM from a VRAM executor, and moving them elsewhere is the caller's own copy.

@@ -369,8 +369,8 @@ struct vram_nvidia_kernels {
             // cuFile writes from the host, so the stream's allocation must finish first.
             cuda_event_t allocated {*stream.api};
             if (failed(allocated.record(stream.handle)) || failed(allocated.wait())) return status_t::device_error_k;
-            cufile_ = &registered->file.api();
-            [[maybe_unused]] cufile_error_t const buffer = cufile_->buffer_register(staging_.get(), bytes, 0);
+            cufile_api_t const& api = registered->file.api();
+            if (cufile_register_staging(api, staging_.get(), bytes) == cufile_staging_t::registered_k) cufile_ = &api;
             sources_ = sources;
             return status_t::success_k;
         }
@@ -403,7 +403,8 @@ struct vram_nvidia_kernels {
         /** The mapped parts the steps read from. */
         std::span<part_source_t const> sources_;
 
-        /** The cuFile entries the staging registered with, which deregister it as it dies. */
+        /** The cuFile entries the staging registered with, which deregister it as it dies; null
+         *  while the driver holds no registration of it. */
         cufile_api_t const* cufile_ = nullptr;
 
         /** Bytes one slot holds. */

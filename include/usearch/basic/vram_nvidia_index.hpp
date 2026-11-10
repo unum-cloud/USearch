@@ -2286,10 +2286,11 @@ struct vram_ragged_graph {
               stored_offsets_(std::move(other.stored_offsets_)),
               drained_ {std::move(other.drained_[0]), std::move(other.drained_[1])},
               device_words_(std::move(other.device_words_)), staging_(std::move(other.staging_)),
-              slot_bytes_(other.slot_bytes_), holder_(std::exchange(other.holder_, nullptr)), stream_(other.stream_),
-              graph_kernels_(other.graph_kernels_), kits_kernels_(other.kits_kernels_), longest_(other.longest_),
-              span_bytes_(other.span_bytes_), chunks_(other.chunks_), covered_(other.covered_),
-              index_(std::exchange(other.index_, nullptr)) {}
+              slot_bytes_(other.slot_bytes_), holder_(std::exchange(other.holder_, nullptr)),
+              staging_registration_(std::exchange(other.staging_registration_, cufile_staging_t::unregistered_k)),
+              stream_(other.stream_), graph_kernels_(other.graph_kernels_), kits_kernels_(other.kits_kernels_),
+              longest_(other.longest_), span_bytes_(other.span_bytes_), chunks_(other.chunks_),
+              covered_(other.covered_), index_(std::exchange(other.index_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
@@ -2297,7 +2298,7 @@ struct vram_ragged_graph {
         /** An unfinished plan awaits every slot's work, so the next grow fills its nodes again, and
          *  gives its claim back. */
         ~load_plan_t() noexcept {
-            if (holder_) [[maybe_unused]]
+            if (staging_registration_ == cufile_staging_t::registered_k) [[maybe_unused]]
                 cufile_error_t const deregistered = holder_->file.api().buffer_deregister(staging_.get());
             if (!index_) return;
             if (chunks_) {
@@ -2488,6 +2489,9 @@ struct vram_ragged_graph {
          *  staging; null where they cross by driver copies. */
         cuda_part_source_t const* holder_ = nullptr;
 
+        /** Whether the driver took the staging, which the plan then deregisters as it dies. */
+        cufile_staging_t staging_registration_ = cufile_staging_t::unregistered_k;
+
         cuda_stream_handle_t stream_ = nullptr;
 
         /** The shared and the kits' kernels on the plan's stream, which outlive the plan there. */
@@ -2599,9 +2603,9 @@ struct vram_ragged_graph {
         // cuFile writes from the host, so the stream's allocation must finish first.
         if (plan.holder_ && (failed(plan.drained_[0].record(stream)) || failed(plan.drained_[0].wait())))
             return {std::move(plan), status_t::device_error_k};
-        if (plan.holder_) [[maybe_unused]]
-            cufile_error_t const registered = plan.holder_->file.api().buffer_register(plan.staging_.get(),
-                                                                                       staging_bytes, 0);
+        if (plan.holder_)
+            plan.staging_registration_ = cufile_register_staging(plan.holder_->file.api(), plan.staging_.get(),
+                                                                 staging_bytes);
         plan.device_words_ = cuda_make_unique(cuda_device_allocator<u64_t> {api()}, 2);
         if (!plan.device_words_) return {std::move(plan), status_t::bad_alloc_k};
         if (cuda_fill_async(api(), plan.device_words_.get(), 0, 2 * sizeof(u64_t), stream) != cuda_success_k)

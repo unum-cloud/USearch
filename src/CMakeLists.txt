@@ -599,7 +599,7 @@ function (usearch_object_library target_)
                    VISIBILITY_INLINES_HIDDEN ON
     )
     target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_definitions(${target_} PRIVATE USEARCH_EXPORTING ${arg_DEFINITIONS})
+    target_compile_definitions(${target_} PRIVATE USEARCH_EXPORTING=1 ${arg_DEFINITIONS})
     target_link_libraries(${target_} PRIVATE yyjson forkunion::static ${arg_LIBRARIES})
 endfunction ()
 

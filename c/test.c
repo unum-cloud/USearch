@@ -27,8 +27,14 @@
 #include <string.h>  // `memset`, `memcmp`, `strstr`
 #include <time.h>    // `time`, for a drawn seed
 
+#include "usearch/arrow.h"
+#include "usearch/dense_index.h"
+#include "usearch/geospatial_index.h"
+#include "usearch/sequence_index.h"
+#include "usearch/shapes_index.h"
+
 /* `dbghelp.h` needs types `windows.h` defines, so a blank line keeps clang-format from sorting it first. */
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
 #include <windows.h>
 
 #include <dbghelp.h> // `CaptureStackBackTrace`, `SymFromAddr`
@@ -38,15 +44,9 @@
 #include <unistd.h>   // `STDERR_FILENO`
 #endif
 
-#include "usearch/arrow.h"
-#include "usearch/dense_index.h"
-#include "usearch/geospatial_index.h"
-#include "usearch/sequence_index.h"
-#include "usearch/shapes_index.h"
-
 static void usearch_write_backtrace(int signal_number) {
     fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
     enum { backtrace_depth_limit = 64 };
     void* backtrace_frames[backtrace_depth_limit];
     USHORT backtrace_depth = CaptureStackBackTrace(0, backtrace_depth_limit, backtrace_frames, NULL);

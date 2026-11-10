@@ -4569,7 +4569,8 @@ std::size_t test_basic_nvme_failed_read(fixture_type_ const& fixture, u64_t seed
     if (failures) return failures;
     {
         growing_buffer<char> part_path {global_allocator};
-        auto [file, status] = seekable_file_t::open(broken_reference.part_path(part_path, 1), file_mode_t::write_k);
+        auto [file, status] = seekable_file_t::open(broken_reference.part_path(part_path, 1),
+                                                    file_access_t::truncate_read_write_k);
         failures += expect_eq(status, status_t::success_k);
     }
 

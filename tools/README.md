@@ -104,7 +104,7 @@ cmake --build build_release --target usearch_tools usearch_tools_mpi --parallel
 cmake --install build_release --component tools
 ```
 
-Add `-D USEARCH_CUDA_ARCH=native` for `--residency vram`, `-D USEARCH_WITH_SPDK=ON` for `spdk://` addresses, and `-D USEARCH_DENSE_DTYPES=6` or more to store `u8`.
+Add `-D USEARCH_CUDA_ARCH=native` for `--residency vram`, `-D USEARCH_WITH_LINUX_SPDK=ON` for `spdk://` addresses, and `-D USEARCH_DENSE_DTYPES=6` or more to store `u8`.
 
 ## Recipe
 

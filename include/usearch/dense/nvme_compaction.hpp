@@ -332,7 +332,7 @@ struct [[nodiscard]] nvme_compact_plan {
                                                                 fields);
                 failed(framed))
                 return {result_, framed};
-            if (status_t const flushed = target.file.sync(); failed(flushed)) return {result_, flushed};
+            if (status_t const flushed = target.file.flush(); failed(flushed)) return {result_, flushed};
         }
         auto part_at = [&](std::size_t part) noexcept {
             target_t const& target = targets_[part];
@@ -715,7 +715,7 @@ struct [[nodiscard]] nvme_compact_plan {
             auto const [path, path_status] = safegraphs_part_path(name, path_of_(stem_), part, rows.size());
             if (failed(path_status)) return path_status;
             if (status_t const kept = keep_path_(target.path, path); failed(kept)) return kept;
-            auto [file, open_status] = seekable_file_t::open(path, file_mode_t::write_k, allocator_);
+            auto [file, open_status] = seekable_file_t::open(path, file_access_t::truncate_read_write_k, allocator_);
             if (failed(open_status)) return open_status;
             target.file = std::move(file);
             if (status_t const sized = target.file.truncate(header.monolith_bytes()); failed(sized)) return sized;

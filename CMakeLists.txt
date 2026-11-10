@@ -45,7 +45,7 @@ set(USEARCH_METAL_ARCH
     ""
     CACHE STRING "Apple GPU family the index variants and tests serve: empty, all or one like apple9"
 )
-option(USEARCH_WITH_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
+option(USEARCH_WITH_LINUX_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 option(USEARCH_WERROR "Treat compiler warnings as errors" OFF)
 
 # Seeded from the environment at the first configure, so `cargo`, `cmake-js` and `scikit-build-core` honour
@@ -179,7 +179,7 @@ endif ()
 if (USEARCH_WITH_JEMALLOC)
     include(cmake/jemalloc.cmake)
 endif ()
-if (USEARCH_WITH_SPDK)
+if (USEARCH_WITH_LINUX_SPDK)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(usearch_spdk REQUIRED spdk_nvme spdk_env_dpdk)
     pkg_check_modules(usearch_spdk_system REQUIRED spdk_syslibs)
@@ -271,8 +271,8 @@ function (usearch_setup_target target_)
     target_link_libraries(${target_} PRIVATE $<BUILD_INTERFACE:numkong::header>)
 
     # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
-    if (USEARCH_WITH_SPDK)
-        target_compile_definitions(${target_} PRIVATE USEARCH_WITH_SPDK=1)
+    if (USEARCH_WITH_LINUX_SPDK)
+        target_compile_definitions(${target_} PRIVATE USEARCH_WITH_LINUX_SPDK=1)
         target_include_directories(${target_} SYSTEM PRIVATE ${usearch_spdk_INCLUDE_DIRS})
         # An object library hands its link items to every consumer, which links the archives whole once already.
         if (NOT target_type_ STREQUAL "OBJECT_LIBRARY")

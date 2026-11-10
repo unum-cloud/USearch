@@ -991,7 +991,8 @@ std::size_t test_nvme_indexes_failed_read(u64_t seed) {
     if (failed(driver.status) || failures) return failures + expect(false);
     {
         growing_buffer<char> part_path {global_allocator};
-        auto [file, status] = seekable_file_t::open(reference.checkpoint.part_path(part_path, 1), file_mode_t::write_k);
+        auto [file, status] = seekable_file_t::open(reference.checkpoint.part_path(part_path, 1),
+                                                    file_access_t::truncate_read_write_k);
         failures += expect_eq(status, status_t::success_k);
     }
 
@@ -1212,13 +1213,13 @@ std::size_t test_nvme_indexes_byte_base(u64_t seed) {
     std::vector<byte_t> const leading(byte_base, byte_t {0xA5});
     std::vector<byte_t> kept(byte_base);
     {
-        auto [file, open_status] = seekable_file_t::open(medium, file_mode_t::write_k);
+        auto [file, open_status] = seekable_file_t::open(medium, file_access_t::truncate_read_write_k);
         failures += expect(succeeded(open_status) && succeeded(file.write_at(0, leading)));
     }
     std::string const based = fmt::format("{}@{}KiB", medium, byte_base / 1024);
     failures += expect(succeeded(reference.whole().save(based, save_config_t {}, reference.builder.executor)));
     {
-        auto [file, open_status] = seekable_file_t::open(medium, file_mode_t::read_k);
+        auto [file, open_status] = seekable_file_t::open(medium, file_access_t::read_only_k);
         failures += expect(succeeded(open_status) && succeeded(file.read_at(0, kept)) && kept == leading);
     }
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
@@ -1666,7 +1667,7 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
         std::size_t const value_bytes = header.value.data.size() / rewrite_entries_k;
         byte_t* const values = bytes.data() + header.data_offset + header.value.data.first;
         std::memcpy(values + twin * value_bytes, values + lonely * value_bytes, value_bytes);
-        auto [file, open_status] = seekable_file_t::open(thinned.monolith.data(), file_mode_t::write_k);
+        auto [file, open_status] = seekable_file_t::open(thinned.monolith.data(), file_access_t::truncate_read_write_k);
         fixture.failures += expect_eq(open_status, status_t::success_k);
         fixture.failures += expect_eq(file.write_at(0, bytes_view_t {bytes}), status_t::success_k);
     }
@@ -1838,7 +1839,7 @@ std::size_t test_nvme_rewrites_dropped(u64_t seed) {
     fixture.failures += expect(failed(viewed.view(target.manifest.data())));
     growing_buffer<char> part_path {global_allocator};
     std::string_view const part = target.part_path(part_path, 0);
-    fixture.failures += expect(failed(seekable_file_t::open(part, file_mode_t::read_k).status));
+    fixture.failures += expect(failed(seekable_file_t::open(part, file_access_t::read_only_k).status));
     return fixture.failures;
 }
 

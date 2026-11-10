@@ -117,23 +117,151 @@
 #include <stddef.h> // `size_t`
 #include <stdint.h> // `uint8_t`, `int32_t`, `uint32_t`
 
-#ifdef __cplusplus
-extern "C" {
+#pragma region Platform Identity
+
+/*  Derived once, here, from the compiler's predefines; no other file reads them, and no build sets
+ *  them. */
+#if defined(USEARCH_OS_LINUX_) || defined(USEARCH_OS_APPLE_) || defined(USEARCH_OS_WINDOWS_) || \
+    defined(USEARCH_OS_FREEBSD_) || defined(USEARCH_OS_WASI_) || defined(USEARCH_OS_POSIX_)
+#error "USEARCH_OS_*_ are identity, derived from the compiler; set a USEARCH_WITH_* facility instead"
 #endif
 
-/** Marks exported functions: exported while building the shared library, imported when consuming
- *  it on Windows, and of default visibility on ELF and Mach-O. Define it to override. */
-#ifndef USEARCH_EXPORT
-#if (defined(_WIN32) || defined(__CYGWIN__)) && defined(USEARCH_EXPORTING)
+/** Whether the kernel is Linux, Android included, as 1 or 0. */
+#if defined(__linux__)
+#define USEARCH_OS_LINUX_ 1
+#else
+#define USEARCH_OS_LINUX_ 0
+#endif
+
+/** Whether the kernel is Darwin: macOS, iOS, tvOS, watchOS or visionOS, as 1 or 0. */
+#if defined(__APPLE__)
+#define USEARCH_OS_APPLE_ 1
+#else
+#define USEARCH_OS_APPLE_ 0
+#endif
+
+/** Whether the target is Windows, MinGW included and Cygwin not, as 1 or 0. */
+#if defined(_WIN32)
+#define USEARCH_OS_WINDOWS_ 1
+#else
+#define USEARCH_OS_WINDOWS_ 0
+#endif
+
+/** Whether the kernel is FreeBSD, as 1 or 0. */
+#if defined(__FreeBSD__)
+#define USEARCH_OS_FREEBSD_ 1
+#else
+#define USEARCH_OS_FREEBSD_ 0
+#endif
+
+/** Whether the target is the WebAssembly System Interface, which maps no files, as 1 or 0. */
+#if defined(__wasi__)
+#define USEARCH_OS_WASI_ 1
+#else
+#define USEARCH_OS_WASI_ 0
+#endif
+
+/** Whether the POSIX interfaces exist: Linux, Darwin, FreeBSD or Cygwin, as 1 or 0. */
+#if USEARCH_OS_LINUX_ || USEARCH_OS_APPLE_ || USEARCH_OS_FREEBSD_ || defined(__CYGWIN__)
+#define USEARCH_OS_POSIX_ 1
+#else
+#define USEARCH_OS_POSIX_ 0
+#endif
+
+#if USEARCH_OS_LINUX_ + USEARCH_OS_APPLE_ + USEARCH_OS_WINDOWS_ + USEARCH_OS_FREEBSD_ + USEARCH_OS_WASI_ > 1
+#error "Two operating-system identities hold at once"
+#endif
+#if USEARCH_OS_POSIX_ && USEARCH_OS_WINDOWS_
+#error "POSIX and Windows identities hold at once"
+#endif
+
+#pragma endregion Platform Identity
+
+#pragma region Facilities
+
+/** Whether the io_uring engines build, as 1 or 0: on Linux, unless a build sets 0. */
+#if !defined(USEARCH_WITH_LINUX_URING) && USEARCH_OS_LINUX_
+#define USEARCH_WITH_LINUX_URING 1
+#elif !defined(USEARCH_WITH_LINUX_URING)
+#define USEARCH_WITH_LINUX_URING 0
+#endif
+#if USEARCH_WITH_LINUX_URING && !USEARCH_OS_LINUX_
+#error "USEARCH_WITH_LINUX_URING needs Linux"
+#endif
+
+/** Whether the Linux AIO engine builds, as 1 or 0: on Linux with the kernel's AIO header, unless a
+ *  build sets 0. */
+#if !defined(USEARCH_WITH_LINUX_AIO) && USEARCH_OS_LINUX_
+#if __has_include(<linux/aio_abi.h>)
+#define USEARCH_WITH_LINUX_AIO 1
+#endif
+#endif // !defined(USEARCH_WITH_LINUX_AIO) && USEARCH_OS_LINUX_
+#if !defined(USEARCH_WITH_LINUX_AIO)
+#define USEARCH_WITH_LINUX_AIO 0
+#endif
+#if USEARCH_WITH_LINUX_AIO && !USEARCH_OS_LINUX_
+#error "USEARCH_WITH_LINUX_AIO needs Linux"
+#endif
+
+/** Whether the I/O Rings engine builds, as 1 or 0: on Windows with an SDK that ships
+ *  @c ioringapi.h, unless a build sets 0. */
+#if !defined(USEARCH_WITH_WINDOWS_IORING) && USEARCH_OS_WINDOWS_ && defined(__has_include)
+#if __has_include(<ioringapi.h>)
+#define USEARCH_WITH_WINDOWS_IORING 1
+#endif
+#endif // !defined(USEARCH_WITH_WINDOWS_IORING) && USEARCH_OS_WINDOWS_ && defined(__has_include)
+#if !defined(USEARCH_WITH_WINDOWS_IORING)
+#define USEARCH_WITH_WINDOWS_IORING 0
+#endif
+#if USEARCH_WITH_WINDOWS_IORING && !USEARCH_OS_WINDOWS_
+#error "USEARCH_WITH_WINDOWS_IORING needs Windows"
+#endif
+
+/** Whether SPDK's user-space NVMe driver is linked, as 1 or 0, which the build passes on. */
+#if !defined(USEARCH_WITH_LINUX_SPDK)
+#define USEARCH_WITH_LINUX_SPDK 0
+#endif
+#if USEARCH_WITH_LINUX_SPDK && !USEARCH_OS_LINUX_
+#error "USEARCH_WITH_LINUX_SPDK needs Linux"
+#endif
+
+/** Whether this unit builds the shared library, as 1 or 0. */
+#if !defined(USEARCH_EXPORTING)
+#define USEARCH_EXPORTING 0
+#endif
+
+/** Whether this unit links the shared library rather than the archive, as 1 or 0. */
+#if !defined(USEARCH_SHARED)
+#define USEARCH_SHARED 0
+#endif
+
+/**
+ *  @brief Marks every function the library exports, and nothing else.
+ *
+ *  On Windows it exports from the shared library, which builds with @c USEARCH_EXPORTING, imports
+ *  where a consumer of that library sets @c USEARCH_SHARED, as linking @c usearch::shared does, and
+ *  expands to nothing for the static library. GCC and Clang give the function default visibility,
+ *  so it survives @c -fvisibility=hidden. Define it to override.
+ */
+#if !defined(USEARCH_EXPORT)
+#if USEARCH_OS_WINDOWS_ && USEARCH_EXPORTING
 #define USEARCH_EXPORT __declspec(dllexport)
-#elif defined(_WIN32) || defined(__CYGWIN__)
+#elif USEARCH_OS_WINDOWS_ && USEARCH_SHARED
 #define USEARCH_EXPORT __declspec(dllimport)
+#elif USEARCH_OS_WINDOWS_
+#define USEARCH_EXPORT
 #elif defined(__GNUC__) || defined(__clang__)
 #define USEARCH_EXPORT __attribute__((visibility("default")))
 #else
 #define USEARCH_EXPORT
 #endif
 #endif // !defined(USEARCH_EXPORT)
+
+#pragma endregion Facilities
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** The library's version, which the release tooling rewrites in place. */
 #define USEARCH_VERSION_MAJOR 3

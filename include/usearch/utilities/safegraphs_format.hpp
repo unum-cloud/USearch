@@ -39,7 +39,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the shared outcome
 
-#include "usearch/utilities/blocking_files.hpp" // `mapped_file_t`, `file_span_t`, `copy_bytes`
+#include "usearch/utilities/blocking_files.hpp" // `mapped_file_t`, `file_span_t`, `copy_bytes`, `replace_file_durably`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - path formatting & header images
 #include "usearch/utilities/types.hpp"
 
@@ -896,12 +896,14 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
 }
 
 /**
- *  Writes a manifest over @p parts entries drawn from @p part_at in order - the commit
- *  record a distributed save writes last.
+ *  @brief Writes a manifest over @p parts entries drawn from @p part_at in order - the record a
+ *      distributed save commits last, replaced durably, so a crash leaves the old manifest or the
+ *      new one whole.
  *
  *  @par Statuses:
- *  - @c invalid_argument_k The path does not parse.
- *  - @c overflow_k A device ends before its base plus the manifest.
+ *  - @c invalid_argument_k The path does not parse, or addresses a device or a span of one, which
+ *    has no room for the sibling a replacement stages in.
+ *  - @c io_k The manifest could not be written, flushed or moved into place.
  */
 template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
 status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, callback_type_&& part_at,
@@ -909,15 +911,14 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
                                    allocator_type_ allocator = {}) noexcept {
     safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
     yyjson_alc const allocator_abi = trampoline.c_abi();
-    return safegraphs_print_(
-        safegraphs_manifest_document_(parts, part_at, custom_fields, allocator_abi), allocator_abi,
-        [&](std::string_view json) noexcept {
-            auto [mapping, map_status] = mapped_file_t::write(path, json.size());
-            if (failed(map_status)) return map_status;
-            if (status_t const wrote = copy_bytes(mapping.span(), bytes_of(json.data(), json.size())); failed(wrote))
-                return wrote;
-            return mapping.sync();
-        });
+    return safegraphs_print_(safegraphs_manifest_document_(parts, part_at, custom_fields, allocator_abi), allocator_abi,
+                             [&](std::string_view json) noexcept {
+                                 auto const [address, address_status] = parse_file_address(path);
+                                 if (failed(address_status)) return address_status;
+                                 if (address.byte_base || address.byte_limit || address.location.size() != path.size())
+                                     return status_t::invalid_argument_k;
+                                 return replace_file_durably(path, bytes_of(json.data(), json.size()), allocator);
+                             });
 }
 
 /**

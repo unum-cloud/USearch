@@ -52,6 +52,8 @@ add_library(
 add_library(${PROJECT_NAME}::shared ALIAS usearch_shared)
 add_library(${PROJECT_NAME}::static ALIAS usearch_static)
 set_target_properties(usearch_shared usearch_static PROPERTIES LINKER_LANGUAGE CXX)
+# Consumers of the shared flavor import its entry points on Windows; the archive needs no decoration.
+target_compile_definitions(usearch_shared INTERFACE USEARCH_SHARED=1)
 
 # Set the compile options for the static library
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

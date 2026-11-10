@@ -1223,6 +1223,24 @@ inline cuda_part_source_t const* cufile_holder(std::span<cuda_part_source_t cons
     return nullptr;
 }
 
+/** Whether cuFile registered a staging buffer, so its owner deregisters exactly what took. */
+enum class cufile_staging_t {
+
+    /** Not registered: cuFile still reads into it, through its own bounce buffers. */
+    unregistered_k,
+
+    /** Registered, and deregistered by its owner as it dies. */
+    registered_k,
+};
+
+/** Registers the @p bytes of device staging at @p staging with cuFile through @p api, answering
+ *  whether the driver took it. */
+inline cufile_staging_t cufile_register_staging(cufile_api_t const& api, void const* staging,
+                                                std::size_t bytes) noexcept {
+    return api.buffer_register(staging, bytes, 0).error == cufile_success_k ? cufile_staging_t::registered_k
+                                                                            : cufile_staging_t::unregistered_k;
+}
+
 #pragma endregion cuFile Reads
 
 /** Page-locked slots the traversal contexts on one executor stream copy their counters into. Each

@@ -1847,7 +1847,7 @@ inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, 
 }
 
 inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_outcome_t* outcome) {
-    auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::read_k);
+    auto [file, status] = seekable_file_t::open(as_text(path), file_access_t::read_only_k);
     if (failed(status)) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for reading");
         return false;
@@ -1877,7 +1877,7 @@ inline mapped_file_t map_file(usearch_bytes_view_t path, usearch_outcome_t* outc
 }
 
 inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_outcome_t* outcome) {
-    auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::write_k);
+    auto [file, status] = seekable_file_t::open(as_text(path), file_access_t::truncate_read_write_k);
     if (failed(status)) {
         propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for writing");
         return false;

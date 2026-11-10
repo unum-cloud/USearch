@@ -25,6 +25,8 @@ project_namespace=$(sed -n 's/^project_namespace="\(.*\)"$/\1/p' "$hooks_directo
 project_directory=$(sed -n 's/^project_name="\(.*\)"$/\1/p' "$hooks_directory/pre-commit" | tr '[:upper:]' '[:lower:]')
 first_sibling_directory=$(sed -n "s/^sibling_projects='\([a-z]*\).*/\1/p" "$hooks_directory/pre-commit")
 first_sibling=$(printf '%s' "$first_sibling_directory" | tr '[:lower:]' '[:upper:]')
+macro_prefix=$(sed -n 's/^macro_prefix="\(.*\)"$/\1/p' "$hooks_directory/pre-commit")
+identity_header=$(sed -n 's/^identity_headers="\([^ "]*\).*/\1/p' "$hooks_directory/pre-commit")
 
 # region Fixture Helpers
 
@@ -862,7 +864,7 @@ FIXTURE
 
 assert_rejects "note past a section's target pragmas" "opens a section with a note inside it" include/$project_directory/probe.h <<'FIXTURE'
 #if PROBE_TARGET_RELAXED
-#if defined(__clang__)
+#if defined(__clang_major__)
 #pragma clang attribute push(__attribute__((target("relaxed-simd"))), apply_to = function)
 #endif
 
@@ -899,7 +901,7 @@ assert_accepts "note on a nested directive, a group label, and a guard spelled w
 #include <emscripten.h>
 
 /*  The probes trip strict-prototype warnings, silenced for this block alone. */
-#if defined(__clang__)
+#if defined(__clang_major__)
 #pragma clang diagnostic push
 #endif
 
@@ -1330,7 +1332,7 @@ expect_acceptance "new header reusing a name from HEAD's headers"
 
 assert_rejects "line comment above a preprocessor block" "writes a // comment outside a function body" include/$project_directory/probe.h <<'FIXTURE'
 // EM_JS expands to an empty-parameter-list declaration, tripping -Wstrict-prototypes.
-#if defined(__clang__)
+#if defined(__clang_major__)
 #pragma clang diagnostic push
 #endif
 FIXTURE
@@ -1351,7 +1353,7 @@ FIXTURE
 assert_accepts "block comments at file scope, line comments in bodies" include/$project_directory/probe.h <<FIXTURE
 /*  EM_JS expands to an empty-parameter-list declaration, which trips -Wstrict-prototypes under
  *  Clang. */
-#if defined(__clang__)
+#if defined(__clang_major__)
 #pragma clang diagnostic push
 #endif
 
@@ -1383,7 +1385,7 @@ assert_accepts "docblock above a single-macro conditional, plain comment above a
 #endif
 
 /* Silences a warning that the macros below would otherwise trigger under Clang. */
-#if defined(__clang__)
+#if defined(__clang_major__)
 #pragma clang diagnostic push
 #define PROBE_FIRST_ 1
 #endif
@@ -1701,6 +1703,57 @@ expect_rejection "changed template header with unchanged class name" "suffixes a
 assert_accepts "qualified memcpy, and prose naming the bare forms" include/probe.hpp <<'FIXTURE'
 /** Copies eight bytes with @c std::memcpy, never an unqualified memcpy or a pragma mark. */
 inline void probe(char *to, char const *from) { std::memcpy(to, from, 8); }
+FIXTURE
+
+assert_rejects "raw platform predefine" "reads a raw platform predefine" include/$project_directory/probe.h <<'FIXTURE'
+#if defined(__linux__)
+static int probe(void) { return 1; }
+#endif
+FIXTURE
+
+assert_accepts "raw __GNUC__ version test" include/$project_directory/probe.h <<'FIXTURE'
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 13
+static int probe(void) { return 1; }
+#endif
+FIXTURE
+
+assert_accepts "raw predefine in the identity header" "$identity_header" <<FIXTURE
+#if defined(__FreeBSD__)
+#define ${macro_prefix}_OS_PROBE_ 1
+#else
+#define ${macro_prefix}_OS_PROBE_ 0
+#endif
+FIXTURE
+
+assert_rejects "switch tested with defined" "with defined or #ifdef" include/$project_directory/probe.h <<FIXTURE
+#if defined(${macro_prefix}_WITH_PROBE)
+static int probe(void) { return 1; }
+#endif
+FIXTURE
+
+assert_accepts "switch defaulted, tested by value, and guarded by an #error" include/$project_directory/probe.h <<FIXTURE
+#if defined(${macro_prefix}_OS_PROBE_) || \\
+    defined(${macro_prefix}_ARCH_PROBE_)
+#error "${macro_prefix}_OS_PROBE_ is identity, derived from the compiler"
+#endif
+#if !defined(${macro_prefix}_WITH_PROBE)
+#define ${macro_prefix}_WITH_PROBE 0
+#endif
+#if ${macro_prefix}_WITH_PROBE
+static int probe(void) { return 1; }
+#endif
+FIXTURE
+
+assert_rejects "macro family outside the vocabulary" "names a macro family outside the vocabulary" include/$project_directory/probe.h <<FIXTURE
+#if ${macro_prefix}_USE_PROBE
+static int probe(void) { return 1; }
+#endif
+FIXTURE
+
+assert_accepts "switch and fact inside the vocabulary" include/$project_directory/probe.h <<FIXTURE
+#if ${macro_prefix}_WITH_PROBE && ${macro_prefix}_HAS_PROBE_
+static int probe(void) { return 1; }
+#endif
 FIXTURE
 
 # endregion C and C++ Idiom Fixtures

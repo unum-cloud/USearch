@@ -209,7 +209,7 @@ Build SPDK once outside the checkout, and point `pkg-config` at its libraries an
 git clone --branch v26.09 --recursive https://github.com/spdk/spdk ~/Dependencies/spdk
 cd ~/Dependencies/spdk && sudo scripts/pkgdep.sh && ./configure && make -j "$(nproc)" && cd -
 export PKG_CONFIG_PATH=~/Dependencies/spdk/build/lib/pkgconfig:~/Dependencies/spdk/dpdk/build/lib/pkgconfig
-cmake -D USEARCH_WITH_SPDK=ON -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
+cmake -D USEARCH_WITH_LINUX_SPDK=ON -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
 cmake --build build_relwithdebinfo --target usearch_test usearch_tools
 ```
 
@@ -371,6 +371,25 @@ Templates carry no `_t` or `_k` suffix, whether class, alias or variable templat
 | the candidates a walk keeps                                                                | candidates                                                                                         | pool                                                            |
 | how a batch's entries are shared among shards                                              | split_batch_into_shards, offsets                                                                   | seat, deal, landed                                              |
 | a member of a plan, cursor or walk                                                         | what it holds and when it holds it                                                                 | bits, current, state, data, flags, tmp, scratch, bitset, buffer |
+
+### Macro Naming
+
+Every all-caps name starts with the full project name, `USEARCH_`.
+A trailing `_` marks a name as internal: it may change in any release, and nothing outside this repository may define or test it.
+A name without it is a public contract, either a switch you may set or a value you may read.
+
+| Family                     | Form                             | Example                    |
+| :------------------------- | :------------------------------- | :------------------------- |
+| CPU or GPU class           | `USEARCH_TARGET_<CLASS>`         | `USEARCH_TARGET_NVIDIA`    |
+| Optional facility          | `USEARCH_WITH_[<OS>_]<FACILITY>` | `USEARCH_WITH_LINUX_URING` |
+| Architecture or GPU vendor | `USEARCH_ARCH_<ARCH>_`           | `USEARCH_ARCH_CUDA_`       |
+| Operating-system identity  | `USEARCH_OS_<OS>_`               | `USEARCH_OS_LINUX_`        |
+
+Every name in these families is always defined, as 0 or 1, and tested with `#if`.
+`defined(...)` appears only in a `!defined` default and in a guard that an `#error` follows.
+A kernel facility, like `USEARCH_WITH_LINUX_URING`, defaults from the identity, and a dependency facility, like `USEARCH_WITH_LINUX_SPDK`, defaults to 0, and the target that links the dependency sets it.
+Only the Platform Identity region of `c/usearch/types.h` reads operating-system predefines like `__linux__`.
+Compiler predefines like `__clang__`, `__GNUC__` and `_MSC_VER` are read raw where they matter.
 
 ### Cross Compilation
 

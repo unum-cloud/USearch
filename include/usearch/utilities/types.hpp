@@ -23,64 +23,30 @@
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
 #include <utility>     // `std::make_index_sequence` - a round's tail at its static extent
 
-#include "usearch/types.h"                  // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
+#include "usearch/types.h"                  // `usearch_status_t` and the `USEARCH_OS_*_` identity
 #include "usearch/utilities/sanitizers.hpp" // `annotate_lock_shared_started` - the gate's TSan annotations
-
-/* Inferring target OS: Windows, macOS, Linux, FreeBSD, or WASI */
-#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
-#define USEARCH_OS_WINDOWS_ 1
-#else
-#define USEARCH_OS_WINDOWS_ 0
-#endif
-#if defined(__APPLE__) && defined(__MACH__)
-#define USEARCH_OS_APPLE_ 1
-#else
-#define USEARCH_OS_APPLE_ 0
-#endif
-#if defined(__linux__)
-#define USEARCH_OS_LINUX_ 1
-#else
-#define USEARCH_OS_LINUX_ 0
-#endif
-#if defined(__FreeBSD__)
-#define USEARCH_OS_FREEBSD_ 1
-#else
-#define USEARCH_OS_FREEBSD_ 0
-#endif
-#if defined(__wasi__)
-#define USEARCH_OS_WASI_ 1
-#else
-#define USEARCH_OS_WASI_ 0
-#endif
-#define USEARCH_OS_POSIX_ (USEARCH_OS_LINUX_ || USEARCH_OS_APPLE_ || USEARCH_OS_FREEBSD_)
 
 /*  Compiling for x86: USEARCH_ARCH_X8664_
  *  @see Intel predefined macros: https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2024-2/additional-predefined-macros.html */
-#if !defined(USEARCH_ARCH_X8664_)
 #if defined(__x86_64__) || defined(_M_X64)
 #define USEARCH_ARCH_X8664_ 1
 #else
 #define USEARCH_ARCH_X8664_ 0
-#endif // defined(__x86_64__) || defined(_M_X64)
-#endif // !defined(USEARCH_ARCH_X8664_)
+#endif
 
 /* Compiling for IBM Z: USEARCH_ARCH_S390X_ */
-#if !defined(USEARCH_ARCH_S390X_)
 #if defined(__s390x__)
 #define USEARCH_ARCH_S390X_ 1
 #else
 #define USEARCH_ARCH_S390X_ 0
-#endif // defined(__s390x__)
-#endif // !defined(USEARCH_ARCH_S390X_)
+#endif
 
 /* Compiling for WASM: USEARCH_ARCH_WASM_ */
-#if !defined(USEARCH_ARCH_WASM_)
 #if defined(__wasm__) || defined(__EMSCRIPTEN__)
 #define USEARCH_ARCH_WASM_ 1
 #else
 #define USEARCH_ARCH_WASM_ 0
-#endif // defined(__wasm__) || defined(__EMSCRIPTEN__)
-#endif // !defined(USEARCH_ARCH_WASM_)
+#endif
 
 /*  GPU backends compiled into this unit: USEARCH_ARCH_CUDA_, USEARCH_ARCH_ROCM_,
  *  USEARCH_ARCH_METAL_. CMake defines each from its `USEARCH_BUILD_*` option, since the toolchain

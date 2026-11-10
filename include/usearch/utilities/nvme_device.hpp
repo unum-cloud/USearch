@@ -22,7 +22,7 @@
  *    request,
  *  - @c linux_uring_nvme_engine: NVMe passthrough via @c IORING_OP_URING_CMD,
  *  - @c windows_ioring_files_engine: I/O Rings on Windows 11 22H2 & newer,
- *  - @c linux_spdk_engine: the SPDK user-space driver, in builds with @c USEARCH_WITH_SPDK.
+ *  - @c linux_spdk_engine: the SPDK user-space driver, in builds with @c USEARCH_WITH_LINUX_SPDK.
  *
  *  Engines own their staging buffers, since buffer registration is an engine-side resource on every
  *  ring API, and requests address buffers and media only by index. Requests carry an offset, a
@@ -97,7 +97,6 @@
 #include <charconv>    // `std::from_chars`, for sysfs attributes
 #include <concepts>    // `std::same_as`
 #include <limits>      // `std::numeric_limits`, for the longest read a result counts
-#include <memory>      // `std::allocator`, for the staging of a header read
 #include <mutex>       // `std::unique_lock`
 #include <new>         // `std::nothrow`
 #include <span>        // `std::span`
@@ -110,48 +109,10 @@
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the SPDK claim word
 #include <forkunion/types.hpp>   // `fu::wait_capped_t`, `fu::spin_mutex_t`
 
-#include "usearch/utilities/blocking_files.hpp" // `NOMINMAX` ahead of `<windows.h>`
+#include "usearch/utilities/blocking_files.hpp" // `native_file_t`, `open_native_file`, `read_native_file`
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer`
 #include "usearch/utilities/ram_device.hpp"     // `forkunion_executor_t`, `forkunion_allocator_t`
 #include "usearch/utilities/types.hpp"          // `status_t`, `expected`, `min_of`, `max_of`
-
-/** Whether the io_uring engines build. Every capability below derives from the platform identity in
- *  @c utilities/types.hpp and takes a @c -D override. */
-#if !defined(USEARCH_WITH_LINUX_URING)
-#if USEARCH_OS_LINUX_
-#define USEARCH_WITH_LINUX_URING 1
-#else
-#define USEARCH_WITH_LINUX_URING 0
-#endif // USEARCH_OS_LINUX_
-#endif // !defined(USEARCH_WITH_LINUX_URING)
-
-/** Whether the Linux AIO engine builds. */
-#if !defined(USEARCH_WITH_LINUX_AIO)
-#if USEARCH_OS_LINUX_ && __has_include(<linux/aio_abi.h>)
-#define USEARCH_WITH_LINUX_AIO 1
-#else
-#define USEARCH_WITH_LINUX_AIO 0
-#endif // USEARCH_OS_LINUX_ && __has_include(<linux/aio_abi.h>)
-#endif // !defined(USEARCH_WITH_LINUX_AIO)
-
-/** Whether the SPDK engine builds: on Linux, when the build found SPDK and set
- *  @c USEARCH_WITH_SPDK. */
-#if !defined(USEARCH_WITH_LINUX_SPDK)
-#if USEARCH_OS_LINUX_ && USEARCH_WITH_SPDK
-#define USEARCH_WITH_LINUX_SPDK 1
-#else
-#define USEARCH_WITH_LINUX_SPDK 0
-#endif // USEARCH_OS_LINUX_ && USEARCH_WITH_SPDK
-#endif // !defined(USEARCH_WITH_LINUX_SPDK)
-
-/** Whether the I/O Rings engine builds: on Windows, with an SDK that ships @c ioringapi.h. */
-#if !defined(USEARCH_WITH_WINDOWS_IORING)
-#if USEARCH_OS_WINDOWS_ && __has_include(<ioringapi.h>)
-#define USEARCH_WITH_WINDOWS_IORING 1
-#else
-#define USEARCH_WITH_WINDOWS_IORING 0
-#endif // USEARCH_OS_WINDOWS_ && __has_include(<ioringapi.h>)
-#endif // !defined(USEARCH_WITH_WINDOWS_IORING)
 
 #if USEARCH_OS_WINDOWS_
 #include <windows.h> // `CreateFileA`, `ReadFile`, `GetOverlappedResult`, `GetFileInformationByHandleEx`
@@ -180,7 +141,7 @@
 
 #if USEARCH_WITH_LINUX_SPDK
 #include <sched.h>         // `sched_getaffinity`, `sched_setaffinity`, undoing the EAL's pinning
-#include <spdk/env.h>      // `spdk_env_init`, `spdk_env_fini`, `spdk_dma_zmalloc`, `spdk_pci_device_get_addr`
+#include <spdk/env.h>      // `spdk_env_init`, `spdk_env_fini`, `spdk_dma_malloc_socket`, `spdk_pci_device_get_addr`
 #include <spdk/env_dpdk.h> // `spdk_env_dpdk_external_init`
 #include <spdk/nvme.h>     // `spdk_nvme_connect`, `spdk_nvme_ns_cmd_read`, `spdk_nvme_qpair_process_completions`
 #endif
@@ -269,11 +230,11 @@ enum class io_transport_t : u32_t {
     /** @c pread or @c ReadFile on the calling thread. */
     blocking_k,
 
-    /** Linux AIO over @c io_submit and @c io_getevents. */
-    linux_aio_k,
-
     /** io_uring reads on files and block devices. */
     linux_uring_k,
+
+    /** Linux AIO over @c io_submit and @c io_getevents. */
+    linux_aio_k,
 
     /** io_uring NVMe passthrough on namespace character devices, from Linux 5.19. */
     linux_uring_nvme_k,
@@ -343,26 +304,12 @@ struct io_device_queues_t {
 };
 
 /** A file or block device open for direct reads, closed when it dies: @c O_DIRECT where the
- *  filesystem admits it, @c F_NOCACHE on Apple, and @c FILE_FLAG_NO_BUFFERING on Windows. */
+ *  filesystem admits it, @c F_NOCACHE on Apple, and @c FILE_FLAG_NO_BUFFERING on Windows, all
+ *  through @ref open_native_file. */
 struct file_medium_t {
-#if USEARCH_OS_WINDOWS_
 
-    /** What the platform calls an open file. */
-    using descriptor_t = HANDLE;
-
-    /** The value a closed medium carries. */
-    inline static descriptor_t const closed_k = INVALID_HANDLE_VALUE;
-#else
-
-    /** What the platform calls an open file. */
-    using descriptor_t = int;
-
-    /** The value a closed medium carries. */
-    inline static constexpr descriptor_t closed_k = -1;
-#endif
-
-    /** The open descriptor, @c closed_k once moved out. */
-    descriptor_t descriptor = closed_k;
+    /** The open descriptor, @c invalid_native_file_k once moved out. */
+    native_file_t descriptor = invalid_native_file_k;
 
     /** Where the part's byte zero sits in the file or on the device. */
     u64_t byte_base = 0;
@@ -375,8 +322,9 @@ struct file_medium_t {
 
     file_medium_t() noexcept = default;
     file_medium_t(file_medium_t&& other) noexcept
-        : descriptor(std::exchange(other.descriptor, closed_k)), byte_base(std::exchange(other.byte_base, 0u)),
-          block_bytes(std::exchange(other.block_bytes, 0u)), queues(std::exchange(other.queues, {})) {}
+        : descriptor(std::exchange(other.descriptor, invalid_native_file_k)),
+          byte_base(std::exchange(other.byte_base, 0u)), block_bytes(std::exchange(other.block_bytes, 0u)),
+          queues(std::exchange(other.queues, {})) {}
     file_medium_t& operator=(file_medium_t&& other) noexcept {
         std::swap(descriptor, other.descriptor);
         std::swap(byte_base, other.byte_base);
@@ -386,7 +334,10 @@ struct file_medium_t {
     }
     file_medium_t(file_medium_t const&) = delete;
     file_medium_t& operator=(file_medium_t const&) = delete;
-    ~file_medium_t() noexcept;
+    ~file_medium_t() noexcept {
+        if (descriptor != invalid_native_file_k) [[maybe_unused]]
+            status_t const closed = close_native_file(descriptor);
+    }
 
     /**
      *  Opens @p path read-only, a file or a device in any form @ref file_address_t lists, its base
@@ -431,16 +382,10 @@ static_assert(sizeof(io_device_queues_t) == 12 && sizeof(file_medium_t) == 32, "
 
 #if USEARCH_OS_WINDOWS_
 
-inline file_medium_t::~file_medium_t() noexcept {
-    if (descriptor != closed_k) ::CloseHandle(descriptor);
-}
-
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     file_medium_t medium;
-    // Overlapped handles let every thread read one file at once, and I/O Rings ask for them.
-    medium.descriptor = ::CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                      FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr);
-    if (medium.descriptor == closed_k) return {std::move(medium), status_t::io_k};
+    medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::unbuffered_k);
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
     FILE_STORAGE_INFO storage {};
     medium.block_bytes = ::GetFileInformationByHandleEx(medium.descriptor, FileStorageInfo, &storage,
                                                         sizeof(storage)) &&
@@ -454,8 +399,7 @@ inline i32_t nvme_namespace_read_(HANDLE, bytes_span_t, u64_t, u32_t) noexcept {
 
 /** Bytes @p medium spans past its base. */
 inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
-    LARGE_INTEGER size {};
-    u64_t const bytes = ::GetFileSizeEx(medium.descriptor, &size) ? static_cast<u64_t>(size.QuadPart) : 0;
+    u64_t const bytes = native_file_capacity(medium.descriptor).value;
     return bytes - min_of(bytes, medium.byte_base);
 }
 
@@ -464,12 +408,6 @@ inline bool reads_directly(file_medium_t const&) noexcept { return true; }
 
 /** The memory domain nearest the disk under @p medium, which only Linux reports. */
 inline fu_memory_domain_id_t memory_domain_of(file_medium_t const&) noexcept { return no_memory_domain_k; }
-
-#else
-
-inline file_medium_t::~file_medium_t() noexcept {
-    if (descriptor != closed_k) ::close(descriptor);
-}
 
 #endif
 
@@ -804,11 +742,12 @@ inline io_block_queue_t io_block_queue_of_(int descriptor, struct stat const& de
 
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     file_medium_t medium;
-    medium.descriptor = ::open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
+    medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::unbuffered_k);
     // Filesystems without direct I/O, like tmpfs, and ng nodes refuse the flag, not ignore it.
-    int const refused = medium.descriptor == closed_k ? errno : 0;
-    if (refused == EINVAL) medium.descriptor = ::open(path, O_RDONLY | O_CLOEXEC);
-    if (medium.descriptor == closed_k) return {std::move(medium), status_t::io_k};
+    int const refused = medium.descriptor == invalid_native_file_k ? errno : 0;
+    if (refused == EINVAL)
+        medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::buffered_k);
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
     struct stat description;
     if (::fstat(medium.descriptor, &description) != 0) return {std::move(medium), status_t::io_k};
     // The whole disk's queue: a node's own, a partition's or a file's parent, or an ng node's disk.
@@ -879,13 +818,8 @@ inline fu_memory_domain_id_t memory_domain_of(file_medium_t const& medium) noexc
 
 inline expected<file_medium_t> file_medium_t::open_(char const* path) noexcept {
     file_medium_t medium;
-    medium.descriptor = ::open(path, O_RDONLY | O_CLOEXEC);
-    if (medium.descriptor == closed_k) return {std::move(medium), status_t::io_k};
-#if USEARCH_OS_APPLE_
-    // A hint rather than `O_DIRECT`: unaligned reads fall back to the cache, and resident pages
-    // still serve.
-    ::fcntl(medium.descriptor, F_NOCACHE, 1);
-#endif
+    medium.descriptor = open_native_file(path, file_access_t::read_only_k, file_buffering_t::unbuffered_k);
+    if (medium.descriptor == invalid_native_file_k) return {std::move(medium), status_t::io_k};
     medium.block_bytes = io_block_bytes_default_k;
     return {std::move(medium), status_t::success_k};
 }
@@ -894,13 +828,12 @@ inline i32_t nvme_namespace_read_(int, bytes_span_t, u64_t, u32_t) noexcept { re
 
 /** Bytes @p medium spans past its base. */
 inline u64_t medium_bytes_of(file_medium_t const& medium) noexcept {
-    struct stat description;
-    u64_t const bytes = ::fstat(medium.descriptor, &description) == 0 ? static_cast<u64_t>(description.st_size) : 0;
+    u64_t const bytes = native_file_capacity(medium.descriptor).value;
     return bytes - min_of(bytes, medium.byte_base);
 }
 
-/** Whether reads on @p medium skip the page cache; Apple's @c F_NOCACHE is a hint, so they may
- *  not, and no flag elsewhere asks for it. */
+/** Whether reads on @p medium skip the page cache; Apple's @c F_NOCACHE is a hint, and FreeBSD
+ *  serves unaligned @c O_DIRECT reads from the cache, so they may not. */
 inline bool reads_directly(file_medium_t const&) noexcept { return false; }
 
 /** The memory domain nearest the disk under @p medium, which only Linux reports. */
@@ -1415,9 +1348,9 @@ struct io_buffers_cut_t {
     std::size_t buffer_bytes = 0;
 };
 
-/** The staging buffers an engine owns: one region, placed through its allocator, cut per call into
- *  equal strides on @c io_alignment_k, and regrown only when a call needs more bytes than it
- *  holds. */
+/** The staging buffers an engine owns: one region of whole pages, placed through its allocator,
+ *  which aligns it to a page, cut per call into equal strides on @c io_alignment_k, and regrown
+ *  only when a call needs more bytes than it holds. */
 template <typename allocator_type_>
 class io_buffers {
   public:
@@ -1439,22 +1372,27 @@ class io_buffers {
     bool covers(std::size_t count, std::size_t bytes) const noexcept { return count <= capacity_ / stride_of_(bytes); }
 
     /**
-     *  Cuts the region into @p count buffers of @p bytes each, regrowing it only when they do not
-     *  fit, which moves every buffer, so nothing may be in flight; empties on failure.
+     *  @brief Cuts the region into @p count buffers of @p bytes each, regrowing it only when they
+     *      do not fit, which moves every buffer, so nothing may be in flight; empties on failure.
      *
      *  @par Statuses:
      *  - @c overflow_k The region's byte count overflows.
+     *  - @c config_mismatch_k The allocator placed the region off an @c io_alignment_k boundary.
      */
     status_t reserve(std::size_t count, std::size_t bytes) noexcept {
         std::size_t const stride = stride_of_(bytes);
         if (covers(count, bytes)) return count_ = count, stride_ = stride, status_t::success_k;
         reset();
-        if (count > (~std::size_t {0} - io_alignment_k) / stride) return status_t::overflow_k;
-        if (status_t const grown = bytes_.resize_uninitialized(count * stride + io_alignment_k); failed(grown))
-            return grown;
-        std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(bytes_.data());
-        base_ = reinterpret_cast<byte_t*>(round_up_to_multiple<std::uintptr_t>(address, io_alignment_k));
-        capacity_ = count * stride, count_ = count, stride_ = stride;
+        std::size_t const page_bytes = fu::ram_page_size();
+        if (count > (~std::size_t {0} - page_bytes) / stride) return status_t::overflow_k;
+        // Whole pages, which the allocator starts on a page, so the region is taken as placed.
+        std::size_t const region_bytes = round_up_to_multiple<std::size_t>(max_of<std::size_t>(count * stride, 1),
+                                                                           page_bytes);
+        if (status_t const grown = bytes_.resize_uninitialized(region_bytes); failed(grown)) return grown;
+        if (reinterpret_cast<std::uintptr_t>(bytes_.data()) % io_alignment_k)
+            return reset(), status_t::config_mismatch_k;
+        base_ = bytes_.data();
+        capacity_ = region_bytes, count_ = count, stride_ = stride;
         return status_t::success_k;
     }
 
@@ -1487,7 +1425,7 @@ class io_buffers {
 /** Copies the descriptors of @p media into @p descriptors by medium ID; a medium of another
  *  transport answers @c config_mismatch_k. */
 template <typename allocator_type_, typename media_type_>
-status_t copy_descriptors_(growing_buffer<file_medium_t::descriptor_t, allocator_type_>& descriptors,
+status_t copy_descriptors_(growing_buffer<native_file_t, allocator_type_>& descriptors,
                            std::span<media_type_ const> media) noexcept {
     descriptors.clear();
     if (status_t const reserved = descriptors.reserve(media.size()); failed(reserved)) return reserved;
@@ -1515,76 +1453,15 @@ std::size_t poll_queued_completions_(growing_buffer<io_completion_t, allocator_t
 
 #pragma region Blocking and AIO Engines
 
-#if USEARCH_OS_WINDOWS_
-
-/** Positional reads on overlapped handles, each waited out on the reader's own event, so threads
- *  sharing one file never wake on each other's reads. */
-class blocking_reader_t {
-  public:
-    blocking_reader_t() noexcept : event_(::CreateEventA(nullptr, TRUE, FALSE, nullptr)) {}
-    blocking_reader_t(blocking_reader_t&& other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
-    blocking_reader_t& operator=(blocking_reader_t&& other) noexcept {
-        std::swap(event_, other.event_);
-        return *this;
-    }
-    blocking_reader_t(blocking_reader_t const&) = delete;
-    blocking_reader_t& operator=(blocking_reader_t const&) = delete;
-    ~blocking_reader_t() noexcept {
-        if (event_) ::CloseHandle(event_);
-    }
-
-    /** Reads @p length bytes at @p offset of @p file into @p destination, at most
-     *  @c io_max_length_k, answering the bytes moved or a negated error. */
-    i32_t read(HANDLE file, byte_t* destination, u32_t length, u64_t offset) const noexcept {
-        if (!event_) return -EIO;
-        OVERLAPPED overlapped {};
-        overlapped.Offset = static_cast<DWORD>(offset);
-        overlapped.OffsetHigh = static_cast<DWORD>(offset >> 32);
-        overlapped.hEvent = event_;
-        DWORD transferred = 0;
-        if ((!::ReadFile(file, destination, length, nullptr, &overlapped) && ::GetLastError() != ERROR_IO_PENDING) ||
-            !::GetOverlappedResult(file, &overlapped, &transferred, TRUE))
-            return ::GetLastError() == ERROR_HANDLE_EOF ? 0 : -EIO;
-        return static_cast<i32_t>(transferred);
-    }
-
-  private:
-    HANDLE event_ = nullptr;
-};
-
-#else
-
-/** Positional reads through @c pread, retried across interrupts and short transfers until the file
- *  ends. */
-struct blocking_reader_t {
-
-    /** Reads @p length bytes at @p offset of @p file into @p destination, at most
-     *  @c io_max_length_k, answering the bytes moved or a negated @c errno. */
-    i32_t read(int file, byte_t* destination, u32_t length, u64_t offset) const noexcept {
-        u32_t moved = 0;
-        while (moved != length) {
-            ssize_t const transferred = ::pread(file, destination + moved, length - moved,
-                                                static_cast<off_t>(offset + moved));
-            if (transferred < 0 && errno == EINTR) continue;
-            if (transferred < 0) return -static_cast<i32_t>(errno);
-            if (transferred == 0) break;
-            moved += static_cast<u32_t>(transferred);
-        }
-        return static_cast<i32_t>(moved);
-    }
-};
-
-#endif
-
 inline status_t file_medium_t::read_at(u64_t offset, bytes_span_t bytes) const noexcept {
     if (bytes.empty()) return status_t::success_k;
     u64_t const begin = byte_base + offset, first = begin - begin % block_bytes;
     u64_t const bound = round_up_to_multiple<u64_t>(begin + bytes.size(), block_bytes);
     if (bound - first > io_max_length_k) return status_t::overflow_k;
-    io_buffers<std::allocator<byte_t>> staging {std::allocator<byte_t> {}};
+    io_buffers<forkunion_allocator_t> staging {forkunion_allocator_t {}};
     if (status_t const reserved = staging.reserve(1, bound - first); failed(reserved)) return reserved;
     u32_t const length = static_cast<u32_t>(bound - first);
-    i32_t moved = blocking_reader_t {}.read(descriptor, staging.buffer(0), length, first);
+    i64_t moved = read_native_file(descriptor, native_file_event_t {}, {staging.buffer(0), length}, first);
     // A generic char node has no read(2); its namespace serves the same blocks to NVMe Reads.
     if (moved == -EINVAL) moved = nvme_namespace_read_(descriptor, {staging.buffer(0), length}, first, block_bytes);
     // The file may end inside its last block, so only the bytes asked for must arrive.
@@ -1677,8 +1554,9 @@ class blocking_files_engine {
     /** Reads everything enqueued before returning, so waiting is implicit. */
     status_t submit(io_wait_t) noexcept {
         for (io_request_t const& request : pending_) {
-            i32_t const result = reader_.read(descriptors_[request.medium], buffers_.buffer(request.buffer),
-                                              request.length, request.offset);
+            i32_t const result = static_cast<i32_t>(read_native_file(descriptors_[request.medium], event_,
+                                                                     {buffers_.buffer(request.buffer), request.length},
+                                                                     request.offset));
             completions_.push_back_reserved(io_completion_t {request.buffer, result, request.context});
         }
         pending_.clear();
@@ -1697,7 +1575,7 @@ class blocking_files_engine {
     io_buffers<allocator_t> buffers_;
 
     /** The attached media's descriptors, indexed by medium ID. */
-    growing_buffer<file_medium_t::descriptor_t, allocator_t> descriptors_;
+    growing_buffer<native_file_t, allocator_t> descriptors_;
 
     /** Reads enqueued since the last @c submit. */
     growing_buffer<io_request_t, allocator_t> pending_;
@@ -1705,8 +1583,8 @@ class blocking_files_engine {
     /** Reads finished and not yet polled. */
     growing_buffer<io_completion_t, allocator_t> completions_;
 
-    /** The platform's positional read. */
-    [[no_unique_address]] blocking_reader_t reader_;
+    /** The event this engine's thread waits its reads out on, empty off Windows. */
+    [[no_unique_address]] native_file_event_t event_;
 
     /** Reads outstanding at most; zero until @c open. */
     std::size_t queue_depth_ = 0;
@@ -1884,7 +1762,7 @@ class linux_aio_files_engine {
     growing_buffer<u64_t, allocator_t> request_contexts_;
 
     /** The attached media's descriptors, indexed by medium ID. */
-    growing_buffer<file_medium_t::descriptor_t, allocator_t> descriptors_;
+    growing_buffer<native_file_t, allocator_t> descriptors_;
 
     /** Control blocks encoded since the last @c submit; the kernel copies them on @c io_submit. */
     growing_buffer<struct iocb, allocator_t> control_blocks_;
@@ -2120,13 +1998,14 @@ class linux_uring_ring_t {
     }
 
     /** Pins @p regions into the ring's registered-buffer table, so @c READ_FIXED skips per-read
-     *  pinning. */
-    status_t register_buffers(std::span<struct iovec const> regions) noexcept {
+     *  pinning, answering zero or the kernel's negated @c errno, @c ENOMEM past the memlock cap. */
+    long register_buffers(std::span<struct iovec const> regions) noexcept {
+        assert(outstanding_ == 0 && "Registered buffers move only with no read in flight");
         u32_t const buffers = 0; // IORING_REGISTER_BUFFERS
         long const registered = register_(buffers, regions.data(), static_cast<unsigned>(regions.size()));
-        if (registered < 0) return status_t::io_k;
+        if (registered < 0) return -static_cast<long>(errno);
         registered_regions_ = static_cast<u32_t>(regions.size());
-        return status_t::success_k;
+        return 0;
     }
 
     /** Unpins the registered regions; a ring holding none asks the kernel nothing. */
@@ -2308,22 +2187,81 @@ class linux_uring_ring_t {
     std::size_t outstanding_ = 0;
 };
 
-/** Cuts @p buffers into @p count of @p bytes each, and under @c fixed_k registers their region with
- *  @p ring as one buffer whenever it moves; a pin the kernel refuses, as @c RLIMIT_MEMLOCK does,
- *  turns @p buffer_registration to @c plain_k. */
+/** The most bytes the kernel pins as one registered buffer. */
+inline constexpr std::size_t linux_uring_registered_range_bytes_k = std::size_t {1} << 30;
+
+/**
+ *  @brief The staging region a ring engine reads into, registered as pieces of whole buffers under
+ *      the kernel's 1 GiB cap per registered buffer, and what became of that registration.
+ *
+ *  Each ring engine owns one and keeps its region through it. The piece table grows only when the
+ *  region regrows, at reserve time, so a warm read allocates nothing, and names its piece in the
+ *  entry's @c buf_index.
+ */
 template <typename allocator_type_>
-status_t reserve_uring_buffers_(linux_uring_ring_t& ring, io_buffers<allocator_type_>& buffers,
-                                linux_uring_buffer_registration_t& buffer_registration, std::size_t count,
-                                std::size_t bytes) noexcept {
-    if (buffers.covers(count, bytes)) return buffers.reserve(count, bytes);
-    ring.unregister_buffers();
-    if (status_t const grown = buffers.reserve(count, bytes); failed(grown)) return grown;
-    if (buffer_registration == linux_uring_buffer_registration_t::plain_k) return status_t::success_k;
-    struct iovec const region {buffers.base(), buffers.capacity()};
-    if (failed(ring.register_buffers(std::span<struct iovec const>(&region, 1))))
-        buffer_registration = linux_uring_buffer_registration_t::plain_k;
-    return status_t::success_k;
-}
+class linux_uring_registered_buffers {
+  public:
+    explicit linux_uring_registered_buffers(allocator_type_ const& allocator) noexcept
+        : buffers_(allocator), regions_(allocator) {}
+
+    /** Asks for registration as @p registration says, from the next region on. */
+    void request(linux_uring_buffer_registration_t registration) noexcept { registration_ = registration; }
+
+    /**
+     *  @brief Cuts the region into @p count buffers of @p bytes each, and under @c fixed_k
+     *      registers it with @p ring in pieces whenever it moves.
+     *
+     *  A pin past @c RLIMIT_MEMLOCK turns the registration to @c plain_k, visible through
+     *  @ref registration, and every later read pins its buffer itself.
+     *
+     *  @par Statuses:
+     *  - @c overflow_k The region's byte count overflows.
+     *  - @c bad_alloc_k The piece table could not grow.
+     *  - @c io_k The kernel refused the registration for another reason than its memlock cap.
+     */
+    status_t reserve(linux_uring_ring_t& ring, std::size_t count, std::size_t bytes) noexcept {
+        if (buffers_.covers(count, bytes)) return buffers_.reserve(count, bytes);
+        ring.unregister_buffers();
+        if (status_t const grown = buffers_.reserve(count, bytes); failed(grown)) return grown;
+        if (registration_ == linux_uring_buffer_registration_t::plain_k) return status_t::success_k;
+        buffers_per_region_ = max_of<std::size_t>(linux_uring_registered_range_bytes_k / buffers_.stride(), 1);
+        std::size_t const held = buffers_.capacity() / buffers_.stride();
+        std::size_t const pieces = divide_round_up<std::size_t>(held, buffers_per_region_);
+        if (status_t const sized = regions_.resize_uninitialized(pieces); failed(sized)) return sized;
+        for (std::size_t piece = 0; piece != pieces; ++piece) {
+            std::size_t const first = piece * buffers_per_region_;
+            std::size_t const piece_buffers = min_of(buffers_per_region_, held - first);
+            regions_[piece] = iovec {buffers_.buffer(static_cast<io_buffer_id_t>(first)),
+                                     piece_buffers * buffers_.stride()};
+        }
+        long const registered = ring.register_buffers(to_span(regions_));
+        if (registered == -ENOMEM) registration_ = linux_uring_buffer_registration_t::plain_k;
+        else if (registered < 0) return status_t::io_k;
+        return status_t::success_k;
+    }
+
+    /** Whether reads land in registered pieces, or at plain addresses the kernel pins per read. */
+    linux_uring_buffer_registration_t registration() const noexcept { return registration_; }
+
+    /** The registered piece @p buffer lies in, which a fixed read names as its @c buf_index. */
+    u16_t piece_of(io_buffer_id_t buffer) const noexcept { return static_cast<u16_t>(buffer / buffers_per_region_); }
+
+    byte_t* buffer(io_buffer_id_t buffer) const noexcept { return buffers_.buffer(buffer); }
+
+  private:
+
+    /** The staging buffers reads arrive in. */
+    io_buffers<allocator_type_> buffers_;
+
+    /** The pieces registered with the ring, whole buffers each, under the kernel's cap. */
+    growing_buffer<struct iovec, allocator_type_> regions_;
+
+    /** Buffers one registered piece holds, the last piece holding the rest. */
+    std::size_t buffers_per_region_ = 1;
+
+    /** Whether reads use the registered pieces, until the kernel refuses to pin them. */
+    linux_uring_buffer_registration_t registration_ = linux_uring_buffer_registration_t::plain_k;
+};
 
 /**
  *  @brief io_uring reads against files and block devices: @c IORING_OP_READ_FIXED over buffers
@@ -2366,16 +2304,17 @@ class linux_uring_files_engine {
         if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::compact_k, config.reaping);
             failed(created))
             return created;
-        buffer_registration_ = config.buffer_registration;
+        buffers_.request(config.buffer_registration);
         return status_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
-        if (status_t const grown = reserve_uring_buffers_(ring_, buffers_, buffer_registration_, buffers, buffer_bytes);
-            failed(grown))
-            return grown;
+        if (status_t const grown = buffers_.reserve(ring_, buffers, buffer_bytes); failed(grown)) return grown;
         return request_contexts_.size() >= buffers ? status_t::success_k : request_contexts_.resize(buffers);
     }
+
+    /** Whether reads land in buffers registered once, or at addresses the kernel pins per read. */
+    linux_uring_buffer_registration_t buffer_registration() const noexcept { return buffers_.registration(); }
 
     template <typename media_type_>
     status_t attach(std::span<media_type_ const> media) noexcept {
@@ -2407,8 +2346,8 @@ class linux_uring_files_engine {
         entry->length = request.length;
         entry->offset = request.offset;
         entry->user_data = request.buffer;
-        // Every buffer lies in the one registered region, so `buf_index` stays zero.
-        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k) entry->opcode = read_fixed;
+        if (buffers_.registration() == linux_uring_buffer_registration_t::fixed_k)
+            entry->opcode = read_fixed, entry->buf_index = buffers_.piece_of(request.buffer);
         request_contexts_[request.buffer] = request.context;
         return status_t::success_k;
     }
@@ -2423,8 +2362,8 @@ class linux_uring_files_engine {
 
   private:
 
-    /** The staging buffers reads arrive in. */
-    io_buffers<allocator_t> buffers_;
+    /** The staging buffers reads arrive in, and their registration with the ring. */
+    linux_uring_registered_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
     growing_buffer<u64_t, allocator_t> request_contexts_;
@@ -2434,9 +2373,6 @@ class linux_uring_files_engine {
 
     /** The ring, declared after the buffers so it dies first and releases its pins on them. */
     linux_uring_ring_t ring_;
-
-    /** Whether reads arrive in the registered region, until the kernel refuses to pin it. */
-    linux_uring_buffer_registration_t buffer_registration_ = linux_uring_buffer_registration_t::plain_k;
 };
 
 /**
@@ -2485,20 +2421,21 @@ class linux_uring_nvme_engine {
         if (status_t const created = ring_.setup(config.queue_depth, linux_uring_form_t::nvme_k, config.reaping);
             failed(created))
             return created;
-        buffer_registration_ = config.buffer_registration;
+        buffers_.request(config.buffer_registration);
         return status_t::success_k;
     }
 
     status_t reserve(std::size_t buffers, std::size_t buffer_bytes) noexcept {
-        if (status_t const grown = reserve_uring_buffers_(ring_, buffers_, buffer_registration_, buffers, buffer_bytes);
-            failed(grown))
-            return grown;
+        if (status_t const grown = buffers_.reserve(ring_, buffers, buffer_bytes); failed(grown)) return grown;
         // The lengths grow second, so a refusal between the two leaves them short and the next call
         // grows both.
         if (lengths_.size() >= buffers) return status_t::success_k;
         if (failed(request_contexts_.resize(buffers)) || failed(lengths_.resize(buffers))) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
+
+    /** Whether commands name buffers registered once, or addresses the kernel pins per read. */
+    linux_uring_buffer_registration_t buffer_registration() const noexcept { return buffers_.registration(); }
 
     /**
      *  @brief Learns each medium's namespace ID and LBA shift, and registers every medium as a
@@ -2551,8 +2488,8 @@ class linux_uring_nvme_engine {
         entry->fd = static_cast<i32_t>(request.medium);
         entry->cmd_op = uring_cmd_io;
         entry->user_data = request.buffer;
-        // Every buffer lies in the one registered region, so `buf_index` stays zero.
-        if (buffer_registration_ == linux_uring_buffer_registration_t::fixed_k) entry->uring_cmd_flags = fixed;
+        if (buffers_.registration() == linux_uring_buffer_registration_t::fixed_k)
+            entry->uring_cmd_flags = fixed, entry->buf_index = buffers_.piece_of(request.buffer);
         nvme_namespace_t const& name_space = namespaces_[request.medium];
         linux_nvme_uring_cmd_t* const command = reinterpret_cast<linux_nvme_uring_cmd_t*>(entry->cmd);
         command->opcode = nvme_read_opcode_k;
@@ -2594,8 +2531,8 @@ class linux_uring_nvme_engine {
         u32_t lba_shift;
     };
 
-    /** The staging buffers reads arrive in. */
-    io_buffers<allocator_t> buffers_;
+    /** The staging buffers commands land in, and their registration with the ring. */
+    linux_uring_registered_buffers<allocator_t> buffers_;
 
     /** The context of the read each buffer serves, indexed by buffer. */
     growing_buffer<u64_t, allocator_t> request_contexts_;
@@ -2612,9 +2549,6 @@ class linux_uring_nvme_engine {
 
     /** The ring, declared after the buffers so it dies first and releases its pins on them. */
     linux_uring_ring_t ring_;
-
-    /** Whether commands reference the registered region, until the kernel refuses to pin it. */
-    linux_uring_buffer_registration_t buffer_registration_ = linux_uring_buffer_registration_t::plain_k;
 };
 
 #endif
@@ -2761,7 +2695,7 @@ class windows_ioring_files_engine {
     growing_buffer<u64_t, allocator_t> request_contexts_;
 
     /** The attached media's handles, registered with the ring. */
-    growing_buffer<file_medium_t::descriptor_t, allocator_t> descriptors_;
+    growing_buffer<native_file_t, allocator_t> descriptors_;
 
     /** The ring, null until @c open. */
     HIORING ring_ = nullptr;
@@ -2782,22 +2716,31 @@ class windows_ioring_files_engine {
 #if USEARCH_WITH_LINUX_SPDK
 
 /** Allocates DMA-able memory from the SPDK environment, which PCIe controllers write into
- *  directly. */
+ *  directly, on one NUMA socket, unzeroed, since every read overwrites what it lands in. */
 template <typename value_type_ = byte_t>
 struct linux_spdk_dma_allocator {
     using value_type = value_type_;
 
+    /** The NUMA socket the pages come from, @c SPDK_ENV_SOCKET_ID_ANY for any. */
+    int socket = SPDK_ENV_SOCKET_ID_ANY;
+
     constexpr linux_spdk_dma_allocator() noexcept = default;
 
-    /** The rebinding conversion @c std::allocator_traits performs. */
+    /** Places on the socket of @p memory_domain, any socket for @c no_memory_domain_k. */
+    explicit constexpr linux_spdk_dma_allocator(fu_memory_domain_id_t memory_domain) noexcept
+        : socket(memory_domain == no_memory_domain_k ? SPDK_ENV_SOCKET_ID_ANY : static_cast<int>(memory_domain)) {}
+
+    /** The rebinding conversion @c std::allocator_traits performs; the socket travels. */
     template <typename other_type_>
-    constexpr linux_spdk_dma_allocator(linux_spdk_dma_allocator<other_type_> const&) noexcept {}
+    constexpr linux_spdk_dma_allocator(linux_spdk_dma_allocator<other_type_> const& other) noexcept
+        : socket(other.socket) {}
 
     value_type_* allocate(std::size_t count) noexcept {
-        return static_cast<value_type_*>(spdk_dma_zmalloc(count * sizeof(value_type_), io_alignment_k, nullptr));
+        return static_cast<value_type_*>(
+            spdk_dma_malloc_socket(count * sizeof(value_type_), io_alignment_k, nullptr, socket));
     }
     void deallocate(value_type_* pointer, std::size_t) noexcept { spdk_dma_free(pointer); }
-    bool operator==(linux_spdk_dma_allocator const&) const noexcept { return true; }
+    bool operator==(linux_spdk_dma_allocator const& other) const noexcept { return socket == other.socket; }
 };
 
 /**
@@ -2822,8 +2765,8 @@ class linux_spdk_engine {
     static constexpr io_transport_t transport() noexcept { return io_transport_t::linux_spdk_k; }
 
     explicit linux_spdk_engine(allocator_t const& allocator = {}) noexcept
-        : buffers_(linux_spdk_dma_allocator<> {}), queue_pairs_(allocator), namespaces_(allocator),
-          commands_(allocator), request_contexts_(allocator), completions_(allocator) {}
+        : buffers_(linux_spdk_dma_allocator<> {allocator.memory_domain}), queue_pairs_(allocator),
+          namespaces_(allocator), commands_(allocator), request_contexts_(allocator), completions_(allocator) {}
     linux_spdk_engine(linux_spdk_engine&&) noexcept = default;
     linux_spdk_engine& operator=(linux_spdk_engine&&) noexcept = default;
     ~linux_spdk_engine() noexcept { assert(queue_pairs_.empty() && "An engine is released before it dies"); }
@@ -3146,6 +3089,17 @@ class io_engine_variant {
         return std::visit([&](auto& engine) noexcept { return engine.buffer(buffer); }, engines_);
     }
 
+    /** Whether the picked engine reads into buffers registered once; @c plain_k for one that
+     *  registers none. */
+    linux_uring_buffer_registration_t buffer_registration() const noexcept {
+        return std::visit(
+            [](auto const& engine) noexcept {
+                if constexpr (requires { engine.buffer_registration(); }) return engine.buffer_registration();
+                else return linux_uring_buffer_registration_t::plain_k;
+            },
+            engines_);
+    }
+
   private:
     template <std::size_t index_>
         requires(index_ == sizeof...(engine_types_))
@@ -3439,6 +3393,19 @@ class nvme_executor {
 
     /** The depth the spawn's config pinned for every call, zero when each call derives its own. */
     std::size_t pinned_depth() const noexcept { return pinned_depth_; }
+
+    /** Whether every engine reads into buffers registered once: @c plain_k once any kernel refused
+     *  to pin its thread's region, or where the engines register none. */
+    linux_uring_buffer_registration_t buffer_registration() const noexcept {
+        if constexpr (requires(engine_t const& engine) { engine.buffer_registration(); }) {
+            for (engine_t const& engine : engines_)
+                if (engine.buffer_registration() == linux_uring_buffer_registration_t::plain_k)
+                    return linux_uring_buffer_registration_t::plain_k;
+            return engines_.empty() ? linux_uring_buffer_registration_t::plain_k
+                                    : linux_uring_buffer_registration_t::fixed_k;
+        }
+        return linux_uring_buffer_registration_t::plain_k;
+    }
 
   private:
 
