@@ -3230,7 +3230,7 @@ inline int probe(int count) { return (count + 16 - 1) / 16; }
 FIXTURE
 
 assert_accepts "ceiling division through the helper" include/usearch/probe.hpp <<'FIXTURE'
-inline int probe(int count) { return divide_round_up(count, 16); }
+inline std::size_t probe(std::size_t count) { return divide_round_up(count, 16); }
 FIXTURE
 
 assert_rejects "C limit macro" "spells a C limit macro" include/usearch/probe.hpp <<'FIXTURE'

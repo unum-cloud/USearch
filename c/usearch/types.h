@@ -398,8 +398,9 @@ typedef enum usearch_status_t {
      *  smaller request can help, so a caller picks another residency, traversal or build. */
     usearch_status_unsupported_k = 16,
 
-    /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside
-     *  the arena the call rewinds, a name no table spells. */
+    /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside the
+     *  arena the call rewinds, a name no table spells. The outcome itself is never @c NULL: it is
+     *  where this status lands. */
     usearch_status_invalid_argument_k = 17,
 } usearch_status_t;
 
@@ -1568,6 +1569,8 @@ USEARCH_EXPORT usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_v
  *  @param[out] major The major version, which changes whenever an argument structure does.
  *  @param[out] minor The minor version.
  *  @param[out] patch The patch version.
+ *
+ *  None of the three outputs may be @c NULL.
  */
 USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch);
 

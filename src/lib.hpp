@@ -1738,6 +1738,31 @@ using deferred_arguments_t = std::variant< //
  *  each raised at its entry and lowered at its end; null where it names none. */
 using named_calls_t = std::array<u32_t*, 5>;
 
+/** Raises the count of every handle @p arguments name and answers where they are, so @c end_call
+ *  lowers the same ones; an output slot for a handle the call creates names nothing yet. */
+template <typename arguments_type_>
+inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcept {
+    named_calls_t named {};
+    u32_t** next = named.data();
+    auto const name = [&](auto* handle) noexcept {
+        if (!handle) return;
+        host_outcome_verbs().raise_named(&handle->named_calls);
+        *next++ = &handle->named_calls;
+    };
+    if constexpr (requires { arguments.index->named_calls; }) name(arguments.index);
+    if constexpr (requires { arguments.target->named_calls; }) name(arguments.target);
+    if constexpr (requires { arguments.cursor->named_calls; }) name(arguments.cursor);
+    if constexpr (requires { arguments.refinement->named_calls; }) name(arguments.refinement);
+    if constexpr (requires { arguments.arena->named_calls; }) name(arguments.arena);
+    return named;
+}
+
+/** Lowers the counts @ref raise_named_calls raised. */
+inline void lower_named_calls(named_calls_t const& named_calls) noexcept {
+    for (u32_t* const named : named_calls)
+        if (named) host_outcome_verbs().lower_named(named);
+}
+
 /** The one call that holds a USearch executor, from its claim to its end. */
 struct holding_call_t {
 
@@ -2070,6 +2095,7 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
  *  cannot grow. */
 template <typename value_type_>
 inline value_type_* carve(growing_arena<forkunion_allocator_t>& staging, std::size_t count) noexcept {
+    if (wraps_on_multiply(count, sizeof(value_type_))) return nullptr;
     return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), default_alignment_k));
 }
 
@@ -2139,12 +2165,18 @@ class call_outcome_t {
     template <typename arguments_type_>
     explicit call_outcome_t(arguments_type_ const& arguments) noexcept
         : published_(arguments.outcome), holding_(holding_executor_of(arguments)), arena_(arena_of(arguments)) {
-        if (!holding_) propagate_pending(published_);
+        if (holding_) return;
+        named_calls_ = raise_named_calls(arguments);
+        propagate_pending(published_);
     }
     ~call_outcome_t() noexcept {
         release_arena(arena_, published_);
-        if (holding_) holding_->holding_call.recorded = recorded_;
-        else propagate_error(recorded_.status, published_, recorded_.message);
+        if (holding_) {
+            holding_->holding_call.recorded = recorded_;
+            return;
+        }
+        lower_named_calls(named_calls_);
+        propagate_error(recorded_.status, published_, recorded_.message);
     }
     call_outcome_t(call_outcome_t const&) = delete;
     call_outcome_t& operator=(call_outcome_t const&) = delete;
@@ -2158,6 +2190,7 @@ class call_outcome_t {
     /** The executor the call holds, whose @c end_call publishes the record, or null. */
     usearch_executor_t holding_;
     usearch_arena_t arena_;
+    named_calls_t named_calls_ {};
     usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
 };
 
@@ -2440,27 +2473,8 @@ inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
     if (forkunion_executor_t* const threads = threads_of(executor)) threads->unsafe_await();
 }
 
-/** Raises the count of every handle @p arguments name and answers where they are, so @c end_call
- *  lowers the same ones; an output slot for a handle the call creates names nothing yet. */
-template <typename arguments_type_>
-inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcept {
-    named_calls_t named {};
-    u32_t** next = named.data();
-    auto const name = [&](auto* handle) noexcept {
-        if (!handle) return;
-        host_outcome_verbs().raise_named(&handle->named_calls);
-        *next++ = &handle->named_calls;
-    };
-    if constexpr (requires { arguments.index->named_calls; }) name(arguments.index);
-    if constexpr (requires { arguments.target->named_calls; }) name(arguments.target);
-    if constexpr (requires { arguments.cursor->named_calls; }) name(arguments.cursor);
-    if constexpr (requires { arguments.refinement->named_calls; }) name(arguments.refinement);
-    if constexpr (requires { arguments.arena->named_calls; }) name(arguments.arena);
-    return named;
-}
-
-/** Returns once no executor call naming the handle that owns @p named_calls is left: what every
- *  free and every consumed donor waits for. */
+/** Returns once no call naming the handle that owns @p named_calls is left: what every free and
+ *  every consumed donor waits for. */
 inline void wait_named_calls(u32_t const& named_calls) noexcept { host_outcome_verbs().wait_named(&named_calls); }
 
 /** Ends the call holding @p executor: its handle counts, the executor claim, then its status. A
@@ -2469,8 +2483,7 @@ inline void end_call(usearch_executor_handle_t& executor) noexcept {
     holding_call_t& call = executor.holding_call;
     usearch_outcome_t* const outcome = call.outcome;
     usearch_outcome_t const recorded = call.recorded;
-    for (u32_t* const named : call.named_calls)
-        if (named) host_outcome_verbs().lower_named(named);
+    lower_named_calls(call.named_calls);
     fu::standard_atomic_ref<void const*>(call.arguments).store(nullptr, std::memory_order_relaxed);
     fu::standard_atomic_ref<std::thread::id>(call.body_thread).store(std::thread::id {}, std::memory_order_relaxed);
     call.delegated_arguments.template emplace<std::monostate>();

@@ -1950,6 +1950,32 @@ void test_sequence_round_trip(void) {
     usearch_executor_free(storage);
     remove(path);
 
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, 0},
+                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_key_stats_t repeated = {0};
+    usearch_sequence_count(&(usearch_sequence_count_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .key = key_of(0),
+                                                        .key_stats = &repeated});
+    expect(!outcome.message, outcome.message);
+    expect_eq(repeated.entries, 5, "A zero key stride repeats the first key for every row");
+    usearch_keys_view_t uncursored_keys = {0};
+    size_t uncursored = 0;
+    usearch_sequence_cursor_next(&(usearch_sequence_cursor_next_t) {.index = index,
+                                                                    .executor = executor,
+                                                                    .outcome = &outcome,
+                                                                    .keys = &uncursored_keys,
+                                                                    .written = &uncursored,
+                                                                    .arena = arena,
+                                                                    .wanted = 1});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A pull without a cursor is refused");
+
     usearch_sequence_free(index);
     usearch_arena_free(arena);
     usearch_executor_free(executor);
@@ -3391,6 +3417,10 @@ void test_maxsim(void) {
         expect_maxsim_tape(matches, written, queries, documents, exact, even_ones, true);
         expect_eq(required, queries * documents / 2, "Required counts no key the predicate rejected");
     }
+    maxsim.predicate = (usearch_predicate_t) {0};
+    maxsim.wanted = SIZE_MAX / queries + 1;
+    usearch_dense_maxsim(&maxsim);
+    expect_eq(outcome.status, usearch_status_overflow_k, "Room for every query's wanted pairs must not wrap");
 
     usearch_arena_free(arena);
     usearch_executor_free(executor);
@@ -4269,6 +4299,75 @@ void test_free_waits_for_named_call(void) {
     printf("Test: Free Waits for Named Call - PASSED\n");
 }
 
+/** A search without an executor that a delegated call runs from its last progress report, held at
+ *  its own last report, so this thread meets it in flight. */
+typedef struct held_search_t {
+    usearch_dense_index_t index;
+    float const* rows;
+    search_outputs_t outputs;
+    gate_t gate;
+    int volatile left;
+} held_search_t;
+
+static usearch_continuation_t hold_then_leave(size_t completed, size_t total, void* state) {
+    held_search_t* const held = (held_search_t*)state;
+    usearch_continuation_t const continuation = hold_until_released(completed, total, &held->gate);
+    if (completed == total) held->left = 1;
+    return continuation;
+}
+
+static usearch_continuation_t search_without_executor(size_t completed, size_t total, void* state) {
+    held_search_t* const held = (held_search_t*)state;
+    if (completed != total) return usearch_continue_k;
+    usearch_dense_search(&(usearch_dense_search_t) {
+        .index = held->index,
+        .outcome = &held->outputs.outcome,
+        .count = deferred_rows,
+        .queries = {held->rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k},
+        .matches = &held->outputs.matches,
+        .arena = held->outputs.arena,
+        .wanted = deferred_wanted,
+        .progress = {hold_then_leave, held, 1}});
+    return usearch_continue_k;
+}
+
+/** Freeing an index waits for a call without an executor naming it, which a delegated call runs on
+ *  a pool thread while this thread frees. */
+void test_free_waits_for_call_without_executor(void) {
+    printf("Test: Free Waits for Call Without Executor\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(2);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    held_search_t held = {.index = create_filled_index(rows, NULL),
+                          .rows = rows,
+                          .outputs = {.arena = create_arena(NULL)}};
+    search_outputs_t outer = {.arena = create_arena(executor)};
+
+    usearch_dense_search(&(usearch_dense_search_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outer.outcome,
+        .completion = usearch_completion_deferred_k,
+        .count = deferred_rows,
+        .queries = {rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k},
+        .matches = &outer.matches,
+        .arena = outer.arena,
+        .wanted = deferred_wanted,
+        .progress = {search_without_executor, &held, 1}});
+    expect(entered_soon(&held.gate), "The delegated call reaches the search it runs without an executor");
+    usearch_dense_free(held.index);
+    expect(held.left, "A free returns only once the call without an executor naming the handle ended");
+    expect_eq(usearch_outcome_wait(&outer.outcome), usearch_status_success_k, "The delegated call finishes");
+    expect_eq(held.outputs.outcome.status, usearch_status_success_k, "The call a free waited for finishes");
+
+    usearch_arena_free(held.outputs.arena);
+    usearch_arena_free(outer.arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Free Waits for Call Without Executor - PASSED\n");
+}
+
 /** A deferred call holds its arena until just before it is final, so another call naming it
  *  meanwhile is refused, and the arena serves again once the deferred call ended. */
 void test_deferred_holds_arena(void) {
@@ -4679,6 +4778,11 @@ void test_arrow_refusals(void) {
               "Keys are 16 bytes wide");
     expect_eq(usearch_rows_view_from_arrow(&schema, &array, &rows, &count), usearch_status_unsupported_layout_k,
               "An untagged fixed-size column holds no rows");
+    int32_t const negative_pairs = -1;
+    schema.metadata = (char const*)&negative_pairs;
+    expect_eq(usearch_rows_view_from_arrow(&schema, &array, &rows, &count), usearch_status_unsupported_layout_k,
+              "A negative count in the metadata tags no extension");
+    schema.metadata = NULL;
     expect_eq(usearch_tape_view_from_arrow(&schema, &array, &tape, &count), usearch_status_unsupported_layout_k,
               "A fixed-size column is no tape");
     schema.format = "w:16", schema.release = NULL;
@@ -4970,6 +5074,7 @@ int main(int argc, char* argv[]) {
     if (selected("contended_from_another_thread")) test_contended_from_another_thread();
     if (selected("drain_then_mood")) test_drain_then_mood();
     if (selected("free_waits_for_named_call")) test_free_waits_for_named_call();
+    if (selected("free_waits_for_call_without_executor")) test_free_waits_for_call_without_executor();
     if (selected("deferred_holds_arena")) test_deferred_holds_arena();
     // An implementation without Arrow, as the stand-in, answers every exchange unsupported.
     struct ArrowSchema probed_schema = {0};

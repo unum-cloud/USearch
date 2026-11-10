@@ -964,6 +964,8 @@ template <auto verb_, typename arguments_type_>
 void basic_cursor_next(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
+    if (!arguments->cursor)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor must not be null"), void();
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
     *arguments->written = 0;

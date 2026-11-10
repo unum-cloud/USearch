@@ -194,7 +194,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names.
+  # One archive per ABI from API 28, the stack's Android floor, serving every level the SDK names from there.
   build_swift_android:
     name: Build Swift Artifact Bundle for Android
     needs: bump_version
@@ -222,8 +222,8 @@ jobs:
             local abi=$1 arch=$2
             cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
               -D CMAKE_TOOLCHAIN_FILE="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake" \
-              -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
-              -D USEARCH_SWIFT_TRIPLES="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+              -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-28 \
+              -D USEARCH_SWIFT_TRIPLES="$(seq -f "$arch-unknown-linux-android%g" -s ';' 28 36)"
             cmake --build "build_$abi"
           }
           abi arm64-v8a aarch64

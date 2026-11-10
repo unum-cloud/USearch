@@ -644,7 +644,7 @@ Mojo 1.0 has no test discovery, so every check is registered in `main` by hand a
 ## Swift
 
 USearch provides Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/USearch).
-Swift 6.4 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, and `Key` stores its bytes in an `InlineArray`.
+Swift 6.4 or newer is required, as `Package.swift` declares.
 
 SwiftPM links the C library prebuilt, as the `USearchC` XCFramework on Apple platforms and as an SE-0482 artifact bundle elsewhere, which the `swift` preset builds for the host.
 `USEARCH_SWIFT_ARTIFACT` points `Package.swift` at it, relative to the package root, and `NUMKONG_SWIFT_ARTIFACT` points the `numkong/` checkout at the one its own `swift` preset builds; without them, SwiftPM downloads the releases':

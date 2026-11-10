@@ -66,25 +66,29 @@ consteval std::array<char, metadata_capacity_k> extension_metadata(std::string_v
     return encode_metadata({{"ARROW:extension:name", name}, {"ARROW:extension:metadata", ""}});
 }
 
+/** The next non-negative @c int32 of Arrow metadata at @p cursor, advancing it, or false. */
+static bool metadata_count_(char const*& cursor, std::size_t& count) noexcept {
+    std::int32_t signed_count = 0;
+    std::memcpy(&signed_count, cursor, sizeof(signed_count));
+    cursor += sizeof(signed_count);
+    count = static_cast<std::size_t>(signed_count);
+    return signed_count >= 0;
+}
+
 /** The name of the extension Arrow @p metadata tags a column with, or empty for none. */
 static std::string_view extension_of(char const* metadata) noexcept {
     if (!metadata) return {};
     char const* cursor = metadata;
-    auto const read_count = [&]() noexcept {
-        std::int32_t count = 0;
-        std::memcpy(&count, cursor, sizeof(count));
-        cursor += sizeof(count);
-        return static_cast<std::size_t>(count);
-    };
-    auto const read_text = [&]() noexcept {
-        std::size_t const length = read_count();
-        std::string_view const text {cursor, length};
-        cursor += length;
-        return text;
-    };
-    for (std::size_t pairs = read_count(); pairs; --pairs) {
-        std::string_view const key = read_text();
-        std::string_view const value = read_text();
+    std::size_t pairs = 0;
+    if (!metadata_count_(cursor, pairs)) return {};
+    for (; pairs; --pairs) {
+        std::size_t key_length = 0, value_length = 0;
+        if (!metadata_count_(cursor, key_length)) return {};
+        std::string_view const key {cursor, key_length};
+        cursor += key_length;
+        if (!metadata_count_(cursor, value_length)) return {};
+        std::string_view const value {cursor, value_length};
+        cursor += value_length;
         if (key == "ARROW:extension:name") return value;
     }
     return {};
@@ -187,7 +191,8 @@ static std::size_t first_value(ArrowArray const& list, ArrowArray const& values,
 
 /** Whether @p values hold every row of a fixed-size list of @p width elements. */
 static bool holds_rows(ArrowArray const& list, ArrowArray const& values, std::size_t width) noexcept {
-    return static_cast<std::size_t>(values.length) >= static_cast<std::size_t>(list.offset + list.length) * width;
+    std::size_t const rows = static_cast<std::size_t>(list.offset) + static_cast<std::size_t>(list.length);
+    return !wraps_on_multiply(rows, width) && static_cast<std::size_t>(values.length) >= rows * width;
 }
 
 #pragma endregion Converters
@@ -407,6 +412,7 @@ USEARCH_EXPORT usearch_status_t usearch_rows_view_from_arrow(ArrowSchema const* 
             return checked;
         auto const* const data = static_cast<byte_t const*>(array->buffers[1]);
         if (!data && array->length) return usearch_status_malformed_k;
+        if (wraps_on_multiply(static_cast<std::size_t>(array->offset), row_bytes)) return usearch_status_malformed_k;
         *rows = {data ? data + array->offset * row_bytes : nullptr, row_bytes, row_bytes * 8, usearch_scalar_u1x8_k};
         *count = static_cast<size_t>(array->length);
         return usearch_status_success_k;
@@ -504,7 +510,8 @@ USEARCH_EXPORT usearch_status_t usearch_rows_view_to_arrow(usearch_rows_view_t r
     std::size_t const width = rows.columns / columns_per_element;
     std::size_t const row_bytes = bits ? width : width * layout->element_bytes;
     if (count > 1 && rows.stride != row_bytes) return usearch_status_unsupported_layout_k;
-    if (!arena_holds(*arena, rows.data, count * row_bytes)) return usearch_status_invalid_argument_k;
+    if (wraps_on_multiply(count, row_bytes) || !arena_holds(*arena, rows.data, count * row_bytes))
+        return usearch_status_invalid_argument_k;
 
     void const* const data = count ? rows.data : no_rows_k;
     std::array<char, format_capacity_k> format {};

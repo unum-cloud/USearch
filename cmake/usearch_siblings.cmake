@@ -10,7 +10,9 @@
 # dependency, so its own warnings never fail a USearch build under `USEARCH_WERROR`, and builds only what a USearch
 # target links. A defined @p override_, the sibling's `FETCHCONTENT_SOURCE_DIR_<NAME>`, outranks the submodule.
 function (usearch_sibling name_ override_ link_target_ repository_ tag_)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt" AND NOT DEFINED ${override_})
+    if (TARGET ${link_target_})
+        # A parent project that already added the sibling keeps its copy.
+    elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt" AND NOT DEFINED ${override_})
         add_subdirectory(${name_} EXCLUDE_FROM_ALL SYSTEM)
     else ()
         message(STATUS "usearch: ${name_} submodule absent, fetching ${tag_}")

@@ -119,8 +119,8 @@ jobs:
       - name: Test Swift
         run: swift test
 
-  # One archive per ABI at the Swift SDK's lowest API level, serving every level the SDK names, built here because the
-  # reusable workflow below runs in a container without the NDK.
+  # One archive per ABI from API 28, the stack's Android floor, serving every level the SDK names from there, built
+  # here because the reusable workflow below runs in a container without the NDK.
   build_swift_android:
     name: Build Swift Artifact Bundles for Android
     runs-on: ubuntu-26.04
@@ -140,12 +140,12 @@ jobs:
           abi() {
             local abi=$1 arch=$2
             local triples
-            triples="$(seq -f "$arch-unknown-linux-android%g" -s ';' 23 36)"
+            triples="$(seq -f "$arch-unknown-linux-android%g" -s ';' 28 36)"
             (cd numkong && cmake -S . -B "build_$abi" --preset swift -D NUMKONG_SWIFT_DIRECTORY="$PWD/build_swift" \
-              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-28 \
               -D NUMKONG_SWIFT_TRIPLES="$triples" && cmake --build "build_$abi")
             cmake -S . -B "build_$abi" --preset swift -D USEARCH_SWIFT_DIRECTORY="$PWD/build_swift" \
-              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-23 \
+              -D CMAKE_TOOLCHAIN_FILE="$toolchain" -D ANDROID_ABI="$abi" -D ANDROID_PLATFORM=android-28 \
               -D USEARCH_SWIFT_TRIPLES="$triples"
             cmake --build "build_$abi"
           }

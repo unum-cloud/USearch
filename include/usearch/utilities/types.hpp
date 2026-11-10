@@ -14,7 +14,7 @@
 #include <atomic>      // `std::atomic_ref` - under `standard_atomic_ref`
 #include <bit>         // `std::bit_cast` - hashing `uuid128_t` as two words, `std::bit_width` - the bijection's span
 #include <compare>     // `std::strong_ordering` - a `shard_node`'s order, shard first
-#include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
+#include <concepts>    // `std::convertible_to` - the string-view conversion's constraint, `std::unsigned_integral`
 #include <functional>  // `std::hash` - specialized for `uuid128_t` below, `std::less`
 #include <limits>      // `std::numeric_limits` - the claim word's closed sentinel
 #include <optional>    // `std::optional` - the identity a `uuid128_t` may render
@@ -813,10 +813,17 @@ constexpr result_type_ power_of_two_mask(u32_t exponent) noexcept {
     return (result_type_(1) << exponent) - result_type_(1);
 }
 
-/** Integer division rounding towards positive infinity; @p divisor must be non-zero. */
-template <typename value_type_>
-constexpr value_type_ divide_round_up(value_type_ value, value_type_ divisor) noexcept {
-    return (value + divisor - value_type_(1)) / divisor;
+/** @p value divided by @p divisor and rounded up, without the overflow <tt>value + divisor - 1</tt>
+ *  risks near the limit. */
+template <std::unsigned_integral integer_type_>
+constexpr integer_type_ divide_round_up(integer_type_ value, std::type_identity_t<integer_type_> divisor) noexcept {
+    return static_cast<integer_type_>(value / divisor + (value % divisor != 0));
+}
+
+/** Whether @p a times @p b exceeds what @p integer_type_ holds. */
+template <std::unsigned_integral integer_type_>
+constexpr bool wraps_on_multiply(integer_type_ a, std::type_identity_t<integer_type_> b) noexcept {
+    return b != 0 && a > (std::numeric_limits<integer_type_>::max)() / b;
 }
 
 /** The smallest multiple of @p multiple at or above @p value; @p multiple must be non-zero. */

@@ -31,9 +31,9 @@
 
 #pragma region Crossings
 
-/** Key @p offset of the caller's keys, through their stride; zero means packed. */
+/** Key @p offset of the caller's keys, through their stride; zero repeats the first. */
 inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t offset) noexcept {
-    std::size_t const stride = keys.stride ? keys.stride : sizeof(usearch_key_t);
+    std::size_t const stride = keys.stride;
     usearch_key_t key;
     std::memcpy(&key, reinterpret_cast<byte_t const*>(keys.data) + offset * stride, sizeof(key));
     return key;
