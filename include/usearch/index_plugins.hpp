@@ -2906,7 +2906,7 @@ class metric_punned_t {
     /// Distance function that takes two arrays and some callback state and returns a scalar.
     using metric_array_array_state_t = result_t (*)(uptr_t, uptr_t, uptr_t);
     /// Distance function callback, like `metric_array_array_size_t`, but depends on member variables.
-    using metric_routed_t = result_t (metric_punned_t::*)(uptr_t, uptr_t) const;
+    using metric_routed_t = result_t (metric_punned_t::*)(uptr_t, uptr_t) const noexcept;
 
     metric_routed_t metric_routed_ = nullptr;
     uptr_t metric_ptr_ = 0;
@@ -3059,25 +3059,38 @@ class metric_punned_t {
     /**
      *  @brief  Typed invoke template for NumKong kernels.
      *
-     *  The accumulator type and IP-reversal flag are selected once in `configure_with_numkong`
-     *  and baked into the member-function pointer stored in `metric_routed_`.
+     *  The input and accumulator types and the IP-reversal flag are selected once in `configure_with_numkong`
+     *  and baked into the member-function pointer stored in `metric_routed_`. The kernel is called through its
+     *  exact type: calling it through a pointer of another type is undefined behavior, which Clang CFI
+     *  (`-fsanitize=cfi-icall`) rejects.
      */
-    template <typename accumulator_at, bool reverse_ak>
-#if defined(USEARCH_DEFINED_CLANG) || defined(USEARCH_DEFINED_GCC)
-    __attribute__((no_sanitize("all")))
-#endif
+    template <typename input_at, typename accumulator_at, bool reverse_ak>
     result_t invoke_numkong(uptr_t a, uptr_t b) const noexcept {
+        using kernel_t = void (*)(input_at const*, input_at const*, nk_size_t, accumulator_at*);
         accumulator_at result = 0;
-        auto function_pointer = (nk_metric_dense_punned_t)(metric_ptr_);
-        function_pointer(reinterpret_cast<void const*>(a), reinterpret_cast<void const*>(b), metric_third_arg_,
+        auto function_pointer = reinterpret_cast<kernel_t>(metric_ptr_);
+        function_pointer(reinterpret_cast<input_at const*>(a), reinterpret_cast<input_at const*>(b), metric_third_arg_,
                          &result);
         return reverse_ak ? (result_t)(1 - (result_t)result) : (result_t)result;
     }
 
-    /// Shorthand: casts an `invoke_numkong` instantiation to the opaque `metric_routed_t` type.
-    template <typename accumulator_at, bool reverse_ak> //
-    static metric_routed_t numkong_routed() noexcept {
-        return reinterpret_cast<metric_routed_t>(&metric_punned_t::invoke_numkong<accumulator_at, reverse_ak>);
+    /// Picks the `invoke_numkong` instantiation for the input type and the kernel's output type.
+    template <typename input_at> //
+    static metric_routed_t numkong_routed(nk_dtype_t out_dtype, bool is_ip) noexcept {
+        switch (out_dtype) {
+        case nk_f32_k:
+            return is_ip ? &metric_punned_t::invoke_numkong<input_at, nk_f32_t, true>
+                         : &metric_punned_t::invoke_numkong<input_at, nk_f32_t, false>;
+        case nk_i32_k:
+            return is_ip ? &metric_punned_t::invoke_numkong<input_at, std::int32_t, true>
+                         : &metric_punned_t::invoke_numkong<input_at, std::int32_t, false>;
+        case nk_u32_k:
+            return is_ip ? &metric_punned_t::invoke_numkong<input_at, std::uint32_t, true>
+                         : &metric_punned_t::invoke_numkong<input_at, std::uint32_t, false>;
+        default:
+            return is_ip ? &metric_punned_t::invoke_numkong<input_at, nk_f64_t, true>
+                         : &metric_punned_t::invoke_numkong<input_at, nk_f64_t, false>;
+        }
     }
 
     bool configure_with_numkong(nk_capability_t simd_caps) noexcept {
@@ -3104,20 +3117,19 @@ class metric_punned_t {
         // The output type depends on both scalar_kind and metric_kind (e.g. i8 dot->i32, i8 l2sq->u32, i8 cos->f32).
         nk_dtype_t out_dtype = nk_kernel_output_dtype(kind, datatype);
         bool is_ip = (metric_kind_ == metric_kind_t::ip_k);
-        switch (out_dtype) {
-        case nk_f64_k:
-            metric_routed_ = is_ip ? numkong_routed<nk_f64_t, true>() : numkong_routed<nk_f64_t, false>();
-            break;
-        case nk_f32_k:
-            metric_routed_ = is_ip ? numkong_routed<nk_f32_t, true>() : numkong_routed<nk_f32_t, false>();
-            break;
-        case nk_i32_k:
-            metric_routed_ = is_ip ? numkong_routed<std::int32_t, true>() : numkong_routed<std::int32_t, false>();
-            break;
-        case nk_u32_k:
-            metric_routed_ = is_ip ? numkong_routed<std::uint32_t, true>() : numkong_routed<std::uint32_t, false>();
-            break;
-        default: metric_routed_ = is_ip ? numkong_routed<nk_f64_t, true>() : numkong_routed<nk_f64_t, false>(); break;
+        switch (scalar_kind_) {
+        case scalar_kind_t::f64_k: metric_routed_ = numkong_routed<nk_f64_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::f32_k: metric_routed_ = numkong_routed<nk_f32_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::bf16_k: metric_routed_ = numkong_routed<nk_bf16_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::f16_k: metric_routed_ = numkong_routed<nk_f16_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::e5m2_k: metric_routed_ = numkong_routed<nk_e5m2_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::e4m3_k: metric_routed_ = numkong_routed<nk_e4m3_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::e3m2_k: metric_routed_ = numkong_routed<nk_e3m2_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::e2m3_k: metric_routed_ = numkong_routed<nk_e2m3_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::i8_k: metric_routed_ = numkong_routed<nk_i8_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::u8_k: metric_routed_ = numkong_routed<nk_u8_t>(out_dtype, is_ip); break;
+        case scalar_kind_t::b1x8_k: metric_routed_ = numkong_routed<nk_u1x8_t>(out_dtype, is_ip); break;
+        default: return false;
         }
         isa_kind_ = simd_kind;
 
