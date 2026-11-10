@@ -149,11 +149,12 @@ add_library(usearch_header INTERFACE)
 add_library(${PROJECT_NAME}::header ALIAS usearch_header)
 set_target_properties(usearch_header PROPERTIES EXPORT_NAME header)
 target_link_libraries(usearch_header INTERFACE usearch_core)
-target_include_directories(
-    usearch_header INTERFACE "$<BUILD_INTERFACE:${usearch_include_build_dirs_}>" $<INSTALL_INTERFACE:include>
-)
-
 include(GNUInstallDirs)
+
+target_include_directories(
+    usearch_header INTERFACE "$<BUILD_INTERFACE:${usearch_include_build_dirs_}>"
+                             "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
 
 # Dependencies: the siblings through `usearch_sibling`, the rest each acquired by its own `cmake/<dependency>.cmake`,
 # and each only for the builds that compile against it.

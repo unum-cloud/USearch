@@ -31,7 +31,7 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 
 `./check.sh` runs every model, and `./check.sh <file>...` only those; the GenMC clients run when `GENMC` names its executable.
 The runner comes from the `forkunion` submodule, `git submodule update --init forkunion`, or from the checkout `FORKUNION_SOURCE` names.
-ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob/main-v4/verification/README.md) documents the runner, the `@verify` grammar, the include roots and the memory budgets.
+ForkUnion's [verification README](https://github.com/ashvardanian/ForkUnion/blob/main/verification/README.md) documents the runner, the `@verify` grammar, the include roots and the memory budgets.
 
 ## What the Models Found
 

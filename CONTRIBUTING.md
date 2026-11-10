@@ -5,11 +5,10 @@ It's always nice to have third-party contributors 🤗
 
 ---
 
-To keep the quality of the code high, we have a set of guidelines common to [all Unum projects](https://github.com/unum-cloud).
+To keep the quality of the code high, please follow the conventions used across [Unum projects](https://github.com/unum-cloud):
 
-- [What's the procedure?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#organizing-software-development)
-- [How to organize branches?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#branches)
-- [How to style commits?](https://github.com/unum-cloud/awesome/blob/main/Workflow.md#commits)
+- Each commit subject starts with `Add:`, `Break:`, `Chore:`, `Docs:`, `Fix:`, `Improve:` or `Make:`, as [Commits](#commits) details.
+- Reference closed issues with `Closes #N` in the body, and credit collaborators with `Co-Authored-By:` trailers.
 
 ## Before You Start
 
