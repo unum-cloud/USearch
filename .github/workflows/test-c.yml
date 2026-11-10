@@ -169,27 +169,21 @@ jobs:
       - name: Test C and C++
         run: ctest --preset msvc2026_x64
 
-  build_windows_arm:
-    name: Build for Windows Arm64
-    runs-on: windows-2025-vs2026
-    timeout-minutes: 10
+  test_windows_arm:
+    name: Test on Windows Arm64 with Visual Studio 2026
+    runs-on: windows-11-vs2026-arm
+    timeout-minutes: 40
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
       - name: Pull Git Submodules
         run: git submodule update --init --recursive
-
-      - name: Set Up MSVC for ARM64
-        uses: microsoft/setup-msbuild@v3
-
-        # C/C++
-      - name: Build C/C++ for Arm64
+      - name: Build C/C++
         run: |
           cmake --preset msvc2026_arm64
           cmake --build --preset msvc2026_arm64
-
-      - name: Verify ARM64 Build Artifacts
-        run: Get-Item build_msvc2026_arm64\libusearch_shared.dll
+      - name: Test C and C++
+        run: ctest --preset msvc2026_arm64
 
   build_cross_linux:
     name: Build for Linux ${{ matrix.arch }}

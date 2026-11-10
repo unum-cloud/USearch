@@ -24,14 +24,16 @@ struct counting_metal_allocator_t {
     metal_buffer_t allocate(std::size_t bytes) noexcept {
         metal_buffer_t buffer = shared_.allocate(bytes);
         if (ledger_ && buffer) {
-            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes).add(static_cast<std::ptrdiff_t>(buffer.bytes));
-            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
+                .store_add(static_cast<std::ptrdiff_t>(buffer.bytes));
+            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).store_add(1);
         }
         return buffer;
     }
     void deallocate(metal_buffer_t& buffer) noexcept {
         if (ledger_ && buffer)
-            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes).sub(static_cast<std::ptrdiff_t>(buffer.bytes));
+            fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
+                .store_sub(static_cast<std::ptrdiff_t>(buffer.bytes));
         shared_.deallocate(buffer);
     }
     int device() const noexcept { return shared_.device(); }
@@ -48,7 +50,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     using index_t = vram_apple_index<dtype_, nk_cap_metal_k, fu::standard_yield_t, counting_metal_allocator_t,
                                      counting_metal_allocator_t>;
-    using indexes_t = vram_apple_indexes<uuid_t, dtype_, nk_cap_metal_k>;
+    using indexes_t = vram_apple_indexes<uuid128_t, dtype_, nk_cap_metal_k>;
     inline static constexpr char const* vendor_prefix_k = "metal";
 
     /** The stream the cell's contexts ride, on the device its indexes sit on. */

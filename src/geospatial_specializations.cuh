@@ -15,7 +15,7 @@
 #include <cmath> // `std::sqrt`, `std::floor`, `std::ceil`, `std::fmin`, `std::fmax`
 
 #include <array>       // `std::array` - a quad of stored observations, a sight line's points
-#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
 #include <memory>      // `std::unique_ptr` - a GPU shard built on its device
 #include <new>         // `std::nothrow` - a GPU shard built on its device
 #include <span>        // `std::span` - a quad's entries and verdicts
@@ -155,7 +155,7 @@ struct geospatial_ram_variant {
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
     using kit_t = typename us::geospatial::geospatial_ladder<numkong_capabilities_of(cpu_class_)>::kit_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using shard_t = us::geospatial::ram_index<us::utilities::uuid_t, waiter_of<cpu_class_>,
+    using shard_t = us::geospatial::ram_index<us::utilities::uuid128_t, waiter_of<cpu_class_>,
                                               atomic_ref_for_cpu_class<cpu_class_>::template type,
                                               forkunion_allocator_t, cache_hints_t>;
     using index_t = basic::ram_indexes<shard_t>;
@@ -923,7 +923,7 @@ struct geospatial_nvme_variant {
     using executor_t = nvme_executor_t;
     template <typename word_type_>
     using atomic_ref = typename atomic_ref_for_cpu_class<cpu_class_>::template type<word_type_>;
-    using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, us::utilities::uuid_t, u32_t,
+    using index_t = basic::nvme_indexes<us::geospatial::earth_observation_codec_t, us::utilities::uuid128_t, u32_t,
                                         nk_u64_t, default_io_engine_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using value_t = us::geospatial::earth_observation_t;
@@ -1204,7 +1204,7 @@ struct geospatial_vram_nvidia_build_t {
 struct geospatial_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using face_t = geospatial_vram_nvidia_build_t::face_t;
-    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, geospatial_vram_nvidia_build_t, f64_t>;
+    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, geospatial_vram_nvidia_build_t, f64_t>;
     using refine_plan_t = index_t::refine_plan_t;
     using value_t = us::geospatial::earth_observation_t;
     using node_id_t = face_t::node_id_t;
@@ -1506,7 +1506,8 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::search(
     };
     auto const [found, status] = index.search_every_shard(
         count, executor, judge,
-        nk::matrix_span<us::utilities::uuid_t> {reinterpret_cast<us::utilities::uuid_t*>(outputs.keys), count, wanted},
+        nk::matrix_span<us::utilities::uuid128_t> {reinterpret_cast<us::utilities::uuid128_t*>(outputs.keys), count,
+                                                   wanted},
         nk::matrix_span<f64_t> {outputs.scores, count, wanted}, std::span<std::size_t> {outputs.counts, count}, queries,
         config, judging_bytes);
     if (failed(status)) return {{}, status};
@@ -1545,7 +1546,7 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::within(
         covering_chords[query] = widened * widened;
     }
     // The fan-out's own rankings stay one entry wide and empty, since every shard keeps its run.
-    us::utilities::uuid_t* const unused_keys = carve<us::utilities::uuid_t>(pages, count);
+    us::utilities::uuid128_t* const unused_keys = carve<us::utilities::uuid128_t>(pages, count);
     f64_t* const unused_scores = carve<f64_t>(pages, count);
     std::size_t* const unused_counts = carve<std::size_t>(pages, count);
     if (!unused_keys || !unused_scores || !unused_counts) return {{}, status_t::bad_alloc_k};
@@ -1632,7 +1633,7 @@ inline expected<traversal_stats_t> geospatial_vram_nvidia_variant::within(
             return context.wait();
         };
         auto const [found, status] = index.search_every_shard(
-            count, executor, judge, nk::matrix_span<us::utilities::uuid_t> {unused_keys, count, 1},
+            count, executor, judge, nk::matrix_span<us::utilities::uuid128_t> {unused_keys, count, 1},
             nk::matrix_span<f64_t> {unused_scores, count, 1}, std::span<std::size_t> {unused_counts, count}, queries,
             config, judging_bytes);
         if (failed(status)) return {{}, status};

@@ -96,7 +96,7 @@ constexpr i64_t chord_squared(earth_fixed_t first, earth_fixed_t second) noexcep
 /** Rounds metres to centimetres, saturating at the storage range rather than wrapping. */
 inline i32_t to_centimetres(f64_t metres) noexcept {
     constexpr f64_t lowest_k = static_cast<f64_t>(std::numeric_limits<i32_t>::lowest());
-    constexpr f64_t highest_k = static_cast<f64_t>(std::numeric_limits<i32_t>::max());
+    constexpr f64_t highest_k = static_cast<f64_t>((std::numeric_limits<i32_t>::max)());
     return static_cast<i32_t>(std::llround(min_of(max_of(metres * centimetres_per_metre_k, lowest_k), highest_k)));
 }
 
@@ -285,17 +285,17 @@ struct earth_observation_t {
     u16_t azimuth = 0;
 
     /** The first instant covered, in Unix milliseconds; the minimum means no time was recorded. */
-    i64_t begin_milliseconds = std::numeric_limits<i64_t>::min();
+    i64_t begin_milliseconds = (std::numeric_limits<i64_t>::min)();
 
     /** Milliseconds from the first instant to the last; the maximum means open-ended. */
     u32_t duration_milliseconds = 0;
 
     /** How far the device saw, in whole metres rounded up; the maximum means without limit. */
-    u16_t range_metres = std::numeric_limits<u16_t>::max();
+    u16_t range_metres = (std::numeric_limits<u16_t>::max)();
 
     /** The pitch above the horizon in 2⁻⁸ turns; the minimum means unknown, which tests the azimuth
      *  alone. */
-    i8_t elevation = std::numeric_limits<i8_t>::min();
+    i8_t elevation = (std::numeric_limits<i8_t>::min)();
 
     /** The full field of view in 2⁻⁸ turns, widened by three standard deviations of the heading on
      *  each side and by one step for the rounding of the angles; zero looks everywhere. */
@@ -352,9 +352,9 @@ inline earth_observation_t to_earth_observation(geodetic_observation_t const& ob
         f64_t const end = has_end ? observation.end_seconds : observation.begin_seconds;
         stored.begin_milliseconds = static_cast<i64_t>(std::floor(begin * 1000.0));
         f64_t const duration = std::ceil(end * 1000.0) - static_cast<f64_t>(stored.begin_milliseconds);
-        constexpr f64_t open_ended_k = static_cast<f64_t>(std::numeric_limits<u32_t>::max());
+        constexpr f64_t open_ended_k = static_cast<f64_t>((std::numeric_limits<u32_t>::max)());
         stored.duration_milliseconds = duration < open_ended_k ? static_cast<u32_t>(duration)
-                                                               : std::numeric_limits<u32_t>::max();
+                                                               : (std::numeric_limits<u32_t>::max)();
     }
     return stored;
 }
@@ -368,16 +368,16 @@ inline geodetic_observation_t to_geodetic_observation(earth_observation_t const&
     observation.longitude_degrees = geodetic.longitude_degrees;
     observation.altitude_metres = geodetic.altitude_metres;
     observation.accuracy_metres = stored.deviation_metres;
-    if (stored.range_metres != std::numeric_limits<u16_t>::max()) observation.range_metres = stored.range_metres;
+    if (stored.range_metres != (std::numeric_limits<u16_t>::max)()) observation.range_metres = stored.range_metres;
     if (stored.field) {
         observation.heading_degrees = stored.azimuth * 360.0 / azimuth_steps_k;
         observation.field_of_view_degrees = stored.field * 360.0 / elevation_steps_k;
     }
-    if (stored.elevation != std::numeric_limits<i8_t>::min())
+    if (stored.elevation != (std::numeric_limits<i8_t>::min)())
         observation.pitch_degrees = stored.elevation * 360.0 / elevation_steps_k;
-    if (stored.begin_milliseconds != std::numeric_limits<i64_t>::min()) {
+    if (stored.begin_milliseconds != (std::numeric_limits<i64_t>::min)()) {
         observation.begin_seconds = static_cast<f64_t>(stored.begin_milliseconds) / 1000.0;
-        observation.end_seconds = stored.duration_milliseconds == std::numeric_limits<u32_t>::max()
+        observation.end_seconds = stored.duration_milliseconds == (std::numeric_limits<u32_t>::max)()
                                       ? std::numeric_limits<f64_t>::infinity()
                                       : static_cast<f64_t>(stored.begin_milliseconds + stored.duration_milliseconds) /
                                             1000.0;
@@ -425,14 +425,14 @@ inline bool within_view(earth_observation_t const& viewer, earth_observation_t c
         static_cast<f64_t>(target.position.y_centimetres) - static_cast<f64_t>(viewer.position.y_centimetres),
         static_cast<f64_t>(target.position.z_centimetres) - static_cast<f64_t>(viewer.position.z_centimetres)};
     f64_t const slant = std::sqrt(offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2]);
-    if (viewer.range_metres != std::numeric_limits<u16_t>::max() &&
+    if (viewer.range_metres != (std::numeric_limits<u16_t>::max)() &&
         slant > viewer.range_metres * centimetres_per_metre_k)
         return false;
     if (!viewer.field || slant == 0) return true;
     std::array<f64_t, 3> const local = local_offset(viewer.position, offset);
     f64_t const half_field = viewer.field * std::numbers::pi / elevation_steps_k;
     f64_t const azimuth = viewer.azimuth * 2 * std::numbers::pi / azimuth_steps_k;
-    if (viewer.elevation == std::numeric_limits<i8_t>::min()) {
+    if (viewer.elevation == (std::numeric_limits<i8_t>::min)()) {
         f64_t const ground = std::sqrt(local[0] * local[0] + local[1] * local[1]);
         if (ground == 0) return true;
         return (local[0] * std::sin(azimuth) + local[1] * std::cos(azimuth)) / ground >= std::cos(half_field);
@@ -450,8 +450,8 @@ inline bool within_view(earth_observation_t const& viewer, earth_observation_t c
  *  holds the other. */
 inline bool admits(relation_t relation, f64_t radius_metres, f64_t slack_milliseconds, earth_observation_t const& query,
                    earth_observation_t const& entry) noexcept {
-    constexpr i64_t timeless_k = std::numeric_limits<i64_t>::min();
-    constexpr u32_t open_ended_k = std::numeric_limits<u32_t>::max();
+    constexpr i64_t timeless_k = (std::numeric_limits<i64_t>::min)();
+    constexpr u32_t open_ended_k = (std::numeric_limits<u32_t>::max)();
     if (query.begin_milliseconds != timeless_k && entry.begin_milliseconds != timeless_k) {
         f64_t const infinity = std::numeric_limits<f64_t>::infinity();
         f64_t const query_begin = static_cast<f64_t>(query.begin_milliseconds);
@@ -561,7 +561,7 @@ struct surface_keep_octants_t {
 
     template <typename index_type_, typename metric_type_, typename context_type_>
     void operator()(index_type_ const& index, metric_type_& metric, context_type_& context) const noexcept {
-        constexpr std::size_t missing_k = std::numeric_limits<std::size_t>::max();
+        constexpr std::size_t missing_k = (std::numeric_limits<std::size_t>::max)();
         auto const& candidates = context.results;
         auto& selected = context.selected_neighbors;
         selected.clear();
@@ -656,7 +656,7 @@ static_assert(basic::value_codec<earth_observation_codec_t, earth_observation_t>
 
 /** Similarity Search over observations: 32-byte values, squared chords in square centimetres as
  *  distances, and 32-bit node IDs. */
-template <typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
+template <typename key_type_ = uuid128_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index = basic::ram_index<earth_observation_t, key_type_, u32_t, nk_u64_t, wait_type_, atomic_ref_template_,

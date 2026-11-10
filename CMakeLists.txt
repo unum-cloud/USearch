@@ -228,7 +228,6 @@ function (usearch_setup_target target_)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
         # MSVC has no O3 optimization level
-        target_compile_options(${target_} PRIVATE /wd4068 /wd4996)
         target_compile_options(
             ${target_} PRIVATE $<$<CONFIG:DEBUG>:/DEBUG> $<$<CONFIG:RELEASE>:/O2> $<$<CONFIG:RELWITHDEBINFO>:/O2
                                /DEBUG>

@@ -84,7 +84,7 @@ struct header_only_codec_t {
 };
 
 using narrow_index_t = basic::ram_index<std::array<char, 8>, u64_t, u32_t, u64_t>;
-using wide_index_t = basic::ram_index<std::array<char, 8>, utilities::uuid_t, u64_t, u64_t>;
+using wide_index_t = basic::ram_index<std::array<char, 8>, utilities::uuid128_t, u64_t, u64_t>;
 
 static_assert(basic::value<std::array<char, 8>>);
 static_assert(basic::metric<header_only_metric_t, std::array<char, 8>, u64_t>);
@@ -105,7 +105,7 @@ static_assert(std::is_move_constructible_v<narrow_index_t::load_plan_t> &&
               !std::is_copy_assignable_v<narrow_index_t::load_plan_t> &&
               !std::is_move_assignable_v<narrow_index_t::load_plan_t>);
 static_assert(std::is_same_v<wide_index_t::columns_view_t,
-                             basic::columns<utilities::uuid_t const, u64_t const, byte_t const, u64_t const>>);
+                             basic::columns<utilities::uuid128_t const, u64_t const, byte_t const, u64_t const>>);
 
 /** The tags the index probes store: distinct leading letters, shared tails. */
 static std::array<char, 8> make_tag(std::size_t ordinal) noexcept {
@@ -120,8 +120,8 @@ int main() {
     u64_t seven = 7;
     expected<u64_t const&> const borrowed {&seven, status_t::success_k};
     if (!borrowed || borrowed.value() != 7) return 1;
-    utilities::uuid_t const uuid {};
-    if (std::hash<utilities::uuid_t> {}(uuid) != std::hash<utilities::uuid_t> {}(uuid)) return 1;
+    utilities::uuid128_t const uuid {};
+    if (std::hash<utilities::uuid128_t> {}(uuid) != std::hash<utilities::uuid128_t> {}(uuid)) return 1;
     if (mix_bits(1) == mix_bits(2)) return 1;
     if (multiply_high(u64_t {1} << 32, u64_t {1} << 32) != 1) return 1;
     if (dtype_named("u64") != dtype_t::u64_k) return 1;
@@ -263,13 +263,14 @@ int main() {
     if (restored.key_of(0).value != index.key_of(0).value) return 1;
     if (restored.degree_of(3).value != index.degree_of(3).value) return 1;
 
-    // The wide instantiation: uuid keys through `std::hash<utilities::uuid_t>`, 64-bit IDs.
+    // The wide instantiation: uuid keys through `std::hash<utilities::uuid128_t>`, 64-bit IDs.
     std::unique_ptr<wide_index_t> const wide_index_ptr {new (std::nothrow) wide_index_t};
     if (!wide_index_ptr) return 1;
     wide_index_t& wide_index = *wide_index_ptr;
     if (failed(wide_index.reserve(4).status)) return 1;
-    std::array<utilities::uuid_t, 2> const wide_keys {std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {1, 2}),
-                                                      std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {3, 4})};
+    std::array<utilities::uuid128_t, 2> const wide_keys {
+        std::bit_cast<utilities::uuid128_t>(std::array<u64_t, 2> {1, 2}),
+        std::bit_cast<utilities::uuid128_t>(std::array<u64_t, 2> {3, 4})};
     std::array<std::array<char, 8>, 2> wide_tags {{make_tag(1), make_tag(2)}};
     wide_index_t::traversal_context_t wide_context {9};
     if (failed(wide_index.insert({wide_tags}, {wide_keys}, metric, {}, wide_context, basic::keep_diverse_t {2}).status))

@@ -53,17 +53,17 @@
 namespace unum::usearch::test {
 using namespace unum::usearch::dense;
 
-/** The key numbered @p number: the number itself, or the @c uuid_t the bindings render it as. */
+/** The key numbered @p number: the number itself, or the @c uuid128_t the bindings render it as. */
 template <typename key_type_>
 constexpr key_type_ dense_key(u64_t number) noexcept {
-    if constexpr (std::is_same_v<key_type_, uuid_t>) return uuid_of(number);
+    if constexpr (std::is_same_v<key_type_, uuid128_t>) return uuid_of(number);
     else return static_cast<key_type_>(number);
 }
 
 /** The number @ref dense_key made @p key from, or zero for a key it never makes. */
 template <typename key_type_>
 constexpr u64_t dense_key_number(key_type_ const& key) noexcept {
-    if constexpr (std::is_same_v<key_type_, uuid_t>) return identity_of(key).value_or(0);
+    if constexpr (std::is_same_v<key_type_, uuid128_t>) return identity_of(key).value_or(0);
     else return static_cast<u64_t>(key);
 }
 
@@ -203,7 +203,7 @@ std::size_t dense_count_self_hits(index_type_& index, make_index_type_ const& ma
         if (failed(status) || !result.count) continue;
         for (std::size_t match = 0; match != result.count; ++match) {
             scored_node_t const scored = context.results[match];
-            if (scored.distance < dense_self_match_tolerance_k && scored.distance > -dense_self_match_tolerance_k) {
+            if (std::fabs(scored.distance) < dense_self_match_tolerance_k) {
                 ++hits;
                 break;
             }
@@ -308,8 +308,8 @@ struct counting_device_allocator {
         status_t const status = virtual_memory_.commit(bytes);
         if (ledger_ && virtual_memory_.committed_bytes() > tallied_bytes_) {
             fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
-                .add(static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
-            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
+                .store_add(static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
+            fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).store_add(1);
             tallied_bytes_ = virtual_memory_.committed_bytes();
         }
         return status;
@@ -325,7 +325,7 @@ struct counting_device_allocator {
     void release() noexcept {
         if (ledger_ && tallied_bytes_)
             fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
-                .sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
+                .store_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
         tallied_bytes_ = 0;
         virtual_memory_.release();
     }
@@ -639,8 +639,7 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
         if constexpr (kernel_ != nk_kernel_dot_k) {
             scored_node_t const nearest = context.results[0];
             failures += expect_eq(nearest.node_id, assigned_ids[row]);
-            failures += expect(nearest.distance < dense_self_match_tolerance_k && //
-                               nearest.distance > -dense_self_match_tolerance_k);
+            failures += expect(std::fabs(nearest.distance) < dense_self_match_tolerance_k);
         }
 
         // A query narrower than the index's width is refused, never read past its end.
@@ -1346,7 +1345,7 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
     pool.for_threads([&](std::size_t) noexcept {
         auto const steps = plan.steps();
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
-            if (failed(plan.save(steps[position]))) lane_failures.add(1);
+            if (failed(plan.save(steps[position]))) lane_failures.store_add(1);
     });
     failures += expect_eq(lane_failures_count, 0u);
     failures += expect_eq(plan.finish(), status_t::success_k);
@@ -1709,8 +1708,7 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
             if (!result.count) continue;
             scored_node_t const best = doubled_context.results[0];
             failures += expect(best.node_id == row || best.node_id == row + nodes_count);
-            failures += expect(best.distance < dense_self_match_tolerance_k &&
-                               best.distance > -dense_self_match_tolerance_k);
+            failures += expect(std::fabs(best.distance) < dense_self_match_tolerance_k);
         }
     }
     return failures;
@@ -2415,7 +2413,7 @@ std::size_t dense_expect_attention_bounds(nk::matrix_view<scalar_type_> keys, nk
     std::size_t failures = expect(outputs.extent(0) == tasks && outputs.extent(1) == columns && carry.size() == tasks);
     if (failures) return failures;
     std::vector<f32_t> const widened = dense_widened_rows(values, scalar_type_::dtype());
-    std::vector<f32_t> lowest(columns, std::numeric_limits<f32_t>::max()),
+    std::vector<f32_t> lowest(columns, (std::numeric_limits<f32_t>::max)()),
         highest(columns, std::numeric_limits<f32_t>::lowest());
     for (std::size_t row = 0; row != rows_count; ++row)
         for (std::size_t column = 0; column != columns; ++column) {
@@ -2967,18 +2965,18 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
                                  {assigned_ids.data() + thread * dense_thread_nodes_k, dense_thread_nodes_k},
                                  threads.contexts[thread])
                          .status;
-        if (status != status_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).add(1);
+        if (status != status_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
         assert_no_locks_held();
     });
 
     failures += expect_eq(thread_failures, 0u);
     failures += expect_eq(index.size(), nodes_count);
     // One batch's IDs come from one dispense: contiguous, in the order of its rows.
+    // Walked batch by batch: MSVC 14.51 `/O2` vectorizes a `row % batch` loop into wild reads.
     std::size_t scattered_ids = 0;
-    for (std::size_t row = 0; row != nodes_count; ++row) {
-        std::size_t const offset = row % dense_thread_nodes_k;
-        scattered_ids += assigned_ids[row] != assigned_ids[row - offset] + offset;
-    }
+    for (std::size_t first = 0; first != nodes_count; first += dense_thread_nodes_k)
+        for (std::size_t offset = 0; offset != dense_thread_nodes_k; ++offset)
+            scattered_ids += assigned_ids[first + offset] != assigned_ids[first] + offset;
     failures += expect_eq(scattered_ids, 0u);
     failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
 
@@ -3044,8 +3042,8 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
                              .insert({keys.data() + (thread - 1) * dense_thread_nodes_k, dense_thread_nodes_k},
                                      threads.slices[thread].view(), {}, threads.contexts[thread])
                              .status;
-            if (status != status_t::success_k) thread_failures.add(1);
-            writer_lanes_remaining.sub(1, std::memory_order_release);
+            if (status != status_t::success_k) thread_failures.store_add(1);
+            writer_lanes_remaining.store_sub(1, std::memory_order_release);
             assert_no_locks_held();
             return;
         }
@@ -3071,14 +3069,14 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
             auto query = query_vectors.view().row(step % queries_count).as_vector();
             bool const predicated = predicable && step % 2 == 1;
             auto const [result, status] = search_step(query, predicated);
-            if (status != status_t::success_k) thread_failures.add(1);
-            thread_failures.add(
+            if (status != status_t::success_k) thread_failures.store_add(1);
+            thread_failures.store_add(
                 scored_failures(threads.contexts[0].results.data(), result.count, index.size(), expansion_bound));
             // Every writer inserts its slice as one batch, which publishes whole.
-            if (index.size() % dense_thread_nodes_k) thread_failures.add(1);
+            if (index.size() % dense_thread_nodes_k) thread_failures.store_add(1);
             if (predicated)
                 for (std::size_t match = 0; match != result.count; ++match)
-                    if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.add(1);
+                    if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.store_add(1);
         }
         assert_no_locks_held();
     });
@@ -3606,7 +3604,7 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     // Re-selection reports from every worker at once, so the furthest count wins.
     std::size_t reported_count = 0;
     fu::standard_atomic_ref<std::size_t> const reported {reported_count};
-    auto note = [&](std::size_t visited) noexcept { reported.max(visited); };
+    auto note = [&](std::size_t visited) noexcept { reported.store_max(visited); };
     auto cancel = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::cancel_k; };
     auto proceed = [&](std::size_t visited, std::size_t) noexcept { return note(visited), continuation_t::continue_k; };
 
@@ -3677,7 +3675,7 @@ std::size_t test_dense_indexes_absorb_many(u64_t seed, placement_types_&... plac
     // fewest.
     std::size_t fewest = rows, most = 0;
     for (std::size_t shard = 0; shard != recipient.shards_count(); ++shard)
-        fewest = std::min(fewest, recipient.shard(shard).size()), most = std::max(most, recipient.shard(shard).size());
+        fewest = min_of(fewest, recipient.shard(shard).size()), most = max_of(most, recipient.shard(shard).size());
     failures += expect(most - fewest <= donors.size());
     failures += dense_indexes_expect_restored(recipient, vectors, keys, dimensions, executor, seed);
     auto const [health, health_status] = recipient.health(executor);
@@ -3946,7 +3944,7 @@ std::size_t test_dense_indexes_save_load(u64_t seed, placement_types_&... placem
     failures += expect(succeeded(restored.load(checkpoint.path, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, executor, seed);
     failures += expect_eq(restored.shards_count(), shards);
-    for (std::size_t shard = 0; shard != std::min(shards, restored.shards_count()); ++shard)
+    for (std::size_t shard = 0; shard != min_of(shards, restored.shards_count()); ++shard)
         failures += expect_eq(restored.shard(shard).size(), indexes.shard(shard).size());
 
     if constexpr (kernel_ != nk_kernel_dot_k) {
@@ -3993,7 +3991,7 @@ std::size_t test_dense_indexes_part_load(u64_t seed, placement_types_&... placem
     failures += expect(succeeded(cramped.reserve({shards}).status));
     failures += expect(succeeded(cramped.load(checkpoint.path, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(cramped, vectors, keys, dimensions, executor, seed);
-    for (std::size_t shard = 0; shard != std::min(shards, cramped.shards_count()); ++shard)
+    for (std::size_t shard = 0; shard != min_of(shards, cramped.shards_count()); ++shard)
         failures += expect_eq(cramped.shard(shard).size(), indexes.shard(shard).size());
     failures += expect_eq(cramped.load(checkpoint.path, load_config_t {}, executor), status_t::config_mismatch_k);
     failures += expect_eq(cramped.size(), rows);
@@ -4040,7 +4038,7 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     if (fu::failed(pool.spawn(3))) return failures + expect(false);
     pool.for_threads([&](std::size_t) noexcept {
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
-            if (failed(plan.save(steps[position]))) lane_failures.add(1);
+            if (failed(plan.save(steps[position]))) lane_failures.store_add(1);
     });
     failures += expect_eq(lane_failures_count, 0u);
     failures += expect_eq(plan.finish(), status_t::success_k);
@@ -4462,7 +4460,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
                 auto [result, status] = indexes.insert(
                     std::span<key_t const> {keys.data() + first, dense_thread_nodes_k},
                     vectors(nk::range(first, first + dense_thread_nodes_k), nk::slice), executor);
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
             }
             writer_done.store(true, std::memory_order_release);
             assert_no_locks_held();
@@ -4470,7 +4468,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
         }
         dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
         if (failed(rows_driver.status)) {
-            thread_failures.add(1);
+            thread_failures.store_add(1);
             writer_done.store(true, std::memory_order_release);
             return;
         }
@@ -4482,13 +4480,13 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
                                                          std::span<key_t> {found_keys}, std::span {found_distances}, {},
                                                          rows_driver.handle());
             if (status != status_t::success_k) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 break;
             }
             for (std::size_t match = 0; match != result.count; ++match)
                 if (dense_key_number(found_keys[match]) < 1 || dense_key_number(found_keys[match]) > nodes_count)
-                    thread_failures.add(1);
-            if (indexes.size() % dense_thread_nodes_k) thread_failures.add(1);
+                    thread_failures.store_add(1);
+            if (indexes.size() % dense_thread_nodes_k) thread_failures.store_add(1);
         }
         assert_no_locks_held();
     });
@@ -4575,8 +4573,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
         return true;
     };
     auto record_settled = [&](std::size_t nodes) noexcept {
-        settled_saves.add(1);
-        if (!audit_settled(nodes)) thread_failures.add(1);
+        settled_saves.store_add(1);
+        if (!audit_settled(nodes)) thread_failures.store_add(1);
         if (recorded_payloads.size() == recorded_payloads.capacity()) return;
         recorded_payload_t recorded {nk::matrix<scalar_t>::zeros({nodes, dimensions}).value,
                                      nk::matrix<node_id_t>::zeros({nodes, connectivity_16_k}).value, nodes};
@@ -4587,19 +4585,19 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
     };
     auto saver_thread = [&]() noexcept { // Classify, audit, and record every settled payload.
         for (std::size_t attempts = 0; inserter_threads_remaining.load(std::memory_order_acquire) != 0; ++attempts) {
-            if (attempts == spin_limit_k) return thread_failures.add(1); // A stuck racer.
+            if (attempts == spin_limit_k) return thread_failures.store_add(1); // A stuck racer.
             auto const [nodes, save_status] = attempt_save();
-            if (save_status == status_t::contended_k) contended_saves.add(1);
+            if (save_status == status_t::contended_k) contended_saves.store_add(1);
             else if (save_status == status_t::success_k) record_settled(nodes);
-            else thread_failures.add(1);
+            else thread_failures.store_add(1);
         }
         // The settle phase: with every racer done, a save must soon succeed.
         for (std::size_t attempts = 0; attempts != attempt_limit_k; ++attempts) {
             auto const [nodes, save_status] = attempt_save();
             if (save_status == status_t::success_k) return record_settled(nodes);
-            if (save_status != status_t::contended_k) return thread_failures.add(1);
+            if (save_status != status_t::contended_k) return thread_failures.store_add(1);
         }
-        thread_failures.add(1); // The settle phase starved.
+        thread_failures.store_add(1); // The settle phase starved.
     };
     auto inserter_thread = [&](std::size_t thread) noexcept { // A slice, then spare singles
                                                               // until the saver has contended.
@@ -4607,17 +4605,17 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
         auto main_rows = slice(nk::range(0, dense_thread_nodes_k), nk::slice);
         if (index.insert({keys.data(), dense_thread_nodes_k}, main_rows, {}, threads.contexts[thread]).status !=
             status_t::success_k)
-            thread_failures.add(1);
+            thread_failures.store_add(1);
         for (std::size_t spare = 0; spare != spare_rows_count && //
                                     contended_saves.load(std::memory_order_acquire) == 0;
              ++spare) {
             auto spare_row = slice(nk::range(dense_thread_nodes_k + spare, dense_thread_nodes_k + spare + 1),
                                    nk::slice);
             if (index.insert({keys.data(), 1u}, spare_row, {}, threads.contexts[thread]).status != status_t::success_k)
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             std::this_thread::yield();
         }
-        inserter_threads_remaining.sub(1, std::memory_order_release);
+        inserter_threads_remaining.store_sub(1, std::memory_order_release);
         assert_no_locks_held();
     };
     auto searcher_thread = [&](std::size_t thread) noexcept { // The reader-thread invariants.
@@ -4628,8 +4626,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
              ++step) {
             auto query = query_slice.row(step % dense_thread_nodes_k).as_vector();
             auto const [result, status] = index.search(query, {}, threads.contexts[thread]);
-            if (status != status_t::success_k) thread_failures.add(1);
-            thread_failures.add(
+            if (status != status_t::success_k) thread_failures.store_add(1);
+            thread_failures.store_add(
                 scored_failures(threads.contexts[thread].results.data(), result.count, index.size(), expansion_bound));
         }
         assert_no_locks_held();
@@ -4812,7 +4810,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
                 auto racing_row = vectors(nk::range(nodes_count + 1 + ordinal, nodes_count + 2 + ordinal), nk::slice);
                 if (index.insert({keys.data() + nodes_count + 1 + ordinal, 1u}, racing_row, {}, lane_context).status !=
                     status_t::success_k)
-                    thread_failures.add(1);
+                    thread_failures.store_add(1);
                 std::this_thread::yield();
             }
             writer_done.store(true, std::memory_order_release);
@@ -4822,15 +4820,15 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
         if (thread != 1) return;
         concurrent_cursor_type_ racing_cursor {index};
         if (racing_cursor.reserve(counting_allocator<byte_t> {ledger}) != status_t::success_k)
-            return thread_failures.add(1);
+            return thread_failures.store_add(1);
         std::size_t sweeps = 0;
         do {
-            if (sweeps++ == attempt_limit_k) return thread_failures.add(1); // A stuck writer.
+            if (sweeps++ == attempt_limit_k) return thread_failures.store_add(1); // A stuck writer.
             racing_cursor.refresh();
             node_id_t const snapshot = racing_cursor.visible_count();
-            if (failed(racing_cursor.seek(0))) return thread_failures.add(1);
+            if (failed(racing_cursor.seek(0))) return thread_failures.store_add(1);
             for (; racing_cursor; ++racing_cursor)
-                if (racing_cursor.id() >= snapshot) thread_failures.add(1);
+                if (racing_cursor.id() >= snapshot) thread_failures.store_add(1);
         } while (!writer_done.load(std::memory_order_acquire));
     });
     failures += expect_eq(thread_failures.load(), 0u);
@@ -4888,7 +4886,7 @@ std::size_t dense_expect_starved_load(make_index_type_ const& make_index, alloca
     std::vector<typename index_type_::key_t> const keys = dense_keys<index_type_>(nodes_count);
     failures += expect_eq(starved.load(source, to_span(keys), nodes_count, local), status_t::bad_alloc_k);
     failures += expect_eq(starved.size(), 0u);
-    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
     return failures;
 }
 
@@ -4925,7 +4923,7 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     failures += expect_eq(index.size(), fill_rows_count);
 
     // Lift it: the identical batch is retryable.
-    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
     failures += expect(
         index.insert({keys.data() + fill_rows_count, extra_rows_count}, extra_rows, {}, context).status ==
         status_t::success_k);
@@ -5051,7 +5049,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(insert_result.saturated_walks, 1u);
     failures += expect_eq(index.size(), dense_growth_nodes_k + 1);
-    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
     return failures;
 }
 
@@ -5119,7 +5117,7 @@ std::size_t dense_expect_refine_atomic(make_index_type_ const& make_index, alloc
         failures += expect(refined.reselected_nodes >= rows && refined.changed_nodes > 0);
         break;
     }
-    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
     failures += expect(refusals > 0);
     return failures;
 }
@@ -5208,7 +5206,7 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
         failures += expect_eq(index.reserve({std::size_t {1} << 33}).status, status_t::overflow_k);
 
     // A lifted budget makes a refused batch retryable.
-    ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
     failures += expect(refused_thread != racing_threads_count);
     failures += expect(index
                            .insert({keys.data() + refused_thread * batch_rows_count, batch_rows_count},

@@ -18,7 +18,7 @@
  */
 #include <cstdio> // `std::remove` - a reloaded checkpoint's files
 
-#include <algorithm> // `std::min`, `std::nth_element`
+#include <algorithm> // `std::nth_element`
 #include <array>     // `std::array` - the templates
 #include <limits>    // `std::numeric_limits` - the node-ID type's sentinel
 #include <memory>    // `std::unique_ptr` - a sharded index's shards
@@ -185,7 +185,7 @@ template <usearch_sequence_metric_t metric_, typename node_id_type_ = u32_t>
 static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& executor, std::size_t count,
                                                   std::size_t length, std::size_t queries_count,
                                                   recall_reference_t reference = recall_reference_t::ram_index_k) {
-    using ram_index_t = ram_index<us::utilities::uuid_t, u32_t>;
+    using ram_index_t = ram_index<us::utilities::uuid128_t, u32_t>;
     using vram_index_t = vram_nvidia_index<vram_kit_of<metric_>, node_id_type_, sequence_nvidia_fatbin<metric_>>;
     constexpr std::size_t wanted_k = 10, expansion_k = 64, batches_k = 3, origin_k = 3;
     std::size_t failures = 0;
@@ -218,7 +218,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         for (std::size_t entry = 0; entry != count; ++entry) {
             ram_index_t::value_t value;
             [[maybe_unused]] sz::status_t const assigned = value.assign(strings[entry]);
-            us::utilities::uuid_t const key = uuid_of(entry);
+            us::utilities::uuid128_t const key = uuid_of(entry);
             failures += expect_eq(ram_index
                                       .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                               us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
@@ -250,7 +250,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
-    std::vector<us::utilities::uuid_t> keys(count);
+    std::vector<us::utilities::uuid128_t> keys(count);
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
@@ -290,7 +290,7 @@ static std::size_t check_sequence_vram_collection(u64_t seed, cuda_executor_t& e
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             node_id_type_ const id = ids[query * wanted_k + rank];
-            if (id == std::numeric_limits<node_id_type_>::max()) break;
+            if (id == (std::numeric_limits<node_id_type_>::max)()) break;
             // The candidates keep 31 bits of a float, so the overlap kind's fixed point loses a
             // mantissa bit more on the device.
             f32_t const distance = distances[query * wanted_k + rank];
@@ -373,7 +373,7 @@ static std::size_t check_sequence_vram_reloaded(indexes_type_& saved, std::size_
  *  so its keys cover as its nodes map, and each counts once in it too. */
 static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
-    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid_t, sequence_vram_shards_t>;
+    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 5000, shard_capacity_k = 1000, queries_k = 64, wanted_k = 10, expansion_k = 64;
     std::size_t failures = 0;
 
@@ -392,7 +392,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
         for (std::size_t entry = 0; entry != entries_k; ++entry) serial_metric.push(std::string_view {strings[entry]});
         serial_metric.drain(exact[query], us::basic::unbounded_radius<sz_size_t>());
     }
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     indexes_t indexes {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
@@ -407,14 +407,14 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
     failures += expect_eq(indexes.shards_count(), std::size_t {6});
     failures += expect_eq(indexes.size(), entries_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid_t const& key : keys) miscounted += indexes.count(key) != 1;
+    for (us::utilities::uuid128_t const& key : keys) miscounted += indexes.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
     auto const [health, health_status] = indexes.health(executor);
     failures += expect_eq(health_status, status_t::success_k);
     failures += expect_eq(health.audited_nodes, entries_k);
     failures += expect(health.reachable_nodes * 20 >= entries_k * 19);
 
-    std::vector<us::utilities::uuid_t> found_keys(queries_k * wanted_k);
+    std::vector<us::utilities::uuid128_t> found_keys(queries_k * wanted_k);
     std::vector<f32_t> found_distances(queries_k * wanted_k);
     std::vector<std::size_t> counts(queries_k);
     typename index_t::search_config_t const search_config {expansion_k, wanted_k};
@@ -441,7 +441,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
     typename index_t::traversal_context_t context {
         cuda_arena_allocator_t {executor.stream(0).arena, executor.stream(0)}};
     failures += expect_eq(single.insert(keys, sequences, context, insert_config).status, status_t::success_k);
-    for (us::utilities::uuid_t const& key : keys) miscounted += single.count(key) != 1;
+    for (us::utilities::uuid128_t const& key : keys) miscounted += single.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
     std::vector<u32_t> ids(queries_k * wanted_k);
     failures += expect_eq(single
@@ -453,7 +453,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
     for (std::size_t query = 0; query != queries_k; ++query) {
         std::vector<sz_size_t> found;
         for (std::size_t rank = 0;
-             rank != wanted_k && ids[query * wanted_k + rank] != std::numeric_limits<u32_t>::max(); ++rank)
+             rank != wanted_k && ids[query * wanted_k + rank] != (std::numeric_limits<u32_t>::max)(); ++rank)
             found.push_back(static_cast<sz_size_t>(found_distances[query * wanted_k + rank]));
         single_matched += matched_count(found, exact[query], wanted_k);
     }
@@ -466,7 +466,7 @@ static std::size_t check_sequence_vram_sharded(u64_t seed, cuda_executor_t& exec
  *  count of every key stay as inserted. */
 static std::size_t check_sequence_vram_split_refused(u64_t seed, cuda_executor_t& executor) {
     using index_t = sequence_vram_shards_t::index_t;
-    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid_t, sequence_vram_shards_t>;
+    using indexes_t = us::basic::vram_nvidia_indexes<index_t, us::utilities::uuid128_t, sequence_vram_shards_t>;
     constexpr std::size_t entries_k = 256, expansion_k = 64;
     std::size_t failures = 0;
 
@@ -476,7 +476,7 @@ static std::size_t check_sequence_vram_split_refused(u64_t seed, cuda_executor_t
     for (std::string const& symbols : strings) tape += symbols, offsets.push_back(tape.size());
     tape_view<byte_t const> const sequences {reinterpret_cast<byte_t const*>(tape.data()),
                                              {offsets.data(), entries_k + 1}};
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(entry);
 
     indexes_t donor {forkunion_allocator_t {no_memory_domain_k}, sequence_vram_shards_t {}};
@@ -494,7 +494,7 @@ static std::size_t check_sequence_vram_split_refused(u64_t seed, cuda_executor_t
                           status_t::config_mismatch_k);
     failures += expect_eq(donor.size(), entries_k);
     std::size_t miscounted = 0;
-    for (us::utilities::uuid_t const& key : keys) miscounted += donor.count(key) != 1;
+    for (us::utilities::uuid128_t const& key : keys) miscounted += donor.count(key) != 1;
     failures += expect_eq(miscounted, std::size_t {0});
     return failures;
 }

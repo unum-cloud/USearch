@@ -103,7 +103,7 @@ struct codec_t {
 
 /** Similarity Search over byte sequences: owned strings, integer distances, and a metric chosen per
  *  call - so a graph built under one kernel is queried under another without rebuilding. */
-template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
+template <typename key_type_ = uuid128_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index =

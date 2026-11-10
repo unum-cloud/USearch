@@ -25,7 +25,6 @@
  */
 #pragma once
 
-#include <algorithm> // `std::min`
 #include <chrono>    // `std::chrono::steady_clock`
 #include <memory>    // `std::unique_ptr`
 #include <vector>    // `std::vector`
@@ -519,16 +518,15 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         return 1;
     }
     std::size_t rows = total_rows - first_row;
-    if (launch.settings.max_base_vectors.value) rows = std::min(rows, launch.settings.max_base_vectors.value);
+    if (launch.settings.max_base_vectors.value) rows = min_of(rows, launch.settings.max_base_vectors.value);
     nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset.vectors(first_row, rows);
     if (sliced_vectors.empty())
         return fmt::println("--first-vector {} and --max-base-vectors {} span two parts", first_row, rows), 1;
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
-        dataset.has_queries()
-            ? dataset.queries()
-            : sliced_vectors(nk::range(std::size_t {0}, std::min<std::size_t>(1000, rows)), nk::slice);
+        dataset.has_queries() ? dataset.queries()
+                              : sliced_vectors(nk::range(std::size_t {0}, min_of<std::size_t>(1000, rows)), nk::slice);
 
     bench_context_type_ bench {launch.settings, kernel};
     streamed_t streamed {bench, sliced_vectors, source_queries};

@@ -95,11 +95,11 @@ struct basic_auditing_metric {
     std::size_t violations = 0;
 
     /** Accepted pushes before refusal begins; the type's maximum means unarmed. */
-    std::size_t budget_left = std::numeric_limits<std::size_t>::max();
+    std::size_t budget_left = (std::numeric_limits<std::size_t>::max)();
 
     /** Accepted pushes per round, refusing the rest until a drain; the type's maximum means
      *  uncapped. */
-    std::size_t round_limit = std::numeric_limits<std::size_t>::max();
+    std::size_t round_limit = (std::numeric_limits<std::size_t>::max)();
 
     template <typename query_type_>
     void reset(query_type_ const& query) noexcept {
@@ -125,7 +125,7 @@ struct basic_auditing_metric {
     }
 
     void arm(std::size_t budget) noexcept { budget_left = budget; }
-    void disarm() noexcept { budget_left = std::numeric_limits<std::size_t>::max(); }
+    void disarm() noexcept { budget_left = (std::numeric_limits<std::size_t>::max)(); }
 };
 
 /** Wrapper whose first push parks until released - the deterministic way to hold
@@ -186,7 +186,7 @@ std::size_t basic_build(index_type_& index, metric_type_& metric, std::vector<ty
     for (std::size_t ordinal = 0; ordinal != count; ++ordinal)
         keys[ordinal] = fixture_type_::make_key(first_key_ordinal + ordinal);
     for (std::size_t begin = 0; begin < count; begin += batch_size_k) {
-        std::size_t const batch = std::min(batch_size_k, count - begin);
+        std::size_t const batch = min_of(batch_size_k, count - begin);
         auto const [result, status] = index.insert({values.data() + begin, batch}, {keys.data() + begin, batch}, metric,
                                                    {assigned_ids.data() + begin, batch}, context, selector, config);
         failures += expect_eq(status, status_t::success_k);
@@ -891,7 +891,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         ledger.byte_budget = ledger.live_bytes + 64;
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::bad_alloc_k);
         failures += expect_eq(index.capacity(), 0u);
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::success_k);
 
         // A budget swept up from the live bytes refuses an insert's allocations one by one: the key
@@ -918,7 +918,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
             failures += expect_eq(swept.size(), 0u);
             failures += expect_eq(swept.capacity(), 0u);
         }
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect_eq(swept_status, status_t::success_k);
         failures += expect(refusals > 0);
         failures += expect_eq(static_cast<std::size_t>(swept_ids[0]), 0u);
@@ -946,7 +946,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         failures += expect(refused_target != 0);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links);
 
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         auto const [retry_membership, retry_status] = index.link(0, refused_target);
         failures += expect_eq(retry_status, status_t::success_k);
         failures += expect(retry_membership == membership_t::absent_k);
@@ -1047,7 +1047,7 @@ std::size_t test_basic_starved(u64_t seed) {
         failures += expect_eq(index.search(query[0], {8}, metric, small_context).status, status_t::bad_alloc_k);
 
         // Lifting the budget makes every refusal retryable.
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect_eq(index.health(warm_context).status, status_t::success_k);
         failures += expect_eq(
             index.insert({extras.data() + 1, 1}, {extra_keys.data() + 1, 1}, metric, {}, cold_context).status,
@@ -1063,7 +1063,7 @@ std::size_t test_basic_starved(u64_t seed) {
         ledger.byte_budget = ledger.live_bytes;
         failures += expect_eq(restored.load(columns.view(), codec), status_t::bad_alloc_k);
         failures += expect_eq(restored.size(), 0u);
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
         failures += expect_eq(restored.size(), index.size());
     }
@@ -1276,7 +1276,7 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
             // while legitimately holding the plan's unique side for the whole pool.
             pool.for_threads([&](std::size_t thread) noexcept {
                 if (plan.save(regions[thread], codec) != status_t::success_k)
-                    fu::standard_atomic_ref<std::size_t>(thread_failures).add(1);
+                    fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
             });
             failures += expect_eq(thread_failures, 0u);
             failures += expect_eq(plan.finish(), status_t::success_k);
@@ -1307,7 +1307,7 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
             std::size_t thread_failures = 0;
             pool.for_threads([&](std::size_t thread) noexcept {
                 if (plan.load(regions[thread], codec) != status_t::success_k)
-                    fu::standard_atomic_ref<std::size_t>(thread_failures).add(1);
+                    fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
             });
             failures += expect_eq(thread_failures, 0u);
             failures += expect_eq(restored.size(), 0u); // Still unpublished before the finish.
@@ -1389,25 +1389,26 @@ std::size_t test_basic_plan_race(u64_t seed) {
         auto planner_thread = [&]() noexcept { // Waits on the prober only - never on the inserter.
             auto [plan, status] = index.plan_save(held.columns(), codec);
             if (failed(status)) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 plan_abandoned.store(true, std::memory_order_release);
             }
             plan_held.store(true, std::memory_order_release);
             if (failed(status)) return;
             if (!spin_until([&]() noexcept { return prober_done.load(std::memory_order_acquire); }))
-                thread_failures.add(1); // Finish regardless - the hold must die.
-            if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k) thread_failures.add(1);
-            if (plan.finish() != status_t::success_k) thread_failures.add(1);
+                thread_failures.store_add(1); // Finish regardless - the hold must die.
+            if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
+                thread_failures.store_add(1);
+            if (plan.finish() != status_t::success_k) thread_failures.store_add(1);
         };
         auto inserter_thread = [&]() noexcept { // Provably parked at the shared gate.
             if (!spin_until([&]() noexcept { return plan_held.load(std::memory_order_acquire); }))
-                return thread_failures.add(1);
+                return thread_failures.store_add(1);
             inserter_started.store(true, std::memory_order_release);
             auto thread_metric = fixture_type_::make_metric();
             context_t thread_context {stream_key(seed, "plan_race", 1), counting_allocator_t {ledger}};
             auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
                                                        thread_context, keep_diverse_t {basic_connectivity_k});
-            if (status != status_t::success_k) thread_failures.add(1);
+            if (status != status_t::success_k) thread_failures.store_add(1);
             assert_no_locks_held();
         };
         auto prober_thread = [&]() noexcept { // Every check runs strictly inside the hold.
@@ -1418,41 +1419,41 @@ std::size_t test_basic_plan_race(u64_t seed) {
             if (plan_abandoned.load(std::memory_order_acquire))
                 return prober_done.store(true, std::memory_order_release); // Counted by thread 0 already.
             if (!rendezvoused) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 return prober_done.store(true, std::memory_order_release);
             }
             context_t prober_context {stream_key(seed, "plan_race", 2), counting_allocator_t {ledger}};
             auto prober_metric = fixture_type_::make_metric();
             // The parked inserter cannot publish under the hold - the overlap proof.
-            if (index.size() != nodes_k) thread_failures.add(1);
+            if (index.size() != nodes_k) thread_failures.store_add(1);
             // Every try-unique verb refuses with contended_k, nothing blocks.
-            if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.add(1);
-            if (index.health(prober_context).status != status_t::contended_k) thread_failures.add(1);
-            if (index.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.add(1);
-            if (index.plan_load(reference.view()).status != status_t::contended_k) thread_failures.add(1);
-            if (index.clear() != status_t::contended_k) thread_failures.add(1);
+            if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.store_add(1);
+            if (index.health(prober_context).status != status_t::contended_k) thread_failures.store_add(1);
+            if (index.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.store_add(1);
+            if (index.plan_load(reference.view()).status != status_t::contended_k) thread_failures.store_add(1);
+            if (index.clear() != status_t::contended_k) thread_failures.store_add(1);
             if (index.template search<synchronization_t::immutable_k>(query[0], {}, prober_metric, prober_context)
                     .status != status_t::contended_k)
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             if (index.template search<synchronization_t::exclusive_k>(query[0], {}, prober_metric, prober_context)
                     .status != status_t::contended_k)
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             // The concurrent mode and the wait-free readers stay fully served meanwhile.
             auto const [result, status] = index.search(query[0], {}, prober_metric, prober_context);
-            if (status != status_t::success_k) thread_failures.add(1);
-            thread_failures.add(scored_failures(prober_context.results.data(), prober_context.results.size(), nodes_k,
-                                                connectivity_32_k * 2));
+            if (status != status_t::success_k) thread_failures.store_add(1);
+            thread_failures.store_add(scored_failures(prober_context.results.data(), prober_context.results.size(),
+                                                      nodes_k, connectivity_32_k * 2));
             for (std::size_t node = 0; node != nodes_k; ++node) {
                 node_id_t const node_id = static_cast<node_id_t>(node);
-                if (!(index.key_of(node_id).value == fixture_type_::make_key(node))) thread_failures.add(1);
-                if (!index.degree_of(node_id)) thread_failures.add(1);
+                if (!(index.key_of(node_id).value == fixture_type_::make_key(node))) thread_failures.store_add(1);
+                if (!index.degree_of(node_id)) thread_failures.store_add(1);
                 [[maybe_unused]] auto const& published_value = index.published_value_of(node_id);
             }
             cursor_t prober_cursor {index, counting_allocator_t {ledger}};
-            if (failed(prober_cursor.seek(0))) thread_failures.add(1);
+            if (failed(prober_cursor.seek(0))) thread_failures.store_add(1);
             std::size_t visited = 0;
             for (; prober_cursor; ++prober_cursor) ++visited;
-            if (visited != nodes_k) thread_failures.add(1);
+            if (visited != nodes_k) thread_failures.store_add(1);
             assert_no_locks_held();
             prober_done.store(true, std::memory_order_release);
         };
@@ -1529,23 +1530,23 @@ std::size_t test_basic_plan_contention(u64_t seed) {
         pool.for_threads([&](std::size_t thread) noexcept {
             if (thread == 0) {
                 auto [plan, status] = index.plan_save(thread_storages[0].columns(), codec);
-                if (failed(status)) thread_failures.add(1);
+                if (failed(status)) thread_failures.store_add(1);
                 plan_held.store(true, std::memory_order_release);
                 if (failed(status)) return;
                 if (!spin_until([&]() noexcept {
                         return refusals_confirmed.load(std::memory_order_acquire) == planner_threads_k - 1;
                     }))
-                    thread_failures.add(1); // Finish regardless - the hold must die.
+                    thread_failures.store_add(1); // Finish regardless - the hold must die.
                 if (plan.save({0, static_cast<node_id_t>(nodes_k)}, codec) != status_t::success_k)
-                    thread_failures.add(1);
-                if (plan.finish() != status_t::success_k) thread_failures.add(1);
+                    thread_failures.store_add(1);
+                if (plan.finish() != status_t::success_k) thread_failures.store_add(1);
                 return;
             }
             if (!spin_until([&]() noexcept { return plan_held.load(std::memory_order_acquire); }))
-                thread_failures.add(1); // A broken rendezvous is a failure, never a shrug.
+                thread_failures.store_add(1); // A broken rendezvous is a failure, never a shrug.
             if (index.plan_save(thread_storages[thread].columns(), codec).status != status_t::contended_k)
-                thread_failures.add(1);
-            refusals_confirmed.add(1); // Unconditional, so thread 0's wait terminates.
+                thread_failures.store_add(1);
+            refusals_confirmed.store_add(1); // Unconditional, so thread 0's wait terminates.
             assert_no_locks_held();
         });
         failures += expect_eq(thread_failures.load(), 0u);
@@ -1594,20 +1595,20 @@ std::size_t test_basic_plan_contention(u64_t seed) {
                 context_t parked_context {stream_key(seed, "plan_contention", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = target.insert({pair_values.data(), 2}, {pair_keys.data(), 2}, gated, {},
                                                             parked_context, keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 assert_no_locks_held();
                 return;
             }
             if (thread != 1) return;
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
-            if (target.plan_load(reference.view()).status != status_t::contended_k) thread_failures.add(1);
-            if (target.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.add(1);
-            if (target.columns_extents(codec).status != status_t::contended_k) thread_failures.add(1);
-            if (target.clear() != status_t::contended_k) thread_failures.add(1);
+            if (target.plan_load(reference.view()).status != status_t::contended_k) thread_failures.store_add(1);
+            if (target.plan_save(prober.columns(), codec).status != status_t::contended_k) thread_failures.store_add(1);
+            if (target.columns_extents(codec).status != status_t::contended_k) thread_failures.store_add(1);
+            if (target.clear() != status_t::contended_k) thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
         });
         failures += expect_eq(thread_failures.load(), 0u);
@@ -2412,7 +2413,7 @@ std::size_t test_basic_refine_starved(u64_t seed) {
                 context_t planning {stream_key(seed, "refine_starved", 2), counting_allocator_t {ledger}};
                 ledger.byte_budget = ledger.live_bytes + static_cast<std::ptrdiff_t>(slack);
                 auto [plan, plan_status] = receiver->plan_absorb(donors, {}, selector, planning);
-                ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+                ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
                 status = plan_status;
             }
             planned = succeeded(status);
@@ -2550,19 +2551,19 @@ std::size_t test_basic_health(u64_t seed) {
                 context_t parked_context {stream_key(seed, "health", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {},
                                                            parked_context, keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 return;
             }
             if (thread != 1) return;
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
                 // The gate must open even on a failed rendezvous, or the pool deadlocks.
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 released.store(true, std::memory_order_release);
                 return;
             }
             context_t checker_context {stream_key(seed, "health", 2), counting_allocator_t {ledger}};
-            if (index.health(checker_context).status != status_t::contended_k) thread_failures.add(1);
-            if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.add(1);
+            if (index.health(checker_context).status != status_t::contended_k) thread_failures.store_add(1);
+            if (index.columns_extents(codec).status != status_t::contended_k) thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
             assert_no_locks_held();
         });
@@ -2661,12 +2662,12 @@ std::size_t test_basic_certified(u64_t seed) {
                 auto const [result, status] = exclusive_index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated,
                                                                      {}, parked_context,
                                                                      keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 return;
             }
             if (thread != 1) return;
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
@@ -2675,11 +2676,11 @@ std::size_t test_basic_certified(u64_t seed) {
             if (exclusive_index
                     .template search<synchronization_t::immutable_k>(one_more[0], {}, checker_metric, checker_context)
                     .status != status_t::contended_k)
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             if (exclusive_index
                     .template search<synchronization_t::exclusive_k>(one_more[0], {}, checker_metric, checker_context)
                     .status != status_t::contended_k)
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
             assert_no_locks_held();
         });
@@ -2747,7 +2748,7 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
                 }
                 if (thread != 1) return; // The mutator: runs strictly inside the parked walk.
                 if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
-                    thread_failures.add(1);
+                    thread_failures.store_add(1);
                     released.store(true, std::memory_order_release); // The gate opens even on failure.
                     return;
                 }
@@ -2755,7 +2756,7 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
                 context_t thread_context {stream_key(seed, "torn_bracket", 3), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
                                                            thread_context, keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 released.store(true, std::memory_order_release); // Every path - the search must resume.
                 assert_no_locks_held();
             });
@@ -2796,7 +2797,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
 
     /** Tallies the rounds & pairs a walk scores, sated once it has seen @c rounds_limit rounds. */
     struct counting_fold_t {
-        std::size_t rounds_limit = std::numeric_limits<std::size_t>::max();
+        std::size_t rounds_limit = (std::numeric_limits<std::size_t>::max)();
         std::size_t rounds = 0;
         std::size_t pairs = 0;
 
@@ -2890,7 +2891,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
             status_t::success_k);
         failures += expect(index.link(twin_id, full_row).value == membership_t::present_k);
         failures += expect(index.link(full_row, twin_id).value == membership_t::present_k);
-        metric.round_limit = std::numeric_limits<std::size_t>::max();
+        metric.round_limit = (std::numeric_limits<std::size_t>::max)();
         failures += expect_eq(metric.violations, 0u);
 
         // An armed insert wires a thinner node but still publishes it.
@@ -2995,7 +2996,7 @@ std::size_t test_basic_concurrent_build(u64_t seed) {
                 {threads.values[thread]}, {threads.keys[thread]}, threads.metrics[thread],
                 {assigned_ids.data() + thread * basic_thread_nodes_k, basic_thread_nodes_k}, threads.contexts[thread],
                 keep_diverse_t {basic_connectivity_k});
-            if (status != status_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).add(1);
+            if (status != status_t::success_k) fu::standard_atomic_ref<std::size_t>(thread_failures).store_add(1);
             assert_no_locks_held();
         });
 
@@ -3063,8 +3064,8 @@ std::size_t test_basic_concurrent_search(u64_t seed) {
                 auto const [result, status] = index.insert({threads.values[thread]}, {threads.keys[thread]},
                                                            threads.metrics[thread], {}, threads.contexts[thread],
                                                            keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
-                writer_threads_remaining.sub(1, std::memory_order_release);
+                if (status != status_t::success_k) thread_failures.store_add(1);
+                writer_threads_remaining.store_sub(1, std::memory_order_release);
                 assert_no_locks_held();
                 return;
             }
@@ -3079,17 +3080,17 @@ std::size_t test_basic_concurrent_search(u64_t seed) {
                    searches < basic_reader_minimal_searches_k) {
                 auto const& query = queries[searches % queries.size()];
                 auto const [search_result, search_status] = index.search(query, {}, reader_metric, reader_context);
-                if (search_status != status_t::success_k) thread_failures.add(1);
-                thread_failures.add(scored_failures(reader_context.results.data(), reader_context.results.size(),
-                                                    index.size(), results_bound));
+                if (search_status != status_t::success_k) thread_failures.store_add(1);
+                thread_failures.store_add(scored_failures(reader_context.results.data(), reader_context.results.size(),
+                                                          index.size(), results_bound));
                 // Any ID is a legal input to the checked readers, published or not.
                 node_id_t const probe = static_cast<node_id_t>(probe_distribution(reader_random));
                 std::size_t const published_before = index.size();
                 auto const [probed_key, key_status] = index.key_of(probe);
                 auto const probed_degree = index.degree_of(probe);
                 if (static_cast<std::size_t>(probe) < published_before)
-                    if (failed(key_status) || !probed_degree) thread_failures.add(1);
-                if (failed(key_status) && key_status != status_t::malformed_k) thread_failures.add(1);
+                    if (failed(key_status) || !probed_degree) thread_failures.store_add(1);
+                if (failed(key_status) && key_status != status_t::malformed_k) thread_failures.store_add(1);
                 ++searches;
             }
             assert_no_locks_held();
@@ -3181,7 +3182,7 @@ std::size_t test_basic_planned_batch(u64_t seed) {
                     std::this_thread::yield();
                     finished_status = plan.finish();
                 }
-                if (finished_status != status_t::success_k) thread_failures.add(1);
+                if (finished_status != status_t::success_k) thread_failures.store_add(1);
                 fu::standard_atomic_ref<bool>(finished).store(true, std::memory_order_release);
                 return assert_no_locks_held();
             }
@@ -3192,15 +3193,16 @@ std::size_t test_basic_planned_batch(u64_t seed) {
             while (!fu::standard_atomic_ref<bool>(finished).load(std::memory_order_acquire) ||
                    searches < basic_reader_minimal_searches_k) {
                 std::size_t const published = index.size();
-                if (published != prefill_k && published != prefill_k + batch_k) thread_failures.add(1);
+                if (published != prefill_k && published != prefill_k + batch_k) thread_failures.store_add(1);
                 auto const [result, status] = index.search(queries[searches % queries.size()], {}, reader_metric,
                                                            reader_context);
-                if (status != status_t::success_k) thread_failures.add(1);
-                thread_failures.add(scored_failures(reader_context.results.data(), reader_context.results.size(),
-                                                    index.size(), connectivity_32_k * 2));
+                if (status != status_t::success_k) thread_failures.store_add(1);
+                thread_failures.store_add(scored_failures(reader_context.results.data(), reader_context.results.size(),
+                                                          index.size(), connectivity_32_k * 2));
                 // Keys are filed after the turn, so a findable batch key implies the whole batch is
                 // published.
-                if (index.contains(batch_keys.back()) && index.size() != prefill_k + batch_k) thread_failures.add(1);
+                if (index.contains(batch_keys.back()) && index.size() != prefill_k + batch_k)
+                    thread_failures.store_add(1);
                 ++searches;
             }
             assert_no_locks_held();
@@ -3267,7 +3269,7 @@ std::size_t test_basic_wiring_race(u64_t seed) {
         fu::standard_atomic_ref<u32_t> const unexpected_status {unexpected_status_word};
         fu::standard_atomic_ref<u32_t> const unexpected_thread {unexpected_thread_word};
         auto record_unexpected = [&](std::size_t thread, status_t status) noexcept {
-            thread_failures.add(1);
+            thread_failures.store_add(1);
             unexpected_status.store(static_cast<u32_t>(status), std::memory_order_relaxed);
             unexpected_thread.store(static_cast<u32_t>(thread), std::memory_order_relaxed);
         };
@@ -3300,15 +3302,15 @@ std::size_t test_basic_wiring_race(u64_t seed) {
                  ++attempts) {
                 if (attempts == spin_limit_k) return record_unexpected(0, status_t::internal_k); // A stuck racer.
                 status_t const saved = attempt_save();
-                if (saved == status_t::contended_k || saved == status_t::overflow_k) contended_saves.add(1);
-                else if (saved == status_t::success_k) settled_saves.add(1);
+                if (saved == status_t::contended_k || saved == status_t::overflow_k) contended_saves.store_add(1);
+                else if (saved == status_t::success_k) settled_saves.store_add(1);
                 else return record_unexpected(0, saved);
                 std::this_thread::yield();
             }
             // The settle phase: with every racer done, a save must soon succeed.
             for (std::size_t attempt = 0; attempt != attempt_limit_k; ++attempt) {
                 status_t const saved = attempt_save();
-                if (saved == status_t::success_k) return settled_saves.add(1);
+                if (saved == status_t::success_k) return settled_saves.store_add(1);
                 if (saved != status_t::contended_k && saved != status_t::overflow_k) return record_unexpected(0, saved);
             }
             record_unexpected(0, status_t::contended_k); // The settle phase never settled.
@@ -3540,7 +3542,7 @@ std::size_t test_basic_cursor(u64_t seed) {
                 auto const [result, status] = index.insert({extras.data() + 1, racing_inserts_k}, {thread_keys},
                                                            thread_metric, {}, thread_context,
                                                            keep_diverse_t {basic_connectivity_k});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 for (std::size_t round = 0; round != 512; ++round) {
                     [[maybe_unused]] auto const linked = index.link(1, 2 + round % 8);
                     [[maybe_unused]] status_t const unlinked = index.unlink(1, 2 + round % 8);
@@ -3552,15 +3554,15 @@ std::size_t test_basic_cursor(u64_t seed) {
             cursor_t racing_cursor {index, counting_allocator_t {ledger}};
             std::size_t sweeps = 0;
             do {
-                if (sweeps++ == attempt_limit_k) return thread_failures.add(1); // A stuck writer.
+                if (sweeps++ == attempt_limit_k) return thread_failures.store_add(1); // A stuck writer.
                 racing_cursor.refresh();
                 node_id_t const snapshot = racing_cursor.visible_count();
                 if (failed(racing_cursor.seek(0))) {
-                    thread_failures.add(1);
+                    thread_failures.store_add(1);
                     return;
                 }
                 for (; racing_cursor; ++racing_cursor)
-                    if (racing_cursor.id() >= snapshot) thread_failures.add(1);
+                    if (racing_cursor.id() >= snapshot) thread_failures.store_add(1);
             } while (!fu::standard_atomic_ref<bool>(writer_done).load(std::memory_order_acquire));
             assert_no_locks_held();
         });
@@ -3596,7 +3598,7 @@ std::size_t test_basic_cursor(u64_t seed) {
  *  and at the floor, serial and pooled; and a fresh index restored from either mirrors the
  *  original. Composed per unit, never by @c test_basic_scenarios: the key dtype's name and
  *  the metric token are unit knowledge - sentences passes "u64", while bioinformatics and
- *  meshes both carry the @c uuid_t key and pass "uuid". */
+ *  meshes both carry the @c uuid128_t key and pass "uuid". */
 template <typename fixture_type_>
 std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dtype_name,
                                             std::string_view metric_token) {
@@ -4292,9 +4294,9 @@ std::size_t test_basic_nvme_search(fixture_type_ const& fixture, u64_t seed) {
 
     std::size_t handed = 0, mismatched = 0;
     auto on_value = [&](std::size_t position, std::size_t rank, std::size_t, auto const& view) noexcept {
-        fu::standard_atomic_ref<std::size_t>(handed).add(1, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(handed).store_add(1, std::memory_order_relaxed);
         if (rank || !fixture.matches(position, view))
-            fu::standard_atomic_ref<std::size_t>(mismatched).add(1, std::memory_order_relaxed);
+            fu::standard_atomic_ref<std::size_t>(mismatched).store_add(1, std::memory_order_relaxed);
     };
     failures += expect_eq(viewed.get(std::span<key_t const> {asked}, entries, 1, executor, on_value),
                           status_t::success_k);
@@ -4305,9 +4307,9 @@ std::size_t test_basic_nvme_search(fixture_type_ const& fixture, u64_t seed) {
     std::vector<key_t> read_keys(count - 1);
     handed = 0, mismatched = 0;
     auto on_entry = [&](std::size_t offset, std::size_t, auto const& view) noexcept {
-        fu::standard_atomic_ref<std::size_t>(handed).add(1, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(handed).store_add(1, std::memory_order_relaxed);
         if (!fixture.matches(offset + 1, view))
-            fu::standard_atomic_ref<std::size_t>(mismatched).add(1, std::memory_order_relaxed);
+            fu::standard_atomic_ref<std::size_t>(mismatched).store_add(1, std::memory_order_relaxed);
     };
     failures += expect_eq(viewed.read_entries(1, std::span<key_t> {read_keys}, executor, on_entry),
                           status_t::success_k);
@@ -4368,11 +4370,11 @@ std::size_t test_basic_nvme_key_scans(fixture_type_ const& fixture, u64_t seed) 
     std::array<std::size_t, probes.size()> handed {};
     std::size_t foreign = 0;
     auto on_value = [&](std::size_t position, std::size_t, std::size_t, auto const& view) noexcept {
-        fu::standard_atomic_ref<std::size_t>(handed[position]).add(1, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(handed[position]).store_add(1, std::memory_order_relaxed);
         bool stored = false;
         for (std::size_t entry = 0; entry != count; ++entry)
             stored |= reference.keys[entry] == probes[position] && fixture.matches(entry, view);
-        if (!stored) fu::standard_atomic_ref<std::size_t>(foreign).add(1, std::memory_order_relaxed);
+        if (!stored) fu::standard_atomic_ref<std::size_t>(foreign).store_add(1, std::memory_order_relaxed);
     };
     auto& executor = reference.executor;
     failures += expect_eq(viewed.count(std::span<key_t const> {probes}, counted, executor), status_t::success_k);

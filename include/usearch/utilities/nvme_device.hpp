@@ -114,6 +114,11 @@
 #include "usearch/utilities/ram_device.hpp"     // `forkunion_executor_t`, `forkunion_allocator_t`
 #include "usearch/utilities/types.hpp"          // `status_t`, `expected`, `min_of`, `max_of`
 
+/*  `<winsock2.h>` goes first to keep Winsock 1.1 out, unless a user's earlier `<windows.h>` already
+ *  brought it in. */
+#if USEARCH_OS_WINDOWS_ && !defined(_WINSOCKAPI_)
+#include <winsock2.h>
+#endif
 #if USEARCH_OS_WINDOWS_
 #include <windows.h> // `CreateFileA`, `ReadFile`, `GetOverlappedResult`, `GetFileInformationByHandleEx`
 #else
@@ -165,7 +170,7 @@ using io_buffer_id_t = u32_t;
 using io_medium_id_t = u32_t;
 
 /** The longest read a request may ask for: the most bytes a completion's signed result counts. */
-inline constexpr u32_t io_max_length_k = static_cast<u32_t>(std::numeric_limits<i32_t>::max());
+inline constexpr u32_t io_max_length_k = static_cast<u32_t>((std::numeric_limits<i32_t>::max)());
 
 /** The NVM command set's Read opcode. */
 inline constexpr u8_t nvme_read_opcode_k = 0x02;
@@ -729,12 +734,12 @@ inline io_block_queue_t io_block_queue_of_(int descriptor, struct stat const& de
     if (hardware_queues && tags && disk_major) {
         // The kernel's own `dev_t` keeps the minor in the low 20 bits.
         queue.queues.device = static_cast<u32_t>(disk_major << 20) | static_cast<u32_t>(disk_minor);
-        queue.queues.tags = static_cast<u16_t>(min_of<u64_t>(tags, std::numeric_limits<u16_t>::max()));
+        queue.queues.tags = static_cast<u16_t>(min_of<u64_t>(tags, (std::numeric_limits<u16_t>::max)()));
         queue.queues.hardware_queues = static_cast<u16_t>(
-            min_of<u32_t>(hardware_queues, std::numeric_limits<u16_t>::max()));
+            min_of<u32_t>(hardware_queues, (std::numeric_limits<u16_t>::max)()));
         queue.queues.reaping = polls ? linux_uring_reaping_t::polled_k : linux_uring_reaping_t::interrupted_k;
         queue.queues.request_kibibytes = static_cast<u16_t>(
-            min_of<u64_t>(sysfs_number_(disk, "queue/max_sectors_kb"), std::numeric_limits<u16_t>::max()));
+            min_of<u64_t>(sysfs_number_(disk, "queue/max_sectors_kb"), (std::numeric_limits<u16_t>::max)()));
     }
     ::close(disk);
     return queue;
@@ -1188,8 +1193,8 @@ inline io_device_queues_t device_queues_of(spdk_medium_t const& medium) noexcept
     // Attach lowers `num_io_queues` to what Set Features - Number of Queues allocated.
     queues.hardware_queues = static_cast<u16_t>(options.num_io_queues);
     queues.reaping = linux_uring_reaping_t::polled_k;
-    queues.request_kibibytes = static_cast<u16_t>(
-        min_of<u32_t>(spdk_nvme_ns_get_max_io_xfer_size(medium.name_space) / 1024, std::numeric_limits<u16_t>::max()));
+    queues.request_kibibytes = static_cast<u16_t>(min_of<u32_t>(
+        spdk_nvme_ns_get_max_io_xfer_size(medium.name_space) / 1024, (std::numeric_limits<u16_t>::max)()));
     return queues;
 }
 

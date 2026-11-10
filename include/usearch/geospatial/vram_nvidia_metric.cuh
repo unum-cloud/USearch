@@ -242,8 +242,8 @@ __device__ __forceinline__ bool cuda_within_view(earth_observation_t const& view
     f64_t const up = cos_latitude * cos_longitude * offset_x + cos_latitude * sin_longitude * offset_y +
                      sin_latitude * offset_z;
     constexpr f64_t turn_k = 2 * 3.14159265358979323846;
-    bool const limited = viewer.range_metres != std::numeric_limits<u16_t>::max();
-    bool const pitched = viewer.elevation != std::numeric_limits<i8_t>::min();
+    bool const limited = viewer.range_metres != (std::numeric_limits<u16_t>::max)();
+    bool const pitched = viewer.elevation != (std::numeric_limits<i8_t>::min)();
     return !nk_terrain_outside_view_f32_cuda_(east, north, up,
                                               viewer.field ? viewer.azimuth * turn_k / azimuth_steps_k : nan_k,
                                               pitched ? viewer.elevation * turn_k / elevation_steps_k : nan_k,
@@ -256,8 +256,8 @@ __device__ __forceinline__ bool cuda_within_view(earth_observation_t const& view
 __device__ __forceinline__ bool cuda_admits(relation_t relation, f64_t radius_metres, f64_t slack_milliseconds,
                                             earth_observation_t const& query, earth_observation_t const& entry,
                                             i64_t chord) noexcept {
-    constexpr i64_t timeless_k = std::numeric_limits<i64_t>::min();
-    constexpr u32_t open_ended_k = std::numeric_limits<u32_t>::max();
+    constexpr i64_t timeless_k = (std::numeric_limits<i64_t>::min)();
+    constexpr u32_t open_ended_k = (std::numeric_limits<u32_t>::max)();
     constexpr f64_t infinity_k = std::numeric_limits<f64_t>::infinity();
     if (query.begin_milliseconds != timeless_k && entry.begin_milliseconds != timeless_k) {
         f64_t const query_begin = static_cast<f64_t>(query.begin_milliseconds);
@@ -379,7 +379,7 @@ __device__ __forceinline__ void cuda_judge_walks(cuda_admit_arguments<node_id_ty
         node_id_type_ const* const candidate_ids = arguments.candidate_ids +
                                                    u64_t {query_index} * arguments.candidates_count;
         auto judge = [&](u32_t rank, i64_t& chord) noexcept {
-            constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+            constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
             node_id_type_ const node_id = rank < arguments.candidates_count ? candidate_ids[rank] : unknown_k;
             return node_id != unknown_k &&
                    cuda_admits_over_terrain(arguments, grid, line_of_sight, query, query_point, node_id, chord);

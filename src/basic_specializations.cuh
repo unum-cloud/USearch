@@ -19,7 +19,7 @@
 #include <cstring> // `std::memcpy` - an entry an NVMe read borrowed, kept past it
 
 #include <array>       // `std::array` - the one key a view scans for
-#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
 #include <limits>      // `std::numeric_limits` - a GPU index's sentinel node ID
 #include <memory>      // `std::make_obj_using_allocator` - values built from the index's allocator
 #include <span>        // `std::span`
@@ -583,7 +583,7 @@ expected<traversal_stats_t> search_entries(index_type_& index, std::size_t count
 template <typename index_type_, typename on_count_type_, typename on_value_type_>
 status_t values_under(index_type_ const& index, usearch_key_t key, nvme_executor_t& executor, on_count_type_&& on_count,
                       on_value_type_&& on_value) noexcept {
-    std::array<us::utilities::uuid_t, 1> const identities {uuid_of(key)};
+    std::array<us::utilities::uuid128_t, 1> const identities {uuid_of(key)};
     std::array<std::size_t, 1> entries {};
     if (status_t const counted = index.count(identities, entries, executor); failed(counted)) return counted;
     std::size_t const held = entries[0];
@@ -710,7 +710,7 @@ status_t count_entries(variant_type_& variant, usearch_key_t key, stats_type_& s
         return values_under(variant.index, key, executor, take_count, measure);
     }
     else {
-        std::array<us::utilities::uuid_t, 1> const identities {uuid_of(key)};
+        std::array<us::utilities::uuid128_t, 1> const identities {uuid_of(key)};
         std::array<std::size_t, 1> entries {};
         status_t const counted = variant.index.count(identities, entries, executor);
         stats.entries = entries[0];
@@ -828,7 +828,7 @@ expected<traversal_stats_t> vram_nvidia_insert(indexes_type_& index, usearch_key
                                                           tape.offsets[count] - tape.offsets[0]);
             failed(reserved))
             return {{}, reserved};
-    growing_buffer<us::utilities::uuid_t, forkunion_allocator_t> keys {forkunion_allocator_t {no_memory_domain_k}};
+    growing_buffer<us::utilities::uuid128_t, forkunion_allocator_t> keys {forkunion_allocator_t {no_memory_domain_k}};
     if (failed(keys.reserve_exactly(count))) return {{}, status_t::bad_alloc_k};
     for (std::size_t offset = 0; offset != count; ++offset) keys.push_back_reserved(uuid_of(key_at(keys_view, offset)));
     typename indexes_type_::insert_config_t const config {static_cast<u32_t>(expansion)};
@@ -855,7 +855,7 @@ expected<traversal_stats_t> vram_nvidia_search(indexes_type_& index, tape_view<b
         for (std::size_t query = 0; query != count; ++query) outputs.counts[query] = 0;
         return {{}, status_t::success_k};
     }
-    using key_t = us::utilities::uuid_t;
+    using key_t = us::utilities::uuid128_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land whole in the caller's outputs");
     typename face_t::search_config_t const config {static_cast<u32_t>(expansion), static_cast<u32_t>(wanted)};
     std::size_t const step = ticks.slice();
@@ -914,7 +914,7 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
                   })
         return {0, status_t::unsupported_k};
     else {
-        us::utilities::uuid_t const identity = uuid_of(key);
+        us::utilities::uuid128_t const identity = uuid_of(key);
         std::size_t const held = variant.index.count(identity);
         if (!held) return {0, status_t::success_k};
         node_id_t* const listed = carve<node_id_t>(memory, held);

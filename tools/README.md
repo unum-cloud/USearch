@@ -6,7 +6,7 @@ Like every driver, they call the library through its C interface alone, and the 
 
 ## How the Tools Are Organized
 
-A command names a modality and its verb, like `usearch dense insert`, or a verb over checkpoints of any modality, like `usearch slots`, and prints one line per step.
+A command names a modality and its verb, like `usearch dense insert`, or a verb over checkpoints of any modality, like `usearch copy`, and prints one line per step.
 
 - `usearch.cpp` parses the command line and dispatches to the verb, through the flag tables of `arguments.hpp`.
 - `dense.cpp` implements the dense verbs.
@@ -40,7 +40,6 @@ The verbs are named after the C interface they call:
   `usearch <modality> metadata <address>` is `usearch metadata <address>`.
 - `usearch metadata <address>` prints a monolith's or a manifest's nodes, parts, metric and keys, then reads its modality's metadata, picked by the metric its header names.
   `usearch metadata -` reads the checkpoint off standard input.
-- `usearch slots <drive>` maps a raw drive: every live file with its owner and extent, and every free run of slots.
 - `usearch copy <from> <to>` copies a checkpoint byte for byte, then reads it back and compares.
   A drive as the source copies the live file starting at its byte base, and a drive as the destination refuses to overlap a live slot; a drive named without a byte base takes the first free run of slots large enough.
 - `usearch export <address> <file.arrow>` writes a checkpoint of any modality as an Arrow IPC file, one record batch per part, each column's bytes as its buffers.
@@ -68,7 +67,7 @@ Every verb takes an address wherever it reads or writes a checkpoint, so a build
 - `trtype:TCP adrfam:IPv4 traddr:10.0.0.7 trsvcid:4420 subnqn:nqn.2026-10.io.example:index ns:1 base:0` is any transport ID SPDK parses, like NVMe over Fabrics, with its `ns:` and `base:` tokens.
 
 A file whose name ends like a byte base, as in `run@64GiB`, is addressed as `run@64GiB@0`.
-Binding a drive to SPDK takes SPDK's own [setup script](https://spdk.io/doc/getting_started.html), and `slots` and `copy` reach only drives the kernel's `nvme` driver holds.
+Binding a drive to SPDK takes SPDK's own [setup script](https://spdk.io/doc/getting_started.html), and `copy` reaches only drives the kernel's `nvme` driver holds.
 
 ## Raw Drives and Slots
 
@@ -83,12 +82,13 @@ A raw drive holds files back to back, with no filesystem and no label, by one co
   Owners come from the SafeGraphs metadata.
 - Deleting a file zeroes its first block.
 
+[DiskSlots](https://github.com/unum-cloud/DiskSlots) maps, copies and frees the slots of every owner on a drive.
+
 A save writes as much as the index needs, and nothing tells that size before it writes, so `--save` naming a drive takes a byte base on a slot boundary, at a slot no live file covers.
 The save is then bounded to the free run that slot starts, as `/dev/nvme1n1@96GiB+412GiB` when the next live file sits at slot 508, so a save that outgrows the run fails instead of overwriting its neighbor.
 A save to a drive stages each part in anonymous memory and writes it out direct, so it never reads the blocks it is about to overwrite.
 
 ```sh
-usearch slots /dev/nvme1n1
 usearch dense insert data/base.100M.u8bin --stored-dtype u8 --metric euclidean --save /dev/nvme1n1@96GiB
 usearch copy /data/index/sift.safegraphs /dev/nvme1n1
 usearch metadata /dev/nvme1n1@96GiB
@@ -96,7 +96,7 @@ usearch metadata /dev/nvme1n1@96GiB
 
 ## Building
 
-The tools build on Linux, where `slots` and `copy` reach block devices, writing them `O_DIRECT` and exclusively, and `usearch-mpi` builds wherever CMake's `FindMPI` finds an MPI implementation with its C compiler wrappers, such as Open MPI or MPICH.
+The tools build on Linux, where `copy` reaches block devices, writing them `O_DIRECT` and exclusively, and `usearch-mpi` builds wherever CMake's `FindMPI` finds an MPI implementation with its C compiler wrappers, such as Open MPI or MPICH.
 
 ```sh
 cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_TOOLS=ON
@@ -272,7 +272,7 @@ Beyond those, the other verbs take only what they move:
   A path ending in `.arrows` and `-`, standard output, take the stream framing, and any other path the file framing; under `-` every step prints to standard error, so standard output carries only Arrow.
   `--query-keys` names the queries in that file: a `.u128bin` of one key per query, as `--hints` reads them, defaulting to row numbers.
 - `recall` takes `--wanted`, defaulting to `1,10`.
-- `metadata`, `slots` and `copy` take no flags.
+- `metadata` and `copy` take no flags.
 
 The other modalities' `insert` takes the flags `dense insert` does but `--keys`, `--stored-dtype` and `--metric`, keys every entry by its number in the file, and reads its entries as the modality's benchmark does:
 

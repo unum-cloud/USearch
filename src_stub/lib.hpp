@@ -29,7 +29,7 @@
 
 #include <cstdio> // `std::snprintf` - a part's name and a manifest's entry
 
-#include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`, `std::min`
+#include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`
 #include <array>            // `std::array`
 #include <bit>              // `std::bit_cast`
 #include <functional>       // `std::function`
@@ -570,7 +570,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     int leading = 0;
     // `frexp` answers one above the leading bit's exponent; below the smallest normal the step is fixed.
     std::frexp(magnitude, &leading);
-    int const exponent = std::max(leading - 1, 1 - bias);
+    int const exponent = max_of(leading - 1, 1 - bias);
     double const scaled = std::ldexp(magnitude, static_cast<int>(format.mantissa_bits) - exponent);
     double const truncated = std::floor(scaled);
     double const remainder = scaled - truncated;
@@ -578,7 +578,7 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     // The significand carries into the exponent on its own, so neither overflow case needs an arm.
     unsigned const significand = static_cast<unsigned>(truncated) + carry;
     unsigned const code = ((static_cast<unsigned>(exponent + bias) - 1) << format.mantissa_bits) + significand;
-    return static_cast<u8_t>(sign | std::min(code, largest));
+    return static_cast<u8_t>(sign | min_of(code, largest));
 }
 
 /** Widens a bit-set row, eight dimensions a byte from the high bit down, as NumKong packs them. */
@@ -729,7 +729,7 @@ struct entry {
 
 /** The project's own key type, which already knows how to hash and compare itself.
  *  Layout-identical to @c usearch_key_t, so the conversion is a reinterpretation. */
-inline uuid_t uuid_of(usearch_key_t const& key) noexcept { return std::bit_cast<uuid_t>(key); }
+inline uuid128_t uuid_of(usearch_key_t const& key) noexcept { return std::bit_cast<uuid128_t>(key); }
 
 /**
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
@@ -748,7 +748,7 @@ struct handle {
     std::vector<entry<payload_>> entries;
 
     /** Entry positions under each key, so a lookup is not a scan; keys need not be unique. */
-    std::unordered_multimap<uuid_t, std::size_t> by_key;
+    std::unordered_multimap<uuid128_t, std::size_t> by_key;
 
     /** Held shared by every reader, exclusively by every mutation. */
     std::shared_mutex mutex;
@@ -772,8 +772,8 @@ struct handle {
     /** Live shards: the parts a checkpoint opened, or one per @c shard_capacity entries, one at
      *  the least. */
     std::size_t shards() const noexcept {
-        std::size_t const capacity = shard_capacity ? shard_capacity : std::numeric_limits<std::size_t>::max();
-        return std::max({std::size_t {1}, parts_opened, divide_round_up(entries.size(), capacity)});
+        std::size_t const capacity = shard_capacity ? shard_capacity : (std::numeric_limits<std::size_t>::max)();
+        return max_of(max_of(std::size_t {1}, parts_opened), divide_round_up(entries.size(), capacity));
     }
 
     /** Drops every entry, which @c clear promises without touching the frozen options. */
@@ -822,9 +822,9 @@ template <typename handle_>
 bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::size_t count,
                            std::size_t values_per_key, usearch_outcome_t* outcome) {
     std::size_t const bound = values_per_key ? values_per_key : 1;
-    std::unordered_map<uuid_t, std::size_t> admitted;
+    std::unordered_map<uuid128_t, std::size_t> admitted;
     for (std::size_t offset = 0; offset != count; ++offset) {
-        uuid_t const key = uuid_of(key_at(keys, offset));
+        uuid128_t const key = uuid_of(key_at(keys, offset));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
         if (reject_if(held > bound, usearch_status_overflow_k, "A key would hold more entries than the index admits",
                       outcome))
@@ -910,7 +910,7 @@ struct matches_outputs_t {
     /** Writes the first @c wanted of @p ranked as the matches of @p query, and their number as its
      *  count. */
     void write(std::size_t query, std::span<match_t const> ranked) const noexcept {
-        std::size_t const found = std::min(wanted, ranked.size());
+        std::size_t const found = min_of(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
             keys[query * wanted + match] = ranked[match].key, scores[query * wanted + match] = ranked[match].distance;
         counts[query] = found;
@@ -942,7 +942,7 @@ void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicat
         for (std::size_t entry = 0; entry != entries.size(); ++entry) keys[entry] = entries[entry].key;
         for (std::size_t first = 0; first < keys.size(); first += 4)
             predicate.callback(keys.data() + first, admissions.data() + first,
-                               std::min<std::size_t>(4, keys.size() - first), predicate.state);
+                               min_of<std::size_t>(4, keys.size() - first), predicate.state);
     }
     ranked.clear();
     ranked.reserve(entries.size());
@@ -969,7 +969,7 @@ std::vector<std::size_t> links_of(handle_ const& index, std::size_t from, std::s
     nearest.reserve(limit);
     for (std::size_t node = 0; node != limit; ++node)
         if (node != from) nearest.push_back({score(index.entries[from].payload, index.entries[node].payload), node});
-    std::size_t const kept = std::min(nearest.size(), index.options.connectivity);
+    std::size_t const kept = min_of(nearest.size(), index.options.connectivity);
     std::partial_sort(nearest.begin(), nearest.begin() + static_cast<std::ptrdiff_t>(kept), nearest.end());
     std::vector<std::size_t> linked(kept);
     for (std::size_t link = 0; link != kept; ++link) linked[link] = nearest[link].second;
@@ -1043,7 +1043,7 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
     std::size_t const wanted = arguments.wanted;
     std::vector<std::size_t> nodes;
     if (cursor.visited.empty()) {
-        std::size_t const taking = std::min(wanted, cursor.limit - std::min(cursor.position, cursor.limit));
+        std::size_t const taking = min_of(wanted, cursor.limit - min_of(cursor.position, cursor.limit));
         for (std::size_t offset = 0; offset != taking; ++offset) nodes.push_back(cursor.position + offset);
     }
     else {
@@ -1052,7 +1052,7 @@ void pull_walk(arguments_ const& arguments, graph_cursor<handle_>& cursor, score
                 if (!cursor.visited[linked]) cursor.visited[linked] = 1, cursor.order.push_back(linked);
             ++cursor.expanded;
         }
-        std::size_t const end = std::min(cursor.order.size(), cursor.position + wanted);
+        std::size_t const end = min_of(cursor.order.size(), cursor.position + wanted);
         nodes.assign(cursor.order.begin() + static_cast<std::ptrdiff_t>(cursor.position),
                      cursor.order.begin() + static_cast<std::ptrdiff_t>(end));
     }
@@ -1238,7 +1238,7 @@ struct no_fixed_coordinates_t {};
  */
 template <typename arguments_, typename handle_, typename score_, typename coordinates_kind_>
 struct sample_plan {
-    inline static constexpr std::size_t none_k = std::numeric_limits<std::size_t>::max();
+    inline static constexpr std::size_t none_k = (std::numeric_limits<std::size_t>::max)();
 
     arguments_ const& arguments;
     handle_ const& index;
@@ -1255,7 +1255,7 @@ struct sample_plan {
 
     std::vector<std::size_t> drawn {};
     std::unordered_map<std::size_t, std::size_t> drawn_at {};
-    std::unordered_map<uuid_t, std::size_t> shown_rows {};
+    std::unordered_map<uuid128_t, std::size_t> shown_rows {};
     std::vector<std::size_t> shown_nodes {}, shown_offsets {};
     std::vector<std::size_t> nearest_shown {};
     std::vector<f32_t> nearest_shown_distances {};
@@ -1267,7 +1267,7 @@ struct sample_plan {
     std::size_t visited_members = 0, computed_distances = 0;
 
     static u64_t key_hash(usearch_key_t const& key) noexcept {
-        return static_cast<u64_t>(std::hash<uuid_t> {}(uuid_of(key)));
+        return static_cast<u64_t>(std::hash<uuid128_t> {}(uuid_of(key)));
     }
     usearch_key_t shown_key(std::size_t row) const noexcept {
         std::span<usearch_key_t const> const keys = row_at<usearch_key_t>(arguments.shown.data, row,
@@ -1389,8 +1389,8 @@ struct sample_plan {
         std::size_t nearest = 0;
         for (std::size_t earlier = 1; earlier != root; ++earlier)
             if (reach[earlier] < reach[nearest]) nearest = earlier;
-        root_radii[root] = std::min(root_radii[root], reach[nearest]);
-        root_radii[nearest] = std::min(root_radii[nearest], reach[nearest]);
+        root_radii[root] = min_of(root_radii[root], reach[nearest]);
+        root_radii[nearest] = min_of(root_radii[nearest], reach[nearest]);
         walk_between(roots[nearest], roots[root]);
     }
 
@@ -1404,7 +1404,7 @@ struct sample_plan {
             shown_nodes.push_back(entries.front());
             shown_offsets.push_back(row);
         }
-        nearest_shown_count = std::min(sample_nearest_shown_k, shown_nodes.size());
+        nearest_shown_count = min_of(sample_nearest_shown_k, shown_nodes.size());
         nearest_shown.resize(wanted * sample_nearest_shown_k);
         nearest_shown_distances.resize(wanted * sample_nearest_shown_k);
         if (!wanted) return;
@@ -1437,14 +1437,14 @@ struct sample_plan {
             for (std::size_t root = 0; root != roots.size() && drawn.size() != wanted; ++root)
                 draw_region(roots[root], root_radii[root], quota);
             if (drawn.size() == wanted) break;
-            std::size_t const next = std::min(2 * quota, drawn.size() + 1);
+            std::size_t const next = min_of(2 * quota, drawn.size() + 1);
             if (drawn.size() == before && next == quota) break;
             quota = next;
         }
     }
 
     void draw_region(std::size_t root, f32_t radius, std::size_t quota) {
-        std::size_t const room = std::min(visits, quota * (visits / wanted));
+        std::size_t const room = min_of(visits, quota * (visits / wanted));
         std::vector<std::size_t> visited {root};
         std::vector<f32_t> visited_distances {0};
         std::unordered_set<std::size_t> reached {root};
@@ -1465,7 +1465,7 @@ struct sample_plan {
             usearch_key_t const& key = index.entries[node].key;
             if (!shown(key)) candidates.push_back({splitmix64_at(arguments.seed, key_hash(key)), node});
         }
-        std::size_t const kept = std::min(candidates.size(), quota);
+        std::size_t const kept = min_of(candidates.size(), quota);
         std::partial_sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(kept), candidates.end());
         for (std::size_t candidate = 0; candidate != kept; ++candidate) draw_nearest(candidates[candidate].second);
     }
@@ -1475,7 +1475,7 @@ struct sample_plan {
     }
 
     f32_t shown_scale() {
-        std::size_t const pairs = std::min(shown_nodes.size(), sample_scaling_draws_k + 1) - 1;
+        std::size_t const pairs = min_of(shown_nodes.size(), sample_scaling_draws_k + 1) - 1;
         f64_t shown_sum = 0, measured = 0;
         for (std::size_t pair = 0; pair != pairs; ++pair) {
             f32_t const reach = distance(shown_nodes[pair], shown_nodes[pair + 1]);
@@ -1506,7 +1506,7 @@ struct sample_plan {
     }
 
     void scale_classically() {
-        std::size_t const anchors = std::min(drawn.size(), sample_scaling_draws_k);
+        std::size_t const anchors = min_of(drawn.size(), sample_scaling_draws_k);
         std::vector<f32_t> centered(anchors * anchors), vector(anchors), product(anchors);
         for (std::size_t row = 0; row != anchors; ++row)
             for (std::size_t column = 0; column != anchors; ++column) {
@@ -1555,7 +1555,7 @@ struct sample_plan {
             multiply();
             f32_t eigenvalue = 0;
             for (std::size_t row = 0; row != anchors; ++row) eigenvalue += vector[row] * product[row];
-            f32_t const spread = std::sqrt(std::max(eigenvalue, 0.0f));
+            f32_t const spread = std::sqrt(max_of(eigenvalue, 0.0f));
             for (std::size_t row = 0; row != anchors; ++row) {
                 coordinates[row * 3 + axis] = vector[row] * spread;
                 for (std::size_t column = 0; column != anchors; ++column)
@@ -1565,7 +1565,7 @@ struct sample_plan {
 
         std::array<f32_t, sample_nearest_shown_k * 3> anchor_coordinates;
         std::array<f32_t, sample_nearest_shown_k> kept_distances;
-        std::size_t const nearest = std::min(sample_nearest_shown_k, anchors);
+        std::size_t const nearest = min_of(sample_nearest_shown_k, anchors);
         for (std::size_t at = anchors; at != drawn.size(); ++at) {
             std::array<std::size_t, sample_nearest_shown_k> kept_anchors;
             std::size_t kept = 0;
@@ -1707,12 +1707,12 @@ std::vector<std::size_t> drawing_order(std::size_t count, u64_t seed, within_ co
 template <typename handle_, typename score_>
 std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts, u64_t seed, score_ const& score) {
     std::size_t const nodes = index.entries.size();
-    std::size_t const unassigned = std::numeric_limits<std::size_t>::max();
+    std::size_t const unassigned = (std::numeric_limits<std::size_t>::max)();
     std::size_t const cap = divide_round_up(nodes, parts);
     std::vector<std::size_t> part_of(nodes, unassigned), sizes(parts, 0), heads(parts, 0);
     std::vector<std::vector<std::size_t>> frontiers(parts);
     std::vector<std::size_t> const order = drawing_order(nodes, seed, [](std::size_t) { return true; });
-    for (std::size_t part = 0; part != std::min(parts, nodes); ++part)
+    for (std::size_t part = 0; part != min_of(parts, nodes); ++part)
         part_of[order[part]] = part, sizes[part] = 1, frontiers[part].push_back(order[part]);
     for (bool grew = true; grew;) {
         grew = false;
@@ -1830,7 +1830,7 @@ void split_and_report(arguments_ const& arguments, handle_& index, score_ const&
 /** The extent of a checkpoint, empty when that many entries cannot be addressed. Every
  *  modality's blob is a prefix followed by @p count entries of @p each bytes. */
 inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t count, std::size_t each) {
-    if (each && count > (std::numeric_limits<std::size_t>::max() - prefix) / each) return std::nullopt;
+    if (each && count > ((std::numeric_limits<std::size_t>::max)() - prefix) / each) return std::nullopt;
     return prefix + count * each;
 }
 
@@ -2017,7 +2017,7 @@ void save_parts(handle_ const& index, usearch_bytes_view_t path, usearch_progres
             return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
         handle_ part;
         part.options = index.options;
-        std::size_t const begin = std::min(shard * per_shard, total), end = std::min(begin + per_shard, total);
+        std::size_t const begin = min_of(shard * per_shard, total), end = min_of(begin + per_shard, total);
         part.entries.assign(index.entries.begin() + static_cast<std::ptrdiff_t>(begin),
                             index.entries.begin() + static_cast<std::ptrdiff_t>(end));
         if (!serialize(part, blob, outcome)) return;

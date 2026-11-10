@@ -131,6 +131,8 @@ constexpr u64_t splitmix64_at(u64_t seed, u64_t counter) noexcept {
 /** The top 53 bits of @p bits as a double in (0, 1]: ((bits >> 11) + 1) · 2⁻⁵³. */
 constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t>((bits >> 11) + 1) * 0x1p-53; }
 
+#pragma float_control(precise, on, push)
+
 /**
  *  @brief Projects one entry's values to three coordinates through a dense Gaussian matrix no one
  *      stores: coordinates[c] = Σ_d values[d] · G[d][c] / sqrt(dimensions).
@@ -141,7 +143,6 @@ constexpr f64_t uniform_unit_f64(u64_t bits) noexcept { return static_cast<f64_t
  *  sqrt(dimensions) in f64 and rounds to f32 once. Values of no dimensions project to the origin.
  */
 inline void sample_projection(f32_t const* values, std::size_t dimensions, u64_t seed, f32_t* coordinates) noexcept {
-#pragma float_control(precise, on)
 #pragma clang fp contract(off)
     std::array<f64_t, 3> sums {0, 0, 0};
     for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
@@ -181,7 +182,6 @@ inline void sample_projection(f32_t const* values, std::size_t dimensions, u64_t
  */
 inline void sample_gauss_newton(f32_t const* references, f32_t const* distances, std::size_t references_count,
                                 u64_t key_seed, f32_t* coordinates) noexcept {
-#pragma float_control(precise, on)
 #pragma clang fp contract(off)
     for (std::size_t reference = 0; reference != references_count; ++reference) {
         if (distances[reference] > 0.0f) continue;
@@ -247,6 +247,7 @@ inline void sample_gauss_newton(f32_t const* references, f32_t const* distances,
     }
     for (std::size_t column = 0; column != 3; ++column) coordinates[column] = point[column];
 }
+#pragma float_control(pop)
 
 /** A callback that ignores every node, spelling the callbacks @ref sample_source checks. */
 struct ignore_nodes_t {
@@ -503,7 +504,7 @@ struct sample_plan {
     static_assert(sizeof(candidate_t) == 16);
 
     /** No draw, no root, no tree parent. */
-    inline static constexpr u32_t none_k = std::numeric_limits<u32_t>::max();
+    inline static constexpr u32_t none_k = (std::numeric_limits<u32_t>::max)();
 
     sample_plan(source_t const* source, sample_inputs_t inputs, sample_outputs_t outputs, sample_config_t config,
                 bytes_span_t scratch, std::size_t wanted, std::size_t shown_count) noexcept

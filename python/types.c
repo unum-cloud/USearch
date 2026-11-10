@@ -416,52 +416,52 @@ static int buffer_refusal_cleared(void) {
  *  @return 1 when the fallback produced a buffer, 0 when the object has no interface.
  */
 static int buffer_via_array_interface(PyObject* object, usearch_py_buffer_backing_t* backing) {
-    PyObject* const interface = PyObject_GetAttrString(object, "__array_interface__");
-    if (!interface) {
+    PyObject* const array_interface = PyObject_GetAttrString(object, "__array_interface__");
+    if (!array_interface) {
         PyErr_Clear();
         return 0;
     }
-    if (!PyDict_Check(interface)) {
-        Py_DECREF(interface);
+    if (!PyDict_Check(array_interface)) {
+        Py_DECREF(array_interface);
         return 0;
     }
 
-    PyObject* const data_tuple = PyDict_GetItemString(interface, "data");
+    PyObject* const data_tuple = PyDict_GetItemString(array_interface, "data");
     if (!data_tuple || !PyTuple_Check(data_tuple) || PyTuple_GET_SIZE(data_tuple) < 1) {
-        Py_DECREF(interface);
+        Py_DECREF(array_interface);
         PyErr_SetString(PyExc_TypeError, "__array_interface__['data'] must be a tuple of (pointer, readonly)");
         return 0;
     }
     void* const data = PyLong_AsVoidPtr(PyTuple_GET_ITEM(data_tuple, 0));
     if (!data && PyErr_Occurred()) {
-        Py_DECREF(interface);
+        Py_DECREF(array_interface);
         return 0;
     }
     int readonly = 0;
     if (PyTuple_GET_SIZE(data_tuple) > 1) {
         readonly = PyObject_IsTrue(PyTuple_GET_ITEM(data_tuple, 1));
         if (readonly < 0) {
-            Py_DECREF(interface);
+            Py_DECREF(array_interface);
             return 0;
         }
     }
 
-    PyObject* const shape_object = PyDict_GetItemString(interface, "shape");
+    PyObject* const shape_object = PyDict_GetItemString(array_interface, "shape");
     if (!shape_object || !PyTuple_Check(shape_object)) {
-        Py_DECREF(interface);
+        Py_DECREF(array_interface);
         PyErr_SetString(PyExc_TypeError, "__array_interface__['shape'] must be a tuple");
         return 0;
     }
     Py_ssize_t const rank = PyTuple_GET_SIZE(shape_object);
     if (rank < 1 || rank > usearch_py_max_rank_k) {
-        Py_DECREF(interface);
+        Py_DECREF(array_interface);
         usearch_py_raise(usearch_status_shape_mismatch_k, "expected a vector or a matrix, got rank %zd", rank);
         return 0;
     }
     for (Py_ssize_t axis = 0; axis != rank; ++axis) {
         backing->shape[axis] = PyLong_AsSsize_t(PyTuple_GET_ITEM(shape_object, axis));
         if (backing->shape[axis] == -1 && PyErr_Occurred()) {
-            Py_DECREF(interface);
+            Py_DECREF(array_interface);
             return 0;
         }
     }
@@ -483,7 +483,7 @@ static int buffer_via_array_interface(PyObject* object, usearch_py_buffer_backin
     else { PyErr_Clear(); }
 
     if (kind == usearch_scalar_unknown_k) {
-        PyObject* const typestr_object = PyDict_GetItemString(interface, "typestr");
+        PyObject* const typestr_object = PyDict_GetItemString(array_interface, "typestr");
         if (typestr_object) {
             Py_ssize_t typestr_length = 0;
             char const* const typestr = PyUnicode_AsUTF8AndSize(typestr_object, &typestr_length);
@@ -493,18 +493,18 @@ static int buffer_via_array_interface(PyObject* object, usearch_py_buffer_backin
     }
     scalar_naming_t const* const naming = scalar_naming(kind);
     if (!naming) {
-        Py_DECREF(interface);
+        Py_DECREF(array_interface);
         usearch_py_raise(usearch_status_unknown_kind_k, "__array_interface__ names no scalar kind this build knows");
         return 0;
     }
     Py_ssize_t const item_bytes = (Py_ssize_t)naming->unit_bytes;
 
-    PyObject* const strides_object = PyDict_GetItemString(interface, "strides");
+    PyObject* const strides_object = PyDict_GetItemString(array_interface, "strides");
     if (strides_object && PyTuple_Check(strides_object) && PyTuple_GET_SIZE(strides_object) == rank) {
         for (Py_ssize_t axis = 0; axis != rank; ++axis) {
             backing->strides[axis] = PyLong_AsSsize_t(PyTuple_GET_ITEM(strides_object, axis));
             if (backing->strides[axis] == -1 && PyErr_Occurred()) {
-                Py_DECREF(interface);
+                Py_DECREF(array_interface);
                 return 0;
             }
         }
@@ -516,7 +516,7 @@ static int buffer_via_array_interface(PyObject* object, usearch_py_buffer_backin
             stride *= backing->shape[axis];
         }
     }
-    Py_DECREF(interface);
+    Py_DECREF(array_interface);
 
     Py_buffer* const buffer = &backing->buffer;
     memset(buffer, 0, sizeof(*buffer));
@@ -2903,20 +2903,20 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
     PyObject* const address = PyLong_FromVoidPtr((void*)self->data);
     PyObject* const data = address ? PyTuple_Pack(2, address, Py_False) : NULL;
     Py_XDECREF(address);
-    PyObject* const interface = data ? PyDict_New() : NULL;
-    if (!interface) {
+    PyObject* const array_interface = data ? PyDict_New() : NULL;
+    if (!array_interface) {
         Py_XDECREF(data);
         return NULL;
     }
-    if (usearch_py_dict_steal_item(interface, "data", data) != 0 ||
-        usearch_py_dict_steal_item(interface, "shape", extents_to_tuple(self->shape, self->rank)) != 0 ||
-        usearch_py_dict_steal_item(interface, "strides", extents_to_tuple(self->strides, self->rank)) != 0 ||
-        usearch_py_dict_steal_item(interface, "typestr", PyUnicode_FromStringAndSize(typestr, 3)) != 0 ||
-        usearch_py_dict_steal_item(interface, "version", PyLong_FromLong(3)) != 0) {
-        Py_DECREF(interface);
+    if (usearch_py_dict_steal_item(array_interface, "data", data) != 0 ||
+        usearch_py_dict_steal_item(array_interface, "shape", extents_to_tuple(self->shape, self->rank)) != 0 ||
+        usearch_py_dict_steal_item(array_interface, "strides", extents_to_tuple(self->strides, self->rank)) != 0 ||
+        usearch_py_dict_steal_item(array_interface, "typestr", PyUnicode_FromStringAndSize(typestr, 3)) != 0 ||
+        usearch_py_dict_steal_item(array_interface, "version", PyLong_FromLong(3)) != 0) {
+        Py_DECREF(array_interface);
         return NULL;
     }
-    return interface;
+    return array_interface;
 }
 
 /** The DLPack device of @p buffer, where the library placed its arena; 0, or -1 with an exception

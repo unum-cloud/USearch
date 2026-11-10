@@ -62,7 +62,7 @@ u32_t claim_capacity(std::size_t count) noexcept {
             chunks_count += 1;
             u32_t const first = atomic_ref<u32_t>(last_allocated_id).fetch_add(count, std::memory_order_acq_rel);
             verify(first + count <= chunks_count * rows_per_chunk_k);
-            atomic_ref<std::ptrdiff_t>(remaining_capacity).add(rows_per_chunk_k, knobs_.return_order);
+            atomic_ref<std::ptrdiff_t>(remaining_capacity).store_add(rows_per_chunk_k, knobs_.return_order);
             return first;
         }
         if (new_remaining >= 0) {
@@ -78,7 +78,7 @@ u32_t claim_capacity(std::size_t count) noexcept {
 /** Returns rows onto a non-negative counter only, so a grower inside is never lifted across zero. */
 template <knobs_t const& knobs_>
 void release_capacity(std::size_t count) noexcept {
-    atomic_ref<u32_t>(last_allocated_id).sub(static_cast<u32_t>(count), std::memory_order_release);
+    atomic_ref<u32_t>(last_allocated_id).store_sub(static_cast<u32_t>(count), std::memory_order_release);
     std::ptrdiff_t observed = atomic_ref<std::ptrdiff_t>(remaining_capacity).load(std::memory_order_acquire);
     while (observed < 0 || !atomic_ref<std::ptrdiff_t>(remaining_capacity)
                                 .compare_exchange_weak(observed, observed + static_cast<std::ptrdiff_t>(count),

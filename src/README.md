@@ -43,10 +43,10 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 
 The variants are aliases over those templates, keyed by the storage dtype and the class:
 
-- `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid_t, quads_kit_of<dtype, cpu_class>, tiles_kit_of<...>, elementwise_kit_of<cpu_class>, rmscast_kit_of<...>, visits_kit_of<cpu_class>, waiter_of<cpu_class>, ...>`, each kit its ladder's pick under the class's NumKong mask, with the class's atomic reference and cache hints last.
-- `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid_t, ...>` over the same five kits.
-- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, cuda_fatbin<gpu_class, dtype>, fu::preferred_cache_hints_t>`, the fatbin of one dtype's kernels stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class, dtype>`.
-- `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
+- `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid128_t, quads_kit_of<dtype, cpu_class>, tiles_kit_of<...>, elementwise_kit_of<cpu_class>, rmscast_kit_of<...>, visits_kit_of<cpu_class>, waiter_of<cpu_class>, ...>`, each kit its ladder's pick under the class's NumKong mask, with the class's atomic reference and cache hints last.
+- `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid128_t, ...>` over the same five kits.
+- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid128_t, dtype, cuda_fatbin<gpu_class, dtype>, fu::preferred_cache_hints_t>`, the fatbin of one dtype's kernels stating the class's NumKong mask as its `capability_k`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes` and `hip_code_object<gpu_class, dtype>`.
+- `vram_apple_indexes<dtype, gpu_class>` → `dense::vram_apple_indexes<uuid128_t, dtype, numkong_capabilities_of(gpu_class)>`, one variant per Apple class, each compiling its own library at first use.
 
 A variant's executor type is its residency, so `vendored_residency_of`, `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 Every residency fills every entry: an NVMe view answers `read_only_k` for each mutation, and a device variant `unsupported_k` for what only a host walk takes.

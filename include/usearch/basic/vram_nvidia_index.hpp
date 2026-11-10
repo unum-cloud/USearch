@@ -400,7 +400,7 @@ struct vram_load_step {
  *  @tparam key_type_ The caller-visible identity of every node, trivially copyable.
  *  @tparam key_hash_type_ The key map's hash of a key.
  */
-template <typename node_id_type_, typename kits_type_, typename key_type_ = uuid_t,
+template <typename node_id_type_, typename kits_type_, typename key_type_ = uuid128_t,
           typename key_hash_type_ = std::hash<key_type_>>
 struct vram_ragged_graph {
     using traversal_context_t = cuda_traversal_context<cuda_arena_allocator_t>;
@@ -414,7 +414,7 @@ struct vram_ragged_graph {
     using candidates_count_t = u32_t;
 
     /** The node-ID space, less the sentinel. */
-    inline static constexpr std::size_t max_node_count_k = std::size_t {std::numeric_limits<node_id_t>::max()} - 1u;
+    inline static constexpr std::size_t max_node_count_k {std::size_t {(std::numeric_limits<node_id_t>::max)()} - 1u};
 
     /** The nodes the host keys span: the node-ID space, no further than the address space holds
      *  keys. */
@@ -625,7 +625,7 @@ struct vram_ragged_graph {
     /** Telemetry of one @c insert() batch, whose IDs are @b [first_id,new_size). */
     struct [[nodiscard]] insert_result_t {
         std::size_t new_size = 0;
-        node_id_t first_id = std::numeric_limits<node_id_t>::max();
+        node_id_t first_id = (std::numeric_limits<node_id_t>::max)();
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
@@ -675,7 +675,7 @@ struct vram_ragged_graph {
     struct [[nodiscard]] insert_plan_t {
 
         /** The first claimed ID. */
-        node_id_t first_id = std::numeric_limits<node_id_t>::max();
+        node_id_t first_id = (std::numeric_limits<node_id_t>::max)();
 
         /** Nodes claimed. */
         std::size_t entries = 0;
@@ -1878,7 +1878,7 @@ struct vram_ragged_graph {
         split.donor = this;
         split.entries = size();
         split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
-        if (parts * split.part_capacity >= std::numeric_limits<u32_t>::max())
+        if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
         for (vram_ragged_graph* const into : split.receivers) {
             vram_ragged_graph& part = *into;

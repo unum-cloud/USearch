@@ -398,7 +398,7 @@ struct shard_set {
      *  its shards passes the bound: the shard taking entries from @c f on, with @c l entries of
      *  room left, takes up to entry @c f + l * width. */
     std::size_t room(shard_generation_t shard_generation, std::size_t starting_shard) const noexcept {
-        std::size_t entries = std::numeric_limits<std::size_t>::max();
+        std::size_t entries = (std::numeric_limits<std::size_t>::max)();
         for (std::size_t offset = 0; offset != shard_generation.width; ++offset) {
             std::size_t const claimed = at_(shard_generation.first + offset).index->claimed_();
             std::size_t const left = claimed < shard_capacity_ ? shard_capacity_ - claimed : 0;
@@ -599,7 +599,7 @@ struct shard_set {
     template <typename source_shard_type_, typename placement_type_, typename rank_type_, typename open_type_>
     status_t pack(std::span<shard_move_t> moves, std::size_t own, std::size_t bound, source_shard_type_&& source_shard,
                   placement_type_&& placement_of, rank_type_&& rank, open_type_&& open) const noexcept {
-        constexpr std::size_t unplaced = std::numeric_limits<std::size_t>::max();
+        constexpr std::size_t unplaced = (std::numeric_limits<std::size_t>::max)();
         std::size_t const count = moves.size();
         for (std::size_t from = 0; from != count; ++from) moves[from] = {from, unplaced};
         auto load_of = [&](std::size_t into) noexcept {
@@ -695,12 +695,14 @@ struct shard_set {
 #pragma region Commits and Snapshots
 
     /** Opens a commit spanning several shards: its watermarks may now move one shard at a time. */
-    void begin_commit() noexcept { atomic_ref<u64_t>(commit_sequence_).add(u64_t {1}, std::memory_order_release); }
+    void begin_commit() noexcept {
+        atomic_ref<u64_t>(commit_sequence_).store_add(u64_t {1}, std::memory_order_release);
+    }
 
     /** Closes the commit @ref begin_commit opened; closing carries into the high half, so a reader
      *  sees the word move even when two commits overlap. */
     void end_commit() noexcept {
-        atomic_ref<u64_t>(commit_sequence_).add((u64_t {1} << 32) - 1, std::memory_order_release);
+        atomic_ref<u64_t>(commit_sequence_).store_add((u64_t {1} << 32) - 1, std::memory_order_release);
     }
 
     /** Takes every shard's watermark into @p watermarks, unless it is empty, at one instant no
@@ -768,12 +770,12 @@ struct shard_set {
     /** Opens a destructive window under the tower's unique side: the epoch turns odd before any
      *  store of the window, which the fence keeps after it. */
     void begin_window() noexcept {
-        atomic_ref<u64_t>(epoch_).add(1, std::memory_order_relaxed);
+        atomic_ref<u64_t>(epoch_).store_add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
     }
 
     /** Closes the window @ref begin_window opened, releasing its stores to the next reader. */
-    void end_window() noexcept { atomic_ref<u64_t>(epoch_).add(1, std::memory_order_release); }
+    void end_window() noexcept { atomic_ref<u64_t>(epoch_).store_add(1, std::memory_order_release); }
 
     /** Runs the reader @p read under the epoch, again once if a destructive window overlapped it,
      *  and answers @c contended_k if one overlapped that too, so whatever it returns was read whole

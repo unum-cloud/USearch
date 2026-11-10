@@ -49,7 +49,7 @@
  */
 #include <cmath> // `std::sqrt`, `std::exp`
 
-#include <algorithm>     // `std::stable_sort`, `std::min`, `std::max`, `std::find`
+#include <algorithm>     // `std::stable_sort`, `std::find`
 #include <bit>           // `std::has_single_bit` - the connectivity init accepts
 #include <limits>        // `std::numeric_limits`
 #include <memory>        // `std::unique_ptr` - a finished refinement's handle
@@ -856,7 +856,7 @@ void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
         cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = std::min(refinement.moved, refinement.swept);
+    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
     if (arguments->stats)
         arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
     reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
@@ -1062,7 +1062,7 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = row_extent(left.scalar, dimensions);
     // A kept row holds the first pairs its walk scored - here, the first in storage order.
-    std::size_t const kept = arguments->wanted ? std::min(arguments->wanted, indexed) : indexed;
+    std::size_t const kept = arguments->wanted ? min_of(arguments->wanted, indexed) : indexed;
 
     // Every row is scored before anything is written, so a cancelled call leaves its outputs null.
     std::vector<double> left_row(dimensions);
@@ -1102,7 +1102,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                   "A softmax weighs logits, so the kind must be inner product", outcome))
         return;
 
-    std::size_t const queries_count = arguments->count, head_count = std::max<std::size_t>(arguments->head_count, 1);
+    std::size_t const queries_count = arguments->count, head_count = max_of<std::size_t>(arguments->head_count, 1);
     std::size_t const dimensions = index.options.dimensions;
     usearch_rows_view_t const& queries = arguments->queries;
     usearch_scalar_t const output_scalar = arguments->outputs_scalar ? arguments->outputs_scalar : queries.scalar;
@@ -1136,7 +1136,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
     std::size_t const value_bytes = row_extent(index.options.quantization, dimensions);
     double const scale = arguments->score_scale > 0 ? arguments->score_scale
-                                                    : 1.0 / std::sqrt(std::max<double>(dimensions, 1));
+                                                    : 1.0 / std::sqrt(max_of<double>(dimensions, 1));
     std::vector<double> query_row(dimensions), value(dimensions), accumulated(dimensions), logits(indexed);
     std::size_t const tokens = queries_count / head_count;
     std::size_t answered = 0;
@@ -1146,7 +1146,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
             double maximum = std::numeric_limits<double>::lowest(), partition = 0;
             for (std::size_t entry = 0; entry != indexed; ++entry) {
                 logits[entry] = scale * dot_product(query_row, index.entries[entry].payload);
-                maximum = std::max(maximum, logits[entry]);
+                maximum = max_of(maximum, logits[entry]);
             }
             std::fill(accumulated.begin(), accumulated.end(), 0.0);
             for (std::size_t entry = 0; entry != indexed; ++entry) {
@@ -1205,7 +1205,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     // count.
     std::vector<usearch_key_t> documents;
     std::vector<std::vector<std::size_t>> token_entries;
-    std::unordered_map<us::utilities::uuid_t, std::size_t> document_of;
+    std::unordered_map<us::utilities::uuid128_t, std::size_t> document_of;
     for (std::size_t entry = 0; entry != index.entries.size(); ++entry) {
         auto const [slot, emplace_status] = document_of.emplace(uuid_of(index.entries[entry].key), documents.size());
         if (emplace_status) documents.push_back(index.entries[entry].key), token_entries.emplace_back();
@@ -1218,7 +1218,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (predicate.callback)
         for (std::size_t first = 0; first < documents.size(); first += 4)
             predicate.callback(documents.data() + first, admissions.data() + first,
-                               std::min<std::size_t>(4, documents.size() - first), predicate.state);
+                               min_of<std::size_t>(4, documents.size() - first), predicate.state);
 
     std::vector<double> query_rows;
     std::vector<match_t> ranked, kept_matches;
@@ -1239,7 +1239,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 std::span<double const> const query_row {query_rows.data() + row * dimensions, dimensions};
                 double best = std::numeric_limits<double>::lowest();
                 for (std::size_t stored : token_entries[document])
-                    best = std::max(best, dot_product(query_row, index.entries[stored].payload));
+                    best = max_of(best, dot_product(query_row, index.entries[stored].payload));
                 summed += best;
             }
             ranked.push_back({summed, documents[document]});
@@ -1249,7 +1249,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                          [](match_t const& first, match_t const& second) { return first.distance > second.distance; });
 
         // A zero `wanted` keeps every scored document.
-        std::size_t const kept = arguments->wanted ? std::min(arguments->wanted, ranked.size()) : ranked.size();
+        std::size_t const kept = arguments->wanted ? min_of(arguments->wanted, ranked.size()) : ranked.size();
         kept_matches.insert(kept_matches.end(), ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(kept));
         kept_offsets.push_back(kept_matches.size());
         required += ranked.size();

@@ -52,7 +52,7 @@ using visits_kit_of = typename dense::visits_hash_set_ladder<numkong_capabilitie
  *  picks, its waiter, its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using ram_indexes =
-    dense::ram_indexes<us::utilities::uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
+    dense::ram_indexes<us::utilities::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                        elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
                        waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
                        typename cache_hints_for_cpu_class<cpu_class_>::type>;
@@ -61,7 +61,7 @@ using ram_indexes =
  *  metric comes from the parts' headers and the transport is the executor's runtime choice. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_indexes =
-    dense::nvme_indexes<us::utilities::uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
+    dense::nvme_indexes<us::utilities::uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                         elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>, visits_kit_of<cpu_class_>,
                         default_io_engine_t, atomic_ref_for_cpu_class<cpu_class_>::template type,
                         waiter_of<cpu_class_>>;
@@ -92,8 +92,9 @@ struct cuda_fatbin {
 /** One NVIDIA variant: the class names the rung and its capability ceiling, and with the dtype the
  *  fatbin its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_nvidia_indexes = dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, cuda_fatbin<gpu_class_, dtype_>,
-                                                       fu::preferred_cache_hints_t, fu::standard_yield_t>;
+using vram_nvidia_indexes =
+    dense::vram_nvidia_indexes<us::utilities::uuid128_t, dtype_, cuda_fatbin<gpu_class_, dtype_>,
+                               fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 
 #if USEARCH_ARCH_ROCM_
@@ -109,7 +110,7 @@ struct hip_code_object {
 /** One AMD variant: the class names the rung and its capability ceiling, and with the dtype the
  *  code object its kernels sit in. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, hip_code_object<gpu_class_, dtype_>,
+using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid128_t, dtype_, hip_code_object<gpu_class_, dtype_>,
                                                  fu::preferred_cache_hints_t, fu::standard_yield_t>;
 #endif
 
@@ -118,8 +119,8 @@ using vram_amd_indexes = dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, 
 /** One Apple variant: the class names the rung and the capability ceiling its kernels compile for
  *  at the first @c reserve. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_apple_indexes =
-    dense::vram_apple_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_), fu::standard_yield_t>;
+using vram_apple_indexes = dense::vram_apple_indexes<us::utilities::uuid128_t, dtype_,
+                                                     numkong_capabilities_of(gpu_class_), fu::standard_yield_t>;
 #endif
 
 /** The index type of the variant @p dtype_ and @p class_ compile in @p residency_. */

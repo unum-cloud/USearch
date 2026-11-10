@@ -565,7 +565,7 @@ template <                                         //
     typename vectors_allocator_type_,              //
     typename neighbors_allocator_type_,            //
     typename traversals_allocator_type_,           //
-    typename key_type_ = uuid_t,                   //
+    typename key_type_ = uuid128_t,                //
     typename key_hash_type_ = std::hash<key_type_> //
     >
 struct vram_shard_core {
@@ -1878,7 +1878,7 @@ struct vram_shard_core {
         split.donor = this;
         split.entries = size();
         split.part_capacity = divide_round_up<std::size_t>(split.entries, parts);
-        if (parts * split.part_capacity >= std::numeric_limits<u32_t>::max())
+        if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
         // Every receiver holds a full part's nodes, sentinel-filled, before the partition queues.
         stream_handle_t const stream = context.stream();
@@ -2222,7 +2222,7 @@ struct vram_shard_core {
             for (node_id_t& neighbor : neighbors_view) neighbor = neighbor < visible ? neighbor : node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows,
                                                                           std::as_bytes(neighbors_view));
-            fu::standard_atomic_ref<std::size_t> {covered}.add(rows.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -2460,8 +2460,8 @@ struct vram_shard_core {
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
             if (normed)
-                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
-            fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(range.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -2527,8 +2527,9 @@ struct vram_shard_core {
             for (std::size_t row = 0; row != count; ++row)
                 index_->keyed_.assign(static_cast<node_id_t>(into + row),
                                       source.keyed_[static_cast<node_id_t>(from + row)]);
-            if (normed) fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
-            fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
+            if (normed)
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(count, std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -4009,7 +4010,7 @@ struct vram_shard_core {
         rmscast.vectors = rows;
         rmscast.x_stride = from_stride;
         rmscast.y_stride = row_bytes();
-        rmscast.epsilon = std::numeric_limits<f32_t>::min();
+        rmscast.epsilon = (std::numeric_limits<f32_t>::min)();
         u32_t const blocks = static_cast<u32_t>(min_of<std::size_t>(
             rows, device_.multiprocessor_count * kernels_type_::resident_blocks_(vram_dense_kernel_t::rmscast_k, 0)));
         return kernels_.launch_(kernels, vram_dense_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);

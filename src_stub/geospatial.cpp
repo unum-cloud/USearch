@@ -29,7 +29,6 @@
  */
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
 
-#include <algorithm> // `std::min`, `std::max`
 #include <array>     // `std::array`
 #include <limits>    // `std::numeric_limits`
 #include <memory>    // `std::unique_ptr` - a finished refinement's handle
@@ -265,8 +264,8 @@ static bool clear_sight(terrain_grid_t const& terrain, placed_t const& from, pla
     if (chord == 0) return true;
     // Two samples per cell, so a ridge one cell wide is never stepped over.
     constexpr double metres_per_degree_k = 111320.0, refraction_k = 0.13, earth_radius_k = 6371000.0;
-    double const cell = std::min(terrain.row_step, terrain.column_step) * metres_per_degree_k;
-    std::size_t const samples = std::min<std::size_t>(1u << 16, static_cast<std::size_t>(2 * chord / cell) + 2);
+    double const cell = min_of(terrain.row_step, terrain.column_step) * metres_per_degree_k;
+    std::size_t const samples = min_of<std::size_t>(1u << 16, static_cast<std::size_t>(2 * chord / cell) + 2);
     for (std::size_t sample = 1; sample != samples; ++sample) {
         double const share = static_cast<double>(sample) / static_cast<double>(samples);
         std::array<double, 3> const point {from.position[0] + share * offset[0], from.position[1] + share * offset[1],
@@ -914,7 +913,7 @@ void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* ar
         cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = std::min(refinement.moved, refinement.swept);
+    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
     if (arguments->stats)
         arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
     reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,

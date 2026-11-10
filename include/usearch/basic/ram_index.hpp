@@ -561,7 +561,7 @@ struct ram_cursor;
  */
 template <                                                                //
     typename value_type_,                                                 //
-    typename key_type_ = uuid_t,                                          //
+    typename key_type_ = uuid128_t,                                       //
     typename node_id_type_ = u64_t,                                       //
     typename distance_type_ = f64_t,                                      //
     typename wait_type_ = dummy_waiter_t,                                 //
@@ -675,7 +675,7 @@ struct ram_index {
     /** Ceiling on dispensable node IDs: every ID the type holds but the all-ones sentinel, and no
      *  more records than the address space holds. */
     inline static constexpr std::size_t max_node_count_k = static_cast<std::size_t>(
-        min_of<u64_t>(min_of<u64_t>(std::numeric_limits<node_id_t>::max(), std::numeric_limits<std::size_t>::max()),
+        min_of<u64_t>(min_of<u64_t>((std::numeric_limits<node_id_t>::max)(), (std::numeric_limits<std::size_t>::max)()),
                       (u64_t {1} << address_bits_k) / sizeof(node_t)));
 
   private:
@@ -691,10 +691,10 @@ struct ram_index {
 
     /** The claim count while a refine holds the claims closed: past every ceiling, so the bounded
      *  add of every batch refuses it. */
-    inline static constexpr std::size_t closed_claims_k = std::numeric_limits<std::size_t>::max();
+    inline static constexpr std::size_t closed_claims_k = (std::numeric_limits<std::size_t>::max)();
 
     /** The all-ones ID no node ever takes: a heal's answer for no target. */
-    inline static constexpr node_id_t missing_k = std::numeric_limits<node_id_t>::max();
+    inline static constexpr node_id_t missing_k = (std::numeric_limits<node_id_t>::max)();
 
     using key_map_t = chunked_multimap<key_t, node_id_t, std::hash<key_t>, allocator_t, atomic_ref_template_>;
 
@@ -929,7 +929,7 @@ struct ram_index {
                                                           values[position], keys[position], metric, context, selector,
                                                           walk);
             // Releases this step's nodes to the acquire in `finish`, whose turn carries them on.
-            atomic_ref<std::size_t>(placed).add(count, std::memory_order_release);
+            atomic_ref<std::size_t>(placed).store_add(count, std::memory_order_release);
         }
 
         /**
@@ -1216,7 +1216,7 @@ struct ram_index {
         /** The level of a node no sweep reached, 255; the deepest a reached node records is 254,
          *  at which the levels saturate: every node reached from there on reads 254 and counts no
          *  parents, so no merge drops a link for a level it cannot tell. */
-        inline static constexpr u8_t unknown_level_k = std::numeric_limits<u8_t>::max();
+        inline static constexpr u8_t unknown_level_k = (std::numeric_limits<u8_t>::max)();
 
         /** The audit's relation for a repair walk: admits the nodes reached from node zero and
          *  reaching it back. */
@@ -1377,8 +1377,8 @@ struct ram_index {
                 }
                 node.unlock();
             }
-            atomic_ref<std::size_t>(expanded_in_level_).add(expanded_count, std::memory_order_relaxed);
-            atomic_ref<std::size_t>(reached_back_in_level_).add(reached_back_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(expanded_in_level_).store_add(expanded_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(reached_back_in_level_).store_add(reached_back_count, std::memory_order_relaxed);
             return expanded_count + reached_back_count;
         }
 
@@ -1502,7 +1502,7 @@ struct ram_index {
         void count_parent_(node_id_t node_id) noexcept {
             atomic_ref<u8_t> const parents {parents_[node_id]};
             u8_t observed = parents.load(std::memory_order_relaxed);
-            while (observed != std::numeric_limits<u8_t>::max() &&
+            while (observed != (std::numeric_limits<u8_t>::max)() &&
                    !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1), std::memory_order_relaxed,
                                                   std::memory_order_relaxed)) {}
         }
@@ -1804,7 +1804,7 @@ struct ram_index {
         };
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
-            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         }
 
         /** Reopens the claims of the refined index and of every receiver closed, and drops every
@@ -3063,7 +3063,7 @@ struct ram_index {
                                                     columns.values.subspan(first, bound - first));
                 if (failed(encoded)) return encoded;
             }
-            atomic_ref<std::size_t>(covered).add(node_range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).store_add(node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -3257,7 +3257,7 @@ struct ram_index {
                     return decoded;
             }
             index_->widen_(widest_list);
-            atomic_ref<std::size_t>(covered).add(node_range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).store_add(node_range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -3378,7 +3378,7 @@ struct ram_index {
      *  peek first, so a graph at its budget never writes the shared line. */
     void widen_(std::size_t width) noexcept {
         atomic_ref<std::size_t> const widest {widest_list_};
-        if (widest.load(std::memory_order_relaxed) < width) widest.max(width, std::memory_order_relaxed);
+        if (widest.load(std::memory_order_relaxed) < width) widest.store_max(width, std::memory_order_relaxed);
     }
 
     /** Forgets every record below @p visible, every key and every counter: what @c clear does under
@@ -3453,7 +3453,7 @@ struct ram_index {
         capacity_claim_t& operator=(capacity_claim_t const&) = delete;
         ~capacity_claim_t() noexcept {
             if (index_ && entries_)
-                atomic_ref<std::size_t>(index_->claimed_count_).sub(entries_, std::memory_order_release);
+                atomic_ref<std::size_t>(index_->claimed_count_).store_sub(entries_, std::memory_order_release);
         }
 
       private:
@@ -3494,7 +3494,7 @@ struct ram_index {
         status_t covered = key_map_.reserve(claimed + count);
         if (succeeded(covered)) covered = nodes_.cover(claimed + count);
         if (failed(covered)) {
-            atomic_ref<std::size_t>(claimed_count_).sub(count, std::memory_order_release);
+            atomic_ref<std::size_t>(claimed_count_).store_sub(count, std::memory_order_release);
             return {{}, covered};
         }
         return {capacity_claim_t {this, count, std::move(hold)}, status_t::success_k};

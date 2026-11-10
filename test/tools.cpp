@@ -20,8 +20,6 @@
 #include <cstdlib> // `std::getenv`, `std::system` - where the round trip writes, and the tool it runs
 #include <cstring> // `std::memset` - the foreign slot
 
-#include <unistd.h> // `dup`, `dup2` - the standard descriptors the pipes stand in for
-
 #include <array>        // `std::array` - the footer's fields
 #include <bit>          // `std::bit_cast` - query numbers into keys
 #include <filesystem>   // `std::filesystem::resize_file` - the file standing as a drive
@@ -37,6 +35,10 @@
 #include "arrow_checkpoints.hpp" // `arrow_export`, `arrow_import`, `arrow_matches_write`
 #include "harness.hpp"
 #include "slots.hpp"
+
+#if !USEARCH_OS_WINDOWS_
+#include <unistd.h> // `dup`, `dup2` - the standard descriptors the pipes stand in for
+#endif
 
 namespace unum::usearch::test::abi {
 
@@ -308,26 +310,82 @@ static std::size_t check_slots_skip_foreign(settings_t const& settings) {
     return failures;
 }
 
-/** Points the standard descriptor @p descriptor at a pipe to or from the shell's @p command until
- *  destroyed, which closes the pipe and waits for the command. */
+#if USEARCH_OS_WINDOWS_
+
+/** Points standard input at a pipe a child process fills from @p path, for mode @c r, or standard
+ *  output at one it drains into @p path, for mode @c w, until destroyed, which closes the pipe and
+ *  waits for the child. */
 struct piped_descriptor_t {
-    int descriptor;
-    int saved;
+    DWORD stream;
+    native_file_t saved;
+    native_file_t ours = invalid_native_file_k;
+    PROCESS_INFORMATION child {};
+
+    piped_descriptor_t(char const* mode, std::string const& path)
+        : stream(*mode == 'r' ? STD_INPUT_HANDLE : STD_OUTPUT_HANDLE), saved(::GetStdHandle(stream)) {
+        SECURITY_ATTRIBUTES inherited {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        native_file_t read_end = invalid_native_file_k, write_end = invalid_native_file_k;
+        if (!::CreatePipe(&read_end, &write_end, &inherited, 0)) return;
+        bool const reading = stream == STD_INPUT_HANDLE;
+        ours = reading ? read_end : write_end;
+        native_file_t const theirs = reading ? write_end : read_end;
+        ::SetHandleInformation(ours, HANDLE_FLAG_INHERIT, 0);
+        STARTUPINFOA startup {};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = reading ? nullptr : theirs;
+        startup.hStdOutput = reading ? theirs : ::GetStdHandle(STD_ERROR_HANDLE);
+        startup.hStdError = ::GetStdHandle(STD_ERROR_HANDLE);
+        // `type` copies a file byte for byte, and Windows ships no such copier from standard input.
+        std::string command = reading ? fmt::format("cmd.exe /d /c type \"{}\"", path)
+                                      : fmt::format("powershell.exe -NoProfile -NonInteractive -Command \"$file = " //
+                                                    "[IO.File]::Create('{}'); [Console]::OpenStandardInput()."      //
+                                                    "CopyTo($file); $file.Close()\"",
+                                                    path);
+        if (!::CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &child))
+            child = {};
+        ::CloseHandle(theirs);
+        ::SetStdHandle(stream, ours);
+    }
+    piped_descriptor_t(piped_descriptor_t const&) = delete;
+    piped_descriptor_t& operator=(piped_descriptor_t const&) = delete;
+    ~piped_descriptor_t() noexcept {
+        ::SetStdHandle(stream, saved);
+        if (ours != invalid_native_file_k) ::CloseHandle(ours);
+        if (!child.hProcess) return;
+        ::WaitForSingleObject(child.hProcess, INFINITE);
+        ::CloseHandle(child.hThread);
+        ::CloseHandle(child.hProcess);
+    }
+};
+
+#else
+
+/** Points standard input at a pipe @c cat fills from @p path, for mode @c r, or standard output at
+ *  one @c cat drains into @p path, for mode @c w, until destroyed, which closes the pipe and waits
+ *  for the command. */
+struct piped_descriptor_t {
+    native_file_t descriptor;
+    native_file_t saved;
     std::FILE* pipe;
 
-    piped_descriptor_t(int descriptor, char const* mode, std::string const& command)
-        : descriptor(descriptor), saved(dup(descriptor)), pipe(popen(command.c_str(), mode)) {
+    piped_descriptor_t(char const* mode, std::string const& path)
+        : descriptor(*mode == 'r' ? standard_input_native_file() : standard_output_native_file()),
+          saved(dup(descriptor)), pipe(popen(fmt::format("cat {}'{}'", *mode == 'r' ? "" : "> ", path).c_str(), mode)) {
+        // What the suite printed so far stays out of the pipe.
+        std::fflush(stdout);
         dup2(fileno(pipe), descriptor);
     }
     piped_descriptor_t(piped_descriptor_t const&) = delete;
     piped_descriptor_t& operator=(piped_descriptor_t const&) = delete;
     ~piped_descriptor_t() noexcept {
-        std::fflush(stdout);
         dup2(saved, descriptor);
         close(saved);
         pclose(pipe);
     }
 };
+
+#endif
 
 /** Rows of the columns a foreign producer writes: its own integer IDs, and its embeddings, packed
  *  as Arrow lays out a fixed-size list. */
@@ -385,7 +443,7 @@ static std::size_t expect_arrow_table(arrow_input_t& input, arrow_table_t const&
     if (failures) return failures;
     failures += check(rows.columns == arrow_dimensions_k && rows.scalar == usearch_scalar_f32_k &&
                       std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(f32_t)) == 0);
-    failures += check(std::bit_cast<uuid_t>(keys.data[1]) == uuid_of(static_cast<u64_t>(table.identifiers[1])));
+    failures += check(std::bit_cast<uuid128_t>(keys.data[1]) == uuid_of(static_cast<u64_t>(table.identifiers[1])));
     failures += check(input.next(more).empty() && !more);
     return failures;
 }
@@ -399,7 +457,7 @@ static std::size_t check_arrow_pipes(settings_t const& settings) {
     for (std::string_view const extension : {"arrow", "arrows"}) {
         std::string const path = fmt::format("{}-table.{}", stem, extension);
         failures += check(table.write(path).empty());
-        piped_descriptor_t const piped {STDIN_FILENO, "r", fmt::format("cat '{}'", path)};
+        piped_descriptor_t const piped {"r", path};
         arrow_input_t input;
         failures += check(input.open("-").empty());
         failures += expect_arrow_table(input, table);
@@ -413,7 +471,7 @@ static std::size_t check_arrow_pipes(settings_t const& settings) {
                                                 std::bit_cast<usearch_key_t>(uuid_of(1))};
     std::string const piped_path = fmt::format("{}-piped.arrows", stem);
     {
-        piped_descriptor_t const piped {STDOUT_FILENO, "w", fmt::format("cat > '{}'", piped_path)};
+        piped_descriptor_t const piped {"w", piped_path};
         failures += check(arrow_matches_write("-", queries, found).empty());
     }
     arrow_matches_t read;

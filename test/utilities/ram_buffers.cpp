@@ -135,8 +135,8 @@ std::size_t check_radix_groups(u64_t seed) noexcept {
     splitmix64_t random_generator {seed};
     std::vector<u64_t> words(1000);
     for (u64_t& word : words) word = (random_generator() % 8) | (u64_t {random_generator() % 4} << 32);
-    std::vector<uuid_t> uuids(1000);
-    for (uuid_t& uuid : uuids) uuid.bytes[7] = static_cast<std::byte>(random_generator() % 16);
+    std::vector<uuid128_t> uuids(1000);
+    for (uuid128_t& uuid : uuids) uuid.bytes[7] = static_cast<std::byte>(random_generator() % 16);
     return check_radix_group(words) + check_radix_group(uuids);
 }
 

@@ -13,14 +13,14 @@
  */
 #pragma once
 
-#include <bit> // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
+#include <bit> // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
 
 #include "usearch/dense/vram_index.hpp" // `dense::vram_keyed_lookup`
 
 #include "lib.hpp"
 
 /** Resolves @p key to its value row through the C lookup, one key per call. */
-__device__ inline void const* vram_value_row(value_lookup_t const& lookup, us::utilities::uuid_t key) noexcept {
+__device__ inline void const* vram_value_row(value_lookup_t const& lookup, us::utilities::uuid128_t key) noexcept {
     usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
     void const* row = nullptr;
     lookup.callback(lookup.state, &scored, 1, lookup.scalar, lookup.dimensions, &row);
@@ -28,7 +28,7 @@ __device__ inline void const* vram_value_row(value_lookup_t const& lookup, us::u
 }
 
 /** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
-using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid_t, value_lookup_t>;
+using vram_attend_lookup_t = dense::vram_keyed_lookup<us::utilities::uuid128_t, value_lookup_t>;
 
 /** The ceiling an AMD device pass instantiates: its class's, read off the one NumKong target the
  *  class compiles under. */

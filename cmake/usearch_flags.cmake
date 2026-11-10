@@ -5,6 +5,12 @@
 # rejects the host spellings.
 add_library(usearch_warnings INTERFACE)
 if (MSVC)
+    # The conformance switches MSVC leaves off by default, which every other supported compiler behaves as.
+    target_compile_options(
+        usearch_warnings
+        INTERFACE
+            "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4068;/wd4996;/permissive-;/Zc:preprocessor;/Zc:__cplusplus;/utf-8;/bigobj>"
+    )
     if (USEARCH_WERROR)
         target_compile_options(usearch_warnings INTERFACE /WX)
     endif ()

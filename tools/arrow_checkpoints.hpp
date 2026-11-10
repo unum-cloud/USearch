@@ -40,17 +40,13 @@
  */
 #pragma once
 
-#include <cerrno>  // `errno`, `EINTR`
-#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::remove`
+#include <cstdio>  // `std::remove`
 #include <cstring> // `std::memcpy`
-
-#include <fcntl.h>    // `open`, `O_RDONLY`
-#include <sys/stat.h> // `stat`, `S_ISREG`
-#include <unistd.h>   // `read`, `close`
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_cast` - distances off the wire
 #include <charconv>    // `std::from_chars`
+#include <filesystem>  // `std::filesystem::is_regular_file` - what an input maps
 #include <limits>      // `std::numeric_limits`
 #include <optional>    // `std::optional`
 #include <span>        // `std::span`
@@ -62,7 +58,7 @@
 #include <fmt/format.h>
 
 #include "usearch/arrow.h"                         // `usearch_rows_view_from_arrow`, `usearch_keys_view_from_arrow`
-#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`
+#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `read_native_file`, `write_native_file`
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_catalog`, `safegraphs_write_header`
 
 #include "abi.hpp"       // `copied_matches_t`, `match_offsets`
@@ -314,15 +310,16 @@ struct arrow_batch_t {
  *  pipe reads in order. */
 enum class arrow_framing_t { file_k, stream_k };
 
-/** Writes @p schema and @p batches to @p file, counting the bytes into @p position; false once a
- *  write failed. */
-inline bool arrow_write_messages(std::FILE* file, arrow_framing_t framing, ipc_schema_t const& schema,
+/** Writes @p schema and @p batches to @p file from @p position on, counting the bytes into it;
+ *  false once a write failed. */
+inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ipc_schema_t const& schema,
                                  std::span<ipc_batch_t const> batches, std::size_t& position) {
     static constexpr std::array<byte_t, ipc_alignment_default_k> zeros_k {};
     ipc_options_t const options {};
+    native_file_event_t const event;
     bool written = true;
     auto write = [&](bytes_view_t bytes) {
-        written = written && std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+        written = written && write_native_file(file, event, bytes, position) == static_cast<i64_t>(bytes.size());
         position += bytes.size();
     };
     // Each writer measures on an empty output first, answering the bytes it needs.
@@ -443,11 +440,12 @@ inline std::string arrow_export(std::string_view checkpoint, std::string const& 
         summary.nodes += source.nodes;
     }
 
-    std::FILE* file = std::fopen(arrow_path.c_str(), "wb");
-    if (!file) return fmt::format("cannot create {}", arrow_path);
+    native_file_t const file = open_native_file(arrow_path.c_str(), file_access_t::truncate_read_write_k,
+                                                file_buffering_t::buffered_k);
+    if (file == invalid_native_file_k) return fmt::format("cannot create {}", arrow_path);
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, arrow_framing_t::file_k, schema, views, position);
-    if (std::fclose(file) != 0 || !framed) {
+    if (failed(close_native_file(file)) || !framed) {
         std::remove(arrow_path.c_str());
         return fmt::format("writing {} failed", arrow_path);
     }
@@ -465,13 +463,15 @@ inline std::string arrow_export(std::string_view checkpoint, std::string const& 
 inline std::string arrow_write_batch(std::string_view path, ipc_schema_t const& schema, ipc_batch_t const& batch) {
     bool const piped = path == "-";
     std::string const arrow_path {path};
-    std::FILE* file = piped ? stdout : std::fopen(arrow_path.c_str(), "wb");
-    if (!file) return fmt::format("cannot create {}", path);
+    native_file_t const file = piped ? standard_output_native_file()
+                                     : open_native_file(arrow_path.c_str(), file_access_t::truncate_read_write_k,
+                                                        file_buffering_t::buffered_k);
+    if (file == invalid_native_file_k) return fmt::format("cannot create {}", path);
     arrow_framing_t const framing = piped || path.ends_with(".arrows") ? arrow_framing_t::stream_k
                                                                        : arrow_framing_t::file_k;
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, framing, schema, {&batch, 1}, position);
-    if ((piped ? std::fflush(file) : std::fclose(file)) != 0 || !framed) {
+    if ((!piped && failed(close_native_file(file))) || !framed) {
         if (!piped) std::remove(arrow_path.c_str());
         return fmt::format("writing {} failed", path);
     }
@@ -566,17 +566,18 @@ inline std::string arrow_vectors_write(std::string_view path, std::span<usearch_
 #pragma region Input
 
 /** What names no column of a schema. */
-inline constexpr std::size_t arrow_no_column_k = std::numeric_limits<std::size_t>::max();
+inline constexpr std::size_t arrow_no_column_k = (std::numeric_limits<std::size_t>::max)();
 
 /** Reads standard input to its end into @p bytes, as a checkpoint piped in arrives; false once a
  *  read failed. */
 inline bool read_standard_input(std::vector<byte_t>& bytes) {
+    native_file_event_t const event;
     std::size_t length = 0;
     bytes.resize(std::size_t {1} << 20);
     while (true) {
         if (length == bytes.size()) bytes.resize(bytes.size() * 2);
-        ssize_t const landed = ::read(STDIN_FILENO, bytes.data() + length, bytes.size() - length);
-        if (landed < 0 && errno == EINTR) continue;
+        i64_t const landed = read_native_file(standard_input_native_file(), event, bytes_span_t {bytes}.subspan(length),
+                                              length);
         if (landed < 0) return false;
         if (!landed) break;
         length += static_cast<std::size_t>(landed);
@@ -598,8 +599,10 @@ class arrow_input_t {
     std::string name_;
     mapped_file_t mapping_;
     bytes_view_t remaining_;
-    int descriptor_ = -1;
-    int owned_descriptor_ = -1;
+    native_file_t descriptor_ = invalid_native_file_k;
+    native_file_t owned_descriptor_ = invalid_native_file_k;
+    native_file_event_t event_;
+    u64_t position_ = 0;
     std::array<byte_t, 8> sniffed_ {};
     std::size_t sniffed_size_ = 0;
     std::size_t sniffed_taken_ = 0;
@@ -619,7 +622,7 @@ class arrow_input_t {
 
     /** Fills @p bytes off the input, answering how many landed, fewer only at its end. */
     std::size_t read_(bytes_span_t bytes) noexcept {
-        if (descriptor_ < 0) {
+        if (descriptor_ == invalid_native_file_k) {
             std::size_t const landed = min_of(bytes.size(), remaining_.size());
             if (landed) std::memcpy(bytes.data(), remaining_.data(), landed);
             remaining_ = remaining_.subspan(landed);
@@ -629,10 +632,10 @@ class arrow_input_t {
         for (; sniffed_taken_ != sniffed_size_ && filled != bytes.size(); ++filled)
             bytes[filled] = sniffed_[sniffed_taken_++];
         while (filled != bytes.size()) {
-            ssize_t const landed = ::read(descriptor_, bytes.data() + filled, bytes.size() - filled);
-            if (landed < 0 && errno == EINTR) continue;
+            i64_t const landed = read_native_file(descriptor_, event_, bytes.subspan(filled), position_);
             if (landed <= 0) break;
             filled += static_cast<std::size_t>(landed);
+            position_ += static_cast<u64_t>(landed);
         }
         return filled;
     }
@@ -640,7 +643,7 @@ class arrow_input_t {
     /** The next @p count bytes, viewing the mapping or read into @p storage, fewer only at the
      *  end. */
     bytes_view_t take_(std::size_t count, std::vector<byte_t>& storage) {
-        if (descriptor_ < 0) {
+        if (descriptor_ == invalid_native_file_k) {
             bytes_view_t const taken = remaining_.first(min_of(count, remaining_.size()));
             remaining_ = remaining_.subspan(taken.size());
             return taken;
@@ -689,7 +692,7 @@ class arrow_input_t {
     /** Sniffs the first bytes, then reads the schema that leads every Arrow input. */
     std::string start_() {
         bytes_view_t head = remaining_.first(min_of(sniffed_.size(), remaining_.size()));
-        if (descriptor_ >= 0) {
+        if (descriptor_ != invalid_native_file_k) {
             sniffed_size_ = read_(sniffed_);
             head = bytes_view_t {sniffed_}.first(sniffed_size_);
         }
@@ -726,27 +729,27 @@ class arrow_input_t {
     arrow_input_t(arrow_input_t const&) = delete;
     arrow_input_t& operator=(arrow_input_t const&) = delete;
     ~arrow_input_t() noexcept {
-        if (owned_descriptor_ >= 0) ::close(owned_descriptor_);
+        if (owned_descriptor_ != invalid_native_file_k) [[maybe_unused]]
+            status_t const closed = close_native_file(owned_descriptor_);
     }
 
     /** Opens @p path, standard input for @c -, and reads its schema; answers why it cannot. */
     std::string open(std::string_view path) {
         name_ = path == "-" ? std::string {"standard input"} : std::string {path};
         if (path == "-") {
-            descriptor_ = STDIN_FILENO;
+            descriptor_ = standard_input_native_file();
             return start_();
         }
-        struct stat description;
-        if (::stat(name_.c_str(), &description) != 0) return fmt::format("cannot read {}", name_);
-        if (S_ISREG(description.st_mode)) {
+        std::error_code unknown;
+        if (std::filesystem::is_regular_file(name_, unknown)) {
             auto [mapping, status] = mapped_file_t::read(path);
             if (failed(status)) return fmt::format("cannot read {}: {}", name_, status_to_string(status));
             mapping_ = std::move(mapping);
             remaining_ = mapping_.view();
             return start_();
         }
-        owned_descriptor_ = ::open(name_.c_str(), O_RDONLY | O_CLOEXEC);
-        if (owned_descriptor_ < 0) return fmt::format("cannot read {}", name_);
+        owned_descriptor_ = open_native_file(name_.c_str(), file_access_t::read_only_k, file_buffering_t::buffered_k);
+        if (owned_descriptor_ == invalid_native_file_k) return fmt::format("cannot read {}", name_);
         descriptor_ = owned_descriptor_;
         return start_();
     }
@@ -1124,13 +1127,13 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
 
 /** What @ref arrow_matches_read answers: the key of every query, and what each one found. */
 struct arrow_matches_t {
-    std::vector<uuid_t> queries;
+    std::vector<uuid128_t> queries;
     copied_matches_t matches;
 };
 
 /** Whether @p field holds one key per row, as @ref arrow_matches_write lays them out. */
 inline bool arrow_field_holds_keys(ipc_field_t const& field) noexcept {
-    return field.type == ipc_type_t::fixed_size_binary_k && field.width == sizeof(uuid_t);
+    return field.type == ipc_type_t::fixed_size_binary_k && field.width == sizeof(uuid128_t);
 }
 
 /** Whether @p fields are the columns @ref arrow_matches_write lays out, whoever wrote them. */
@@ -1153,13 +1156,13 @@ inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read
     std::size_t const rows = static_cast<std::size_t>(batch.length);
     for (std::size_t row = 0; row != rows; ++row) {
         read.queries.emplace_back();
-        std::memcpy(read.queries.back().bytes, queries.data() + row * sizeof(uuid_t), sizeof(uuid_t));
+        std::memcpy(read.queries.back().bytes, queries.data() + row * sizeof(uuid128_t), sizeof(uuid128_t));
         std::int64_t const first = ipc_load_little<std::int64_t>(offsets.data() + row * sizeof(std::int64_t));
         std::int64_t const last = ipc_load_little<std::int64_t>(offsets.data() + (row + 1) * sizeof(std::int64_t));
         read.matches.counts.push_back(static_cast<std::size_t>(last - first));
         for (std::size_t match = static_cast<std::size_t>(first); match != static_cast<std::size_t>(last); ++match) {
             read.matches.keys.emplace_back();
-            std::memcpy(read.matches.keys.back().bytes, keys.data() + match * sizeof(uuid_t), sizeof(uuid_t));
+            std::memcpy(read.matches.keys.back().bytes, keys.data() + match * sizeof(uuid128_t), sizeof(uuid128_t));
             std::uint64_t const bits = ipc_load_little<std::uint64_t>(distances.data() + match * sizeof(std::uint64_t));
             read.matches.scores.push_back(std::bit_cast<f64_t>(bits));
         }

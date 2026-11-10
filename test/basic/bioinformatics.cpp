@@ -5,7 +5,7 @@
  *  @brief The bioinformatics unit of the basic-index suite.
  *
  *  ACGT reads under an alignment distance with transition/transversion-weighted substitutions - the
- *  non-transparent, integer-exact, wide-ID, @c utilities::uuid_t-keyed corner, and the only unit
+ *  non-transparent, integer-exact, wide-ID, @c utilities::uuid128_t-keyed corner, and the only unit
  *  whose serialized bytes differ from the in-RAM form.
  *
  *  Reads are drawn from planted reference sequences with a few point mutations & indels
@@ -49,7 +49,7 @@ static u64_t alignment_distance(std::string_view first, std::string_view second,
             u64_t const substituted = previous_row[column - 1] + substitution_cost(first[row - 1], second[column - 1]);
             u64_t const erased = previous_row[column] + gap_cost_k;
             u64_t const inserted = current_row[column - 1] + gap_cost_k;
-            current_row[column] = std::min(substituted, std::min(erased, inserted));
+            current_row[column] = min_of(substituted, min_of(erased, inserted));
         }
         std::swap(previous_row, current_row);
     }
@@ -129,7 +129,7 @@ struct bioinformatics_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct bioinformatics_fixture {
-    using index_t = ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, fu::standard_atomic_ref,
+    using index_t = ram_index<dna_t, us::utilities::uuid128_t, u64_t, u64_t, wait_type_, fu::standard_atomic_ref,
                               counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
@@ -137,8 +137,9 @@ struct bioinformatics_fixture {
     }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid128_t>(
+            std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;
@@ -222,7 +223,7 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
                               substitution_cost(first[0], second[0]);
     u64_t const erased = exhaustive_alignment_distance(first.substr(1), second) + gap_cost_k;
     u64_t const inserted = exhaustive_alignment_distance(first, second.substr(1)) + gap_cost_k;
-    return std::min(substituted, std::min(erased, inserted));
+    return min_of(substituted, min_of(erased, inserted));
 }
 
 /** The independent-oracle audit: sampled read prefixes short enough for the

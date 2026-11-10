@@ -766,7 +766,7 @@ class query_walker {
         shape.latencies = latencies;
         status_t refusal = status_t::success_k;
         auto add = [](std::size_t& into, std::size_t value) noexcept {
-            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         };
         auto add_reads = [&](nvme_reads_t& into, nvme_reads_t const& reads) noexcept {
             add(into.count, reads.count), add(into.bytes, reads.bytes);
@@ -1531,8 +1531,8 @@ expected<nvme_reads_t> nvme_scan_reads(executor_type_& executor,
             arena.allocate(depth * reads_per_task_ * sizeof(io_completion_t), default_alignment_k));
         if (lane.slots && lane.free_slots && lane.completions) lane.run();
         else lane.local = status_t::bad_alloc_k;
-        atomic_ref_template_<std::size_t>(issued.count).add(lane.reads.count, std::memory_order_relaxed);
-        atomic_ref_template_<std::size_t>(issued.bytes).add(lane.reads.bytes, std::memory_order_relaxed);
+        atomic_ref_template_<std::size_t>(issued.count).store_add(lane.reads.count, std::memory_order_relaxed);
+        atomic_ref_template_<std::size_t>(issued.bytes).store_add(lane.reads.bytes, std::memory_order_relaxed);
         keep_first_failure<atomic_ref_template_>(failure, lane.local);
     };
     if (status_t const fanned = executor.for_threads(scan_thread); failed(fanned)) return {issued, fanned};
@@ -1634,7 +1634,7 @@ status_t nvme_find_first(std::span<key_type_ const> keys, std::span<shard_node<n
     status_t const scanned = scan_keys(
         keys, [&](std::size_t, std::size_t position, shard_node<node_id_type_> locator) noexcept {
             atomic_ref_template_<u64_t>(earliest[position])
-                .min(bases[locator.shard] + locator.node, std::memory_order_relaxed);
+                .store_min(bases[locator.shard] + locator.node, std::memory_order_relaxed);
         });
     if (failed(scanned)) return scanned;
     for (std::size_t position = 0; position != keys.size(); ++position) {

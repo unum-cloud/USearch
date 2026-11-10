@@ -44,10 +44,11 @@ namespace unum::usearch::basic {
  *  It keeps @p node_id_type_ and @p key_type_ as free as @c nvme_index does; only the compiled
  *  library narrows them, to the 32-bit IDs its sharded indexes write.
  */
-template <
-    typename codec_type_, typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename distance_type_ = f64_t,
-    typename engine_type_ = default_io_engine<dummy_waiter_t>, typename row_kit_type_ = st::serial_row_kit_t,
-    template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, typename wait_type_ = dummy_waiter_t>
+template <typename codec_type_, typename key_type_ = uuid128_t, typename node_id_type_ = u32_t,
+          typename distance_type_ = f64_t, typename engine_type_ = default_io_engine<dummy_waiter_t>,
+          typename row_kit_type_ = st::serial_row_kit_t,
+          template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
+          typename wait_type_ = dummy_waiter_t>
     requires std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>
 class nvme_indexes {
     template <typename>

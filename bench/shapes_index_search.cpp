@@ -54,7 +54,7 @@ int bench_shapes_index_search(int argc, char const* const* argv) {
                             search.queries.value),
                1;
     std::size_t const query_first = shapes - search.queries.value;
-    std::size_t const base_count = search.max_base_entries.value ? std::min(search.max_base_entries.value, query_first)
+    std::size_t const base_count = search.max_base_entries.value ? min_of(search.max_base_entries.value, query_first)
                                                                  : query_first;
     usearch_tape_view_t const tape = clouds.view();
     fmt::println("- Metric: {} · scalar: {} · {} shapes of {} points", metric_name,

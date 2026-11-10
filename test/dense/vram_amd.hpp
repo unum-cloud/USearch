@@ -40,7 +40,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
     using index_t = vram_amd_index<dtype_, dense_amd_code_object_t, fu::standard_yield_t, dummy_cache_hints_t,
                                    counting_hip_allocator_t, counting_hip_allocator_t, hip_device_allocator_t>;
-    using indexes_t = vram_amd_indexes<uuid_t, dtype_, dense_amd_code_object_t>;
+    using indexes_t = vram_amd_indexes<uuid128_t, dtype_, dense_amd_code_object_t>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
 
     /** The stream the cell's contexts and checkpoints ride, on the device its indexes sit on. */

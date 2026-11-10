@@ -156,7 +156,7 @@ inline void report_search_metrics(settings_t const& settings, std::size_t query_
                                   std::size_t threads, std::size_t index_bytes, telemetry_lane_t const& sums,
                                   std::span<float> latencies_us) {
     auto percentile = [&](double share) {
-        std::size_t const rank = std::min(query_count - 1, std::size_t(share * double(query_count)));
+        std::size_t const rank = min_of(query_count - 1, std::size_t(share * double(query_count)));
         std::nth_element(latencies_us.begin(), latencies_us.begin() + rank, latencies_us.end());
         return latencies_us[rank];
     };
@@ -361,7 +361,7 @@ struct exact_scorer_t {
         if (!weights.empty()) {
             f64_t score = 0;
             for (std::size_t head = 0; head != weights.size(); ++head)
-                score += weights[head] * std::max(dot(head * dimensions), f64_t {});
+                score += weights[head] * max_of(dot(head * dimensions), f64_t {});
             return score;
         }
         f64_t products = 0, query_squares = 0, key_squares = 0, differences = 0;
@@ -416,7 +416,7 @@ std::vector<exact_row_t> exact_best_rows(exact_scorer_t& scorer, nk::matrix_view
     std::vector<exact_row_t> best(vectors.extent(0));
     for (std::size_t row = 0; row != best.size(); ++row)
         best[row] = {scorer(vectors.row(row).as_vector()), static_cast<u32_t>(row)};
-    std::size_t const kept = std::min(top_k, best.size());
+    std::size_t const kept = min_of(top_k, best.size());
     std::partial_sort(best.begin(), best.begin() + kept, best.end(),
                       [](exact_row_t a, exact_row_t b) noexcept { return a.score > b.score; });
     best.resize(kept);
@@ -449,7 +449,7 @@ void judge_hits(settings_t const& settings, bench_indexer_heads<scalar_type_> co
         fmt::println("  self-recall@{}: {:.2f}%", settings.top_k.value, self_at_k);
     }
     else if (!ground_truth.empty()) {
-        std::size_t const judged_depth = std::min(settings.top_k.value, ground_truth.extent(1));
+        std::size_t const judged_depth = min_of(settings.top_k.value, ground_truth.extent(1));
         std::vector<f64_t> scores(settings.top_k.value);
         std::vector<double> discounts(settings.top_k.value), ideal(settings.top_k.value);
         fill_discounts(discounts, ideal);
@@ -499,8 +499,8 @@ void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> 
                   std::size_t query_count) {
     if (!ground_truth.empty() || !heads.engaged())
         return judge_hits(settings, heads, results, ground_truth, vectors, query_vectors, query_count);
-    std::size_t const judged = std::min(settings.oracle_queries.value, query_count);
-    std::size_t const top_k = std::min(settings.top_k.value, vectors.extent(0));
+    std::size_t const judged = min_of(settings.oracle_queries.value, query_count);
+    std::size_t const top_k = min_of(settings.top_k.value, vectors.extent(0));
     std::vector<u64_t> truth(judged * top_k);
     for (std::size_t query = 0; query != judged; ++query) {
         exact_scorer_t scorer = exact_scorer_of(heads, query);

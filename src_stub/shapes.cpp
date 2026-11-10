@@ -34,7 +34,7 @@
  */
 #include <cmath> // `std::sqrt`
 
-#include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
+#include <algorithm> // `std::stable_sort`
 #include <limits>    // `std::numeric_limits`
 #include <memory>    // `std::unique_ptr` - a finished refinement's handle
 #include <optional>  // `std::optional`
@@ -127,10 +127,10 @@ static void nearest_partners(std::span<double const> from, std::span<double cons
     for (std::size_t point = 0; point != from_points; ++point) {
         double nearest = std::numeric_limits<double>::infinity();
         for (std::size_t partner = 0; partner != onto_points; ++partner)
-            nearest = std::min(nearest, point_distance(from.subspan(point * coordinates_k, coordinates_k),
-                                                       onto.subspan(partner * coordinates_k, coordinates_k)));
+            nearest = min_of(nearest, point_distance(from.subspan(point * coordinates_k, coordinates_k),
+                                                     onto.subspan(partner * coordinates_k, coordinates_k)));
         summed += nearest;
-        worst = std::max(worst, nearest);
+        worst = max_of(worst, nearest);
     }
     if (from_points) summed /= static_cast<double>(from_points);
 }
@@ -142,7 +142,7 @@ static double distance(shapes_index_t const& index, std::span<double const> quer
     nearest_partners(query, stored, forward_mean, forward_worst);
     nearest_partners(stored, query, reverse_mean, reverse_worst);
     if (index.options.metric == usearch_shapes_metric_chamfer_k) return (forward_mean + reverse_mean) / 2;
-    return std::max(forward_worst, reverse_worst);
+    return max_of(forward_worst, reverse_worst);
 }
 
 /** Whether the kind is one this build implements. The transport kinds need a solver and
@@ -654,7 +654,7 @@ void usearch_shapes_count(usearch_shapes_count_t* arguments) {
     for (auto position = range.first; position != range.second; ++position, ++entries) {
         std::size_t const points = points_of(index.entries[position->second]);
         total_points += points;
-        largest_points = std::max(largest_points, points);
+        largest_points = max_of(largest_points, points);
     }
     *arguments->key_stats = {entries, total_points, largest_points};
 }
@@ -812,7 +812,7 @@ void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments)
         cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = std::min(refinement.moved, refinement.swept);
+    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
     if (arguments->stats)
         arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
     reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,

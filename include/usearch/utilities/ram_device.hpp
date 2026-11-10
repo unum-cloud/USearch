@@ -11,9 +11,8 @@
  */
 #pragma once
 
-#include <cstdlib> // `std::aligned_alloc`, `std::free` - the heap fallback of a domainless allocator
-
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
+#include <new>         // `std::align_val_t`, `std::nothrow` - the heap fallback of a domainless allocator
 #include <type_traits> // `std::remove_reference_t`, `std::true_type`, `std::is_same_v` - callbacks, moves, hints
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
@@ -77,11 +76,8 @@ struct forkunion_allocator {
      *  aligns like the domains do. */
     value_type_* allocate(std::size_t count) noexcept {
         std::size_t const bytes = aligned_bytes_(count);
-        if (heap_serves_(bytes)) {
-            std::size_t const alignment = bytes < fu::ram_page_size() ? default_alignment_k : fu::ram_page_size();
-            return static_cast<value_type_*>(
-                std::aligned_alloc(alignment, round_up_to_multiple<std::size_t>(bytes, alignment)));
-        }
+        if (heap_serves_(bytes))
+            return static_cast<value_type_*>(::operator new(bytes, heap_alignment_(bytes), std::nothrow));
         if constexpr (places_by_mmap_k) {
             pages_allocator_t pages {static_cast<fu::memory_domain_id_t>(memory_domain)};
             char* memory = nullptr;
@@ -95,7 +91,8 @@ struct forkunion_allocator {
     }
 
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
-        if (heap_serves_(aligned_bytes_(count))) return std::free(pointer);
+        if (heap_serves_(aligned_bytes_(count)))
+            return ::operator delete(pointer, heap_alignment_(aligned_bytes_(count)));
         if constexpr (places_by_mmap_k)
             return pages_allocator_t {static_cast<fu::memory_domain_id_t>(memory_domain)}.deallocate(
                 reinterpret_cast<char*>(pointer), mapped_bytes_(aligned_bytes_(count)));
@@ -124,6 +121,11 @@ struct forkunion_allocator {
      *  a small block taking it costs a whole page and a page-splitting @c munmap to free. */
     bool heap_serves_(std::size_t bytes) const noexcept {
         return !places_on_domains_k || memory_domain == no_memory_domain_k || bytes < fu::ram_page_size();
+    }
+
+    /** Where the heap aligns a block of @p bytes: on a page from a page up, as domains do. */
+    static std::align_val_t heap_alignment_(std::size_t bytes) noexcept {
+        return std::align_val_t {bytes < fu::ram_page_size() ? default_alignment_k : fu::ram_page_size()};
     }
 
     /** The byte count a run of @p count elements is claimed and released with. */

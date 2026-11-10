@@ -2,9 +2,9 @@
  *  @file tools/checkpoints.cpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The verbs over checkpoints of every modality: their metadata, the slots of a raw drive
- *      holding them, verified copies between files and slots, Apache Arrow exports and imports, and
- *      the recall of one search's matches against another's.
+ *  @brief The verbs over checkpoints of every modality: their metadata, verified copies between
+ *      files and slots, Apache Arrow exports and imports, and the recall of one search's
+ *      matches against those of another.
  *
  *  How a drive is cut into slots, mapped and copied onto lives in @c slots.hpp, which the
  *  benchmarks share; deleting a file zeroes its first block. How a checkpoint's columns become
@@ -32,41 +32,6 @@
 #include "world.hpp"             // `world_t`, `parse_verb`
 
 namespace unum::usearch::tools {
-
-int checkpoints_slots(world_t& world, int argc, char const* const* argv) {
-    std::array<std::string_view, 1> positionals;
-    std::size_t given = 0;
-    if (std::optional<int> const exit = parse_verb(world, argc, argv, "usearch slots <drive>", {}, positionals, given))
-        return *exit;
-    if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1 || utilities::names_transport_id(positionals[0])) {
-        fmt::println(stderr, "a drive the kernel's nvme driver holds is required, like /dev/nvme1n1");
-        return EXIT_FAILURE;
-    }
-    std::string location;
-    slot_drive_t drive;
-    std::vector<slot_file_t> files;
-    if (!slot_open_drive(positionals[0], location, drive, files)) return EXIT_FAILURE;
-
-    u64_t const slots = drive.bytes / slot_bytes_k;
-    u64_t live = 0;
-    for (slot_file_t const& file : files) live += file.owner != slot_foreign_k;
-    fmt::println("{}: {} bytes in {} slots of 1 GiB, {} live", location, drive.bytes, slots, live);
-    u64_t next = 0;
-    for (slot_file_t const& file : files) {
-        if (file.first_slot > next)
-            fmt::println("{}@{}GiB: free, {} {}", location, next, file.first_slot - next,
-                         slots_noun(file.first_slot - next));
-        u64_t const covered = slots_covered(file.bytes);
-        if (file.owner == slot_foreign_k) fmt::println("{}@{}GiB: foreign, skipped", location, file.first_slot);
-        else
-            fmt::println("{}@{}GiB: {}, {} bytes over {} {}", location, file.first_slot, file.owner, file.bytes,
-                         covered, slots_noun(covered));
-        next = file.first_slot + covered;
-    }
-    if (next < slots) fmt::println("{}@{}GiB: free, {} {}", location, next, slots - next, slots_noun(slots - next));
-    return EXIT_SUCCESS;
-}
 
 int checkpoints_copy(world_t& world, int argc, char const* const* argv) {
     std::array<std::string_view, 2> positionals;
@@ -309,7 +274,7 @@ int checkpoints_import(world_t& world, int argc, char const* const* argv) {
 
 /** Copies the distances of a query's matches into @p kept, past the one holding the query's own key
  *  at distance zero, which is the query finding itself; true when it dropped that one. */
-static bool recall_keep(uuid_t const& query, std::span<uuid_t const> keys,
+static bool recall_keep(uuid128_t const& query, std::span<uuid128_t const> keys,
                         std::span<usearch_distance_t const> distances, std::vector<usearch_distance_t>& kept) {
     kept.clear();
     bool dropped = false;
@@ -355,7 +320,7 @@ int checkpoints_recall(world_t& world, int argc, char const* const* argv) {
     std::vector<usearch_distance_t> true_distances, run_distances;
     std::vector<double> recalled(depths.size());
     std::size_t own_keys = 0;
-    std::span<uuid_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
+    std::span<uuid128_t const> const truth_keys {truth.matches.keys}, run_keys {run.matches.keys};
     std::span<usearch_distance_t const> const truth_scores {truth.matches.scores}, run_scores {run.matches.scores};
     for (std::size_t query = 0; query != truth.queries.size(); ++query) {
         std::size_t const truth_first = truth_offsets[query], truth_count = truth.matches.counts[query];

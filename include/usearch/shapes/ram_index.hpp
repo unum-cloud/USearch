@@ -145,7 +145,7 @@ struct codec {
  *  @tparam allocator_type_ Places the node records, the neighbor lists and the key map, and,
  *      rebound, every value.
  */
-template <typename kit_type_, typename key_type_ = uuid_t, typename wait_type_ = dummy_waiter_t,
+template <typename kit_type_, typename key_type_ = uuid128_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = fu::standard_atomic_ref,
           typename allocator_type_ = forkunion_allocator_t, typename cache_hints_type_ = dummy_cache_hints_t>
 using ram_index = basic::ram_index<

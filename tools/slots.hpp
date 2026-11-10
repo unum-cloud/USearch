@@ -208,18 +208,6 @@ inline u64_t slot_run_end(std::span<slot_file_t const> files, u64_t slots, u64_t
     return slots;
 }
 
-/** Opens the drive @p address names and maps it, refusing an address that does not parse. */
-inline bool slot_open_drive(std::string_view address, std::string& location, slot_drive_t& drive,
-                            std::vector<slot_file_t>& files) {
-    auto const [parsed, status] = parse_file_address(address);
-    if (failed(status)) {
-        fmt::println(stderr, "{} is no address", address);
-        return false;
-    }
-    location = parsed.location;
-    return slot_open(location, drive) && slot_map(drive, location, files);
-}
-
 /** The address a save may write to at @p address, printing why none: @c - for standard output, a
  *  file or a transport ID as given, and a drive bounded to the free run its slot starts, since
  *  nothing sizes a save before it writes. A drive takes a byte base on a slot boundary, at a slot

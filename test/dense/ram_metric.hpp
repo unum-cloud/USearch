@@ -88,27 +88,27 @@ static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
                                 nk::vector_view<scalar_> second_vector) noexcept {
     if constexpr (kernel_ == nk_kernel_dot_k) {
         auto const [inner_product, status] = nk::dot<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
         return f32_t(1) - static_cast<f32_t>(inner_product);
     }
     else if constexpr (kernel_ == nk_kernel_angular_k) {
         auto const [angular_value, status] = nk::angular<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
         return static_cast<f32_t>(angular_value);
     }
     else if constexpr (kernel_ == nk_kernel_euclidean_k) {
         auto const [euclidean_value, status] = nk::euclidean<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
         return static_cast<f32_t>(euclidean_value);
     }
     else if constexpr (kernel_ == nk_kernel_hamming_k) {
         auto const [hamming_value, status] = nk::hamming<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
         return static_cast<f32_t>(hamming_value);
     }
     else if constexpr (kernel_ == nk_kernel_jaccard_k) {
         auto const [jaccard_value, status] = nk::jaccard<scalar_>(first_vector, second_vector);
-        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+        if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
         return static_cast<f32_t>(jaccard_value);
     }
 }

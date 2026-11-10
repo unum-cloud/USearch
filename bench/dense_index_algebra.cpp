@@ -38,7 +38,6 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite` - the pairs file
 #include <cstring> // `std::memcpy` - the attended rows
 
-#include <algorithm>  // `std::min`, `std::max`
 #include <chrono>     // `std::chrono::steady_clock` - the phase clocks
 #include <filesystem> // `std::filesystem::temp_directory_path` - where an NVMe run saves
 #include <limits>     // `std::numeric_limits` - the oracle's running maximum
@@ -177,7 +176,7 @@ inline value_table_t value_table_of(std::span<f32_t const> values, std::size_t c
     bool const unsigned_kind = stored == usearch_scalar_u8_k || stored == usearch_scalar_u4x2_k;
     if (integral) {
         f32_t largest = 0;
-        for (f32_t const value : values) largest = std::max(largest, std::abs(value));
+        for (f32_t const value : values) largest = max_of(largest, std::abs(value));
         if (unsigned_kind) table.offset = largest;
         f32_t const top = stored == usearch_scalar_i8_k     ? 127.f
                           : stored == usearch_scalar_u8_k   ? 255.f
@@ -251,11 +250,11 @@ struct scored_pair_t {
 inline bool run_multiply(handle<dense_verbs_t>& index, usearch_rows_view_t queries, std::size_t queries_count,
                          algebra_settings_t const& algebra, std::size_t judged,
                          std::vector<std::vector<scored_pair_t>>& pairs) {
-    std::size_t const batch = std::max<std::size_t>(1, std::min(algebra.batch.value, queries_count));
+    std::size_t const batch = max_of<std::size_t>(1, min_of(algebra.batch.value, queries_count));
     std::size_t scored = 0;
     std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
     for (std::size_t first = 0; first < queries_count; first += batch) {
-        std::size_t const count = std::min(batch, queries_count - first);
+        std::size_t const count = min_of(batch, queries_count - first);
         usearch_outcome_t outcome {};
         usearch_matches_tape_view_t products {};
         std::size_t written = 0;
@@ -269,7 +268,7 @@ inline bool run_multiply(handle<dense_verbs_t>& index, usearch_rows_view_t queri
         scored += written;
         if (first >= judged) continue;
         // The judged rows' pairs come back off the arena, wherever it lives.
-        std::size_t const kept = std::min(count, judged - first);
+        std::size_t const kept = min_of(count, judged - first);
         std::vector<std::size_t> offsets(kept + 1);
         if (!download(offsets.data(), products.offsets, offsets.size() * sizeof(std::size_t))) return false;
         std::vector<usearch_key_t> keys(offsets[kept]);
@@ -322,11 +321,11 @@ inline bool run_attend(handle<dense_verbs_t>& index, usearch_rows_view_t keys, s
     table.seed = index.session->seed;
 
     std::vector<f32_t> attended(judged * columns);
-    std::size_t const batch = std::max<std::size_t>(head_count, algebra.batch.value / head_count * head_count);
+    std::size_t const batch = max_of<std::size_t>(head_count, algebra.batch.value / head_count * head_count);
     usearch_traversal_stats_t totals {};
     std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
     for (std::size_t first = 0; first < rows_count; first += batch) {
-        std::size_t const count = std::min(batch, rows_count - first);
+        std::size_t const count = min_of(batch, rows_count - first);
         usearch_outcome_t outcome {};
         usearch_rows_view_t outputs {};
         usearch_traversal_stats_t stats {};
@@ -340,7 +339,7 @@ inline bool run_attend(handle<dense_verbs_t>& index, usearch_rows_view_t keys, s
         usearch_dense_attend(&attend);
         if (report_failure(outcome, "Attending")) return false;
         totals.computed_distances += stats.computed_distances;
-        for (std::size_t row = first; row < std::min(first + count, judged); ++row)
+        for (std::size_t row = first; row < min_of(first + count, judged); ++row)
             std::memcpy(attended.data() + row * columns,
                         static_cast<byte_t const*>(outputs.data) + (row - first) * outputs.stride,
                         columns * sizeof(f32_t));
@@ -376,7 +375,7 @@ inline bool run_attend(handle<dense_verbs_t>& index, usearch_rows_view_t keys, s
             difference += delta * delta, magnitude += exact[row].output[column] * exact[row].output[column];
         }
         double const error = magnitude > 0 ? std::sqrt(difference / magnitude) : std::sqrt(difference);
-        error_mean += error, error_worst = std::max(error_worst, error);
+        error_mean += error, error_worst = max_of(error_worst, error);
     }
     fmt::println("  relative L2 error over {} heads: {:.2e} mean · {:.2e} worst", judged,
                  judged ? error_mean / double(judged) : 0.0, error_worst);
@@ -398,7 +397,7 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
     if (first_row >= base.rows())
         return fmt::println(stderr, "--first-vector {} is past the {} rows", first_row, base.rows()), 1;
     std::size_t const rows = algebra.max_base_vectors.value
-                                 ? std::min(algebra.max_base_vectors.value, base.rows() - first_row)
+                                 ? min_of(algebra.max_base_vectors.value, base.rows() - first_row)
                                  : base.rows() - first_row;
     usearch_rows_view_t const vectors = base.view(first_row, rows);
     if (!vectors.data)
@@ -436,7 +435,7 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
 
     mapped_rows_t query_file;
     usearch_rows_view_t queries = vectors;
-    std::size_t queries_count = std::min<std::size_t>(rows, 1000);
+    std::size_t queries_count = min_of<std::size_t>(rows, 1000);
     if (!algebra.query_vectors.empty()) {
         auto [opened, query_status] = mapped_rows_t::open(algebra.query_vectors);
         if (failed(query_status) || opened.columns() != base.columns())
@@ -446,7 +445,7 @@ int bench_dense_index_algebra(int argc, char const* const* argv) {
         query_file = std::move(opened);
         queries = query_file.view(0, query_file.rows()), queries_count = query_file.rows();
     }
-    std::size_t const judged = std::min(algebra.oracle_queries.value, queries_count);
+    std::size_t const judged = min_of(algebra.oracle_queries.value, queries_count);
 
     std::vector<std::vector<scored_pair_t>> pairs(judged);
     if (!run_multiply(index, queries, queries_count, algebra, judged, pairs)) return 1;

@@ -1074,7 +1074,7 @@ struct chunk_schedule {
      *  which no allocation reaches. */
     static constexpr std::size_t nodes_in(std::size_t chunk) noexcept {
         u64_t const nodes = u64_t {1} << (chunk < doubling_chunks_k ? first_nodes_log2_ + chunk : slab_nodes_log2_);
-        return static_cast<std::size_t>(min_of<u64_t>(nodes, std::numeric_limits<std::size_t>::max()));
+        return static_cast<std::size_t>(min_of<u64_t>(nodes, (std::numeric_limits<std::size_t>::max)()));
     }
 
     /** Chunks that hold the first @p nodes nodes. */

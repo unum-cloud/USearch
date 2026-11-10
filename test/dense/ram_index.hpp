@@ -207,9 +207,9 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     using geometry_t = typename index_t::geometry_t;
+    using scalar_t = typename index_t::scalar_t;
     auto make_index = [](allocation_ledger_t& ledger,
-                         geometry_t geometry = {dense_dimensions_for<typename index_t::scalar_t>(dense_values_k),
-                                                connectivity_16_k}) {
+                         geometry_t geometry = {dense_dimensions_for<scalar_t>(dense_values_k), connectivity_16_k}) {
         return std::unique_ptr<index_t>(
             new (std::nothrow) index_t(kernel_, geometry, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
@@ -261,9 +261,9 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
                               fu::standard_atomic_ref, dummy_cache_hints_t, counting_allocator_t, counting_allocator_t,
                               counting_allocator_t>;
     using geometry_t = typename index_t::geometry_t;
+    using scalar_t = typename index_t::scalar_t;
     auto make_index = [](allocation_ledger_t& ledger,
-                         geometry_t geometry = {dense_dimensions_for<typename index_t::scalar_t>(dense_values_k),
-                                                connectivity_16_k}) {
+                         geometry_t geometry = {dense_dimensions_for<scalar_t>(dense_values_k), connectivity_16_k}) {
         return std::unique_ptr<index_t>(
             new (std::nothrow) index_t(kernel_, geometry, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };

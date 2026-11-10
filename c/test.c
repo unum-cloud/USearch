@@ -35,6 +35,7 @@
 
 /* `dbghelp.h` needs types `windows.h` defines, so a blank line keeps clang-format from sorting it first. */
 #if USEARCH_OS_WINDOWS_
+#include <winsock2.h>
 #include <windows.h>
 
 #include <dbghelp.h> // `CaptureStackBackTrace`, `SymFromAddr`
@@ -4073,19 +4074,35 @@ void drain(usearch_executor_t executor, usearch_mood_t mood) {
     expect(!outcome.message, outcome.message);
 }
 
-/** A RAM index pinned to the serial class opens on any CPU and describes itself under that class
- *  and no GPU class, and an NVMe executor submits through the POSIX class it names. */
+/** A RAM index pinned to the floor class, serial or a monoversioned build's one class, opens on any
+ *  CPU the build runs on and describes itself under that class and no GPU class, and an NVMe
+ *  executor submits through the POSIX class it names. */
 void test_pins_and_fill(void) {
     printf("Test: Pins and Fill\n");
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t index = NULL;
-    usearch_ram_options_t const serial = {.cpu_class = usearch_cpu_class_serial_k};
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = 8});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_describe(
+        &(usearch_dense_describe_t) {.index = index, .outcome = &outcome, .description = &description});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_free(index);
+    // A monoversioned build compiles its one class alone, so the serial floor is not there to pin.
+    usearch_cpu_class_t const pinned_class = description.cpu_class == usearch_cpu_class_monoversioned_k
+                                                 ? usearch_cpu_class_monoversioned_k
+                                                 : usearch_cpu_class_serial_k;
+    index = NULL;
     usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
                                                         .outcome = &outcome,
                                                         .metric = usearch_dense_metric_angular_k,
                                                         .quantization = usearch_scalar_bf16_k,
                                                         .dimensions = 8,
-                                                        .ram = serial});
+                                                        .ram = {.cpu_class = pinned_class}});
     expect(!outcome.message, outcome.message);
     usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index, .outcome = &outcome, .capacity = 2});
     expect(!outcome.message, outcome.message);
@@ -4097,13 +4114,12 @@ void test_pins_and_fill(void) {
                                                     .keys = {keys, sizeof(usearch_key_t)},
                                                     .vectors = {rows, 8 * sizeof(float), 8, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
-    usearch_dense_index_description_t description = {0};
     usearch_dense_describe(
         &(usearch_dense_describe_t) {.index = index, .outcome = &outcome, .description = &description});
     expect(!outcome.message, outcome.message);
     expect(description.shards_count >= 1, "A fresh index spans at least one shard");
     expect_eq(description.size, (size_t)2, "The description counts the rows inserted");
-    expect(description.cpu_class == usearch_cpu_class_serial_k, "A serial pin dispatches the serial class");
+    expect(description.cpu_class == pinned_class, "A pin dispatches the pinned class");
     expect(description.gpu_class == usearch_gpu_class_unknown_k, "A RAM index names no GPU class");
     expect(description.load_path == usearch_load_path_none_k, "A RAM index names no load path");
     usearch_dense_free(index);

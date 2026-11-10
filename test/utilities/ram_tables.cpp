@@ -32,7 +32,7 @@ struct colliding_hash_t {
 };
 
 /** A watermark past every node, so a lookup sees whatever was filed. */
-constexpr u32_t all_visible_k = std::numeric_limits<u32_t>::max();
+constexpr u32_t all_visible_k = (std::numeric_limits<u32_t>::max)();
 
 /** Covers @p node, then files it under @p key - the whole life of a single insert. */
 template <typename multimap_type_>
@@ -257,7 +257,7 @@ std::size_t check_multimap_reader_during_writers() noexcept {
             for (std::size_t node = nodes_schedule_t::nodes_before(lane);
                  node != nodes_schedule_t::nodes_before(lane + 1); ++node)
                 multimap.insert(node % keys_alphabet_k, static_cast<u32_t>(node));
-            fu::standard_atomic_ref<std::size_t>(writers_done).add(1);
+            fu::standard_atomic_ref<std::size_t>(writers_done).store_add(1);
             return;
         }
         std::size_t previous_counts[keys_alphabet_k] = {};
@@ -269,7 +269,7 @@ std::size_t check_multimap_reader_during_writers() noexcept {
                 multimap.find_each(key, all_visible_k, [&](u32_t node) noexcept {
                     ++observed_count;
                     bool const planted = node < nodes && node % keys_alphabet_k == key;
-                    if (!planted) fu::standard_atomic_ref<std::size_t>(torn_observations).add(1);
+                    if (!planted) fu::standard_atomic_ref<std::size_t>(torn_observations).store_add(1);
                 });
                 if (observed_count < previous_counts[key]) ++shrinking_counts;
                 previous_counts[key] = observed_count;
@@ -301,7 +301,7 @@ std::size_t check_multimap_starved_growth() noexcept {
         failures += expect_eq(multimap.capacity(), capacity);
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key, all_visible_k));
 
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect(succeeded(multimap.reserve(capacity + 1)));
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key, all_visible_k));
     }
@@ -339,7 +339,7 @@ std::size_t check_multimap_uncovered_slots() noexcept {
         failures += expect(!multimap.contains(42, all_visible_k));
         failures += expect_eq(multimap.count(42, all_visible_k), 0u);
 
-        ledger.byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+        ledger.byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
         failures += expect(succeeded(multimap.reserve(1)));
         multimap.insert(42, 0);
         failures += expect_eq(multimap.count(42, all_visible_k), 1u);

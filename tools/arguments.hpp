@@ -32,7 +32,6 @@
 #include <cstdio>  // `stderr`
 #include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
 
-#include <algorithm>    // `std::min`
 #include <array>        // `std::array`
 #include <charconv>     // `std::from_chars`
 #include <chrono>       // `std::chrono::milliseconds`
@@ -90,7 +89,7 @@ enum class argument_status_t {
 struct count_t {
     std::size_t value = 0;
     std::size_t minimum = 1;
-    std::size_t maximum = std::numeric_limits<std::size_t>::max();
+    std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
 };
 
 /** Comma-separated counts like @c 16,256,4096, each within @b [minimum,maximum].
@@ -100,7 +99,7 @@ struct counts_t {
     std::array<std::size_t, capacity_k> values {};
     std::size_t size = 0;
     std::size_t minimum = 1;
-    std::size_t maximum = std::numeric_limits<std::size_t>::max();
+    std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
     std::size_t minimum_size = 1;
     std::size_t maximum_size = capacity_k;
 
@@ -197,7 +196,8 @@ struct arguments_t {
 /** Parses comma-separated counts within the bounds @p counts carries, replacing the items it
  *  held. */
 [[nodiscard]] inline argument_status_t parse_counts(std::string_view text, counts_t& counts) noexcept {
-    std::size_t const maximum_size = std::min(counts.maximum_size, counts_t::capacity_k);
+    std::size_t const maximum_size = counts.maximum_size < counts_t::capacity_k ? counts.maximum_size
+                                                                                : counts_t::capacity_k;
     counts.size = 0;
     while (true) {
         std::size_t const comma = text.find(',');
@@ -226,7 +226,7 @@ struct arguments_t {
     std::uint64_t parsed = 0;
     if (argument_status_t const status = parse_integer_(text, parsed); status != argument_status_t::parsed_k)
         return status;
-    if (parsed > (std::numeric_limits<std::size_t>::max() >> shift)) return argument_status_t::out_of_range_k;
+    if (parsed > ((std::numeric_limits<std::size_t>::max)() >> shift)) return argument_status_t::out_of_range_k;
     bytes.value = static_cast<std::size_t>(parsed) << shift;
     return argument_status_t::parsed_k;
 }

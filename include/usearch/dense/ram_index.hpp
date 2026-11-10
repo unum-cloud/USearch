@@ -95,7 +95,7 @@ template <                                                                    //
     typename vectors_allocator_type_ = std::allocator<byte_t>,                //
     typename neighbors_allocator_type_ = std::allocator<byte_t>,              //
     typename traversals_allocator_type_ = std::allocator<byte_t>,             //
-    typename key_type_ = uuid_t,                                              //
+    typename key_type_ = uuid128_t,                                           //
     typename key_hash_type_ = std::hash<key_type_>                            //
     >
 struct ram_index;
@@ -548,8 +548,8 @@ struct attention_rescoring {
                 state.maximum_score = maximum;
             }
             for (std::size_t position = 0; position != folded; ++position)
-                elementwise_kit_type_::exp2(weights[position]);
-            elementwise_kit_type_::exp2(corrections);
+                invoke_under_target_<exp2_loop_, elementwise_kit_type_>(std::span(weights[position]));
+            invoke_under_target_<exp2_loop_, elementwise_kit_type_>(std::span(corrections));
             for (std::size_t head = 0; head != group; ++head) {
                 softmax_state_t& state = carry[first + head];
                 state.partition *= corrections[head];
@@ -1220,7 +1220,7 @@ struct ram_index {
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         // Racing reservations keep the lowest ceiling any of them asked for.
-        atomic_ref<std::size_t>(ceiling_nodes_).min(config.ceiling, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(ceiling_nodes_).store_min(config.ceiling, std::memory_order_relaxed);
 
         while (true) {
             std::size_t const total_nodes = capacity();
@@ -1512,7 +1512,7 @@ struct ram_index {
      *  every negative one.
      */
     void release_capacity(std::size_t count) noexcept {
-        atomic_ref<node_id_t>(last_allocated_id_).sub(static_cast<node_id_t>(count), std::memory_order_release);
+        atomic_ref<node_id_t>(last_allocated_id_).store_sub(static_cast<node_id_t>(count), std::memory_order_release);
         atomic_ref<std::ptrdiff_t> const remaining {remaining_capacity_};
         std::ptrdiff_t const released = static_cast<std::ptrdiff_t>(count);
         std::ptrdiff_t observed = remaining.load(std::memory_order_acquire);
@@ -1608,7 +1608,7 @@ struct ram_index {
          *  at which the levels saturate: every node reached from there on reads 254, the sweep
          *  stops ordering its expansions and counts no parents, so no merge drops a link for a
          *  level it cannot tell. */
-        inline static constexpr u8_t unknown_level_k = std::numeric_limits<u8_t>::max();
+        inline static constexpr u8_t unknown_level_k = (std::numeric_limits<u8_t>::max)();
 
         /** The audit's bitsets, one run of words each in @c bits_, in this order. */
         enum bitset_t : std::size_t {
@@ -1833,8 +1833,8 @@ struct ram_index {
                     if (settled_neighbors > 1) insert_exclusive_(back_linked_twice_k, node_id);
                 }
             }
-            atomic_ref<std::size_t>(expanded_in_level_).add(expanded_count, std::memory_order_relaxed);
-            atomic_ref<std::size_t>(reached_back_in_level_).add(reached_back_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(expanded_in_level_).store_add(expanded_count, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(reached_back_in_level_).store_add(reached_back_count, std::memory_order_relaxed);
             return expanded_count + reached_back_count;
         }
 
@@ -1963,7 +1963,7 @@ struct ram_index {
         void count_parent_(node_id_t node_id) noexcept {
             atomic_ref<u8_t> const parents {parents_[node_id]};
             u8_t observed = parents.load(std::memory_order_relaxed);
-            while (observed != std::numeric_limits<u8_t>::max() &&
+            while (observed != (std::numeric_limits<u8_t>::max)() &&
                    !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1), std::memory_order_relaxed,
                                                   std::memory_order_relaxed)) {}
         }
@@ -2344,7 +2344,7 @@ struct ram_index {
         }
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
-            atomic_ref<std::size_t>(into).add(value, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         }
 
         /** The rows the current phase steps over: a split donor's, every audited one in the
@@ -3502,7 +3502,7 @@ struct ram_index {
                 node_id_t const* const source = index_->neighbors_[location];
                 for (std::size_t word = 0; word != step_slots; ++word) save_neighbor(word, source[word]);
             }
-            atomic_ref<std::size_t>(covered).add(rows.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).store_add(rows.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -3746,7 +3746,7 @@ struct ram_index {
             compact_neighbors(copied, connectivity, range.first, node_id_unknown_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
-            atomic_ref<std::size_t>(covered).add(range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).store_add(range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -3801,7 +3801,7 @@ struct ram_index {
                                                range.size() * connectivity};
             rebase_neighbors(copied, source_range, shift, node_id_unknown_k);
             compact_neighbors(copied, connectivity, range.first, node_id_unknown_k);
-            atomic_ref<std::size_t>(covered).add(range.size(), std::memory_order_release);
+            atomic_ref<std::size_t>(covered).store_add(range.size(), std::memory_order_release);
             return status_t::success_k;
         }
 
@@ -4197,14 +4197,14 @@ struct ram_index {
                 if (chunk_status != status_t::success_k) {
                     // Revert the claim, releasing any partially added chunks along the way.
                     atomic_ref<std::ptrdiff_t>(remaining_capacity_)
-                        .add(count + added_capacity, std::memory_order_release);
+                        .store_add(count + added_capacity, std::memory_order_release);
                     return {node_id_unknown_k, chunk_status};
                 }
                 // The take releases too: a claimer that fit on the counter before the growth but whose rows this
                 // take pushes into the new chunk reaches its pointer through this word alone.
                 node_id_t const first_id =
                     atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acq_rel);
-                atomic_ref<std::ptrdiff_t>(remaining_capacity_).add(added_capacity, std::memory_order_release);
+                atomic_ref<std::ptrdiff_t>(remaining_capacity_).store_add(added_capacity, std::memory_order_release);
                 return {first_id, status_t::success_k};
             }
             // We may be lucky and the space is already reserved for the whole batch.
@@ -5096,7 +5096,7 @@ struct ram_index {
         auto keep = [&](std::size_t, scored_node_t candidate) noexcept {
             [[maybe_unused]] bool const kept = context.results.insert(std::move(candidate), expansion_factor);
             return context.results.size() == expansion_factor ? context.results.top().distance
-                                                              : std::numeric_limits<distance_t>::max();
+                                                              : (std::numeric_limits<distance_t>::max)();
         };
         if (status_t const scanned = scan_quads_(query_vector, admits, keep, context, first_invisible_id);
             failed(scanned))
@@ -5199,7 +5199,7 @@ struct ram_index {
     status_t scan_quads_(vector_view_t query, admits_type_& admits, keep_type_& keep, traversal_context_t& context,
                          node_id_t first_invisible_id) noexcept {
         vector_norms_t const query_norms = norms(query);
-        distance_t threshold = std::numeric_limits<distance_t>::max();
+        distance_t threshold = (std::numeric_limits<distance_t>::max)();
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
              first += chunk_schedule_t::nodes_in(chunk++)) {
             std::size_t const rows_count = min_of(chunk_schedule_t::nodes_in(chunk), first_invisible_id - first);
@@ -5273,7 +5273,7 @@ struct ram_index {
             for (std::size_t column = 0; column != tiles_kit_t::pack_columns_k; ++column) {
                 sumsqs[column] = column < pack_columns ? norms(pack_queries.row(column).as_vector()).sumsq
                                                        : dot_result_t {};
-                thresholds[column] = std::numeric_limits<distance_t>::max();
+                thresholds[column] = (std::numeric_limits<distance_t>::max)();
             }
         }
 

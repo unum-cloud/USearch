@@ -16,7 +16,7 @@
  */
 #include <cstring> // `std::memcmp` - the folded nucleotide costs
 
-#include <algorithm>   // `std::min`, `std::max`, `std::find` - a found key among the batch's
+#include <algorithm>   // `std::find` - a found key among the batch's
 #include <array>       // `std::array` - the window widths, the handmade triples, a round's distances
 #include <limits>      // `std::numeric_limits` - the oracle's open best
 #include <memory>      // `std::unique_ptr`
@@ -57,7 +57,7 @@ constexpr std::string_view overlap_alphabet_k = "ACGT";
 constexpr std::size_t overlap_symbols_k = 12;
 
 using sequence_index_t =
-    sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+    sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
 using sequence_value_t = sequence_index_t::value_t;
 
 /** The symbols of @p text as views of their bytes: every byte under @c sz_levenshtein_bytes_k, and
@@ -129,8 +129,8 @@ static sz_size_t levenshtein_oracle(std::string_view first, std::string_view sec
     for (std::size_t row = 1; row <= rows.size(); ++row) {
         current_row[0] = static_cast<sz_size_t>(row);
         for (std::size_t column = 1; column <= columns.size(); ++column)
-            current_row[column] = std::min({previous_row[column - 1] + (rows[row - 1] != columns[column - 1]),
-                                            previous_row[column] + 1, current_row[column - 1] + 1});
+            current_row[column] = min_of(previous_row[column - 1] + (rows[row - 1] != columns[column - 1]),
+                                         min_of(previous_row[column] + 1, current_row[column - 1] + 1));
         std::swap(previous_row, current_row);
     }
     return previous_row[columns.size()];
@@ -146,7 +146,7 @@ static sz_size_t overlap_oracle(std::string_view query, std::string_view stored)
             hits += query.find(stored.substr(start, width)) != std::string_view::npos;
     }
     if (query_windows == 0) return overlap_resolution_k;
-    u64_t const longer = std::max<u64_t>(query_windows, stored_windows);
+    u64_t const longer = max_of<u64_t>(query_windows, stored_windows);
     return static_cast<sz_size_t>((longer - hits) * static_cast<u64_t>(overlap_resolution_k) / longer);
 }
 
@@ -206,9 +206,9 @@ static sz_size_t needleman_wunsch_oracle(std::string_view first, std::string_vie
     for (std::size_t row = 1; row <= rows.size(); ++row) {
         current_row[0] = row * costs.gap;
         for (std::size_t column = 1; column <= columns.size(); ++column)
-            current_row[column] = std::min(
-                {previous_row[column - 1] + costs.substitutions[rows[row - 1]][columns[column - 1]],
-                 previous_row[column] + costs.gap, current_row[column - 1] + costs.gap});
+            current_row[column] = min_of(
+                previous_row[column - 1] + costs.substitutions[rows[row - 1]][columns[column - 1]],
+                min_of(previous_row[column] + costs.gap, current_row[column - 1] + costs.gap));
         std::swap(previous_row, current_row);
     }
     return previous_row[columns.size()];
@@ -243,7 +243,7 @@ struct levenshtein_fixture {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x5E0E0CE0ull + ordinal); }
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x5E0E0CE0ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return levenshtein_oracle(query, stored, symbol_);
     }
@@ -279,7 +279,7 @@ struct overlap_fixture_t {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0E7E1A90ull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) noexcept {
         return overlap_oracle(query, stored);
     }
@@ -312,7 +312,7 @@ struct needleman_wunsch_fixture_t {
         return metric;
     }
     static codec_t make_codec() noexcept { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) noexcept { return uuid_of(0x0A11C0DEull + ordinal); }
     static sz_size_t oracle(std::string_view query, std::string_view stored) {
         return needleman_wunsch_oracle(query, stored, nucleotide_costs_k);
     }
@@ -509,7 +509,7 @@ std::size_t check_needleman_wunsch_kit(u64_t seed) {
 
 /** The byte Levenshtein fixture over 64-bit node IDs, which a saved neighbors column records. */
 struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
-    using index_t = sequence::ram_index<us::utilities::uuid_t, u64_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using index_t = sequence::ram_index<us::utilities::uuid128_t, u64_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
@@ -522,10 +522,10 @@ struct levenshtein_wide_fixture_t : levenshtein_bytes_fixture_t {
 struct levenshtein_nvme_fixture_t {
     using ram_fixture_t = levenshtein_bytes_fixture_t;
     using wide_fixture_t = levenshtein_wide_fixture_t;
-    using shard_index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using shard_index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                               forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<codec_t, us::utilities::uuid_t, node_id_type_, sz_size_t, engine_type_>;
+    using nvme_t = us::basic::nvme_indexes<codec_t, us::utilities::uuid128_t, node_id_type_, sz_size_t, engine_type_>;
     using scratch_metric_t =
         levenshtein_metric<levenshtein_ladder<sz_levenshtein_bytes_k, sz_cap_any_k>::kit_t, basic_nvme_scratch_t>;
     using query_t = std::string_view;
@@ -569,7 +569,7 @@ struct levenshtein_nvme_fixture_t {
 /** 5000 strings over sharded indexes, as @c test_basic_sharded checks, against the Wagner-Fischer
  *  oracle over every string. */
 std::size_t check_sequence_sharded(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = 5000;
@@ -589,23 +589,23 @@ std::size_t check_sequence_sharded(u64_t seed) {
             sz::status_t const assigned = values.emplace_back(allocator).assign(texts[entry]);
         return values;
     };
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x91A7A100ull + entry);
     auto query_of = [&](std::size_t sample) noexcept { return std::string_view {texts[entries_k + sample]}; };
     auto best_of = [&](std::size_t sample) {
-        sz_size_t best = std::numeric_limits<sz_size_t>::max();
+        sz_size_t best = (std::numeric_limits<sz_size_t>::max)();
         for (std::size_t entry = 0; entry != entries_k; ++entry)
-            best = std::min(best, levenshtein_oracle(query_of(sample), texts[entry], sz_levenshtein_bytes_k));
+            best = min_of(best, levenshtein_oracle(query_of(sample), texts[entry], sz_levenshtein_bytes_k));
         return best;
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid_t const>(keys), make_values, query_of, best_of);
+        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values, query_of, best_of);
 }
 
 /** Generated strings sampled from two shards, as @c test_basic_sharded_sample checks. */
 std::size_t check_sequence_sample(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
@@ -624,17 +624,17 @@ std::size_t check_sequence_sample(u64_t seed) {
             sz::status_t const assigned = values.emplace_back(allocator).assign(text);
         return values;
     };
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x5A3B1E00ull + entry);
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded_sample<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid_t const>(keys), make_values, no_fixed_coordinates_t {});
+        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values, no_fixed_coordinates_t {});
 }
 
 /** 600 strings in a sharded index of two shards split into two sharded indexes of two, as
  *  @c test_basic_sharded_split checks. */
 std::size_t check_sequence_sharded_split(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using value_t = index_t::value_t;
     constexpr std::size_t entries_k = 600;
@@ -647,7 +647,7 @@ std::size_t check_sequence_sharded_split(u64_t seed) {
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0x5917A100ull + entry);
     auto make_values = [&] {
         std::vector<value_t> values;
@@ -658,7 +658,7 @@ std::size_t check_sequence_sharded_split(u64_t seed) {
     };
     levenshtein_bytes_fixture_t::metric_t metric = levenshtein_bytes_fixture_t::make_metric();
     return test_basic_sharded_split<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid_t const>(keys), make_values);
+        seed, metric, std::span<us::utilities::uuid128_t const>(keys), make_values);
 }
 
 /** Searches racing a clear of one shard read only retired entries nothing frees: each answers
@@ -667,7 +667,7 @@ std::size_t check_sequence_sharded_split(u64_t seed) {
  *  clear answers @c contended_k after it. Under a sanitizer, a value freed under a search would
  *  trap. */
 std::size_t check_sequence_sharded_clear_race(u64_t seed) {
-    using index_t = sequence::ram_index<us::utilities::uuid_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
+    using index_t = sequence::ram_index<us::utilities::uuid128_t, u32_t, flaky_waiter_t, fu::standard_atomic_ref,
                                         forkunion_allocator_t>;
     using indexes_t = us::basic::ram_indexes<index_t>;
     using value_t = index_t::value_t;
@@ -684,7 +684,7 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
             texts.emplace_back(std::string_view {value});
     }
     forkunion_allocator_t const allocator {no_memory_domain_k};
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = uuid_of(0xC1EA0000ull + entry);
     keep_diverse_t const selector {basic_connectivity_k};
     std::vector<index_t::traversal_context_t> contexts;
@@ -708,7 +708,7 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
         auto [plan, plan_status] = indexes.plan_insert(entries_k);
         failures += expect_eq(plan_status, status_t::success_k);
         if (failed(plan_status)) return;
-        plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid_t const>(keys), metrics[0],
+        plan.insert(0, std::span<value_t>(values), std::span<us::utilities::uuid128_t const>(keys), metrics[0],
                     contexts[0], selector);
         failures += expect_eq(plan.finish(), status_t::success_k);
     };
@@ -734,7 +734,7 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
                 return;
             }
             std::vector<u32_t> watermarks;
-            std::array<us::utilities::uuid_t, wanted_k> found_keys;
+            std::array<us::utilities::uuid128_t, wanted_k> found_keys;
             std::array<distance_t, wanted_k> found_distances;
             dummy_predicate_t unfiltered;
             for (std::size_t entry = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
@@ -744,12 +744,13 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
                 auto const [found, status] = indexes.search_if(std::string_view {texts[entry]}, watermarks, found_keys,
                                                                found_distances, {}, unfiltered, metrics[thread],
                                                                contexts[thread]);
-                if (entry == thread) fu::standard_atomic_ref<std::size_t>(searched).add(1, std::memory_order_release);
+                if (entry == thread)
+                    fu::standard_atomic_ref<std::size_t>(searched).store_add(1, std::memory_order_release);
                 if (status == status_t::contended_k) continue;
-                if (failed(status)) foreign.add(1);
+                if (failed(status)) foreign.store_add(1);
                 else
                     for (std::size_t match = 0; match != found; ++match)
-                        foreign.add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
+                        foreign.store_add(std::find(keys.begin(), keys.end(), found_keys[match]) == keys.end());
             }
         });
         failures += expect_eq(indexes.size(), std::size_t {0});
@@ -757,9 +758,9 @@ std::size_t check_sequence_sharded_clear_race(u64_t seed) {
         failures += expect_eq(indexes.shards_count(), round + 2);
         auto const live = indexes.live_shards();
         failures += expect_eq(live.bound - live.first, std::size_t {1});
-        std::array<us::utilities::uuid_t, 4> read_keys;
+        std::array<us::utilities::uuid128_t, 4> read_keys;
         failures += expect_eq(
-            cursor.pull(indexes, std::span<us::utilities::uuid_t> {read_keys}, nullptr, nullptr).status,
+            cursor.pull(indexes, std::span<us::utilities::uuid128_t> {read_keys}, nullptr, nullptr).status,
             status_t::contended_k);
     }
     failures += expect_eq(foreign_count, std::size_t {0});

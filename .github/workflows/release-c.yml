@@ -155,7 +155,7 @@ jobs:
         if: matrix.arch == 'arm64'
         run: |
           cmake --preset msvc2026_arm64 -B ./build_release
-          cmake --build ./build_release --config Release
+          cmake --build ./build_release --config Release --target usearch_shared
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
           xcopy /E /I .\c\usearch pkg\usearch

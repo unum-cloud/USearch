@@ -97,7 +97,7 @@ static double shapes_score_band(shapes_tape_t const& tape, double unit_roundoff)
     for (std::size_t shape = 0; shape + 1 < tape.offsets.size(); ++shape) {
         auto const first = tape.coordinates.begin() + tape.offsets[shape] * 3;
         auto const extremes = std::minmax_element(first, tape.coordinates.begin() + tape.offsets[shape + 1] * 3);
-        widest = std::max(widest, static_cast<double>(*extremes.second - *extremes.first));
+        widest = max_of(widest, static_cast<double>(*extremes.second - *extremes.first));
     }
     auto const extremes = std::minmax_element(tape.coordinates.begin(), tape.coordinates.end());
     double const diagonal = std::sqrt(3.0) * (static_cast<double>(*extremes.second) - *extremes.first);

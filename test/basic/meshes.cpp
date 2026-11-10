@@ -43,7 +43,7 @@ static f32_t point_distance(point3_t first, point3_t second) noexcept {
     std::array<f32_t, 3> const first_coordinates {first.x, first.y, first.z};
     std::array<f32_t, 3> const second_coordinates {second.x, second.y, second.z};
     auto const [distance, status] = nk::euclidean<nk::f32_t>(first_coordinates, second_coordinates);
-    if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
+    if (nk::failed(status)) return (std::numeric_limits<f32_t>::max)();
     return float(distance);
 }
 
@@ -63,7 +63,7 @@ static void refresh_spectrum(mesh_t& mesh) {
 static f64_t spectra_distance(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
     if (first.empty()) return 0.0;
     auto const [gap, status] = nk::euclidean<nk::f32_t>(first, second);
-    if (nk::failed(status)) return std::numeric_limits<f64_t>::max();
+    if (nk::failed(status)) return (std::numeric_limits<f64_t>::max)();
     return static_cast<f64_t>(float(gap)) / std::sqrt(static_cast<f64_t>(first.size()));
 }
 
@@ -164,7 +164,7 @@ struct meshes_handmade_t {
 
 template <typename wait_type_ = fu::standard_yield_t>
 struct meshes_fixture {
-    using index_t = ram_index<mesh_t, us::utilities::uuid_t, u64_t, f64_t, wait_type_, fu::standard_atomic_ref,
+    using index_t = ram_index<mesh_t, us::utilities::uuid128_t, u64_t, f64_t, wait_type_, fu::standard_atomic_ref,
                               counting_allocator_t>;
 
     static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
@@ -172,8 +172,8 @@ struct meshes_fixture {
     }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid128_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);

@@ -280,7 +280,7 @@ struct safegraphs_header_t {
  *  checkpoint written where pointers are wider may name an extent past @c size_t, and
  *  truncating it would pass every later check carrying a plausible wrong number. */
 inline bool safegraphs_addressable_(u64_t value, std::size_t& extent) noexcept {
-    if (value > std::numeric_limits<std::size_t>::max()) return false;
+    if (value > (std::numeric_limits<std::size_t>::max)()) return false;
     extent = static_cast<std::size_t>(value);
     return true;
 }

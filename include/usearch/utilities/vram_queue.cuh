@@ -79,7 +79,7 @@ __device__ __forceinline__ void vram_for_each_link(node_id_type_ const* neighbor
     node_id_type_ const* const slots = vram_row(neighbors, node, connectivity);
     for (u32_t slot = lane; slot < connectivity; slot += warp_type_::width_k)
         if (node_id_type_ const target = slots[slot];
-            target != std::numeric_limits<node_id_type_>::max() && target != node && target < nodes_count)
+            target != (std::numeric_limits<node_id_type_>::max)() && target != node && target < nodes_count)
             callback(target);
 }
 
@@ -760,7 +760,7 @@ struct vram_visited_set {
     /** Marks @p node_id visited; @c true when it was fresh. A lane with nothing to claim passes the
      *  sentinel, which no walk visits. */
     __device__ __forceinline__ bool test_and_set(node_id_type_ node_id, u32_t lane) noexcept {
-        constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+        constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
         bool const active = node_id != unknown_k;
         // Warp-uniform: an idle call skips the matching votes, a ballot per distinct value on HIP.
         if (!warp_t::any(active)) return false;
@@ -859,7 +859,7 @@ struct vram_neighbors_ref {
      *  receives the sentinel back did @b not acquire. @return The displaced first-neighbor value,
      *  or the sentinel. */
     __device__ __forceinline__ node_id_type_ lock_if_free() const noexcept {
-        return warp_t::exchange_acquire(row_[0], std::numeric_limits<node_id_type_>::max());
+        return warp_t::exchange_acquire(row_[0], (std::numeric_limits<node_id_type_>::max)());
     }
 
     /** Release-stores @p first_value into slot 0 - unlocking and simultaneously (re)publishing the
@@ -969,7 +969,7 @@ __device__ __forceinline__ walk_demand_t vram_expand_round( //
     using warp_t = warp_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
     using row_t = vram_neighbors_ref<warp_t, node_id_type_>;
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     constexpr u32_t window_k = vram_max_gathers_in_flight_k;
     u32_t const connectivity = storage.connectivity;
 

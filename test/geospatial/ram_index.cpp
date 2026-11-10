@@ -64,7 +64,7 @@ struct positions_handmade_t {
 
 struct positions_fixture_t {
     using index_t =
-        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
     using metric_t = chord_metric_t;
@@ -74,8 +74,8 @@ struct positions_fixture_t {
     }
     static metric_t make_metric() { return make_chord_metric(); }
     static earth_observation_codec_t make_codec() { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid_t>(
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid128_t>(
             std::array<u64_t, 2> {mix_bits(ordinal ^ 0x6E0ull), 0x6E05ull ^ ordinal});
     }
     static nk_u64_t oracle(earth_observation_t const& query, earth_observation_t const& stored) noexcept {
@@ -180,7 +180,7 @@ static std::size_t check_positions_frame() {
 /** Brute-force cone winners around @p base over every other node, ascending by chord. */
 static std::array<std::size_t, surface_keep_octants_t::cones_k> //
 brute_force_cone_winners(std::vector<earth_observation_t> const& values, std::size_t base) {
-    constexpr std::size_t missing_k = std::numeric_limits<std::size_t>::max();
+    constexpr std::size_t missing_k = (std::numeric_limits<std::size_t>::max)();
     tangent_frame_t const frame = tangent_frame(values[base].position);
     std::array<std::size_t, surface_keep_octants_t::cones_k> winners;
     winners.fill(missing_k);
@@ -236,10 +236,10 @@ static std::size_t check_positions_selector(u64_t seed) {
             auto const winners = brute_force_cone_winners(stored, base);
             std::size_t winners_count = 0;
             for (std::size_t cone = 0; cone != winners.size(); ++cone)
-                winners_count += winners[cone] != std::numeric_limits<std::size_t>::max();
+                winners_count += winners[cone] != (std::numeric_limits<std::size_t>::max)();
             failures += expect_eq(context.selected_neighbors.size(), selector.connectivity);
             for (std::size_t cone = 0; cone != winners.size(); ++cone) {
-                if (winners[cone] == std::numeric_limits<std::size_t>::max()) continue;
+                if (winners[cone] == (std::numeric_limits<std::size_t>::max)()) continue;
                 bool kept = false;
                 for (std::size_t slot = 0; slot != context.selected_neighbors.size() && !kept; ++slot)
                     kept = context.selected_neighbors[slot].node_id == assigned_ids[winners[cone]];
@@ -451,9 +451,9 @@ static std::size_t check_observations_admits() {
 struct positions_nvme_fixture_t {
     using ram_fixture_t = positions_fixture_t;
     using shard_index_t =
-        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, node_id_type_, nk_u64_t,
+    using nvme_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid128_t, node_id_type_, nk_u64_t,
                                            engine_type_>;
     using scratch_metric_t = chord_metric<i32_serial_geospatial_kit_t, basic_nvme_scratch_t>;
     using query_t = earth_observation_t;
@@ -499,10 +499,10 @@ struct positions_nvme_fixture_t {
  *  own position. */
 static std::size_t check_positions_sample(u64_t seed) {
     using index_t =
-        geospatial::ram_index<us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+        geospatial::ram_index<us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     allocation_ledger_t ledger;
-    std::vector<us::utilities::uuid_t> keys(entries_k);
+    std::vector<us::utilities::uuid128_t> keys(entries_k);
     for (std::size_t entry = 0; entry != entries_k; ++entry) keys[entry] = positions_fixture_t::make_key(entry);
     auto make_values = [&] {
         return positions_fixture_t::make_values(entries_k, stream_key(seed, "plural_sample"),
@@ -510,7 +510,7 @@ static std::size_t check_positions_sample(u64_t seed) {
     };
     chord_metric_t metric = make_chord_metric();
     return test_basic_sharded_sample<us::basic::ram_indexes<index_t>>(
-        seed, metric, std::span<us::utilities::uuid_t const> {keys}, make_values,
+        seed, metric, std::span<us::utilities::uuid128_t const> {keys}, make_values,
         positions_nvme_fixture_t::coordinates_t {});
 }
 
@@ -519,7 +519,7 @@ static std::size_t check_positions_sample(u64_t seed) {
 static std::size_t check_positions_nvme_within(u64_t seed) {
     using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
     using metric_t = chord_metric<i32_serial_geospatial_kit_t, scratch_t>;
-    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid_t, u32_t, nk_u64_t,
+    using nvme_indexes_t = us::basic::nvme_indexes<earth_observation_codec_t, us::utilities::uuid128_t, u32_t, nk_u64_t,
                                                    blocking_files_engine<fu::standard_yield_t>>;
     using index_t = positions_fixture_t::index_t;
     using key_t = index_t::key_t;

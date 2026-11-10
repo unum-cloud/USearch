@@ -74,6 +74,12 @@ struct cuda_warp_t {
     /** The lowest lane of a non-empty @p mask. */
     static __device__ __forceinline__ u32_t first(mask_t mask) noexcept { return __ffs(mask) - 1; }
 
+    /** The zero bits above the highest set bit of @p value, 32 for zero. */
+    static __device__ __forceinline__ u32_t leading_zeros(u32_t value) noexcept { return __clz(value); }
+
+    /** The index of the highest set bit of a nonzero @p value. */
+    static __device__ __forceinline__ u32_t highest_bit(u32_t value) noexcept { return 31u - __clz(value); }
+
     /** The lanes strictly below @p lane. */
     static __device__ __forceinline__ mask_t below(u32_t lane) noexcept { return (1u << lane) - 1; }
 

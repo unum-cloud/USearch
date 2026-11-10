@@ -60,7 +60,7 @@ struct shapes_ram_variant {
     using scalar_t = scalar_type_;
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using shard_t = us::shapes::ram_index<kit_t, us::utilities::uuid_t, waiter_of<cpu_class_>,
+    using shard_t = us::shapes::ram_index<kit_t, us::utilities::uuid128_t, waiter_of<cpu_class_>,
                                           atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
                                           cache_hints_t>;
     using index_t = basic::ram_indexes<shard_t>;
@@ -123,7 +123,7 @@ struct shapes_ram_variant {
 
     /** Adds the points of a consumed @p donor, whose nodes this index now holds. */
     void count_absorbed_donor(shapes_ram_variant const& donor) noexcept {
-        atomic_ref<std::size_t>(total_points).add(donor.total_points, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(total_points).store_add(donor.total_points, std::memory_order_relaxed);
     }
 
     /** Counts the points of the part @p receiver now holds, once a split emptied this index. */
@@ -207,7 +207,7 @@ expected<traversal_stats_t> shapes_ram_variant<scalar_type_, cpu_class_>::insert
     expected<traversal_stats_t> const inserted = insert_entries(index, keys, shapes, connectivity, expansion,
                                                                 shapes_metric_factory<metric_t>(geometry.metric), build,
                                                                 ticks, executor);
-    if (inserted) atomic_ref<std::size_t>(total_points).add(elements_in(shapes), std::memory_order_relaxed);
+    if (inserted) atomic_ref<std::size_t>(total_points).store_add(elements_in(shapes), std::memory_order_relaxed);
     return inserted;
 }
 
@@ -325,7 +325,7 @@ struct shapes_nvme_variant {
     using kit_t = typename us::shapes::shapes_ladder<scalar_type_, numkong_capabilities_of(cpu_class_)>::kit_t;
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
-    using index_t = basic::nvme_indexes<codec_t, us::utilities::uuid_t, u32_t, typename kit_t::distance_t,
+    using index_t = basic::nvme_indexes<codec_t, us::utilities::uuid128_t, u32_t, typename kit_t::distance_t,
                                         default_io_engine_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
@@ -454,7 +454,7 @@ struct shapes_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using build_t = shapes_vram_nvidia_build<scalar_type_, gpu_class_>;
     using face_t = typename build_t::face_t;
-    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, build_t>;
+    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, build_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     using scalar_t = scalar_type_;
     using pack_kit_t = typename us::shapes::shapes_ladder<scalar_type_, nk_cap_serial_k>::kit_t;
@@ -514,7 +514,7 @@ struct shapes_vram_nvidia_variant {
 
     /** Adds the points of a consumed @p donor, whose nodes this index now holds. */
     void count_absorbed_donor(shapes_vram_nvidia_variant const& donor) noexcept {
-        fu::standard_atomic_ref<std::size_t>(total_points).add(donor.total_points, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(total_points).store_add(donor.total_points, std::memory_order_relaxed);
     }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
@@ -590,7 +590,7 @@ expected<traversal_stats_t> shapes_vram_nvidia_variant<scalar_type_, gpu_class_>
     expected<traversal_stats_t> const inserted = vram_nvidia_insert(index, keys, packs, geometry.connectivity,
                                                                     config.expansion_factor, ticks, executor);
     if (failed(inserted.status)) return inserted;
-    fu::standard_atomic_ref<std::size_t>(total_points).add(elements_in(shapes), std::memory_order_relaxed);
+    fu::standard_atomic_ref<std::size_t>(total_points).store_add(elements_in(shapes), std::memory_order_relaxed);
     return inserted;
 }
 
@@ -726,7 +726,7 @@ struct variant_bodies<shapes_traits_t> {
         std::size_t points = 0;
         if constexpr (requires { cloud.max_points(); }) points = cloud.max_points();
         else points = cloud.extent(0);
-        fu::standard_atomic_ref<std::size_t>(stats.total_points).add(points, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(stats.total_points).store_add(points, std::memory_order_relaxed);
         raise_to<fu::standard_atomic_ref>(stats.largest_points, points);
     }
 };

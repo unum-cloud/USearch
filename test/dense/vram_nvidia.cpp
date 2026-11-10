@@ -22,7 +22,7 @@ using test::dense::dense_nvidia_fatbin;
 
 template struct vram_nvidia_index<nk_bf16_k, dense_nvidia_fatbin<nk_bf16_k>, fu::standard_yield_t, dummy_cache_hints_t,
                                   counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
-template struct vram_nvidia_indexes<uuid_t, nk_bf16_k, dense_nvidia_fatbin<nk_bf16_k>>;
+template struct vram_nvidia_indexes<uuid128_t, nk_bf16_k, dense_nvidia_fatbin<nk_bf16_k>>;
 
 } // namespace unum::usearch::dense
 

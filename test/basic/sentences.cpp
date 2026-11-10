@@ -34,7 +34,7 @@ static u64_t levenshtein_distance(std::string_view first, std::string_view secon
             u64_t const substituted = previous_row[column - 1] + (first[row - 1] != second[column - 1]);
             u64_t const erased = previous_row[column] + 1;
             u64_t const inserted = current_row[column - 1] + 1;
-            current_row[column] = std::min(substituted, std::min(erased, inserted));
+            current_row[column] = min_of(substituted, min_of(erased, inserted));
         }
         std::swap(previous_row, current_row);
     }
@@ -261,16 +261,16 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
                 context_t context {stream_key(seed, "whole_batch", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert(std::span(values), std::span(keys), gated, {}, context,
                                                            keep_diverse_t {4});
-                if (status != status_t::success_k) thread_failures.add(1);
+                if (status != status_t::success_k) thread_failures.store_add(1);
                 return;
             }
             if (!spin_until([&]() noexcept { return entered.load(std::memory_order_acquire); })) {
-                thread_failures.add(1);
+                thread_failures.store_add(1);
                 released.store(true, std::memory_order_release); // The gate opens even on failure.
                 return;
             }
             if (index.size() != 0 || succeeded(index.key_of(0).status) || index.contains(keys[0]))
-                thread_failures.add(1);
+                thread_failures.store_add(1);
             released.store(true, std::memory_order_release);
         });
         failures += expect_eq(thread_failures_count, 0u);

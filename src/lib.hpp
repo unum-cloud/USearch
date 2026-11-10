@@ -15,7 +15,7 @@
 #include <cstring> // `std::memcpy` - strided keys and coordinates packed into the arena
 
 #include <array>            // `std::array` - the predicate's batch
-#include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
+#include <bit>              // `std::bit_cast` - the C key struct & `us::utilities::uuid128_t` share sixteen bytes
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <memory>           // `std::unique_ptr` - the executor's topology
 #include <mutex>            // `std::lock_guard` over the ticks' lock
@@ -235,8 +235,10 @@ inline bool crossed(expected<value_type_> const& result, usearch_traversal_stats
     return result || propagate_error(result.status, outcome, message);
 }
 
-/** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
-inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
+/** The C key struct and the engine's @c utilities::uuid128_t share sixteen bytes: one bit cast. */
+inline us::utilities::uuid128_t uuid_of(usearch_key_t key) noexcept {
+    return std::bit_cast<us::utilities::uuid128_t>(key);
+}
 
 /** Admits every candidate, for a call that names no predicate. */
 struct no_predicate_t {};
@@ -247,7 +249,7 @@ struct cheap_predicate_t {
     usearch_predicate_t predicate;
 
     template <std::size_t extent_>
-    void operator()(std::span<us::utilities::uuid_t const, extent_> keys,
+    void operator()(std::span<us::utilities::uuid128_t const, extent_> keys,
                     std::span<admission_t, extent_> admissions) const noexcept {
         std::array<usearch_key_t, extent_> c_keys;
         std::array<usearch_admission_t, extent_> c_admissions;
@@ -283,7 +285,7 @@ struct value_lookup_t {
     std::size_t dimensions;
 
     template <typename scalar_type_, std::size_t extent_>
-    void operator()(std::span<us::utilities::uuid_t const, extent_> keys,
+    void operator()(std::span<us::utilities::uuid128_t const, extent_> keys,
                     std::span<nk::vector_view<scalar_type_>, extent_> rows) const noexcept {
         std::array<usearch_key_t, extent_> batch;
         std::array<void const*, extent_> found;
@@ -331,7 +333,7 @@ struct expensive_predicate {
     }
 
     template <std::size_t extent_>
-    void push(std::span<us::utilities::uuid_t const, extent_> asked,
+    void push(std::span<us::utilities::uuid128_t const, extent_> asked,
               std::span<payload_type_ const, extent_> carried) noexcept {
         for (std::size_t lane = 0; lane != extent_; ++lane) {
             keys.push_back_reserved(std::bit_cast<usearch_key_t>(asked[lane]));
@@ -1250,8 +1252,8 @@ outcome_verbs_t outcome_verbs_of() noexcept {
             for (call_claim_t observed; (observed = held.load(std::memory_order_acquire)) == call_claim_t::held_k;)
                 wait_t {}(claim, observed, 0u, fu::wait_capped_t {});
         },
-        [](u32_t* count) noexcept { count_ref_t(*count).add(1, std::memory_order_relaxed); },
-        [](u32_t* count) noexcept { count_ref_t(*count).sub(1, std::memory_order_release); },
+        [](u32_t* count) noexcept { count_ref_t(*count).store_add(1, std::memory_order_relaxed); },
+        [](u32_t* count) noexcept { count_ref_t(*count).store_sub(1, std::memory_order_release); },
         [](u32_t const* count) noexcept {
             count_reader_t const named {*count};
             for (u32_t observed; (observed = named.load(std::memory_order_acquire)) != 0;)
@@ -1802,7 +1804,7 @@ inline usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
                                       : forkunion_executor_t::spawn(topology, threads, forkunion_allowed_of(ceiling));
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     request_tile_state(ceiling);
-    handle.executor = std::move(spawned);
+    handle.executor.emplace<forkunion_executor_t>(std::move(spawned));
     return &handle;
 }
 
@@ -1878,7 +1880,7 @@ inline usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
     request_tile_state(ceiling);
-    handle.executor = std::move(spawned);
+    handle.executor.emplace<nvme_executor_t>(std::move(spawned));
     return &handle;
 }
 
@@ -2214,7 +2216,7 @@ inline expected<usearch_matches_view_t> publish_matches(usearch_arena_handle_t& 
  *  end, and the offset where each entry's run starts, one more than the entries, as the C tape
  *  reads them out. */
 struct links_outputs_t {
-    growing_buffer<us::utilities::uuid_t, thread_allocator_t> keys;
+    growing_buffer<us::utilities::uuid128_t, thread_allocator_t> keys;
     growing_buffer<std::size_t, thread_allocator_t> offsets;
 
     explicit links_outputs_t(growing_arena<forkunion_allocator_t>& memory) noexcept
@@ -2225,7 +2227,7 @@ struct links_outputs_t {
 
     /** The C tape over the gathered links. */
     usearch_keys_tape_view_t tape() const noexcept {
-        static_assert(sizeof(us::utilities::uuid_t) == sizeof(usearch_key_t), "Links land as the walk reads them");
+        static_assert(sizeof(us::utilities::uuid128_t) == sizeof(usearch_key_t), "Links land as the walk reads them");
         return {reinterpret_cast<usearch_key_t const*>(keys.data()), offsets.data()};
     }
 };

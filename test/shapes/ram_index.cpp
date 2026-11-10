@@ -179,8 +179,8 @@ template <typename kit_type_, nk_kernel_kind_t kernel_>
 struct shapes_fixture {
     using kit_t = kit_type_;
     using scalar_t = typename kit_t::scalar_t;
-    using index_t =
-        shapes::ram_index<kit_t, us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, counting_allocator_t>;
+    using index_t = shapes::ram_index<kit_t, us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref,
+                                      counting_allocator_t>;
     using value_t = typename index_t::value_t;
     using allocator_t = typename index_t::allocator_t;
     using distance_t = typename index_t::distance_t;
@@ -195,8 +195,8 @@ struct shapes_fixture {
         return metric;
     }
     static codec<kit_t> make_codec() noexcept { return {}; }
-    static us::utilities::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
+    static us::utilities::uuid128_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid128_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x5A5A5Aull), ordinal});
     }
     static distance_t oracle(value_t const& query, value_t const& stored) noexcept {
         return serial_distance<scalar_t>(kernel_, query[0], stored[0]);
@@ -406,7 +406,7 @@ std::size_t check_shapes_packing(u64_t seed) {
 }
 
 /** The sharded index of Chamfer shards over the heap, and the clouds its cells hold. */
-using chamfer_shard_index_t = shapes::ram_index<chamfer_fixture_t::kit_t, us::utilities::uuid_t, flaky_waiter_t,
+using chamfer_shard_index_t = shapes::ram_index<chamfer_fixture_t::kit_t, us::utilities::uuid128_t, flaky_waiter_t,
                                                 fu::standard_atomic_ref, forkunion_allocator_t>;
 using chamfer_indexes_t = us::basic::ram_indexes<chamfer_shard_index_t>;
 
@@ -417,7 +417,7 @@ struct chamfer_entries_t {
     using value_t = chamfer_shard_index_t::value_t;
 
     std::vector<std::vector<scalar_t>> clouds;
-    std::vector<us::utilities::uuid_t> keys;
+    std::vector<us::utilities::uuid128_t> keys;
 
     chamfer_entries_t(std::size_t count, u64_t seed) : clouds(make_clouds<scalar_t>(count, seed)), keys(count) {
         for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = chamfer_fixture_t::make_key(seed + entry);
@@ -451,13 +451,13 @@ std::size_t check_shapes_sharded(u64_t seed) {
             while (first + staged != entries_k && oracle.push(packs[first + staged]) == metric_staging_t::staged_k)
                 ++staged;
             oracle.drain(std::span {distances}.first(staged), unbounded_radius<distance_t>());
-            best = std::min(best, *std::min_element(distances.begin(), distances.begin() + staged));
+            best = min_of(best, *std::min_element(distances.begin(), distances.begin() + staged));
             first += staged;
         }
         return best;
     };
     return test_basic_sharded<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}.first(entries_k),
+        seed, metric, std::span<us::utilities::uuid128_t const> {entries.keys}.first(entries_k),
         [&] { return entries.values(entries_k); }, query_of, best_of);
 }
 
@@ -467,8 +467,9 @@ std::size_t check_shapes_sharded_split(u64_t seed) {
     constexpr std::size_t entries_k = 600;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_split")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
-    return test_basic_sharded_split<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); });
+    return test_basic_sharded_split<chamfer_indexes_t>(seed, metric,
+                                                       std::span<us::utilities::uuid128_t const> {entries.keys},
+                                                       [&] { return entries.values(entries_k); });
 }
 
 /** Clouds sampled from two shards, as @c test_basic_sharded_sample checks. */
@@ -477,8 +478,8 @@ std::size_t check_shapes_sample(u64_t seed) {
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_sample")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
     return test_basic_sharded_sample<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); },
-        no_fixed_coordinates_t {});
+        seed, metric, std::span<us::utilities::uuid128_t const> {entries.keys},
+        [&] { return entries.values(entries_k); }, no_fixed_coordinates_t {});
 }
 
 /** Clouds walked by a cursor over two shards, as @c test_basic_sharded_cursor checks. */
@@ -486,8 +487,9 @@ std::size_t check_shapes_cursor(u64_t seed) {
     constexpr std::size_t entries_k = basic_recall_samples_k * basic_connectivity_k;
     chamfer_entries_t const entries {entries_k, stream_key(seed, "plural_cursor")};
     chamfer_fixture_t::metric_t metric = chamfer_fixture_t::make_metric();
-    return test_basic_sharded_cursor<chamfer_indexes_t>(
-        seed, metric, std::span<us::utilities::uuid_t const> {entries.keys}, [&] { return entries.values(entries_k); });
+    return test_basic_sharded_cursor<chamfer_indexes_t>(seed, metric,
+                                                        std::span<us::utilities::uuid128_t const> {entries.keys},
+                                                        [&] { return entries.values(entries_k); });
 }
 
 /** Chamfer over storage: every cloud a ragged entry of points the view locates through its
@@ -496,10 +498,10 @@ struct chamfer_nvme_fixture_t {
     using ram_fixture_t = chamfer_fixture_t;
     using kit_t = ram_fixture_t::kit_t;
     using scalar_t = ram_fixture_t::scalar_t;
-    using shard_index_t =
-        shapes::ram_index<kit_t, us::utilities::uuid_t, flaky_waiter_t, fu::standard_atomic_ref, forkunion_allocator_t>;
+    using shard_index_t = shapes::ram_index<kit_t, us::utilities::uuid128_t, flaky_waiter_t, fu::standard_atomic_ref,
+                                            forkunion_allocator_t>;
     template <typename engine_type_, typename node_id_type_ = u32_t>
-    using nvme_t = us::basic::nvme_indexes<codec<kit_t>, us::utilities::uuid_t, node_id_type_,
+    using nvme_t = us::basic::nvme_indexes<codec<kit_t>, us::utilities::uuid128_t, node_id_type_,
                                            ram_fixture_t::distance_t, engine_type_>;
     using scratch_metric_t = shapes_metric<kit_t, basic_nvme_scratch_t>;
     using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<basic_nvme_scratch_t>::rebind_alloc<char>>;

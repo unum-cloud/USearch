@@ -1052,7 +1052,7 @@ void basic_sample(arguments_type_* arguments) noexcept {
     reset_sample(*arguments);
     if (!accepts_sample(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        using key_t = us::utilities::uuid_t;
+        using key_t = us::utilities::uuid128_t;
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);

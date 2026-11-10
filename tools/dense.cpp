@@ -31,7 +31,6 @@
 #include <sys/stat.h> // `fstat`
 #include <unistd.h>   // `pread`, `close`
 
-#include <algorithm>   // `std::min`
 #include <array>       // `std::array`
 #include <limits>      // `std::numeric_limits`
 #include <string>      // `std::string`
@@ -66,7 +65,7 @@ struct dense_settings_t {
 };
 
 /** What @ref dense_source_t::rows holds for an input read to its end, sized by nothing up front. */
-static constexpr std::size_t dense_rows_unknown_k = std::numeric_limits<std::size_t>::max();
+static constexpr std::size_t dense_rows_unknown_k = (std::numeric_limits<std::size_t>::max)();
 
 /** The Arrow input an insert reads, its columns, and the first non-empty batch already read. */
 struct dense_arrow_t {
@@ -238,7 +237,7 @@ static bool dense_session_for_ram(world_t const& world, count_t const& threads, 
 /** Inserts the slice, reading one staging while the index ingests the other. */
 static bool dense_insert_slice(world_t const& world, dense_settings_t const& settings, dense_source_t const& source,
                                handle<dense_verbs_t> const& index) {
-    std::size_t const batch_rows = std::min(settings.checkpoint.batch.value, source.slice_rows);
+    std::size_t const batch_rows = min_of(settings.checkpoint.batch.value, source.slice_rows);
     std::array<dense_staging_t, 2> stagings;
     for (dense_staging_t& staging : stagings) {
         staging.rows.resize(batch_rows * source.row_bytes);
@@ -250,7 +249,7 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
         dense_staging_t& staging = stagings[turn];
         // A zeroed outcome already reads as final, so a staging's first turn waits on nothing.
         if (usearch_outcome_wait(&staging.outcome) != usearch_status_success_k) break;
-        std::size_t const count = std::min(batch_rows, source.slice_rows - offset);
+        std::size_t const count = min_of(batch_rows, source.slice_rows - offset);
         std::uint64_t const row = source.first_row + offset;
         if (!dense_read_at(source.descriptor, staging.rows.data(), count * source.row_bytes,
                            dense_header_bytes_k + row * source.row_bytes)) {
@@ -315,7 +314,7 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
         fmt::println(stderr, "{}{}", rank_label(world), failure);
         return false;
     }
-    std::size_t const batch_rows = std::min(settings.checkpoint.batch.value, count);
+    std::size_t const batch_rows = min_of(settings.checkpoint.batch.value, count);
     for (std::size_t offset = 0; offset < count; offset += batch_rows) {
         std::size_t const position = first_position + offset;
         usearch_outcome_t outcome {};
@@ -323,7 +322,7 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
             .index = index.get(),
             .executor = index.executor(),
             .outcome = &outcome,
-            .count = std::min(batch_rows, count - offset),
+            .count = min_of(batch_rows, count - offset),
             .keys = {keys.data + position, keys.stride},
             .vectors = {static_cast<usearch_byte_t const*>(rows.data) + position * rows.stride, rows.stride,
                         rows.columns, rows.scalar},
@@ -345,7 +344,7 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
     std::uint64_t row = 0;
     for (bool more = true; more && row < end;) {
         std::uint64_t const batch_end = row + arrow.input.rows();
-        std::uint64_t const taken_begin = std::max(row, begin), taken_end = std::min(batch_end, end);
+        std::uint64_t const taken_begin = max_of(row, begin), taken_end = min_of(batch_end, end);
         if (taken_begin < taken_end &&
             !dense_insert_batch(world, settings, arrow, index, static_cast<std::size_t>(taken_begin - row),
                                 static_cast<std::size_t>(taken_end - taken_begin), taken_begin))
@@ -362,7 +361,7 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
                      settings.checkpoint.first_entry.value, settings.checkpoint.entries.value, row, arrow.input.name());
         return false;
     }
-    source.slice_rows = static_cast<std::size_t>(std::min(row, end) - begin);
+    source.slice_rows = static_cast<std::size_t>(min_of(row, end) - begin);
     return true;
 }
 

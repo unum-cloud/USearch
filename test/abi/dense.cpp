@@ -124,7 +124,7 @@ static std::size_t expect_predicate(handle<dense_verbs_t>& index, usearch_rows_v
     if (failures) return failures;
     copied_matches_t const found = copy_matches(matches, dense_queries_k);
     std::size_t outside = 0;
-    for (uuid_t const& key : found.keys)
+    for (uuid128_t const& key : found.keys)
         outside += !std::binary_search(admitted.begin(), admitted.end(), std::bit_cast<usearch_key_t>(key),
                                        key_precedes);
     return check(outside == 0 && !found.keys.empty());
@@ -149,7 +149,7 @@ static std::size_t check_dense_behaviors(sweep_cell_t const& cell, settings_t co
     // A view holds a key table, so its key verbs and hints probe it rather than scan.
     settings_t cell_settings = settings_of(settings, cell);
     if (cell.residency == usearch_residency_nvme_k)
-        cell_settings.nvme_ram.value = std::numeric_limits<std::size_t>::max();
+        cell_settings.nvme_ram.value = (std::numeric_limits<std::size_t>::max)();
     session_t session = open_session(cell_settings, cell.cpu_class);
     if (!session) return 1;
     u64_t const seed = stream_key(settings.seed, name);

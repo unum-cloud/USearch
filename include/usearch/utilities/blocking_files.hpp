@@ -39,15 +39,17 @@
 
 #include "usearch/utilities/types.hpp"
 
-#if USEARCH_OS_WINDOWS_ && !defined(NOMINMAX)
-#define NOMINMAX
+/*  `<winsock2.h>` goes first to keep Winsock 1.1 out, unless a user's earlier `<windows.h>` already
+ *  brought it in. */
+#if USEARCH_OS_WINDOWS_ && !defined(_WINSOCKAPI_)
+#include <winsock2.h>
 #endif
 #if USEARCH_OS_WINDOWS_
-#include <windows.h> // `CreateFileA`, `CreateFileMappingA`, `MapViewOfFile`, `MoveFileExA`
+#include <windows.h> // `CreateFileA`, `CreateFileMappingA`, `MapViewOfFile`, `MoveFileExA`, `GetStdHandle`
 #else
 #include <fcntl.h>    // `open`, `fcntl`, `O_DIRECT`, `F_NOCACHE`, `F_FULLFSYNC`
 #include <sys/stat.h> // `fstat`, `stat`, `S_ISBLK`, `S_ISREG`
-#include <unistd.h>   // `pread`, `pwrite`, `ftruncate`, `fsync`, `fdatasync`, `close`
+#include <unistd.h>   // `pread`, `pwrite`, `read`, `write`, `ftruncate`, `fsync`, `fdatasync`, `close`
 #endif
 #if USEARCH_OS_LINUX_
 #include <sys/ioctl.h> // `ioctl`
@@ -151,7 +153,10 @@ constexpr int open_flags_of_(file_access_t access) noexcept {
 /** Opens @p path under @p access and @p buffering, or answers @c invalid_native_file_k. */
 inline native_file_t open_native_file(char const* path, file_access_t access, file_buffering_t buffering) noexcept {
     DWORD const wanted = access == file_access_t::read_only_k ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE;
-    DWORD const shared = access == file_access_t::read_only_k ? FILE_SHARE_READ : 0;
+    // As on POSIX, others may truncate, rename or delete an open file; only a claimed disk refuses.
+    DWORD const shared = access == file_access_t::exclusive_read_write_k
+                             ? 0
+                             : FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     DWORD const disposition = access == file_access_t::truncate_read_write_k ? CREATE_ALWAYS : OPEN_EXISTING;
     DWORD const unbuffered = buffering == file_buffering_t::unbuffered_k ? FILE_FLAG_NO_BUFFERING : 0;
     // Overlapped handles let every thread read one file at once, and I/O Rings ask for them.
@@ -246,7 +251,7 @@ inline status_t close_native_file(native_file_t file) noexcept {
 }
 
 /** Reads @p destination at @p offset of @p file, waiting on @p event, answering the bytes moved,
- *  fewer only where the file ends, or a negated @c errno. */
+ *  fewer only where the file ends or a pipe holds no more yet, or a negated @c errno. */
 inline i64_t read_native_file(native_file_t file, native_file_event_t const& event, bytes_span_t destination,
                               u64_t offset) noexcept {
     if (!event.handle()) return -EIO;
@@ -261,11 +266,14 @@ inline i64_t read_native_file(native_file_t file, native_file_event_t const& eve
         if ((!::ReadFile(file, destination.data() + moved, asked, nullptr, &overlapped) &&
              ::GetLastError() != ERROR_IO_PENDING) ||
             !::GetOverlappedResult(file, &overlapped, &transferred, TRUE)) {
-            if (::GetLastError() == ERROR_HANDLE_EOF) break;
+            DWORD const error = ::GetLastError();
+            // A pipe whose writer closed ends like a file.
+            if (error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) break;
             return -EIO;
         }
-        if (!transferred) break;
         moved += transferred;
+        // A file reads short only at its end, where an unbuffered one refuses the unaligned retry.
+        if (transferred != asked) break;
     }
     return static_cast<i64_t>(moved);
 }
@@ -300,6 +308,12 @@ inline expected<u64_t> native_file_capacity(native_file_t file) noexcept {
     return {static_cast<u64_t>(size.QuadPart), status_t::success_k};
 }
 
+/** The process's standard input, which a pipe or a console reads in order, ignoring offsets. */
+inline native_file_t standard_input_native_file() noexcept { return ::GetStdHandle(STD_INPUT_HANDLE); }
+
+/** The process's standard output, which a pipe or a console writes in order, ignoring offsets. */
+inline native_file_t standard_output_native_file() noexcept { return ::GetStdHandle(STD_OUTPUT_HANDLE); }
+
 /** Whether @p path names a regular file or nothing at all, rather than a directory or a device. */
 inline bool names_regular_file_or_nothing_(char const* path) noexcept {
     DWORD const attributes = ::GetFileAttributesA(path);
@@ -320,8 +334,9 @@ inline i64_t read_native_file(native_file_t file, native_file_event_t const&, by
     std::size_t moved = 0;
     while (moved != destination.size()) {
         std::size_t const asked = min_of(destination.size() - moved, native_transfer_bytes_k);
-        ssize_t const transferred = ::pread(file, destination.data() + moved, asked,
-                                            static_cast<off_t>(offset + moved));
+        ssize_t transferred = ::pread(file, destination.data() + moved, asked, static_cast<off_t>(offset + moved));
+        // A pipe or a terminal has no offsets, and reads in order.
+        if (transferred < 0 && errno == ESPIPE) transferred = ::read(file, destination.data() + moved, asked);
         if (transferred < 0 && errno == EINTR) continue;
         if (transferred < 0) return -static_cast<i64_t>(errno);
         if (transferred == 0) break;
@@ -337,7 +352,9 @@ inline i64_t write_native_file(native_file_t file, native_file_event_t const&, b
     std::size_t moved = 0;
     while (moved != source.size()) {
         std::size_t const asked = min_of(source.size() - moved, native_transfer_bytes_k);
-        ssize_t const transferred = ::pwrite(file, source.data() + moved, asked, static_cast<off_t>(offset + moved));
+        ssize_t transferred = ::pwrite(file, source.data() + moved, asked, static_cast<off_t>(offset + moved));
+        // A pipe or a terminal has no offsets, and writes in order.
+        if (transferred < 0 && errno == ESPIPE) transferred = ::write(file, source.data() + moved, asked);
         if (transferred < 0 && errno == EINTR) continue;
         if (transferred < 0) return -static_cast<i64_t>(errno);
         if (transferred == 0) return -EIO;
@@ -353,6 +370,12 @@ inline expected<u64_t> native_file_capacity(native_file_t file) noexcept {
     if (S_ISBLK(description.st_mode)) return {block_device_bytes_(file), status_t::success_k};
     return {static_cast<u64_t>(description.st_size), status_t::success_k};
 }
+
+/** The process's standard input, which a pipe or a terminal reads in order, ignoring offsets. */
+inline native_file_t standard_input_native_file() noexcept { return STDIN_FILENO; }
+
+/** The process's standard output, which a pipe or a terminal writes in order, ignoring offsets. */
+inline native_file_t standard_output_native_file() noexcept { return STDOUT_FILENO; }
 
 /** Whether @p path names a regular file or nothing at all, rather than a directory or a device. */
 inline bool names_regular_file_or_nothing_(char const* path) noexcept {

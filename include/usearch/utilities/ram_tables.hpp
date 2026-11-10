@@ -385,7 +385,7 @@ class chunked_multimap {
     /** Slots the columns hold - every chunk of the doubling phase, past any table a machine holds,
      *  capped at what @c std::size_t addresses. */
     inline static constexpr std::size_t max_slots_k = static_cast<std::size_t>(
-        min_of<u64_t>(slots_schedule_t::doubling_nodes_k, std::numeric_limits<std::size_t>::max()));
+        min_of<u64_t>(slots_schedule_t::doubling_nodes_k, (std::numeric_limits<std::size_t>::max)()));
     inline static constexpr std::size_t max_chunks_k = slots_schedule_t::chunks_for(max_slots_k);
 
     /** Whether any node below @p visible filed under @p key satisfies @p accepts, stopping at the

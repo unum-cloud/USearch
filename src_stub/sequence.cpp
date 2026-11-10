@@ -31,7 +31,7 @@
  *  walks its graph, placing its draws as the library does.
  */
 
-#include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
+#include <algorithm> // `std::stable_sort`
 #include <limits>    // `std::numeric_limits`
 #include <memory>    // `std::unique_ptr` - a finished refinement's handle
 #include <optional>  // `std::optional`
@@ -152,7 +152,7 @@ static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> s
         for (std::size_t column = 0; column != second.size(); ++column) {
             std::size_t const substitution = diagonal + (first[above] == second[column] ? 0 : 1);
             diagonal = row[column + 1];
-            row[column + 1] = std::min(substitution, std::min(row[column], row[column + 1]) + 1);
+            row[column + 1] = min_of(substitution, min_of(row[column], row[column + 1]) + 1);
         }
     }
     return static_cast<double>(row[second.size()]);
@@ -178,7 +178,7 @@ static double global_alignment(bytes_view_t first, bytes_view_t second, sequence
             double const cost = (score(a, a) + score(b, b)) / 2 - score(a, b);
             double const aligned = diagonal + cost;
             diagonal = row[column + 1];
-            row[column + 1] = std::min(aligned, std::min(row[column], row[column + 1]) + gap);
+            row[column + 1] = min_of(aligned, min_of(row[column], row[column + 1]) + gap);
         }
     }
     return row[second.size()];
@@ -211,7 +211,7 @@ static double window_overlap(bytes_view_t query, bytes_view_t stored, std::span<
         query_count += query_windows.size();
         stored_count += windows_in(stored_text.size(), width);
     }
-    std::size_t const longer = std::max(query_count, stored_count);
+    std::size_t const longer = max_of(query_count, stored_count);
     return longer ? static_cast<double>(longer - hits) / static_cast<double>(longer) : 1.0;
 }
 
@@ -791,7 +791,7 @@ void usearch_sequence_count(usearch_sequence_count_t* arguments) {
     for (auto position = range.first; position != range.second; ++position, ++entries) {
         std::size_t const bytes = index.entries[position->second].payload.size();
         total_bytes += bytes;
-        largest_bytes = std::max(largest_bytes, bytes);
+        largest_bytes = max_of(largest_bytes, bytes);
     }
     *arguments->key_stats = {entries, total_bytes, largest_bytes};
 }
@@ -949,7 +949,7 @@ void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* argume
         cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
     // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
     if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = std::min(refinement.moved, refinement.swept);
+    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
     if (arguments->stats)
         arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
     reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,

@@ -142,11 +142,11 @@ static_assert(value_codec<embedding_codec_t, embedding_t>);
 static_assert(interchange_value_codec<embedding_codec_t>);
 
 /** A UUID-keyed RAM index over the embeddings, the target every narrower key column widens into. */
-using widened_index_t = ram_index<embedding_t, us::utilities::uuid_t, u32_t, f32_t, dummy_waiter_t,
+using widened_index_t = ram_index<embedding_t, us::utilities::uuid128_t, u32_t, f32_t, dummy_waiter_t,
                                   fu::standard_atomic_ref, counting_allocator_t>;
 
 /** A UUID-keyed view of the embeddings on storage. */
-using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, us::utilities::uuid_t, u32_t, f32_t,
+using widened_view_t = us::basic::nvme_indexes<embedding_codec_t, us::utilities::uuid128_t, u32_t, f32_t,
                                                blocking_files_engine<fu::standard_yield_t>>;
 
 /**
@@ -168,17 +168,17 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
                   static_cast<unsigned>(stream_key(seed, label) ^ reinterpret_cast<std::uintptr_t>(&ledger)));
     std::vector<embedding_t> values = fixture_type_::make_values(nodes_k, stream_key(seed, label),
                                                                  counting_allocator_t {ledger});
-    std::vector<us::utilities::uuid_t> expected_keys(nodes_k * wanted_k);
+    std::vector<us::utilities::uuid128_t> expected_keys(nodes_k * wanted_k);
     std::vector<f32_t> expected_distances(nodes_k * wanted_k);
     serial_executor_t serial;
     // A query ranks alike when its distances agree within noise and every key nearer than the
     // query's last distance is one the saved index ranked there too: ties at the cut may swap keys.
     error_stats_t distance_errors;
-    auto ranked_alike = [&](std::size_t query, std::span<us::utilities::uuid_t const> keys,
+    auto ranked_alike = [&](std::size_t query, std::span<us::utilities::uuid128_t const> keys,
                             std::span<f32_t const> distances) {
         std::size_t mismatches = 0;
-        std::span<us::utilities::uuid_t const> const wanted_keys =
-            std::span<us::utilities::uuid_t const> {expected_keys}.subspan(query * wanted_k, wanted_k);
+        std::span<us::utilities::uuid128_t const> const wanted_keys =
+            std::span<us::utilities::uuid128_t const> {expected_keys}.subspan(query * wanted_k, wanted_k);
         f32_t const last = expected_distances[query * wanted_k + wanted_k - 1];
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             distance_errors.add(distances[rank], expected_distances[query * wanted_k + rank]);
@@ -225,7 +225,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
                                   status_t::success_k);
             failures += expect(context.results.size() >= wanted_k);
             if (context.results.size() < wanted_k) continue;
-            std::array<us::utilities::uuid_t, wanted_k> keys;
+            std::array<us::utilities::uuid128_t, wanted_k> keys;
             std::array<f32_t, wanted_k> distances;
             for (std::size_t rank = 0; rank != wanted_k; ++rank)
                 keys[rank] = widened.key_of(context.results[rank].node_id).value,
@@ -247,7 +247,7 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         failures += expect_eq(viewed.size(), nodes_k);
         std::vector<std::size_t> entries(expected_keys.size());
         failures += expect_eq(
-            viewed.count(std::span<us::utilities::uuid_t const> {expected_keys}, std::span {entries}, executor),
+            viewed.count(std::span<us::utilities::uuid128_t const> {expected_keys}, std::span {entries}, executor),
             status_t::success_k);
         for (std::size_t const counted : entries) failures += expect_eq(counted, 1u);
         auto make_metric = [](auto const&, std::size_t) noexcept {
@@ -258,17 +258,17 @@ static std::size_t expect_keys_widen(u64_t seed, std::string_view label) {
         };
         widened_view_t::search_config_t search_config;
         search_config.expansion_factor = nodes_k;
-        std::vector<us::utilities::uuid_t> keys(nodes_k * wanted_k);
+        std::vector<us::utilities::uuid128_t> keys(nodes_k * wanted_k);
         std::vector<f32_t> distances(nodes_k * wanted_k);
         std::vector<std::size_t> counts(nodes_k);
         auto const [found, search_status] = viewed.search(
-            nodes_k, make_metric, query_of, std::span<us::utilities::uuid_t> {keys}, std::span<f32_t> {distances},
+            nodes_k, make_metric, query_of, std::span<us::utilities::uuid128_t> {keys}, std::span<f32_t> {distances},
             std::span<std::size_t> {counts}, search_config, executor);
         failures += expect_eq(search_status, status_t::success_k);
         for (std::size_t query = 0; query != nodes_k; ++query)
-            failures += ranked_alike(query,
-                                     std::span<us::utilities::uuid_t const> {keys}.subspan(query * wanted_k, wanted_k),
-                                     std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
+            failures += ranked_alike(
+                query, std::span<us::utilities::uuid128_t const> {keys}.subspan(query * wanted_k, wanted_k),
+                std::span<f32_t const> {distances}.subspan(query * wanted_k, wanted_k));
     }
     fu_topology_delete(topology);
     std::remove(path);

@@ -1309,7 +1309,7 @@ struct [[nodiscard]] nvme_compact_plan {
             }
             node_id_t* const row_neighbors = neighbors + row * connectivity_();
             std::size_t const row_cut = source.kept.empty() ? 0 : rewire_(source, first + row, row_neighbors);
-            if (row_cut) atomic_ref<std::size_t>(cut).add(row_cut, std::memory_order_relaxed);
+            if (row_cut) atomic_ref<std::size_t>(cut).store_add(row_cut, std::memory_order_relaxed);
         });
         if (failed(prepared)) return prepared;
         result_.compaction.cut_edges += cut;

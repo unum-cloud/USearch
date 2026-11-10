@@ -1427,7 +1427,7 @@ template <                                                                      
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
     typename traversals_allocator_type_ = cuda_arena_allocator_t,               //
-    typename key_type_ = uuid_t,                                                //
+    typename key_type_ = uuid128_t,                                             //
     typename key_hash_type_ = std::hash<key_type_>                              //
     >
 struct vram_nvidia_index {

@@ -2217,7 +2217,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
     u32_t const windows = divide_round_up(storage.geometry.row_fragments, window_fragments);
     // Every copy writes on a 128-byte boundary, as tensor copies require.
     u32_t const quad_bytes = round_up_to_multiple(4 * window_bytes, 128u);
-    u32_t const lanes_per_quad = min_of(1u << (32 - __clz(window_fragments - 1)), width_k);
+    u32_t const lanes_per_quad = min_of(1u << (32 - cuda_warp_t::leading_zeros(window_fragments - 1)), width_k);
     u32_t const quads_per_unit = min_of(width_k / lanes_per_quad,
                                         static_cast<u32_t>(sizeof(gather.stages[0])) / quad_bytes);
     u32_t const quads = divide_round_up(gathered_count, 4u);

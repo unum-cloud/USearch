@@ -63,7 +63,7 @@ inline bool known_layout(usearch_tape_layout_t layout) noexcept {
 template <typename offset_type_>
 status_t widen_offsets(offset_type_ const* source, std::span<std::size_t> widened) noexcept {
     for (std::size_t& offset : widened) {
-        if (*source > std::numeric_limits<std::size_t>::max()) return status_t::overflow_k;
+        if (*source > (std::numeric_limits<std::size_t>::max)()) return status_t::overflow_k;
         offset = static_cast<std::size_t>(*source++);
     }
     return status_t::success_k;
@@ -98,7 +98,7 @@ inline void write_output_tape(void const* data, std::size_t const* offsets, usea
 template <template <typename> class atomic_ref_template_, typename word_type_>
 void raise_to(word_type_& word, std::type_identity_t<word_type_> value) noexcept {
     atomic_ref_template_<word_type_> const raised {word};
-    if (raised.load(std::memory_order_relaxed) < value) raised.max(value, std::memory_order_relaxed);
+    if (raised.load(std::memory_order_relaxed) < value) raised.store_max(value, std::memory_order_relaxed);
 }
 
 /** The decimal spelling of @p value in @p text, which a checkpoint's metadata records. */
@@ -176,8 +176,8 @@ struct reserve_capacity_t {
 };
 
 /** What a basic SAMPLE reads and writes, in the keys every basic index stores. */
-using basic_sample_inputs_t = sample_inputs<us::utilities::uuid_t>;
-using basic_sample_outputs_t = sample_outputs<us::utilities::uuid_t>;
+using basic_sample_inputs_t = sample_inputs<us::utilities::uuid128_t>;
+using basic_sample_outputs_t = sample_outputs<us::utilities::uuid128_t>;
 
 /** What a modality's verbs do to one variant beyond its index: adopting a geometry, describing it,
  *  and writing, keeping and tallying its values; each modality's specializations define it
@@ -366,7 +366,7 @@ usearch_executor_t call_executor_for(punned_basic_index<traits_type_, residency_
     auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}),
                                              std::span<int const> {devices.data(), devices_count});
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor = gpu_executor_t {std::move(built)};
+    call_executor.executor.emplace<gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;
 }
 

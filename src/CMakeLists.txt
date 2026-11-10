@@ -667,9 +667,6 @@ function (usearch_variants modality_ residency_ backend_)
         )
         foreach (class_ IN LISTS classes_)
             target_sources(${library_} PRIVATE ${unit_}_${class_}.cpp)
-            set_source_files_properties(
-                ${unit_}_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_class_${class_}_flags_}"
-            )
         endforeach ()
         list(APPEND libraries_ ${library_})
     else ()

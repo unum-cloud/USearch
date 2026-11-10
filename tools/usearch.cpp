@@ -67,7 +67,6 @@ int main(int argc, char** argv) {
     if (std::optional<int> const exit = us::tools::run_modality_verb<us::tools::geospatial_verbs_t>(world, argc, argv))
         return *exit;
     if (first == "metadata") return us::tools::checkpoints_metadata(world, argc - 1, argv + 1);
-    if (first == "slots") return us::tools::checkpoints_slots(world, argc - 1, argv + 1);
     if (first == "copy") return us::tools::checkpoints_copy(world, argc - 1, argv + 1);
     if (first == "export") return us::tools::checkpoints_export(world, argc - 1, argv + 1);
     if (first == "import") return us::tools::checkpoints_import(world, argc - 1, argv + 1);
@@ -78,6 +77,6 @@ int main(int argc, char** argv) {
         fmt::println(stream, "Usage: usearch <dense|sequence|shapes|geospatial> " //
                              "<insert|absorb|refine|split|health|search|metadata> --help");
     if (world.rank == 0) fmt::println(stream, "       usearch dense get --help");
-    if (world.rank == 0) fmt::println(stream, "       usearch <metadata|slots|copy|export|import|recall> --help");
+    if (world.rank == 0) fmt::println(stream, "       usearch <metadata|copy|export|import|recall> --help");
     return asked ? EXIT_SUCCESS : EXIT_FAILURE;
 }

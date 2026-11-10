@@ -61,7 +61,7 @@ struct vram_apple_indexes_cursor;
  *  @tparam wait_type_ What a reader spanning the shards waits through while a commit is in flight.
  */
 template <                                        //
-    typename key_type_ = uuid_t,                  //
+    typename key_type_ = uuid128_t,               //
     nk_dtype_t vector_dtype_ = nk_i8_k,           //
     nk_capability_t capability_ = nk_cap_metal_k, //
     typename wait_type_ = dummy_waiter_t,         //

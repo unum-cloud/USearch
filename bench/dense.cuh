@@ -18,7 +18,7 @@
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
 
-#include <algorithm>    // `std::ranges::find`, `std::max`
+#include <algorithm>    // `std::ranges::find`
 #include <charconv>     // `std::from_chars` - the `--memory-domain` ordinal
 #include <filesystem>   // `std::filesystem::temp_directory_path` - the default checkpoints dir
 #include <ranges>       // `std::views::iota`, `std::views::filter`, `std::views::transform`
@@ -461,13 +461,13 @@ inline std::array<flag_t, 21> common_flags(settings_t& settings) noexcept {
 /** Rows each insert call takes: `--inserts-per-core` for every core the run drives, capped by
  *  @p total_rows. */
 inline std::size_t insert_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
-    return std::min(settings.inserts_per_core.value * settings.cores, total_rows);
+    return min_of(settings.inserts_per_core.value * settings.cores, total_rows);
 }
 
 /** Queries each search call takes: `--queries-per-core` for every core the run drives, capped by
  *  @p total_rows. */
 inline std::size_t query_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
-    return std::min(settings.queries_per_core.value * settings.cores, total_rows);
+    return min_of(settings.queries_per_core.value * settings.cores, total_rows);
 }
 
 /** The flags every binary takes to rank its searches by a lightning indexer's heads instead of plain rows, and the
@@ -907,8 +907,8 @@ struct streamed_dataset {
                 fmt::println("Rescaling skipped: {}", nk::status_name(status));
                 return;
             }
-            float const max_amplitude = std::max(std::abs(float(extremes.min_value)),
-                                                 std::abs(float(extremes.max_value)));
+            float const max_amplitude = max_of(std::abs(float(extremes.min_value)),
+                                               std::abs(float(extremes.max_value)));
             // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
             float const target_amplitude = component_max<scalar_t>();
             if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
@@ -1140,13 +1140,13 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
                     continue;
                 local_cores += domain_cores;
             }
-            settings.threads.value = std::max<std::size_t>(1, local_cores * 7 / 8);
+            settings.threads.value = max_of<std::size_t>(1, local_cores * 7 / 8);
         }
         spawned = fu_pool_spawn_near_memory_domain(machine.topology, machine.pool, settings.memory_domains.front(),
                                                    settings.threads.value, fu_caller_inclusive_k) == fu_success_k;
     }
     else {
-        if (!settings.threads.value) settings.threads.value = std::max<std::size_t>(1, machine.logical_cores * 7 / 8);
+        if (!settings.threads.value) settings.threads.value = max_of<std::size_t>(1, machine.logical_cores * 7 / 8);
         spawned = fu_pool_spawn(machine.topology, machine.pool, settings.threads.value, fu_caller_inclusive_k) ==
                   fu_success_k;
     }

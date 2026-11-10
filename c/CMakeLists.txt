@@ -9,6 +9,10 @@ if (USEARCH_BUILD_TEST AND USEARCH_BUILD_SHARED)
     include(CTest)
     enable_testing()
     add_test(NAME usearch_test_c COMMAND usearch_test_c)
+    add_test(NAME usearch_duplicate_symbols
+             COMMAND ${CMAKE_COMMAND} "-DOBJECTS=$<FILTER:$<TARGET_PROPERTY:usearch_static,SOURCES>,INCLUDE,[.]o(bj)?$>"
+                     -P "${forkunion_SOURCE_DIR}/cmake/forkunion_duplicate_symbols.cmake"
+    )
 
     # Export the dynamic symbol table so `backtrace_symbols_fd` can resolve function names when the in-test crash
     # handler fires.

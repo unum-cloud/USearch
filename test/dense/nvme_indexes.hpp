@@ -23,7 +23,7 @@
 
 #include <algorithm>    // `std::is_sorted`, `std::nth_element`
 #include <array>        // `std::array`
-#include <bit>          // `std::bit_cast`, for `uuid_t` keys from numbers
+#include <bit>          // `std::bit_cast`, for `uuid128_t` keys from numbers
 #include <filesystem>   // `std::filesystem::temp_directory_path`, the directory parts go into
 #include <memory>       // `std::unique_ptr`, for the rewrites' checkpoints
 #include <string>       // `std::string`, for the relocation's directory
@@ -673,7 +673,7 @@ struct nvme_composed_engine {
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_, u32_t block_bytes_>
 std::size_t test_nvme_indexes_straddling(u64_t seed) {
     using engine_t = nvme_composed_engine<engine_type_, nvme_reblocked_medium<block_bytes_>>;
-    using nvme_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, engine_t>;
+    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_t>;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(100);
 
@@ -1021,7 +1021,7 @@ std::size_t test_nvme_indexes_failed_read(u64_t seed) {
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
     using engine_t = nvme_composed_engine<engine_type_>;
-    using nvme_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, engine_t>;
+    using nvme_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_t>;
     using key_t = typename nvme_t::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 8, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(dense_values_k);
@@ -1151,7 +1151,7 @@ std::size_t test_nvme_indexes_relocated(u64_t seed) {
     growing_buffer<char> part_path {global_allocator};
     failures += expect_eq(std::rename(reference.checkpoint.part_path(part_path, 1).data(), moved), 0);
     std::string_view const manifest_path {manifest};
-    std::string const directory {manifest_path.substr(0, manifest_path.rfind('/'))};
+    std::string const directory {manifest_path.substr(0, manifest_path.find_last_of("/\\"))};
     std::array<std::string_view, 2> const paths {directory, moved};
 
     nvme_type_ relocated {forkunion_allocator_t {no_memory_domain_k}};
@@ -1984,11 +1984,11 @@ concept nvme_staged = nvme_collection<indexes_type_> && requires { typename inde
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_widened_keys(u64_t seed) {
     using narrow_t = nvme_indexes_for<u32_t, dtype_, nk_cap_serial_k, engine_type_>;
-    using wide_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using wide_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_type_>;
     using scalar_t = typename wide_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    auto const number_of = [](uuid_t const& key) noexcept {
+    auto const number_of = [](uuid128_t const& key) noexcept {
         u64_t number = 0;
         for (std::size_t byte = sizeof(key.bytes) - sizeof(number); byte != sizeof(key.bytes); ++byte)
             number = number << 8 | std::to_integer<u64_t>(key.bytes[byte]);
@@ -2007,22 +2007,22 @@ std::size_t test_nvme_widened_keys(u64_t seed) {
     if (failed(narrow_driver.status) || failed(wide_driver.status) || failures) return failures + expect(false);
     failures += expect_eq(wide.size(), rows_count);
 
-    std::vector<uuid_t> placed_keys(rows_count);
+    std::vector<uuid128_t> placed_keys(rows_count);
     auto placed_rows = make_vectors<scalar_t>(rows_count, dimensions, 0);
     failures += expect_eq(
         wide.read_entries(0, std::span {placed_keys}, placed_rows.span(), wide_driver.executor).status,
         status_t::success_k);
     std::vector<bool> found(rows_count);
-    for (uuid_t const& key : placed_keys) {
+    for (uuid128_t const& key : placed_keys) {
         u64_t const number = number_of(key);
         bool const fresh = key == uuid_of(number) && number >= 1 && number <= rows_count && !found[number - 1];
         failures += expect(fresh);
         if (fresh) found[number - 1] = true;
     }
 
-    std::array<uuid_t, 2> const probes {uuid_of(1), uuid_of(rows_count + 7)};
+    std::array<uuid128_t, 2> const probes {uuid_of(1), uuid_of(rows_count + 7)};
     std::array<std::size_t, probes.size()> counted {};
-    failures += expect_eq(wide.count(std::span<uuid_t const> {probes}, std::span {counted}, wide_driver.executor),
+    failures += expect_eq(wide.count(std::span<uuid128_t const> {probes}, std::span {counted}, wide_driver.executor),
                           status_t::success_k);
     failures += expect_eq(counted[0], 1u);
     failures += expect_eq(counted[1], 0u);
@@ -2036,7 +2036,7 @@ std::size_t test_nvme_widened_keys(u64_t seed) {
     failures += expect(succeeded(wide_rankings.search(wide, queries, wide_driver.executor, rows_count).status));
     failures += expect(wide_rankings.counts == narrow_rankings.counts);
     for (std::size_t slot = 0; slot != wide_rankings.keys.size(); ++slot) {
-        uuid_t const& key = wide_rankings.keys[slot];
+        uuid128_t const& key = wide_rankings.keys[slot];
         failures += expect_eq(wide_rankings.distances[slot], narrow_rankings.distances[slot]);
         failures += expect(key == uuid_of(number_of(key)) && number_of(key) <= rows_count);
     }
@@ -2046,10 +2046,10 @@ std::size_t test_nvme_widened_keys(u64_t seed) {
 /** Composes one engine's NVMe cell: every read verb against the RAM group its parts came from,
  *  every rewrite under the angular kernel against a fresh RAM build, since a dot graph neither
  *  stays reachable through compaction nor finds itself at distance zero, and a @c u32 monolith
- *  viewed through @c uuid_t keys, skipped where the host refuses the engine. */
+ *  viewed through @c uuid128_t keys, skipped where the host refuses the engine. */
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_configuration(char const* name, u64_t seed) {
-    using indexes_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using indexes_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, engine_type_>;
     using staged_t = nvme_staged_indexes<indexes_t>;
     {
         dense_indexes_executor<indexes_t> probe;
@@ -2102,8 +2102,8 @@ std::size_t test_nvme_configuration(char const* name, u64_t seed) {
  */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span<std::string_view const> nvme_paths) {
-    using files_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, blocking_files_engine<fu::standard_yield_t>>;
-    using spdk_t = nvme_indexes_for<uuid_t, dtype_, nk_cap_serial_k, linux_spdk_engine<fu::standard_yield_t>>;
+    using files_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, blocking_files_engine<fu::standard_yield_t>>;
+    using spdk_t = nvme_indexes_for<uuid128_t, dtype_, nk_cap_serial_k, linux_spdk_engine<fu::standard_yield_t>>;
     using key_t = typename files_t::key_t;
     using scalar_t = typename files_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;

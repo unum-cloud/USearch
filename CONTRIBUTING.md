@@ -91,7 +91,7 @@ ctest --preset release            # runs the suites
 Every preset writes into `build_<preset name>` and exports a `compile_commands.json` for the language server.
 The development ones build with LLVM through Ninja and link with `lld`; `tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
 `check` compiles every suite at `-O0` with warnings as errors.
-The rest match CI: `library` for the C library alone, `linux_arm64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc2026_x64` / `msvc2022_arm64`.
+The rest match CI: `library` for the C library alone, `linux_arm64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc2026_x64` / `msvc2026_arm64`.
 Three of them are about GPUs: `cuda` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `cuda_release` emits a fat binary spanning every architecture through both Blackwell lines; `rocm` and `metal` do the same for AMD and Apple.
 `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` compile the C library for one machine alone: its CPU through `USEARCH_MARCH` in a monoversioned build, `USEARCH_MULTIVERSIONED=OFF`, and its one GPU code through `USEARCH_CUDA_ARCH`.
 `cuda_trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.

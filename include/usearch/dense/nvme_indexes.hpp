@@ -56,7 +56,7 @@ namespace unum::usearch::dense {
  *  one the parts' headers name, so one instantiation views parts of any kernel its kits finalize.
  */
 template <                                                                    //
-    typename key_type_ = uuid_t,                                              //
+    typename key_type_ = uuid128_t,                                           //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
     typename tiles_kit_type_ = no_tiles_kit_t,                                //
     typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
@@ -732,7 +732,7 @@ struct nvme_indexes {
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
         return lookup_keys_(keys, executor, [&](std::size_t, std::size_t position, shard_node_t) noexcept {
-            atomic_ref<std::size_t>(entries[position]).add(1, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(entries[position]).store_add(1, std::memory_order_relaxed);
         });
     }
 
@@ -1274,7 +1274,7 @@ struct nvme_indexes {
             std::size_t confirmed = 0;
             for (u1x64_t const word : confirmed_hints) confirmed += static_cast<std::size_t>(std::popcount(word));
             atomic_ref<std::size_t>(*inputs.missing_hints)
-                .add(hinted_keys.size() - confirmed, std::memory_order_relaxed);
+                .store_add(hinted_keys.size() - confirmed, std::memory_order_relaxed);
             return status_t::success_k;
         }
     };
@@ -1896,7 +1896,7 @@ struct nvme_indexes {
                 return {{}, status_t::bad_alloc_k};
             std::memset(share.kept, 0, queries_count * sizeof(u32_t));
             for (std::size_t query = 0; query != queries_count; ++query)
-                share.thresholds[query] = std::numeric_limits<distance_t>::max();
+                share.thresholds[query] = (std::numeric_limits<distance_t>::max)();
             if (status_t const reserved = reserve_predicate(thread_predicate(predicate, thread),
                                                             scan_round_capacity<tiles_kit_t>());
                 failed(reserved))
@@ -1924,7 +1924,7 @@ struct nvme_indexes {
             u32_t& count = share.kept[query];
             if (count < wanted) {
                 kept[count++] = match;
-                if (count < wanted) return std::numeric_limits<distance_t>::max();
+                if (count < wanted) return (std::numeric_limits<distance_t>::max)();
             }
             else {
                 std::size_t worst = 0;
@@ -2169,7 +2169,7 @@ struct nvme_indexes {
         status_t listing = status_t::success_k;
         status_t const scanned = lookup_keys_(
             nominations, executor, [&](std::size_t thread, std::size_t position, shard_node_t locator) noexcept {
-                atomic_ref<std::size_t>(row_starts[position]).add(1, std::memory_order_relaxed);
+                atomic_ref<std::size_t>(row_starts[position]).store_add(1, std::memory_order_relaxed);
                 if (failed(listings[thread].push_back({locator, position})))
                     atomic_ref<status_t>(listing).store(status_t::bad_alloc_k, std::memory_order_relaxed);
             });
@@ -2348,7 +2348,7 @@ struct nvme_indexes {
                                         [](dot_result_t& maximum, dot_result_t dot) noexcept {
                                             atomic_ref<dot_result_t> const shared {maximum};
                                             if (shared.load(std::memory_order_relaxed) < dot)
-                                                shared.max(dot, std::memory_order_relaxed);
+                                                shared.store_max(dot, std::memory_order_relaxed);
                                         });
             }
         };
@@ -2500,7 +2500,7 @@ struct nvme_indexes {
             status_t const scanned = indexes.lookup_keys_keeping_cut_(
                 keys, executor, [&](std::size_t, std::size_t position, shard_node_t locator) noexcept {
                     if (locator < nodes[position])
-                        atomic_ref<std::size_t>(ordinals[position]).add(1, std::memory_order_relaxed);
+                        atomic_ref<std::size_t>(ordinals[position]).store_add(1, std::memory_order_relaxed);
                 });
             return failed(scanned) ? scanned : *rows.failure;
         }

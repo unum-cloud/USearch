@@ -49,9 +49,9 @@
 #include <unistd.h> // `isatty`
 #endif
 
-#include <algorithm>       // `std::min`, `std::max`
+#include <algorithm>       // `std::equal`, `std::minmax_element`, `std::nth_element`, `std::sort`
 #include <array>           // `std::array`
-#include <bit>             // `std::bit_cast` - keys between the C struct and `uuid_t`
+#include <bit>             // `std::bit_cast` - keys between the C struct and `uuid128_t`
 #include <charconv>        // `std::from_chars`
 #include <chrono>          // `std::chrono::milliseconds`, `std::chrono::steady_clock`
 #include <filesystem>      // `std::filesystem::temp_directory_path` - where an NVMe benchmark saves
@@ -73,7 +73,7 @@
 #include "usearch/usearch.h"
 #include "usearch/utilities/blocking_files.hpp" // `mapped_file_t` - the dataset parts, the compared checkpoints
 #include "usearch/utilities/nvme_device.hpp"    // `file_medium_t`, `block_bytes_of`, `reads_directly` - views' reads
-#include "usearch/utilities/types.hpp"          // `uuid_t`, `u64_t`
+#include "usearch/utilities/types.hpp"          // `uuid128_t`, `u64_t`
 #include "usearch/utilities/vram_device.hpp"    // `cuda_device_of`, `hip_device_of` - device outputs read back
 
 #include "arguments.hpp" // `flag_t`, `count_t`, `parse_or_exit`, `bytes_view`
@@ -172,7 +172,7 @@ inline std::optional<std::string_view> environment_text(char const* name) noexce
 inline std::optional<std::vector<std::string_view>> split_items(std::string_view text) {
     std::vector<std::string_view> items;
     for (std::size_t begin = 0; begin <= text.size();) {
-        std::size_t const end = std::min(text.find(',', begin), text.size());
+        std::size_t const end = min_of(text.find(',', begin), text.size());
         if (end == begin) return std::nullopt;
         items.push_back(text.substr(begin, end - begin));
         begin = end + 1;
@@ -193,7 +193,7 @@ inline std::vector<std::int32_t> devices_from_environment() {
         std::uint32_t ordinal = 0;
         auto const [end, parse_status] = std::from_chars(item.data(), item.data() + item.size(), ordinal);
         if (parse_status != std::errc {} || end != item.data() + item.size() ||
-            ordinal > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
+            ordinal > static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)()))
             exit_unparsed("USEARCH_DEVICES", *text, "unsigned integers like 0,1");
         devices.push_back(static_cast<std::int32_t>(ordinal));
     }
@@ -429,7 +429,7 @@ inline std::vector<usearch_gpu_device_t> listed_devices() {
                                    .devices_capacity = count,
                                    .devices_count = &count};
     usearch_gpu_devices(&listing);
-    devices.resize(std::min(count, devices.size()));
+    devices.resize(min_of(count, devices.size()));
     return devices;
 }
 
@@ -1668,10 +1668,10 @@ usearch_outcome_t insert_entries(handle<verbs_type_>& index, typename verbs_type
                                  std::size_t first_offset, std::size_t batch, std::size_t expansion,
                                  usearch_traversal_stats_t& totals, progress_type_&& progress = {}) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_entries = std::max<std::size_t>(1, std::min(batch, count));
+    std::size_t const batch_entries = max_of<std::size_t>(1, min_of(batch, count));
     std::vector<usearch_key_t> keys(batch_entries);
     for (std::size_t first = 0; first < count; first += batch_entries) {
-        std::size_t const entries = std::min(batch_entries, count - first);
+        std::size_t const entries = min_of(batch_entries, count - first);
         std::span<usearch_key_t> const batch_keys = std::span {keys}.first(entries);
         for (std::size_t offset = 0; offset != entries; ++offset)
             batch_keys[offset] = key_of_offset(index.session->seed, first_offset + first + offset);
@@ -1971,7 +1971,7 @@ inline usearch_geospatial_relation_t geospatial_relation_of(std::string_view nam
 /** The matches searches wrote, copied off their arena: every query's keys and scores end to end,
  *  and how many each query holds, so whole searches compare and judge. */
 struct copied_matches_t {
-    std::vector<uuid_t> keys;
+    std::vector<uuid128_t> keys;
     std::vector<usearch_distance_t> scores;
     std::vector<std::size_t> counts;
 
@@ -1991,7 +1991,7 @@ inline bool append_matches(usearch_matches_view_t const& matches, std::size_t qu
     for (std::size_t query = 0; query != queries; ++query) {
         copied.counts.push_back(counts[query]);
         for (std::size_t match = query * matches.columns; match != query * matches.columns + counts[query]; ++match) {
-            copied.keys.push_back(std::bit_cast<uuid_t>(keys[match]));
+            copied.keys.push_back(std::bit_cast<uuid128_t>(keys[match]));
             copied.scores.push_back(scores[match]);
         }
     }
@@ -2004,7 +2004,7 @@ inline copied_matches_t copy_matches(usearch_matches_view_t const& matches, std:
     for (std::size_t query = 0; query != queries; ++query)
         for (std::size_t match = query * matches.columns; match != query * matches.columns + matches.counts[query];
              ++match) {
-            copied.keys.push_back(std::bit_cast<uuid_t>(matches.keys[match]));
+            copied.keys.push_back(std::bit_cast<uuid128_t>(matches.keys[match]));
             copied.scores.push_back(matches.scores[match]);
         }
     return copied;
@@ -2018,9 +2018,9 @@ usearch_outcome_t search_queries(handle<verbs_type_>& index, typename verbs_type
                                  usearch_traversal_t traversal, usearch_traversal_stats_t& totals,
                                  copied_matches_t& copied, usearch_matches_view_t const* hints = nullptr) {
     usearch_outcome_t outcome {};
-    std::size_t const batch_queries = std::max<std::size_t>(1, std::min(batch, count));
+    std::size_t const batch_queries = max_of<std::size_t>(1, min_of(batch, count));
     for (std::size_t first = 0; first < count; first += batch_queries) {
-        std::size_t const sliced = std::min(batch_queries, count - first);
+        std::size_t const sliced = min_of(batch_queries, count - first);
         usearch_matches_view_t matches {};
         usearch_traversal_stats_t stats {};
         usearch_matches_view_t const sliced_hints = hints
@@ -2055,13 +2055,13 @@ inline copied_matches_t truth_oracle(u64_t seed, std::span<std::uint32_t const> 
     std::size_t const queries = depth ? offsets.size() / depth : 0;
     oracle.counts.assign(queries, depth);
     for (std::uint32_t const offset : offsets.first(queries * depth))
-        oracle.keys.push_back(std::bit_cast<uuid_t>(key_of_offset(seed, offset)));
+        oracle.keys.push_back(std::bit_cast<uuid128_t>(key_of_offset(seed, offset)));
     return oracle;
 }
 
 /** Whether @p found ranks no further than @p exact, within the rounding two kits may differ by. */
 inline bool within(double found, double exact) noexcept {
-    return found <= exact + 1e-6 * std::max(1.0, std::fabs(exact));
+    return found <= exact + 1e-6 * max_of(1.0, std::fabs(exact));
 }
 
 /** The offset of every query's first match in @p copied. */
@@ -2086,11 +2086,11 @@ void judge_queries(std::size_t k, copied_matches_t const& found, copied_matches_
     std::vector<std::size_t> const found_offsets = match_offsets(found), truth_offsets = match_offsets(oracle);
     bool const scored = !oracle.scores.empty();
     std::vector<bool> hits;
-    for (std::size_t query = 0; query != std::min(found.counts.size(), oracle.counts.size()); ++query) {
-        std::size_t const expected = std::min(k, oracle.counts[query]);
+    for (std::size_t query = 0; query != min_of(found.counts.size(), oracle.counts.size()); ++query) {
+        std::size_t const expected = min_of(k, oracle.counts[query]);
         if (!expected) continue;
         std::size_t const truth_first = truth_offsets[query], found_first = found_offsets[query];
-        std::size_t const ranked = std::min(k, found.counts[query]);
+        std::size_t const ranked = min_of(k, found.counts[query]);
         hits.assign(ranked, false);
         for (std::size_t rank = 0; rank != ranked; ++rank)
             if (scored)
@@ -2110,7 +2110,7 @@ inline double recall_at(std::size_t k, copied_matches_t const& found, copied_mat
     judge_queries(k, found, oracle, [&](std::size_t expected, std::vector<bool> const& hits) {
         std::size_t hit_count = 0;
         for (bool const hit : hits) hit_count += hit;
-        recall += static_cast<double>(std::min(hit_count, expected)) / static_cast<double>(expected);
+        recall += static_cast<double>(min_of(hit_count, expected)) / static_cast<double>(expected);
         ++answerable;
     });
     return answerable ? recall / static_cast<double>(answerable) : 0;
@@ -2176,14 +2176,14 @@ inline std::optional<cgroup_reads_t> cgroup_reads(u64_t block_bytes) {
     cgroup_reads_t counted;
     std::string_view text {*stat};
     while (!text.empty()) {
-        std::size_t const space = std::min(text.find_first_of(" \n"), text.size());
+        std::size_t const space = min_of(text.find_first_of(" \n"), text.size());
         std::string_view const token = text.substr(0, space);
         std::string_view const digits = token.substr(token.find('=') + 1);
         u64_t value = 0;
         std::from_chars_result const parsed = std::from_chars(digits.data(), digits.data() + digits.size(), value);
         if (parsed.ec == std::errc {} && token.starts_with("rbytes=")) counted.bytes += value;
         if (parsed.ec == std::errc {} && token.starts_with("rios=")) counted.reads += value;
-        text.remove_prefix(std::min(space + 1, text.size()));
+        text.remove_prefix(min_of(space + 1, text.size()));
     }
     return counted;
 }
@@ -2257,7 +2257,7 @@ usearch_outcome_t sweep_recall(handle<verbs_type_>& index, typename verbs_type_:
                          static_cast<double>(reads_after->reads - reads_before->reads) * per_query,
                          static_cast<double>(reads_after->bytes - reads_before->bytes) * per_query / 1024);
         if (index.residency == usearch_residency_nvme_k) {
-            std::size_t const judged = std::min(count, oracle.counts.size());
+            std::size_t const judged = min_of(count, oracle.counts.size());
             outcome = time_single_queries(index, queries, judged, wanted, expansion, batched, latencies);
             if (outcome.status != usearch_status_success_k) return outcome;
             if (!latencies.empty())
@@ -2319,6 +2319,19 @@ inline std::vector<usearch_cpu_class_t> admitted_classes() {
     return classes;
 }
 
+/** The class a pin names for the portable floor: serial, or the one class a monoversioned build
+ *  compiles in its place, which an unpinned RAM index then describes. */
+inline usearch_cpu_class_t floor_class() {
+    usearch_dense_index_t index = nullptr;
+    usearch_outcome_t outcome {};
+    usearch_dense_index_description_t described {};
+    dense_verbs_t::init_ram(&index, {usearch_dense_metric_inner_k, usearch_scalar_bf16_k, 64, 0}, {}, &outcome);
+    if (index) dense_verbs_t::describe(index, nullptr, &described, &outcome);
+    dense_verbs_t::free(index);
+    return described.cpu_class == usearch_cpu_class_monoversioned_k ? usearch_cpu_class_monoversioned_k
+                                                                    : usearch_cpu_class_serial_k;
+}
+
 /** One cell of a suite's sweep: where its index lives, what it stores, the class it pins and how
  *  many shards it spans. */
 struct sweep_cell_t {
@@ -2330,8 +2343,8 @@ struct sweep_cell_t {
 
 /**
  *  @brief The diagonal a suite sweeps rather than the full product: every scalar at the best class,
- *      every admitted class at @p first, and serial at every scalar, each over the compiled
- *      residencies at one and at three shards.
+ *      every admitted class at @p first, and the floor class at every scalar, each over the
+ *      compiled residencies at one and at three shards.
  *
  *  A basic modality passes @c usearch_scalar_unknown_k, whose cells vary the class alone, so the
  *  suite runs its first metric at each and every metric at the best class. A VRAM cell pins no CPU
@@ -2340,6 +2353,7 @@ struct sweep_cell_t {
 inline std::vector<sweep_cell_t> diagonal_sweep(usearch_scalar_t first) {
     std::vector<sweep_cell_t> cells;
     std::vector<usearch_cpu_class_t> const classes = admitted_classes();
+    usearch_cpu_class_t const pinned_floor = floor_class();
     for (usearch_residency_t const residency : compiled_residencies()) {
         std::vector<usearch_scalar_t> const scalars = first == usearch_scalar_unknown_k
                                                           ? std::vector<usearch_scalar_t> {first}
@@ -2350,7 +2364,7 @@ inline std::vector<sweep_cell_t> diagonal_sweep(usearch_scalar_t first) {
             if (residency == usearch_residency_vram_k) continue;
             for (usearch_cpu_class_t const cpu_class : classes) cells.push_back({residency, first, cpu_class, shards});
             for (usearch_scalar_t const scalar : scalars)
-                if (scalar != first) cells.push_back({residency, scalar, usearch_cpu_class_serial_k, shards});
+                if (scalar != first) cells.push_back({residency, scalar, pinned_floor, shards});
         }
     }
     return cells;
@@ -2462,7 +2476,7 @@ std::size_t check_checkpoint_round_trip(handle<verbs_type_>& index, std::string 
             if (!equivalent && reloaded.scores.size() == original_matches.scores.size()) {
                 double widest = 0;
                 for (std::size_t match = 0; match != reloaded.scores.size(); ++match)
-                    widest = std::max(widest, std::fabs(reloaded.scores[match] - original_matches.scores[match]));
+                    widest = max_of(widest, std::fabs(reloaded.scores[match] - original_matches.scores[match]));
                 fmt::println(stderr, "  a reloaded score moved {:.3g} against a band of {:.3g}", widest, score_band);
             }
             failures += check(equivalent);
@@ -2634,7 +2648,7 @@ int run_search_bench(settings_t const& settings, search_bench_settings_t const& 
     }
 
     copied_matches_t oracle;
-    std::size_t const judged = std::min(search.oracle_queries.value, queries_count);
+    std::size_t const judged = min_of(search.oracle_queries.value, queries_count);
     std::chrono::steady_clock::time_point const scan_start = std::chrono::steady_clock::now();
     if (report_failure(scan_oracle(index, queries, judged, search.top_k.value, search.batch.value, oracle), "Scanning"))
         return 1;

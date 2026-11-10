@@ -28,7 +28,6 @@
 #include <cmath>   // `std::asin`, `std::pow`, `std::isnan`
 #include <cstdlib> // `std::strtod` - signed terrain degrees
 
-#include <algorithm>   // `std::min`, `std::max`
 #include <array>       // `std::array` - a town's centre
 #include <limits>      // `std::numeric_limits` - the unbounded time slack
 #include <span>        // `std::span` - the observations, from a file or generated
@@ -55,7 +54,7 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
     constexpr std::size_t places_per_town_k = 64;
     constexpr f64_t spread_degrees_k = 0.02;
     splitmix64_t random_generator {seed};
-    std::size_t const towns = std::max<std::size_t>(1, count / places_per_town_k);
+    std::size_t const towns = max_of<std::size_t>(1, count / places_per_town_k);
     std::vector<std::array<f64_t, 2>> centres(towns);
     for (std::array<f64_t, 2>& centre : centres)
         centre = {std::asin(2 * uniform_unit(random_generator) - 1) * degrees_k,
@@ -63,7 +62,7 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
     std::vector<usearch_geospatial_observation_t> places(count);
     for (usearch_geospatial_observation_t& place : places) {
         // A log-uniform rank draws a town in inverse proportion to its rank.
-        std::size_t const town = std::min(
+        std::size_t const town = min_of(
             towns - 1,
             static_cast<std::size_t>(std::pow(static_cast<f64_t>(towns), uniform_unit(random_generator))) - 1);
         // The sum of three uniforms approximates a normal offset.
@@ -71,7 +70,7 @@ inline std::vector<usearch_geospatial_observation_t> generate_places(std::size_t
         for (f64_t& offset : offsets)
             offset = spread_degrees_k * (uniform_unit(random_generator) + uniform_unit(random_generator) +
                                          uniform_unit(random_generator) - 1.5);
-        f64_t const latitude = std::min(90.0, std::max(-90.0, centres[town][0] + offsets[0]));
+        f64_t const latitude = min_of(90.0, max_of(-90.0, centres[town][0] + offsets[0]));
         f64_t const longitude = centres[town][1] + offsets[1];
         place = {latitude, longitude > 180 ? longitude - 360 : longitude,
                  nan_k,    nan_k,
@@ -172,7 +171,7 @@ int bench_geospatial_index_search(int argc, char const* const* argv) {
                             observations.size(), search.queries.value),
                1;
     std::size_t const query_first = observations.size() - search.queries.value;
-    std::size_t const base_count = search.max_base_entries.value ? std::min(search.max_base_entries.value, query_first)
+    std::size_t const base_count = search.max_base_entries.value ? min_of(search.max_base_entries.value, query_first)
                                                                  : query_first;
     fmt::println("- Observations: {} · relation: {} · radius: {} m · terrain: {} × {} heights",
                  observations_path.empty() ? std::string_view {"GeoNames-like"} : observations_path, relation_text,

@@ -458,7 +458,7 @@ static bool hints_of_view(usearch_matches_view_t const* given, std::size_t count
                           usearch_outcome_t* outcome) noexcept {
     if (rejects_hints(given, count, outcome)) return false;
     if (given && count)
-        hints = {{reinterpret_cast<us::utilities::uuid_t const*>(given->keys), count, given->columns},
+        hints = {{reinterpret_cast<us::utilities::uuid128_t const*>(given->keys), count, given->columns},
                  {given->counts, count}};
     return true;
 }
@@ -642,7 +642,7 @@ inline variants_view_t view_dense_variants(usearch_dense_index_t const* others, 
  *  there; the verbs hand every window of it the whole keys and scores with its own offsets. */
 static expected<products_tape_t> carve_products_tape(usearch_arena_handle_t& arena, std::size_t count,
                                                      std::size_t stride) noexcept {
-    using key_t = us::utilities::uuid_t;
+    using key_t = us::utilities::uuid128_t;
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
     std::size_t const room = count * stride;
     products_tape_t tape;
@@ -818,7 +818,7 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     if (submitted<usearch_dense_count>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    us::utilities::uuid_t const key = uuid_of(arguments->key);
+    us::utilities::uuid128_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
     visit_punned(
         *arguments->index, [&]<vendored_residency_t residency_>(punned_dense_index<residency_> punned) noexcept {
@@ -976,7 +976,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (submitted<usearch_dense_get>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    us::utilities::uuid_t const key = uuid_of(arguments->key);
+    us::utilities::uuid128_t const key = uuid_of(arguments->key);
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
@@ -1045,7 +1045,7 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the cursor"), void();
     status_t const placed = std::visit(
         [&](auto const* verbs) noexcept {
-            using key_t = us::utilities::uuid_t;
+            using key_t = us::utilities::uuid128_t;
             static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Start keys cross as the walk reads them");
             std::span<key_t const> const starts {reinterpret_cast<key_t const*>(arguments->starts),
                                                  arguments->starts_count};
@@ -1792,7 +1792,7 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    executor->executor = std::move(spawned);
+    executor->executor.emplace<gpu_executor_t>(std::move(spawned));
     *arguments->executor = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }

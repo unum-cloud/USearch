@@ -45,7 +45,7 @@
 #include "abi.hpp" // `tools::settings_t`, `tools::copied_matches_t` - what every suite shares
 
 /** The short spelling every test reaches the library through where its `using` directive is
- *  ambiguous - Darwin declares a global `uuid_t` too - or unwanted, as inside foreign specializations. */
+ *  ambiguous or unwanted, as inside foreign specializations. */
 namespace us = unum::usearch;
 
 namespace unum::usearch::test {
@@ -104,7 +104,7 @@ struct error_stats_t {
         f64_t const delta = error - mean;
         mean += delta / static_cast<f64_t>(count);
         sum_of_squares += delta * (error - mean);
-        max_ulp = std::max(max_ulp, ulp_distance(static_cast<f32_t>(actual), static_cast<f32_t>(reference)));
+        max_ulp = max_of(max_ulp, ulp_distance(static_cast<f32_t>(actual), static_cast<f32_t>(reference)));
     }
 
     f64_t deviation() const noexcept {
@@ -348,7 +348,7 @@ struct allocation_ledger_t {
 
     /** Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
      *  nothing refusal paths, so a request past it is refused, never counted. */
-    std::ptrdiff_t byte_budget = std::numeric_limits<std::ptrdiff_t>::max();
+    std::ptrdiff_t byte_budget = (std::numeric_limits<std::ptrdiff_t>::max)();
 };
 
 /**
@@ -381,14 +381,14 @@ struct counting_allocator {
         fu::standard_atomic_ref<std::ptrdiff_t> const live_bytes {ledger_->live_bytes};
         if (live_bytes.load() + wanted > fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->byte_budget).load())
             return nullptr;
-        live_bytes.add(wanted);
-        fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).add(1);
+        live_bytes.store_add(wanted);
+        fu::standard_atomic_ref<std::size_t>(ledger_->total_allocations).store_add(1);
         return static_cast<value_type_*>(std::malloc(count * sizeof(value_type_)));
     }
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
         if (ledger_)
             fu::standard_atomic_ref<std::ptrdiff_t>(ledger_->live_bytes)
-                .sub(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
+                .store_sub(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
         // Scribbled first, so a read after free sees garbage in every build rather than stale bytes.
         if (pointer) std::memset(static_cast<void*>(pointer), 0xA5, count * sizeof(value_type_));
         std::free(pointer);
@@ -469,9 +469,10 @@ nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, st
     for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
         for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
             hyperplanes(dimension, latent) = centered(hyperplanes_generator);
-    auto vectors = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator).value;
+    auto made = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator);
     std::array<f64_t, latent_dimensions_k> point;
-    for (auto row : vectors.rows()) {
+    // Filled before the move, as in `make_vectors`, past the same MSVC 14.51 `/O2` miscompile.
+    for (auto row : made.value.rows()) {
         for (f64_t& coordinate : point) coordinate = centered(points_generator);
         auto bits = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
@@ -481,7 +482,7 @@ nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, st
             bits[dimension] = make_scalar<scalar_>(side > 0);
         }
     }
-    return vectors;
+    return std::move(made.value);
 }
 
 /** Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
@@ -492,15 +493,16 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
                                                   allocator_type_ allocator = {}) {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>)
         return make_sketched_vectors<scalar_>(count, dimensions, seed, allocator);
-    auto vectors = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator).value;
+    auto made = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator);
     splitmix64_t random_generator {seed};
     uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
-    for (auto row : vectors.rows()) {
+    // Filled before the move: MSVC 14.51 `/O2` reads the moved rank from `rcx`, not `xmm1`.
+    for (auto row : made.value.rows()) {
         auto values = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
             values[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
     }
-    return vectors;
+    return std::move(made.value);
 }
 
 /** A cursor over the sharded @p indexes, pulled @p chunk keys at a time, yields each of its
@@ -670,7 +672,7 @@ std::size_t expect_hints(handle<verbs_type_>& index, typename verbs_type_::queri
     std::vector<std::size_t> const counts(count, 2);
     for (std::size_t query = 0; query != count; ++query) {
         keys[2 * query] = std::bit_cast<usearch_key_t>(found.keys[offsets[query]]);
-        keys[2 * query + 1] = key_of_offset(index.session->seed, std::numeric_limits<u64_t>::max() - query);
+        keys[2 * query + 1] = key_of_offset(index.session->seed, (std::numeric_limits<u64_t>::max)() - query);
     }
     usearch_matches_view_t const hints {keys.data(), nullptr, counts.data(), 2};
     copied_matches_t hinted;
@@ -756,7 +758,7 @@ std::size_t expect_cursor(handle<verbs_type_>& index, std::size_t count) {
  *  and an equal seed draws the same keys again; a GPU index refuses it and says why. */
 template <typename verbs_type_>
 std::size_t expect_sample(handle<verbs_type_>& index, std::size_t count) {
-    std::size_t const wanted = std::min(cell_wanted_k, count);
+    std::size_t const wanted = min_of(cell_wanted_k, count);
     std::array<std::vector<usearch_key_t>, 2> drawn;
     std::size_t failures = 0;
     for (std::vector<usearch_key_t>& keys : drawn) {

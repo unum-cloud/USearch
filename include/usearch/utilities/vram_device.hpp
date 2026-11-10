@@ -115,7 +115,7 @@ inline expected<gpu_executor_t> spawn_gpu_executor(gpu_drivers_t& drivers, std::
     auto const spawn = [&]<typename executor_type_>(std::type_identity<executor_type_> vendor) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
         auto [spawned, status] = executor_type_::spawn(driver_of(drivers, vendor), to_span(ordinals), scratch_limit);
-        if (succeeded(status)) result.value = std::move(spawned);
+        if (succeeded(status)) result.value.emplace<executor_type_>(std::move(spawned));
         result.status = status;
         return true;
     };
@@ -457,10 +457,10 @@ void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<value_ty
     symbol.append(builtin);
 }
 
-/** Spells @c uuid_t, @c S3_ being @c unum::usearch::utilities, which a kernel's leading
+/** Spells @c uuid128_t, @c S3_ being @c unum::usearch::utilities, which a kernel's leading
  *  @ref unum::usearch::utilities::vram_kernel_t argument introduces. */
-inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<uuid_t>) noexcept {
-    symbol.append("NS3_6uuid_tE");
+inline void append_itanium_argument(vram_kernel_symbol_t& symbol, itanium_type<uuid128_t>) noexcept {
+    symbol.append("NS3_9uuid128_tE");
 }
 
 /** Where the kernel's parameter struct lives: the kernel's own scope, or @c basic, whose arguments
@@ -488,8 +488,8 @@ struct itanium_parameter_t {
  *  The substitutions are fixed by that shape: @c S_ is @c unum, @c S0_ is @c unum::usearch, @c S1_
  *  is the scope and @c S2_ the kernel's template. A @ref unum::usearch::utilities::vram_kernel_t
  *  argument spells as @c NS0_9utilities13vram_kernel_tE, adding @c S3_ and @c S4_, of which only a
- *  @c uuid_t reuses @c S3_. The parameter spells as @c NS1_ , the name's length, the name and @c E
- *  for the scope's own struct and as @c NS0_5basic , the name's length, the name and @c E for
+ *  @c uuid128_t reuses @c S3_. The parameter spells as @c NS1_ , the name's length, the name and
+ *  @c E for the scope's own struct and as @c NS0_5basic , the name's length, the name and @c E for
  *  basic's - with @c I<T>E before the closing @c E when it reuses the kernel's template argument,
  *  @c T_ for the first and @c T<n-1>_ for the n-th. So
  *  @c sequence::cuda_kernel<vram_kernel_t::search_k, sz_cap_cuda_k, sz_levenshtein_bytes_k, 2,

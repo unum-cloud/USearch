@@ -109,7 +109,6 @@ int modality_insert(geospatial_verbs_t, world_t& world, int argc, char const* co
 int modality_split(geospatial_verbs_t, world_t& world, int argc, char const* const* argv);
 int modality_search(geospatial_verbs_t, world_t& world, int argc, char const* const* argv);
 int checkpoints_metadata(world_t& world, int argc, char const* const* argv);
-int checkpoints_slots(world_t& world, int argc, char const* const* argv);
 int checkpoints_copy(world_t& world, int argc, char const* const* argv);
 int checkpoints_export(world_t& world, int argc, char const* const* argv);
 int checkpoints_import(world_t& world, int argc, char const* const* argv);
@@ -150,7 +149,7 @@ inline bool checkpoint_write_manifest(std::string_view manifest_path, std::span<
 }
 
 /** The text a key prints as: the entry number it was minted from, or its 32 hex digits. */
-inline std::string checkpoint_key_text(uuid_t const& key) {
+inline std::string checkpoint_key_text(uuid128_t const& key) {
     if (std::optional<u64_t> const number = identity_of(key)) return fmt::format("{}", *number);
     std::string text;
     for (std::byte const byte : key.bytes)
@@ -684,7 +683,7 @@ inline bool write_key_rows(std::string_view path, copied_matches_t const& found,
         std::memcpy(bytes + keys_bytes + row * sizeof(std::uint32_t), &count, sizeof(count));
         if (!count) continue;
         for (std::size_t column = 0; column != columns; ++column) {
-            uuid_t const& key = found.keys[offsets[row] + std::min<std::size_t>(column, count - 1)];
+            uuid128_t const& key = found.keys[offsets[row] + min_of<std::size_t>(column, count - 1)];
             byte_t* const integer = bytes + key_rows_header_bytes_k + (row * columns + column) * sizeof(usearch_key_t);
             for (std::size_t byte = 0; byte != sizeof(usearch_key_t); ++byte)
                 integer[byte] = key.bytes[sizeof(usearch_key_t) - 1 - byte];

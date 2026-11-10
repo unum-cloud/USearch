@@ -271,7 +271,7 @@ __device__ __forceinline__ void vram_split_by_bytes(vram_ragged_view<node_id_typ
     auto const keyed = [&](u32_t slot) noexcept {
         return slot < count
                    ? scored_node_t::make(static_cast<distance_t>(storage.entry(ids[slot]).bytes) + 1, ids[slot])
-                   : scored_node_t::make(0, std::numeric_limits<node_id_type_>::max());
+                   : scored_node_t::make(0, (std::numeric_limits<node_id_type_>::max)());
     };
     scored_node_t const descending = shuffle_xor<warp_t>(sort_lanes<warp_t>(keyed(lane), lane), width_k - 1);
     scored_node_t const ascending = sort_lanes<warp_t>(keyed(width_k + lane), lane);
@@ -300,7 +300,7 @@ struct vram_lane_schedule {
     __device__ __forceinline__ distance_t score(vram_ragged_view<node_id_type_> const& storage,
                                                 typename kit_::query_t const& query, node_id_type_ node_id,
                                                 distance_t radius, u32_t lane) const noexcept {
-        if (node_id == std::numeric_limits<node_id_type_>::max()) return std::numeric_limits<distance_t>::infinity();
+        if (node_id == (std::numeric_limits<node_id_type_>::max)()) return std::numeric_limits<distance_t>::infinity();
         vram_entry_t const entry = storage.entry(node_id);
         distance_t const lower_bound = kit_::lower_bound(storage.kernel, query, entry);
         return lower_bound > radius ? lower_bound : vram_score<kit_, rung_>(storage.kernel, query, entry, radius, lane);
@@ -347,7 +347,7 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
     splitmix64_t& random_generator, node_id_type_* candidate_ids, u32_t lane) noexcept {
 
     using warp_t = typename kit_::warp_t;
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     node_id_type_ const span = sampling_bound - sampling_first;
     uniform_below<node_id_type_> const uniform {span};
     node_id_type_ draw = sampling_first + uniform(random_generator);
@@ -402,7 +402,7 @@ __device__ __forceinline__ void vram_score_into_frontier( //
         return;
     }
     node_id_type_ const node_id = lane < gathered_count ? gathered_ids[lane]
-                                                        : std::numeric_limits<node_id_type_>::max();
+                                                        : (std::numeric_limits<node_id_type_>::max)();
     distance_t const distance = schedule.score(storage, query, node_id, radius, lane);
     context.frontier.insert_batch(
         lane < gathered_count ? scored_node_t::make(distance, node_id) : scored_node_t::sentinel(), lane);
@@ -421,7 +421,7 @@ __device__ __forceinline__ void vram_search_ahead( //
 
     using warp_t = typename kit_::warp_t;
     using scored_node_t = vram_scored_node<node_id_type_>;
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     frontier_& frontier = context.frontier;
     vram_telemetry_t& telemetry = context.telemetry;
     scored_node_t held = scored_node_t::sentinel();
@@ -532,7 +532,7 @@ struct vram_keep_diverse_t {
             bool diverse = true;
             for (u32_t base = 0; base < kept_count && diverse; base += warp_t::width_k) { // Warp-uniform bounds.
                 node_id_type_ const kept_id = base + lane < kept_count ? candidate_ids[kept_positions[base + lane]]
-                                                                       : std::numeric_limits<node_id_type_>::max();
+                                                                       : (std::numeric_limits<node_id_type_>::max)();
                 diverse = warp_t::all(!(schedule.score(storage, pivot, kept_id, to_query, lane) < to_query));
                 telemetry.scored += min_of(kept_count - base, warp_t::width_k);
             }
@@ -608,7 +608,7 @@ __device__ __forceinline__ void vram_thread_back_links(vram_build_view<node_id_t
         node_id_type_ const pick = (node_id - view.first_id) * view.storage.connectivity + slot;
         node_id_type_ const previous = warp_type_::exchange_acquire(view.link_heads[target], pick);
         view.link_next[pick] = previous;
-        if (previous == std::numeric_limits<node_id_type_>::max())
+        if (previous == (std::numeric_limits<node_id_type_>::max)())
             view.touched_ids[warp_type_::fetch_add_relaxed(*view.touched_count, 1u)] = target;
     }
     warp_type_::sync();
@@ -683,7 +683,7 @@ __device__ __forceinline__ bool vram_back_link_one( //
 
     using warp_t = typename kit_::warp_t;
     using scored_node_t = vram_scored_node<node_id_type_>;
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     vram_ragged_view<node_id_type_> const& storage = view.storage;
     u32_t const connectivity = storage.connectivity;
     node_id_type_* const candidate_ids = selection.candidate_ids;
@@ -810,7 +810,7 @@ __device__ __forceinline__ void vram_reselect_one( //
     u32_t lane) noexcept {
 
     using warp_t = typename kit_::warp_t;
-    constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
     vram_ragged_view<node_id_type_> const& storage = view.storage;
     typename kit_::query_t const query = vram_prepare<kit_>(storage.parameters, storage.entry(node_id), query_span,
                                                             lane);

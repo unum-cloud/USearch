@@ -31,13 +31,13 @@
  *  @c src/ climbs every ladder once per dtype and CPU class and hands each dense engine the kits
  *  they pick, so no engine derives a pick from a capability mask.
  *
- *  @b Trampoline - @c invoke_scores_<fan_out,kit> is the one place the load, update,
- *  finalize, through, prefetch, demote choreography lives. Reads everything it needs -
- *  @c scalar_t, @c step_vec_t, @c reduce_accumulators, ... - off the kit. Lane fan-out
- *  is unrolled via @c std::index_sequence so the same body emits clean code for both
- *  @b 1-to-1 and @b 1-to-4. The state array is always sized 4 (NumKong's finalize is
- *  hardcoded fan-out-4); for 1-to-1 the bottom three slots are left as register noise
- *  and the resulting lanes 1-3 are dropped at extract time.
+ *  @b Trampoline - @c invoke_scores_<fan_out,kit> is the one place the load, update, finalize,
+ *  through, prefetch, demote choreography lives, run by @c invoke_under_target_ under the kit's
+ *  target, so its kernels inline with no flags on the unit. It reads everything it needs, like
+ *  @c scalar_t, @c step_vec_t and @c reduce_accumulators, off the kit. Lane fan-out is unrolled
+ *  via @c std::index_sequence so the same body emits clean code for both @b 1-to-1 and @b 1-to-4.
+ *  The state array is always sized 4, as NumKong's finalize is hardcoded fan-out-4; for 1-to-1
+ *  the bottom three slots hold register noise, and lanes 1-3 are dropped when extracting.
  *
  *  @b Entry-points - free function templates @c distance<kit> and @c distances<kit>, taking the
  *  quads kit an engine was handed and the metric as their first argument. Call sites read
@@ -93,13 +93,14 @@
  */
 #pragma once
 
-#include <cassert>
+#include <cassert> // `assert` - the status every kit call must succeed with
 #include <cstring> // `std::memcpy` - rows that already hold the target scalar move as bytes
 
-#include <array>
-#include <limits> // `std::numeric_limits` - the unit-RMS cast's epsilon
-#include <type_traits>
-#include <utility>
+#include <array>       // `std::array` - a fan-out's lanes and an elementwise tile
+#include <limits>      // `std::numeric_limits` - the unit-RMS cast's epsilon
+#include <span>        // `std::span` - the tile an elementwise loop raises in place
+#include <type_traits> // `std::is_same_v` - which scalar a kit takes
+#include <utility>     // `std::index_sequence` - the unrolled fan-out
 
 #include <numkong/numkong.h>
 #include <numkong/types.hpp>
@@ -2796,10 +2797,8 @@ struct serial_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_serial;
     static constexpr auto blend = nk_each_blend_f32_serial;
 
-    /** Raises two to every one of @p values in place, as NumKong's attention weighs its logits. */
-    static void exp2(std::array<f32_t, 8>& values) noexcept {
-        for (f32_t& value : values) value = nk_f32_exp2_serial_(value);
-    }
+    using vec_t = f32_t;
+    static constexpr auto exp2 = nk_f32_exp2_serial_;
 };
 
 #if NUMKONG_TARGET_HASWELL
@@ -2810,9 +2809,8 @@ struct haswell_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_haswell;
     static constexpr auto blend = nk_each_blend_f32_haswell;
 
-    static void exp2(std::array<f32_t, 8>& values) noexcept {
-        _mm256_storeu_ps(values.data(), nk_exp2_f32x8_haswell_(_mm256_loadu_ps(values.data())));
-    }
+    using vec_t = __m256;
+    static constexpr auto exp2 = nk_exp2_f32x8_haswell_;
 };
 #else
 
@@ -2832,6 +2830,7 @@ struct skylake_elementwise_kit_t {
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto scale = nk_each_scale_f32_skylake;
     static constexpr auto blend = nk_each_blend_f32_skylake;
+    using vec_t = haswell_elementwise_kit_t::vec_t;
     static constexpr auto exp2 = haswell_elementwise_kit_t::exp2;
 };
 #else
@@ -2852,6 +2851,7 @@ struct icelake_elementwise_kit_t {
     static constexpr auto cast = nk_cast_icelake;
     static constexpr auto scale = skylake_elementwise_kit_t::scale;
     static constexpr auto blend = skylake_elementwise_kit_t::blend;
+    using vec_t = skylake_elementwise_kit_t::vec_t;
     static constexpr auto exp2 = skylake_elementwise_kit_t::exp2;
 };
 #else
@@ -2872,6 +2872,7 @@ struct sapphire_elementwise_kit_t {
     static constexpr auto cast = nk_cast_sapphire;
     static constexpr auto scale = skylake_elementwise_kit_t::scale;
     static constexpr auto blend = skylake_elementwise_kit_t::blend;
+    using vec_t = skylake_elementwise_kit_t::vec_t;
     static constexpr auto exp2 = skylake_elementwise_kit_t::exp2;
 };
 #else
@@ -2892,10 +2893,8 @@ struct neon_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_neon;
     static constexpr auto blend = nk_each_blend_f32_neon;
 
-    static void exp2(std::array<f32_t, 8>& values) noexcept {
-        vst1q_f32(values.data(), nk_exp2_f32x4_neon_(vld1q_f32(values.data())));
-        vst1q_f32(values.data() + 4, nk_exp2_f32x4_neon_(vld1q_f32(values.data() + 4)));
-    }
+    using vec_t = float32x4_t;
+    static constexpr auto exp2 = nk_exp2_f32x4_neon_;
 };
 #else
 
@@ -2915,10 +2914,11 @@ struct rvv_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_rvv;
     static constexpr auto blend = nk_each_blend_f32_rvv;
 
-    static void exp2(std::array<f32_t, 8>& values) noexcept {
-        vfloat32m4_t const lanes = __riscv_vle32_v_f32m4(values.data(), values.size());
-        __riscv_vse32_v_f32m4(values.data(), nk_exp2_f32m4_rvv_(lanes, values.size()), values.size());
-    }
+    /** RVV's @c vfloat32m4_t is sizeless, so no tile copies into it; the serial helper takes its
+     *  place. */
+    using vec_t = serial_elementwise_kit_t::vec_t;
+    using vec_t = serial_elementwise_kit_t::vec_t;
+    static constexpr auto exp2 = serial_elementwise_kit_t::exp2;
 };
 #else
 
@@ -2938,10 +2938,8 @@ struct v128relaxed_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_v128relaxed;
     static constexpr auto blend = nk_each_blend_f32_v128relaxed;
 
-    static void exp2(std::array<f32_t, 8>& values) noexcept {
-        wasm_v128_store(values.data(), nk_exp2_f32x4_v128relaxed_(wasm_v128_load(values.data())));
-        wasm_v128_store(values.data() + 4, nk_exp2_f32x4_v128relaxed_(wasm_v128_load(values.data() + 4)));
-    }
+    using vec_t = v128_t;
+    static constexpr auto exp2 = nk_exp2_f32x4_v128relaxed_;
 };
 #else
 
@@ -2962,6 +2960,7 @@ struct powervsx_elementwise_kit_t {
     static constexpr auto cast = nk_cast_powervsx;
     static constexpr auto scale = serial_elementwise_kit_t::scale;
     static constexpr auto blend = serial_elementwise_kit_t::blend;
+    using vec_t = serial_elementwise_kit_t::vec_t;
     static constexpr auto exp2 = serial_elementwise_kit_t::exp2;
 };
 #else
@@ -3153,7 +3152,7 @@ void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk
             }
             status = rmscast_kit_type_::rmscast(wide, nullptr, &target.data()->raw_, 1, 1, columns,
                                                 columns * sizeof(f32_t), packed_bytes(scalar_type_::dtype(), columns),
-                                                std::numeric_limits<f32_t>::min(), nullptr);
+                                                (std::numeric_limits<f32_t>::min)(), nullptr);
             assert(status == nk_success_k && "Every kit RMS-casts from f32");
             return;
         }
@@ -3187,6 +3186,23 @@ void export_row(void const* native, nk_dtype_t native_dtype, rows_span_t target,
                                                                             target.dtype, target.columns, nullptr);
     assert(status == nk_success_k && "Every kit casts every dtype pair");
 }
+
+/** Raises two to every value of @p values in place, one kit register at a time, as NumKong's
+ *  attention weighs its logits. */
+struct exp2_loop_ {
+    template <typename kit_, std::size_t extent_>
+    [[gnu::always_inline]] static void invoke(std::span<f32_t, extent_> values) noexcept {
+        using vec_t = typename kit_::vec_t;
+        constexpr std::size_t lanes_k = sizeof(vec_t) / sizeof(f32_t);
+        static_assert(extent_ % lanes_k == 0, "The tile holds whole registers");
+        for (std::size_t offset = 0; offset != extent_; offset += lanes_k) {
+            vec_t lanes;
+            std::memcpy(&lanes, values.data() + offset, sizeof(lanes));
+            lanes = kit_::exp2(lanes);
+            std::memcpy(values.data() + offset, &lanes, sizeof(lanes));
+        }
+    }
+};
 
 /** Scales each of @p heads @c f32 sums, at most eight, by its correction, then adds @p count value rows into it, each
  *  row's weights one tile over the heads. Each chunk of the rows widens once and stays in L1 while every head
@@ -3271,6 +3287,399 @@ template <typename lane_type_, typename finalized_vec_type_>
     return {static_cast<f32_t>(typed[0]), static_cast<f32_t>(typed[1]), static_cast<f32_t>(typed[2]),
             static_cast<f32_t>(typed[3])};
 }
+
+/*  Each loop runs under its kit's target, so the kit's inline kernels inline into it; the units
+ *  themselves compile at the floor. */
+#pragma region Targeted Entries
+
+/** Runs @p loop_type_ for a serial kit, at the floor every CPU runs. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_serial_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if NUMKONG_TARGET_HASWELL
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx2,f16c,fma,bmi,bmi2"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "f16c", "fma", "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Haswell kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_haswell_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_HASWELL
+
+#if NUMKONG_TARGET_SKYLAKE
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx2,avx512f,avx512vl,avx512bw,avx512dq,f16c,fma,bmi,bmi2"))), \
+                             apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "avx512f", "avx512vl", "avx512bw", "avx512dq", "f16c", "fma", "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Skylake kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_skylake_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_SKYLAKE
+
+#if NUMKONG_TARGET_ICELAKE
+#if defined(__clang__)
+#pragma clang attribute push(                                                                                        \
+    __attribute__((                                                                                                  \
+        target("avx2,avx512f,avx512vl,avx512bw,avx512dq,avx512vnni,avx512vbmi,avx512vpopcntdq,f16c,fma,bmi,bmi2"))), \
+    apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "avx512f", "avx512vl", "avx512bw", "avx512dq", "avx512vnni", "avx512vbmi", \
+                   "avx512vpopcntdq", "f16c", "fma", "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Ice Lake kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_icelake_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_ICELAKE
+
+#if NUMKONG_TARGET_GENOA
+#if defined(__clang__)
+#pragma clang attribute push(                                                                        \
+    __attribute__((target("avx2,avx512f,avx512vl,avx512bw,avx512dq,avx512bf16,f16c,fma,bmi,bmi2"))), \
+    apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "avx512f", "avx512vl", "avx512bw", "avx512dq", "avx512bf16", "f16c", "fma", "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Genoa kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_genoa_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_GENOA
+
+#if NUMKONG_TARGET_DIAMOND
+#if defined(__clang__) && __clang_major__ >= 22
+#pragma clang attribute push(                                                                                \
+    __attribute__((target("avx2,avx512f,avx512vl,avx512bw,avx512dq,avx512fp16,avx10.2,f16c,fma,bmi,bmi2"))), \
+    apply_to = function)
+#elif defined(__clang__)
+#pragma clang attribute push(                                                                                    \
+    __attribute__((target("avx2,avx512f,avx512vl,avx512bw,avx512dq,avx512fp16,avx10.2-512,f16c,fma,bmi,bmi2"))), \
+    apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "avx512f", "avx512vl", "avx512bw", "avx512dq", "avx512fp16", "avx10.2", "f16c", "fma", \
+                   "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Diamond Rapids kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_diamond_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_DIAMOND
+
+#if NUMKONG_TARGET_ALDER
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx2,f16c,fma,bmi,bmi2,avxvnni"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "f16c", "fma", "bmi", "bmi2", "avxvnni")
+#endif
+
+/** Runs @p loop_type_ for Alder Lake kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_alder_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_ALDER
+
+#if NUMKONG_TARGET_SIERRA
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("avx2,f16c,fma,bmi,bmi2,avxvnni,avxvnniint8"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "f16c", "fma", "bmi", "bmi2", "avxvnni", "avxvnniint8")
+#endif
+
+/** Runs @p loop_type_ for Sierra Forest kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_sierra_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_SIERRA
+
+#if NUMKONG_TARGET_SAPPHIRE
+#if defined(__clang__)
+#pragma clang attribute push(                                                                        \
+    __attribute__((target("avx2,avx512f,avx512vl,avx512bw,avx512dq,avx512fp16,f16c,fma,bmi,bmi2"))), \
+    apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("avx2", "avx512f", "avx512vl", "avx512bw", "avx512dq", "avx512fp16", "f16c", "fma", "bmi", "bmi2")
+#endif
+
+/** Runs @p loop_type_ for Sapphire Rapids kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_sapphire_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_SAPPHIRE
+
+#if NUMKONG_TARGET_NEON
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=armv8-a+simd"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=armv8-a+simd")
+#endif
+
+/** Runs @p loop_type_ for NEON kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_neon_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_NEON
+
+#if NUMKONG_TARGET_NEONBFDOT
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=armv8.6-a+simd+bf16"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=armv8.6-a+simd+bf16")
+#endif
+
+/** Runs @p loop_type_ for NEON BFDOT kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_neonbfdot_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_NEONBFDOT
+
+#if NUMKONG_TARGET_NEONSDOT
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=armv8.2-a+dotprod"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=armv8.2-a+dotprod")
+#endif
+
+/** Runs @p loop_type_ for NEON SDOT kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_neonsdot_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_NEONSDOT
+
+#if NUMKONG_TARGET_NEONFHM
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=armv8.2-a+simd+fp16+fp16fml"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=armv8.2-a+simd+fp16+fp16fml")
+#endif
+
+/** Runs @p loop_type_ for NEON FHM kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_neonfhm_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_NEONFHM
+
+#if NUMKONG_TARGET_NEONFP8
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=armv8-a+simd+fp8dot4"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=armv8-a+simd+fp8dot4")
+#endif
+
+/** Runs @p loop_type_ for NEON FP8 kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_neonfp8_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_NEONFP8
+
+#if NUMKONG_TARGET_V128
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("simd128"))), apply_to = function)
+#endif
+
+/** Runs @p loop_type_ for SIMD128 kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_v128_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
+#endif // NUMKONG_TARGET_V128
+
+#if NUMKONG_TARGET_V128RELAXED
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("relaxed-simd"))), apply_to = function)
+#endif
+
+/** Runs @p loop_type_ for Relaxed SIMD kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_v128relaxed_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
+#endif // NUMKONG_TARGET_V128RELAXED
+
+#if NUMKONG_TARGET_POWERVSX
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("power9-vector"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("power9-vector")
+#endif
+
+/** Runs @p loop_type_ for POWER VSX kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_powervsx_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_POWERVSX
+
+#if NUMKONG_TARGET_RVV
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("arch=+v"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("arch=+v")
+#endif
+
+/** Runs @p loop_type_ for RVV kits, under their target so their kernels inline. */
+template <typename loop_type_, typename kit_, typename... arguments_types_>
+    requires(kit_::capability_k == nk_cap_rvv_k)
+auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
+    return loop_type_::template invoke<kit_>(std::forward<arguments_types_>(arguments)...);
+}
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif // NUMKONG_TARGET_RVV
+
+#pragma endregion Targeted Entries
 
 /**
  *  @brief The metric's epilogue over one finalize: four @p dots, the query's squared norm and the
@@ -3429,6 +3838,15 @@ template <std::size_t fan_out_, quads_kit kit_, typename prefetcher_type_>
     return scores;
 }
 
+/** The scores loop as a type, so @c invoke_under_target_ can run it under a kit's target. */
+template <std::size_t fan_out_>
+struct scores_loop_ {
+    template <quads_kit kit_, typename... arguments_types_>
+    [[gnu::always_inline]] static auto invoke(arguments_types_&&... arguments) noexcept {
+        return invoke_scores_<fan_out_, kit_>(std::forward<arguments_types_>(arguments)...);
+    }
+};
+
 /** Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms - one source of truth, the
  *  kit. */
 template <quads_kit kit_>
@@ -3443,14 +3861,14 @@ template <quads_kit kit_>
  *  Free function template - the quads kit passed explicitly, the metric at runtime.
  */
 template <quads_kit kit_>
-[[gnu::always_inline]] inline f32_t distance(                        //
+inline f32_t distance(                                               //
     nk_kernel_kind_t kernel,                                         //
     nk::vector_view<typename kit_::scalar_t> query,                  //
     vector_norms<typename kit_::scalar_t::dot_result_t> query_norms, //
     nk::vector_view<typename kit_::scalar_t> candidate,              //
     vector_norms<typename kit_::scalar_t::dot_result_t> candidate_norms) noexcept {
     using vector_view_t = nk::vector_view<typename kit_::scalar_t>;
-    return invoke_scores_<1, kit_>( //
+    return invoke_under_target_<scores_loop_<1>, kit_>( //
                kernel, query, query_norms, std::array<vector_view_t, 1> {candidate}, std::array {candidate_norms},
                std::array<vector_view_t, 1> {candidate}, object_prefetcher<dummy_cache_hints_t> {})
         .distances[0];
@@ -3458,42 +3876,44 @@ template <quads_kit kit_>
 
 /** 1-to-4 distances from @c query to four @c candidates under @p kernel. */
 template <quads_kit kit_>
-[[gnu::always_inline]] inline quad<f32_t> distances(                 //
+inline quad<f32_t> distances(                                        //
     nk_kernel_kind_t kernel,                                         //
     nk::vector_view<typename kit_::scalar_t> query,                  //
     vector_norms<typename kit_::scalar_t::dot_result_t> query_norms, //
     quad<nk::vector_view<typename kit_::scalar_t>> candidates,       //
     quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms) noexcept {
-    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, candidates,
-                                              object_prefetcher<dummy_cache_hints_t> {})
+    return invoke_under_target_<scores_loop_<quad_lanes_k>, kit_>(kernel, query, query_norms, candidates,
+                                                                  candidates_norms, candidates,
+                                                                  object_prefetcher<dummy_cache_hints_t> {})
         .distances;
 }
 
 /** 1-to-4 native dots and the distances derived from them, from one finalize, under @p kernel. */
 template <quads_kit kit_>
-[[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t> scores( //
-    nk_kernel_kind_t kernel,                                                               //
-    nk::vector_view<typename kit_::scalar_t> query,                                        //
-    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                       //
-    quad<nk::vector_view<typename kit_::scalar_t>> candidates,                             //
+inline scores_result<typename kit_::scalar_t::dot_result_t> scores(  //
+    nk_kernel_kind_t kernel,                                         //
+    nk::vector_view<typename kit_::scalar_t> query,                  //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms, //
+    quad<nk::vector_view<typename kit_::scalar_t>> candidates,       //
     quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms) noexcept {
-    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, candidates,
-                                              object_prefetcher<dummy_cache_hints_t> {});
+    return invoke_under_target_<scores_loop_<quad_lanes_k>, kit_>(kernel, query, query_norms, candidates,
+                                                                  candidates_norms, candidates,
+                                                                  object_prefetcher<dummy_cache_hints_t> {});
 }
 
 /** As @c scores, while streaming @p next_candidates toward L2 one line per line scored, so the walk's next quad
  *  arrives as this one finishes. */
 template <quads_kit kit_, typename prefetcher_type_>
-[[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t> scores( //
-    nk_kernel_kind_t kernel,                                                               //
-    nk::vector_view<typename kit_::scalar_t> query,                                        //
-    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                       //
-    quad<nk::vector_view<typename kit_::scalar_t>> candidates,                             //
-    quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms,            //
-    quad<nk::vector_view<typename kit_::scalar_t>> next_candidates,                        //
+inline scores_result<typename kit_::scalar_t::dot_result_t> scores(             //
+    nk_kernel_kind_t kernel,                                                    //
+    nk::vector_view<typename kit_::scalar_t> query,                             //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,            //
+    quad<nk::vector_view<typename kit_::scalar_t>> candidates,                  //
+    quad<vector_norms<typename kit_::scalar_t::dot_result_t>> candidates_norms, //
+    quad<nk::vector_view<typename kit_::scalar_t>> next_candidates,             //
     prefetcher_type_ const& prefetcher) noexcept {
-    return invoke_scores_<quad_lanes_k, kit_>(kernel, query, query_norms, candidates, candidates_norms, next_candidates,
-                                              prefetcher);
+    return invoke_under_target_<scores_loop_<quad_lanes_k>, kit_>(kernel, query, query_norms, candidates,
+                                                                  candidates_norms, next_candidates, prefetcher);
 }
 
 /** The walks' default rescoring: none, so every node keeps the score the kit gave it. */

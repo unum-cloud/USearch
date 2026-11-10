@@ -575,22 +575,18 @@
       }
     },
     {
-      "name": "msvc2022_arm64",
-      "inherits": [
-        "windows",
-        "library"
-      ],
-      "generator": "Visual Studio 17 2022",
-      "architecture": "ARM64"
-    },
-    {
       "name": "msvc2026_arm64",
       "inherits": [
-        "windows",
-        "library"
+        "base",
+        "windows"
       ],
       "generator": "Visual Studio 18 2026",
-      "architecture": "ARM64"
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_SHARED": "ON",
+        "USEARCH_DENSE_DTYPES": "11"
+      }
     }
   ],
   "buildPresets": [
@@ -755,12 +751,6 @@
       "configuration": "Release"
     },
     {
-      "name": "msvc2022_arm64",
-      "configurePreset": "msvc2022_arm64",
-      "jobs": 0,
-      "configuration": "Release"
-    },
-    {
       "name": "msvc2026_arm64",
       "configurePreset": "msvc2026_arm64",
       "jobs": 0,
@@ -840,6 +830,12 @@
       "name": "msvc2026_x64",
       "inherits": "base",
       "configurePreset": "msvc2026_x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc2026_arm64",
+      "inherits": "base",
+      "configurePreset": "msvc2026_arm64",
       "configuration": "Release"
     }
   ],

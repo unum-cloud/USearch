@@ -168,7 +168,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     for (std::size_t entry = 0; entry != count; ++entry) {
         std::array const cloud {std::span<scalar_type_ const> {stored[entry]}};
         value_t value = value_t::make(cloud, value_allocator, 0).value;
-        us::utilities::uuid_t const key = uuid_of(entry);
+        us::utilities::uuid128_t const key = uuid_of(entry);
         failures += expect_eq(ram_index
                                   .insert({&value, 1}, {&key, 1}, metric, {}, ram_context,
                                           us::basic::keep_diverse_t {connectivity_32_k}, {expansion_k})
@@ -191,7 +191,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
     failures += expect_eq(vram_index.reserve({count, connectivity_32_k, offsets[count] - offsets[0]}).status,
                           status_t::success_k);
     typename vram_index_t::insert_config_t const insert_config {expansion_k};
-    std::vector<us::utilities::uuid_t> keys(count);
+    std::vector<us::utilities::uuid128_t> keys(count);
     for (std::size_t entry = 0; entry != count; ++entry) keys[entry] = uuid_of(entry);
     for (std::size_t batch = 0; batch != batches_k && !failures; ++batch) {
         std::size_t const first = count * batch / batches_k, bound = count * (batch + 1) / batches_k;
@@ -230,7 +230,7 @@ static std::size_t check_shapes_vram_collection(u64_t seed, cuda_executor_t& exe
         std::vector<f64_t> found;
         for (std::size_t rank = 0; rank != wanted_k; ++rank) {
             u32_t const id = ids[query * wanted_k + rank];
-            if (id == std::numeric_limits<u32_t>::max()) break;
+            if (id == (std::numeric_limits<u32_t>::max)()) break;
             f64_t const distance = distances[query * wanted_k + rank];
             failures += expect(id < count);
             if (id < count) distance_errors.add(distance, exact[query][id]);

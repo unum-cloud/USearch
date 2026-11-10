@@ -219,7 +219,7 @@ template <                                                          //
     typename vectors_allocator_type_ = metal_shared_allocator_t,    //
     typename neighbors_allocator_type_ = metal_shared_allocator_t,  //
     typename traversals_allocator_type_ = metal_shared_allocator_t, //
-    typename key_type_ = uuid_t,                                    //
+    typename key_type_ = uuid128_t,                                 //
     typename key_hash_type_ = std::hash<key_type_>                  //
     >
 struct vram_apple_index {
@@ -1171,7 +1171,7 @@ struct vram_apple_index {
         split.entries = rows;
         split.part_capacity = divide_round_up<std::size_t>(rows, parts);
         split.config = config.refine;
-        if (parts * split.part_capacity >= std::numeric_limits<u32_t>::max())
+        if (parts * split.part_capacity >= (std::numeric_limits<u32_t>::max)())
             return {std::move(plan), status_t::overflow_k};
         // Every receiver holds a full part's rows, sentinel-filled, before the partition runs.
         for (vram_apple_index* const into : split.receivers) {
@@ -1279,7 +1279,7 @@ struct vram_apple_index {
             node_id_t* const neighbor_slots = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
                 neighbor_slots[slot] = source[slot] < visible ? source[slot] : node_id_unknown_k;
-            fu::standard_atomic_ref<std::size_t> {covered}.add(rows.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1427,7 +1427,7 @@ struct vram_apple_index {
             if (index_->stores_norms() && !norms_rows.empty()) {
                 std::memcpy(index_->norms_column_.host + range.first * sizeof(norms_t), norms_rows.data(),
                             norms_rows.size());
-                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(range.size(), std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(range.size(), std::memory_order_acq_rel);
             }
             std::span<node_id_t> const copied_rows {index_->neighbor_rows_() + range.first * connectivity,
                                                     range.size() * connectivity};
@@ -1436,7 +1436,7 @@ struct vram_apple_index {
             compact_neighbors(copied_rows, connectivity, range.first, node_id_unknown_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
-            fu::standard_atomic_ref<std::size_t> {covered}.add(range.size(), std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1474,7 +1474,7 @@ struct vram_apple_index {
             if (index_->stores_norms()) {
                 std::memcpy(index_->norms_column_.host + into * sizeof(norms_t),
                             source.norms_column_.host + from * sizeof(norms_t), count * sizeof(norms_t));
-                fu::standard_atomic_ref<std::size_t> {covered_norms}.add(count, std::memory_order_acq_rel);
+                fu::standard_atomic_ref<std::size_t> {covered_norms}.store_add(count, std::memory_order_acq_rel);
             }
             std::span<node_id_t> const copied_rows {index_->neighbor_rows_() + into * connectivity,
                                                     count * connectivity};
@@ -1484,7 +1484,7 @@ struct vram_apple_index {
             for (std::size_t row = 0; row != count; ++row)
                 index_->keyed_.assign(static_cast<node_id_t>(into + row),
                                       source.keyed_[static_cast<node_id_t>(from + row)]);
-            fu::standard_atomic_ref<std::size_t> {covered}.add(count, std::memory_order_acq_rel);
+            fu::standard_atomic_ref<std::size_t> {covered}.store_add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -2780,8 +2780,6 @@ struct vram_apple_index {
         fu::standard_atomic_ref<status_t>(status_).store(status_t::success_k, std::memory_order_release);
         keyed_.forget();
     }
-
-    /** Stores @p key as the key of @p node, which the caller's claim or closed word covers. */
 
     /** Files every row of @p range under its key ahead of its watermark: the claim holder, or the
      *  closer of the word, is the map's one writer. */

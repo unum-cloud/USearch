@@ -41,14 +41,14 @@ inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcep
 
 /** Where a ranking writes: @c wanted keys and scores per query, distances or products, and how
  *  many each kept. */
-using ranked_matches_span_t = dense::ranked_matches_span<us::utilities::uuid_t, f64_t>;
+using ranked_matches_span_t = dense::ranked_matches_span<us::utilities::uuid128_t, f64_t>;
 
 /** The keys each query's walk starts from, as a ranking's keys and counts lay them out. */
-using ranked_hints_view_t = dense::ranked_hints_view<us::utilities::uuid_t>;
+using ranked_hints_view_t = dense::ranked_hints_view<us::utilities::uuid128_t>;
 
 /** Where a product or MaxSim writes, in the arena's memory for its residency: each query's keys
  *  and the ABI's scores from its offset, as the C tape reads them. */
-using products_tape_t = dense::products_tape<us::utilities::uuid_t, usearch_distance_t>;
+using products_tape_t = dense::products_tape<us::utilities::uuid128_t, usearch_distance_t>;
 
 /** Queries of many rows each: the rows, the offsets cutting them, one more than the queries, and
  *  the keys every row's walks of a query start from, empty for none. */
@@ -87,7 +87,7 @@ struct attention_arguments_t {
 template <vendored_residency_t residency_>
 struct dense_verbs {
     using executor_t = typename vendored_residency_executor<residency_>::type;
-    using key_t = us::utilities::uuid_t;
+    using key_t = us::utilities::uuid128_t;
     using keys_view_t = nk::vector_view<key_t>;
     using rows_view_t = dense::rows_view_t;
     using rows_span_t = dense::rows_span_t;
@@ -261,7 +261,7 @@ usearch_executor_t call_executor_for(punned_dense_index<residency_> const& punne
     using executor_t = typename punned_dense_index<residency_>::executor_t;
     auto [built, status] = executor_t::spawn(driver_of(gpu_drivers(), std::type_identity<executor_t> {}), devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor = gpu_executor_t {std::move(built)};
+    call_executor.executor.emplace<gpu_executor_t>(std::in_place_type<executor_t>, std::move(built));
     return &call_executor;
 }
 

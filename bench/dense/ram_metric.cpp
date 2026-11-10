@@ -28,7 +28,6 @@
 #include <cstdint> // `std::uint32_t`
 #include <cstring> // `std::strcmp`, `std::memcpy` - the dot lanes a finalizer takes
 
-#include <algorithm>   // `std::max`
 #include <array>       // `std::array`
 #include <chrono>      // `std::chrono::steady_clock`, `std::chrono::milliseconds`
 #include <string>      // `std::string`
@@ -351,7 +350,7 @@ template <typename scalar_>
 static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     constexpr std::size_t dims_per_value = nk::dimensions_per_value<scalar_>();
     std::size_t const row_bytes = (dim / dims_per_value) * sizeof(scalar_);
-    std::size_t const target_rows = std::max<std::size_t>(8, candidate_pool_target_bytes_k / row_bytes);
+    std::size_t const target_rows = max_of<std::size_t>(8, candidate_pool_target_bytes_k / row_bytes);
     std::size_t const row_count = round_up_pow2(target_rows);
 
     candidate_pool<scalar_> pool {

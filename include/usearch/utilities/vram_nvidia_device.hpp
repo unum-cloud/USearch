@@ -206,7 +206,7 @@ struct cufile_error_t {
 struct cufile_descriptor_t {
     int type;
     union handle_t {
-        int file;
+        native_file_t file;
         void* handle;
     } handle;
     void const* file_system_operations;

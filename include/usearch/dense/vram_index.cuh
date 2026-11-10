@@ -350,7 +350,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> vram_score_batch( //
                                     : storage.geometry.lanes_per_row;
     u32_t const steps_per_row = divide_round_up(storage.geometry.steps_per_row, fragments_per_load_);
     u32_t const row_loads = storage.geometry.row_fragments / fragments_per_load_;
-    u32_t const lanes_log2 = 31 - __clz(lanes_per_row);
+    u32_t const lanes_log2 = warp_t::highest_bit(lanes_per_row);
     u32_t const rows_per_gather = warp_t::width_k >> lanes_log2;
     u32_t const lane_in_row = lane & (lanes_per_row - 1);
     u32_t const subwarp = lane >> lanes_log2;
@@ -819,7 +819,7 @@ __device__ __forceinline__ u32_t vram_select_diverse( //
 
     // Re-sort by distance, ties on the ring around the row, while the rows copy in; the low bits
     // keep the cache position.
-    u32_t const position_mask = ~0u >> __clz(selection_nodes);
+    u32_t const position_mask = ~0u >> warp_t::leading_zeros(selection_nodes);
     vram_sorted_buffer<warp_t, node_id_t> sorted_candidates {selection.scored_entries, 0, selection_nodes};
     for (u32_t base = 0; base < candidates_count; base += warp_t::width_k) {
         u32_t const position = base + lane, batch_count = min_of(candidates_count - base, warp_t::width_k);
@@ -1138,7 +1138,7 @@ __device__ __forceinline__ bool vram_reselect_staged( //
     // Score every candidate against the node & sort ascending, ties on the ring around the node;
     // the IDs' low bits are cache-row indices.
     telemetry.scored += candidates_count;
-    u32_t const position_mask = ~0u >> __clz(query_row);
+    u32_t const position_mask = ~0u >> warp_t::leading_zeros(query_row);
     vram_sorted_buffer<warp_t, node_id_t> sorted_candidates {selection.scored_entries, 0, query_row};
     for (u32_t base = 0; base < candidates_count; base += warp_t::width_k) {
         u32_t const position = base + lane, batch_count = min_of(candidates_count - base, warp_t::width_k);
@@ -2567,7 +2567,7 @@ struct vram_heads_rescoring {
                                                                    u32_t gathered_count, u32_t lane,
                                                                    vram_scored_node<node_id_t> scored) const noexcept {
         constexpr u32_t lanes_k = warp_t::width_k;
-        u32_t const lanes_log2 = 31 - __clz(storage.geometry.lanes_per_row);
+        u32_t const lanes_log2 = warp_t::highest_bit(storage.geometry.lanes_per_row);
         u32_t const lane_in_row = lane & (storage.geometry.lanes_per_row - 1);
         bool const live = lane < gathered_count;
         if (live) dots[lane] = static_cast<f32_t>(gathered.dots[lane]);

@@ -62,6 +62,10 @@ codegen_macro_prefix=''
 macro_prefix="USEARCH"
 identity_headers="c/usearch/types.h"
 platform_predefines_refused=''
+# The helpers that replace `std::min` and `std::max`, which spell no name `<windows.h>` takes as a macro.
+minmax_helpers="min_of or max_of from utilities/types.hpp"
+# The one header whose helpers may call the device bit intrinsics, empty where the project has no device code.
+device_bit_helpers_path="include/usearch/utilities/vram_nvidia_device.cuh"
 
 # endregion Project Settings
 
@@ -2526,6 +2530,115 @@ check_macro_families() {
         "            or an _OS_, _ARCH_ or _HAS_ fact:"
 }
 
+# Rejects `std::min` and `std::max` in any spelling, and any `min` or `max` a parenthesis follows, as in
+# `numeric_limits<type>::max()` or `range.min()`, because `<windows.h>` defines both as function-like macros.
+# A parenthesized `(std::numeric_limits<type>::max)()` escapes the macro; `minmax_helpers` name the rest.
+check_minmax_uses_helpers() {
+    local rolled
+    rolled=$(blank_c_comments_preserving_columns literals < "$staged_code_path" | scan_staged_file_marking_added_lines '
+        (FNR in added) && $0 ~ /(^|[^A-Za-z0-9_])(min|max)[[:space:]]*\(|std::(min|max)([^A-Za-z0-9_]|$)/ {
+            printf "line %d: %s\n", FNR, $0
+        }' -)
+    [ -z "$rolled" ] || reject_with_reason "$rolled" \
+        "$staged_path calls min or max, which <windows.h> defines as macros; write $minmax_helpers," \
+        "            or parenthesize a member as (std::numeric_limits<type>::max)():"
+}
+
+# Rejects `NOMINMAX` or `WIN32_LEAN_AND_MEAN` defined anywhere, because a header must never change what its user's
+# `<windows.h>` declares and a unit defining them hides the macro clashes its users meet, and a `<windows.h>` no
+# `<winsock2.h>` precedes, because it then pulls in Winsock 1.1, which a later `<winsock2.h>` collides with.
+check_windows_header_hygiene() {
+    local defined unguarded
+    defined=$(grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+(NOMINMAX|WIN32_LEAN_AND_MEAN)([^A-Za-z0-9_]|$)' \
+        "$staged_added_code_path" || true)
+    [ -z "$defined" ] || reject_with_reason "$defined" \
+        "$staged_path defines NOMINMAX or WIN32_LEAN_AND_MEAN; spell no min or max and" \
+        "            include <winsock2.h> before <windows.h> instead:"
+    unguarded=$(scan_staged_file_marking_added_lines '
+        { line = tolower($0) }
+        line ~ /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]winsock2\.h[>"]/ { winsock = 1 }
+        (FNR in added) && !winsock && line ~ /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]windows\.h[>"]/ {
+            printf "line %d: %s\n", FNR, $0
+        }' "$staged_code_path")
+    [ -z "$unguarded" ] || reject_with_reason "$unguarded" \
+        "$staged_path includes <windows.h> before <winsock2.h>, which drags in Winsock 1.1; include <winsock2.h> first:"
+}
+
+# Rejects a device bit intrinsic outside the one header that wraps each in a helper named like its host twin, so
+# kernels spell neither the intrinsic nor its argument casts.
+check_device_bit_intrinsics() {
+    local spelled
+    [ "$staged_path" != "$device_bit_helpers_path" ] || return 0
+    spelled=$(blank_c_comments_preserving_columns literals < "$staged_code_path" | scan_staged_file_marking_added_lines '
+        (FNR in added) && $0 ~ /(^|[^A-Za-z0-9_])__(clz|clzll|ffs|ffsll|popc|popcll|brev|brevll)[[:space:]]*\(/ {
+            printf "line %d: %s\n", FNR, $0
+        }' -)
+    [ -z "$spelled" ] || reject_with_reason "$spelled" \
+        "$staged_path calls a device bit intrinsic; call its helper in ${device_bit_helpers_path:-a device header}:"
+}
+
+# The lowercase macros of the Windows SDK, verbatim from an MSVC dump of `<winsock2.h>`, `<ws2tcpip.h>`,
+# `<windows.h>`, `<mswsock.h>`, `<iphlpapi.h>` and `<winternl.h>`. Regenerate it per SDK from a unit including
+# those six, with `cl /std:c++20 /Zc:preprocessor /EP /d1PP unit.cpp`, piped through
+# `sed -En 's/^[[:space:]]*#[[:space:]]*define[[:space:]]+([a-z][a-z0-9_]*)([[:space:](]|$).*/\1/p' | LC_ALL=C sort -u`.
+windows_lowercase_macros='
+abnormal_termination boolean_array_from_ndr boolean_from_ndr byte_array_from_ndr byte_from_ndr cdecl chx1 chx10
+chx11 chx12 chx13 chx14 chx15 chx16 chx2 chx3 chx4 chx5 chx6 chx7 chx8 chx9 cmb1 cmb10 cmb11 cmb12 cmb13 cmb14
+cmb15 cmb16 cmb2 cmb3 cmb4 cmb5 cmb6 cmb7 cmb8 cmb9 ctl1 edt1 edt10 edt11 edt12 edt13 edt14 edt15 edt16 edt2
+edt3 edt4 edt5 edt6 edt7 edt8 edt9 environ errno exception_code exception_info far frm1 frm2 frm3 frm4
+gai_strerror grp1 grp2 grp3 grp4 h_addr h_errno hyper ico1 ico2 ico3 ico4 in_addr6 interface isascii iscsym
+iscsymf lst1 lst10 lst11 lst12 lst13 lst14 lst15 lst16 lst2 lst3 lst4 lst5 lst6 lst7 lst8 lst9 lstrcat lstrcmp
+lstrcmpi lstrcpy lstrcpyn lstrlen max midl_user_allocate midl_user_free min near offsetof onexit_t pascal psh1
+psh10 psh11 psh12 psh13 psh14 psh15 psh16 psh2 psh3 psh4 psh5 psh6 psh7 psh8 psh9 rad1 rad10 rad11 rad12 rad13
+rad14 rad15 rad16 rad2 rad3 rad4 rad5 rad6 rad7 rad8 rad9 rct1 rct2 rct3 rct4 rpc_binding_handle_t
+rpc_binding_vector_t s6_addr s6_bytes s6_words s_addr s_host s_imp s_impno s_lh s_net scr1 scr2 scr3 scr4 scr5
+scr6 scr7 scr8 small small_array_from_ndr small_from_ndr small_from_ndr_temp stc1 stc10 stc11 stc12 stc13 stc14
+stc15 stc16 stc17 stc18 stc19 stc2 stc20 stc21 stc22 stc23 stc24 stc25 stc26 stc27 stc28 stc29 stc3 stc30 stc31
+stc32 stc4 stc5 stc6 stc7 stc8 stc9 sys_errlist sys_nerr timerclear timercmp timerisset toascii ua_lstrcmp
+ua_lstrcmpi ua_lstrlen ua_tcscpy ua_tcscpy_s uuid_t uuid_vector_t va_arg va_copy va_end va_start wcswcs
+wsprintf wvsprintf'
+
+# Rejects a code identifier a system header rewrites wherever a user includes it first: `windows_lowercase_macros`
+# (`small` turns into `char`), GNU's and Objective-C's object-like `linux`, `unix`, `i386`, `nil` and `Nil`, and,
+# only before a parenthesis, glibc's and BSD's function-like `major`, `minor`, `makedev`, `howmany`, `roundup`,
+# `powerof2`, `setbit`, `clrbit`, `isset` and `isclr`. The standard and socket names the code means to reach pass,
+# `min` and `max` are `check_minmax_uses_helpers`'s, and `uuid_t` reads `uuid128_t`.
+check_windows_macro_names() {
+    local caught
+    caught=$(blank_c_comments_preserving_columns literals < "$staged_code_path" |
+        names="$windows_lowercase_macros" scan_staged_file_marking_added_lines '
+        BEGIN {
+            count = split(ENVIRON["names"], listed)
+            for (position = 1; position <= count; ++position) macros[listed[position]]
+            count = split("errno offsetof va_arg va_copy va_end va_start s_addr s6_addr s6_bytes s6_words min max", spared)
+            for (position = 1; position <= count; ++position) delete macros[spared[position]]
+            count = split("linux unix i386 nil Nil", listed)
+            for (position = 1; position <= count; ++position) macros[listed[position]]
+            count = split("major minor makedev howmany roundup powerof2 setbit clrbit isset isclr", listed)
+            for (position = 1; position <= count; ++position) calls[listed[position]]
+        }
+        (FNR in added) && $0 !~ /^[[:space:]]*#[[:space:]]*include/ {
+            rest = $0
+            while (match(rest, /[A-Za-z_][A-Za-z0-9_]*/)) {
+                word = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+                if (word in macros || (word in calls && rest ~ /^[[:space:]]*\(/)) printf "line %d: %s, in %s\n", FNR, word, $0
+            }
+        }' -)
+    [ -z "$caught" ] || reject_with_reason "$caught" \
+        "$staged_path names an identifier a system header defines as a macro; rename it to say what it holds," \
+        "            and spell uuid_t as uuid128_t:"
+}
+
+# Rejects `_ITERATOR_DEBUG_LEVEL` defined in a source file, because every object and the runtime it links must
+# agree on it, which only the build's `/MD` or `/MDd` choice keeps.
+check_iterator_debug_level() {
+    local defined
+    defined=$(grep -E '^\+[[:space:]]*#[[:space:]]*define[[:space:]]+_ITERATOR_DEBUG_LEVEL([^A-Za-z0-9_]|$)' \
+        "$staged_added_code_path" || true)
+    [ -z "$defined" ] || reject_with_reason "$defined" \
+        "$staged_path defines _ITERATOR_DEBUG_LEVEL, which must match across every object; leave it to /MD or /MDd:"
+}
+
 # endregion C and C++ Idioms
 
 # region Formatters
@@ -2966,7 +3079,18 @@ run_shared_checks() {
         ;;
     esac
     case "$staged_path" in
+    *.hpp | *.h | *.c | *.cpp | *.cc | *.cu | *.cuh | *.hip)
+        check_minmax_uses_helpers
+        check_windows_header_hygiene
+        check_windows_macro_names
+        check_iterator_debug_level
+        ;;
+    esac
+    case "$staged_path" in
     *.hpp | *.cpp | *.cc) check_memcpy_qualified ;;
+    esac
+    case "$staged_path" in
+    *.cu | *.cuh | *.hip) check_device_bit_intrinsics ;;
     esac
     case "$staged_path" in
     c/* | cpp/* | include/* | src/* | python/* | javascript/* | swift/* | golang/* | java/* | csharp/*)
@@ -3423,7 +3547,7 @@ check_doxygen_trailers() {
 
 # The full `unum::usearch::` spelling belongs to three places: the alias and `using` lines, the
 # lines opening and closing a nested `unum::usearch::<dir>` namespace, and the specializations of
-# foreign templates, `std::hash<unum::usearch::utilities::uuid_t>` and its call operator or
+# foreign templates, `std::hash<unum::usearch::utilities::uuid128_t>` and its call operator or
 # `fmt::formatter<...>`, which have to name the type from outside. Everywhere else the name is
 # already in scope, through an alias like `us::` or `dense::`, the directive a translation unit
 # opened with, or the enclosing namespace.
@@ -3436,7 +3560,7 @@ check_qualified_namespace() {
         grep -E 'unum::usearch::' || true)
     [ -z "$spelled" ] || reject_with_reason "$spelled" \
         "$staged_path spells unum::usearch:: in full; the name is already in scope through an alias like \`us\`," \
-        "            a \`using\` directive, or the enclosing namespace; only std::hash<unum::usearch::utilities::uuid_t> earns it:"
+        "            a \`using\` directive, or the enclosing namespace; only std::hash<unum::usearch::utilities::uuid128_t> earns it:"
 }
 
 # The namespaces a C++ source opens at file scope, as `line:name`, reading past comments, literals,
@@ -3622,7 +3746,7 @@ check_hand_ceils() {
 }
 
 # C's limit macros, `INFINITY`, `NAN`, `SIZE_MAX`, `PTRDIFF_MAX`, `FLT_MAX` and kin, name what
-# `std::numeric_limits` spells per type, so a C++ line writes `lowest()`, `max()`, `quiet_NaN()` or
+# `std::numeric_limits` spells per type, so a C++ line writes `lowest()`, `(max)()`, `quiet_NaN()` or
 # `infinity()`. Preprocessor lines, comments and string literals stay out; the C sources keep the
 # macros.
 check_c_limit_macros() {
@@ -3630,7 +3754,7 @@ check_c_limit_macros() {
     macros=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*(#|//|/\*|\*( |/|$))' | sed -E 's/"([^"\\]|\\.)*"//g' |
         grep -E '\b(INFINITY|NAN|HUGE_VALF?|SIZE_MAX|PTRDIFF_(MAX|MIN)|U?INT(8|16|32|64)?_(MAX|MIN)|U?L?LONG_(MAX|MIN)|(FLT|DBL)_(MAX|MIN|EPSILON))\b' || true)
     [ -z "$macros" ] || reject_with_reason "$macros" \
-        "$staged_path spells a C limit macro; write std::numeric_limits<type>::lowest(), max(), quiet_NaN() or infinity():"
+        "$staged_path spells a C limit macro; write std::numeric_limits<type>::lowest(), (max)(), quiet_NaN() or infinity():"
 }
 
 # The C library's math functions are spelled through `std::`, so overload resolution picks the
@@ -3646,17 +3770,6 @@ check_bare_libc_math() {
         grep -vE "\b(void|auto|bool|float|double|[a-z0-9_]+_t)[[:space:]]+($libc_math_names)[[:space:]]*\(" || true)
     [ -z "$bare" ] || reject_with_reason "$bare" \
         "$staged_path calls a C math function bare; spell it std::sqrt(x) or std::atan2(y, x):"
-}
-
-# `std::min` / `std::max` re-derive what the shared vocabulary already names, and the parenthesized
-# `(std::min<...>)` spelling exists only to dodge the `windows.h` min/max macros, a ritual that
-# `min_of` / `max_of` remove outright. Library code says what it means; tests and benches, where the
-# standard algorithms are the subject rather than the tool, are dispatched elsewhere.
-check_hand_minmax() {
-    local rolled
-    rolled=$(printf '%s\n' "$staged_added_text" | grep -nE '\(?std::(min|max)[<(]' || true)
-    [ -z "$rolled" ] || reject_with_reason "$rolled" \
-        "$staged_path uses std::min/std::max; write min_of(left, right) from usearch/utilities/types.hpp:"
 }
 
 # `fu::preferred_yield_t` and `fu::preferred_atomic_ref` are for a unit that dispatches nothing;
@@ -4347,7 +4460,7 @@ check_utilities_vocabulary() {
 # which every sibling hook carries word for word.
 shared_region_sums='Shared Helpers	0f47a409a3595919bb8c842cb2947d38
 All Files	53c26430146a2f3695eb5998e4b1dc4c
-Shared Dispatch	a11a5c81e82ee2814348080827a66f73
+Shared Dispatch	763b62fb29c14c5871e5e6d7612b1881
 Parallel Judging	738b237daa7b91d37b6a535e0f073b9a'
 
 # Rejects a pinned region of this hook whose text drifted from NumKong's copy, because Shared Helpers,
@@ -4631,7 +4744,6 @@ run_project_checks() {
     case "$staged_path" in
     c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | include/*.hip | src/*.cpp | src/*.cuh | src/*.hip | \
         verification/*.cpp)
-        check_hand_minmax
         check_preferred_aliases
         ;;
     esac

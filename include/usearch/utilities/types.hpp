@@ -12,12 +12,12 @@
 
 #include <array>       // `std::array` - a quad's keys and admissions
 #include <atomic>      // `std::atomic_ref` - under `standard_atomic_ref`
-#include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words, `std::bit_width` - the bijection's span
+#include <bit>         // `std::bit_cast` - hashing `uuid128_t` as two words, `std::bit_width` - the bijection's span
 #include <compare>     // `std::strong_ordering` - a `shard_node`'s order, shard first
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
-#include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
+#include <functional>  // `std::hash` - specialized for `uuid128_t` below, `std::less`
 #include <limits>      // `std::numeric_limits` - the claim word's closed sentinel
-#include <optional>    // `std::optional` - the identity a `uuid_t` may render
+#include <optional>    // `std::optional` - the identity a `uuid128_t` may render
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
@@ -131,17 +131,19 @@ using u1x32_t = u32_t;
 inline constexpr u64_t usearch_magic_k = 0x3368637261657375ull;
 
 /** The 128-bit key default - the SafeGraphs @c uuid column, one UUID per node. */
-struct uuid_t {
+struct uuid128_t {
     std::byte bytes[16];
 
-    bool operator==(uuid_t const& other) const noexcept { return std::memcmp(bytes, other.bytes, sizeof(bytes)) == 0; }
+    bool operator==(uuid128_t const& other) const noexcept {
+        return std::memcmp(bytes, other.bytes, sizeof(bytes)) == 0;
+    }
 };
-static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
+static_assert(std::is_trivially_copyable_v<uuid128_t> && sizeof(uuid128_t) == 16);
 
-/** The @c uuid_t every binding renders the integer @p identity as: big-endian in the trailing
+/** The @c uuid128_t every binding renders the integer @p identity as: big-endian in the trailing
  *  eight bytes. */
-constexpr uuid_t uuid_of(u64_t identity) noexcept {
-    uuid_t key {};
+constexpr uuid128_t uuid_of(u64_t identity) noexcept {
+    uuid128_t key {};
     for (std::size_t byte = 0; byte != sizeof(identity); ++byte)
         key.bytes[sizeof(key.bytes) - 1 - byte] = static_cast<std::byte>(identity >> (byte * 8));
     return key;
@@ -149,7 +151,7 @@ constexpr uuid_t uuid_of(u64_t identity) noexcept {
 
 /** The integer identity @ref uuid_of renders as @p key, or none when its leading eight bytes are
  *  not zero. */
-constexpr std::optional<u64_t> identity_of(uuid_t const& key) noexcept {
+constexpr std::optional<u64_t> identity_of(uuid128_t const& key) noexcept {
     u64_t identity = 0;
     for (std::size_t byte = 0; byte != sizeof(key.bytes); ++byte) {
         if (byte < sizeof(identity) && key.bytes[byte] != std::byte {0}) return std::nullopt;
@@ -1331,10 +1333,10 @@ struct standard_atomic_ref {
         return observed;
     }
 
-    void add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+    void store_add(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         word_.fetch_add(operand, order);
     }
-    void sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+    void store_sub(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         word_.fetch_sub(operand, order);
     }
     void set_bits(value_type_ bits, std::memory_order order = std::memory_order_seq_cst) const noexcept {
@@ -1352,7 +1354,7 @@ struct standard_atomic_ref {
     bool fetch_test_and_reset_bit(unsigned bit, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         return (word_.fetch_and(static_cast<value_type_>(~(value_type_ {1} << bit)), order) >> bit) & 1;
     }
-    void max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+    void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         fetch_max(operand, order);
     }
 
@@ -1751,8 +1753,8 @@ struct splitmix64_t {
 
     u64_t state = 0;
 
-    static constexpr u64_t min() noexcept { return 0; }
-    static constexpr u64_t max() noexcept { return ~u64_t(0); }
+    static constexpr u64_t(min)() noexcept { return 0; }
+    static constexpr u64_t(max)() noexcept { return ~u64_t(0); }
 
     /** One SplitMix64 step: 64 fresh uniform bits. */
     constexpr u64_t operator()() noexcept { return mix_bits(state += golden_ratio_u64_k); }
@@ -1801,7 +1803,7 @@ struct uniform_below<u64_t> {
  *  neighbor list it guards. */
 template <typename node_id_type_>
 struct node_id_limits {
-    static constexpr node_id_type_ unknown_k = std::numeric_limits<node_id_type_>::max();
+    static constexpr node_id_type_ unknown_k = (std::numeric_limits<node_id_type_>::max)();
 };
 
 /** Distance representation shared by all metrics, regardless of the stored dtype. */
@@ -1888,7 +1890,7 @@ struct vram_telemetry_block_t {
 struct claim_word_t {
 
     /** The word's value while a caller holds it closed, past any entry count. */
-    static constexpr std::size_t closed_k = std::numeric_limits<std::size_t>::max();
+    static constexpr std::size_t closed_k = (std::numeric_limits<std::size_t>::max)();
 
     std::size_t claimed_entries = 0;
 
@@ -2017,7 +2019,7 @@ struct shared_mutex {
         // atomics, and the certified probes' acquire would otherwise pair with nothing.
         annotate_release(&word);
         annotate_unlock_shared_started(&word);
-        atomic_ref<u64_t>(word).sub(u64_t {1}, std::memory_order_release);
+        atomic_ref<u64_t>(word).store_sub(u64_t {1}, std::memory_order_release);
         annotate_unlock_shared_finished(&word);
     }
 
@@ -2062,11 +2064,11 @@ struct shard_set;
 
 } // namespace unum::usearch::utilities
 
-/** Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one mixed
+/** Makes @c uuid128_t a first-class key of standard-hash-keyed containers: fold one mixed
  *  half into the other, then mix again - @ref unum::usearch::utilities::mix_bits twice. */
 template <>
-struct std::hash<unum::usearch::utilities::uuid_t> {
-    std::size_t operator()(unum::usearch::utilities::uuid_t const& key) const noexcept {
+struct std::hash<unum::usearch::utilities::uuid128_t> {
+    std::size_t operator()(unum::usearch::utilities::uuid128_t const& key) const noexcept {
         namespace utilities = unum::usearch::utilities;
         struct halves_t {
             utilities::u64_t low, high;

@@ -124,7 +124,7 @@ struct cuda_block_schedule {
             node_id_type_ const node_id = round.ids[position];
             distance_t distance = std::numeric_limits<distance_t>::infinity();
             // An entry's lanes share its ID, so every group takes one side of each branch whole.
-            if (node_id != std::numeric_limits<node_id_type_>::max()) {
+            if (node_id != (std::numeric_limits<node_id_type_>::max)()) {
                 vram_entry_t const entry = storage.entry(node_id);
                 distance = kit_::lower_bound(storage.kernel, round.query, entry);
                 if (!(distance > round.radius))
@@ -241,7 +241,7 @@ __device__ __forceinline__ void cuda_back_link(vram_build_view<node_id_type_> co
             vram_back_link_one<vram_kernel_t::back_link_k, kit_, typename kit_::selector_t>( //
                 view, schedule, node_id, slice.scratch, slice.scratch + view.span_bytes, selection, telemetry, lane,
                 static_cast<node_id_type_ const*>(nullptr), 0);
-            if (lane == 0) view.link_heads[node_id] = std::numeric_limits<node_id_type_>::max();
+            if (lane == 0) view.link_heads[node_id] = (std::numeric_limits<node_id_type_>::max)();
             telemetry.template flush<cuda_warp_t, vram_traversal_t::inserting_k>(view.telemetry, lane);
         });
 }

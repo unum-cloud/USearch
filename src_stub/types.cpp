@@ -49,7 +49,7 @@ static void run_listed(call_t& call) {
     std::visit([&](auto& arguments) { call.verb(&arguments); }, call.arguments);
     std::lock_guard<std::mutex> lock(calls.guard);
     calls.running.erase(std::find(calls.running.begin(), calls.running.end(), &call));
-    serial_atomic_ref<u32_t>(calls.finished).add(1, std::memory_order_release);
+    serial_atomic_ref<u32_t>(calls.finished).store_add(1, std::memory_order_release);
 }
 
 void run_holding(call_t call, usearch_outcome_t* outcome) {

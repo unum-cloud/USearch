@@ -70,7 +70,7 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
     using index_t = vram_nvidia_index<dtype_, dense_nvidia_fatbin<dtype_>, fu::standard_yield_t, dummy_cache_hints_t,
                                       counting_cuda_allocator_t, counting_cuda_allocator_t, cuda_device_allocator_t>;
-    using indexes_t = vram_nvidia_indexes<uuid_t, dtype_, dense_nvidia_fatbin<dtype_>>;
+    using indexes_t = vram_nvidia_indexes<uuid128_t, dtype_, dense_nvidia_fatbin<dtype_>>;
     inline static constexpr char const* vendor_prefix_k = "cuda";
 
     /** The stream the cell's contexts and checkpoints ride, on the device its indexes sit on. */

@@ -164,7 +164,7 @@ static usearch_status_t check_column(ArrowSchema const& schema, ArrowArray const
         return usearch_status_malformed_k;
     // A count of -1 is unknown, so only a missing validity buffer rules nulls out
     if (array.null_count > 0 || (array.null_count < 0 && array.buffers[0])) return usearch_status_invalid_argument_k;
-    if (static_cast<std::uint64_t>(array.length) > std::numeric_limits<std::size_t>::max())
+    if (static_cast<std::uint64_t>(array.length) > (std::numeric_limits<std::size_t>::max)())
         return usearch_status_overflow_k;
     return usearch_status_success_k;
 }

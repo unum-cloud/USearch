@@ -91,7 +91,7 @@ template <cpu_class_t cpu_class_>
 struct sequence_ram_variant {
     using executor_t = forkunion_executor_t;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
-    using shard_t = us::sequence::ram_index<us::utilities::uuid_t, u32_t, waiter_of<cpu_class_>,
+    using shard_t = us::sequence::ram_index<us::utilities::uuid128_t, u32_t, waiter_of<cpu_class_>,
                                             atomic_ref_for_cpu_class<cpu_class_>::template type, forkunion_allocator_t,
                                             cache_hints_t>;
     using index_t = basic::ram_indexes<shard_t>;
@@ -279,7 +279,7 @@ expected<std::size_t> sequence_ram_variant<cpu_class_>::storage_requirements() c
 template <cpu_class_t cpu_class_>
 struct sequence_nvme_variant {
     using executor_t = nvme_executor_t;
-    using index_t = basic::nvme_indexes<us::sequence::codec_t, us::utilities::uuid_t, u32_t, sz_size_t,
+    using index_t = basic::nvme_indexes<us::sequence::codec_t, us::utilities::uuid128_t, u32_t, sz_size_t,
                                         default_io_engine_t, row_kit_of<cpu_class_>,
                                         atomic_ref_for_cpu_class<cpu_class_>::template type, waiter_of<cpu_class_>>;
     using cache_hints_t = typename cache_hints_for_cpu_class<cpu_class_>::type;
@@ -397,7 +397,7 @@ inline expected<std::span<u32_t const>> parameters_of(std::type_identity<std::sp
                                                       growing_buffer<u32_t, std::allocator<byte_t>>& widths) noexcept {
     if (failed(widths.reserve_exactly(geometry.window_widths.size()))) return {{}, status_t::bad_alloc_k};
     for (std::size_t const width : geometry.window_widths) {
-        if (width > std::numeric_limits<u32_t>::max()) return {{}, status_t::config_mismatch_k};
+        if (width > (std::numeric_limits<u32_t>::max)()) return {{}, status_t::config_mismatch_k};
         widths.push_back_reserved(static_cast<u32_t>(width));
     }
     return {to_span(widths), status_t::success_k};
@@ -439,7 +439,7 @@ struct sequence_vram_nvidia_variant {
     using executor_t = cuda_executor_t;
     using build_t = sequence_vram_nvidia_build<metric_>;
     using face_t = typename build_t::face_t;
-    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid_t, build_t>;
+    using index_t = basic::vram_nvidia_indexes<face_t, us::utilities::uuid128_t, build_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
     static constexpr usearch_sequence_metric_t metric_k = metric_;
     static constexpr gpu_class_t gpu_class_k = gpu_class_t::nvidia_ampere_k;
@@ -632,7 +632,7 @@ struct variant_bodies<sequence_traits_t> {
     /** Adds one entry's bytes to a key's statistics, from any thread. */
     template <typename value_type_>
     static void tally(usearch_sequence_key_stats_t& stats, value_type_ const& value) noexcept {
-        fu::standard_atomic_ref<std::size_t>(stats.total_bytes).add(value.size(), std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(stats.total_bytes).store_add(value.size(), std::memory_order_relaxed);
         raise_to<fu::standard_atomic_ref>(stats.largest_bytes, value.size());
     }
 };

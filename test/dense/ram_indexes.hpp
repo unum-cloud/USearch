@@ -34,7 +34,7 @@ namespace unum::usearch::test::dense {
 /** A behavior cell: the kits of @p cpu_class_ under a waiter or atomic it would not pick. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_, typename waiter_type_ = fu::standard_yield_t,
           template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-using ram_indexes_for = ram_indexes<uuid_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
+using ram_indexes_for = ram_indexes<uuid128_t, quads_kit_of<dtype_, cpu_class_>, tiles_kit_of<dtype_, cpu_class_>,
                                     elementwise_kit_of<cpu_class_>, rmscast_kit_of<dtype_, cpu_class_>,
                                     visits_kit_of<cpu_class_>, waiter_type_, atomic_ref_>;
 
@@ -533,7 +533,7 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
                 return;
             }
             dense_indexes_row_driver<indexes_type_> walker {indexes, drivers[0]};
-            if (failed(walker.status)) return foreign.add(1);
+            if (failed(walker.status)) return foreign.store_add(1);
             std::array<key_t, 8> found_keys {};
             std::array<distance_t, 8> found_distances {};
             for (std::size_t row = thread; !fu::standard_atomic_ref<bool>(cleared).load(std::memory_order_acquire);
@@ -541,12 +541,12 @@ static std::size_t test_ram_indexes_clear_race(u64_t seed) {
                 auto const [result, status] = indexes.search(vectors.view().row(row).as_vector(),
                                                              std::span<key_t> {found_keys}, std::span {found_distances},
                                                              {}, walker.handle());
-                if (status == status_t::contended_k) refused.add(1);
-                else if (failed(status)) foreign.add(1);
+                if (status == status_t::contended_k) refused.store_add(1);
+                else if (failed(status)) foreign.store_add(1);
                 else
                     for (std::size_t found = 0; found != result.count; ++found)
-                        foreign.add(dense_key_number(found_keys[found]) < 1 ||
-                                    dense_key_number(found_keys[found]) > rows);
+                        foreign.store_add(dense_key_number(found_keys[found]) < 1 ||
+                                          dense_key_number(found_keys[found]) > rows);
             }
         });
         failures += expect_eq(indexes.size(), 0u);

@@ -82,7 +82,7 @@ struct keyed_ids {
  *  freed while the index lives: emptied shards keep their memory until it dies.
  */
 template <                                                                    //
-    typename key_type_ = uuid_t,                                              //
+    typename key_type_ = uuid128_t,                                           //
     typename quads_kit_type_ = bf16_serial_quads_kit_t,                       //
     typename tiles_kit_type_ = no_tiles_kit_t,                                //
     typename elementwise_kit_type_ = serial_elementwise_kit_t,                //
@@ -3285,7 +3285,7 @@ struct ram_indexes {
             counts[query] = merge_search_results(std::span<scored_node_t const>(&candidate, 1), shard.index->keys(),
                                                  to_span(keys.row(query).as_vector()), distances_row, counts[query]);
             return counts[query] == distances_row.size() ? static_cast<distance_t>(distances_row.back())
-                                                         : std::numeric_limits<distance_t>::max();
+                                                         : (std::numeric_limits<distance_t>::max)();
         }
 
         status_t close_shard(std::size_t, rows_view_t, shard_t const&, traversal_context_t&, byte_t*) const noexcept {
@@ -3348,7 +3348,7 @@ struct ram_indexes {
                 ids[position] = candidate.node_id, distances[position] = candidate.distance;
                 fill += fill != wanted;
             }
-            return fill == wanted ? distances.back() : std::numeric_limits<distance_t>::max();
+            return fill == wanted ? distances.back() : (std::numeric_limits<distance_t>::max)();
         }
 
         /** Scores every query's kept rows of @p shard exactly and merges them into its row, ranked
@@ -3434,14 +3434,14 @@ struct ram_indexes {
         distance_t keep(std::size_t, std::size_t column, shard_t const& shard, scored_node_t candidate,
                         byte_t* staged) const noexcept {
             status_t& status = kept_status_(staged);
-            if (failed(status)) return std::numeric_limits<distance_t>::max();
+            if (failed(status)) return (std::numeric_limits<distance_t>::max)();
             keyed_t const& shard_keys = shard.index->keys();
             key_t const key = shard_keys[candidate.node_id];
             vector_view_t row;
             value_lookup(std::span<key_t const, 1>(&key, 1), std::span<vector_view_t, 1>(&row, 1));
             if (row.size() != outputs.columns) {
                 status = status_t::shape_mismatch_k;
-                return std::numeric_limits<distance_t>::max();
+                return (std::numeric_limits<distance_t>::max)();
             }
             softmax_state_t& state = softmax_state_(column, staged);
             f32_t const logit = score_scale * std::numbers::log2e_v<f32_t> *
@@ -3449,14 +3449,14 @@ struct ram_indexes {
             f32_t const maximum = max_of(state.maximum_score, logit);
             // The new row's weight and the running sums' correction, exponentiated in one tile.
             std::array<f32_t, 8> weights {logit - maximum}, corrections {state.maximum_score - maximum};
-            elementwise_kit_t::exp2(weights);
-            elementwise_kit_t::exp2(corrections);
+            invoke_under_target_<exp2_loop_, elementwise_kit_t>(std::span(weights));
+            invoke_under_target_<exp2_loop_, elementwise_kit_t>(std::span(corrections));
             state.partition = state.partition * corrections[0] + weights[0];
             state.maximum_score = maximum;
             char const* const row_bytes = row.byte_data();
             values_step<scalar_t, elementwise_kit_t>(value_sums_(column, staged), 1, outputs.columns, &row_bytes,
                                                      &weights, corrections, 1);
-            return std::numeric_limits<distance_t>::max();
+            return (std::numeric_limits<distance_t>::max)();
         }
 
         status_t close_shard(std::size_t, rows_view_t, shard_t const&, traversal_context_t&, byte_t*) const noexcept {
@@ -3685,7 +3685,7 @@ struct ram_indexes {
                 refusal = ran;
                 break;
             }
-            atomic_ref<std::size_t>(live_rows).sub(1, std::memory_order_relaxed);
+            atomic_ref<std::size_t>(live_rows).store_sub(1, std::memory_order_relaxed);
             if (succeeded(refusal)) return;
             status_t expected_status = status_t::success_k;
             atomic_ref<status_t>(first_refusal)

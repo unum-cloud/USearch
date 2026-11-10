@@ -442,7 +442,7 @@ struct u8_ampere_overlap_kit_t {
     /** The widest rung whose lanes still roll a widest window of a @p longest -byte sequence, or
      *  past every rung for a length no byte count states. */
     static std::size_t rung_serving(std::size_t longest, parameters_t widths) noexcept {
-        if (longest > std::numeric_limits<u32_t>::max()) return std::size(rungs_k);
+        if (longest > (std::numeric_limits<u32_t>::max)()) return std::size(rungs_k);
         u32_t widest = 0;
         for (u32_t const width : widths) widest = max_of(widest, width);
         std::size_t rung = 0;

@@ -979,7 +979,7 @@ struct packed_skylake_needleman_wunsch_kit_t {
     static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
                           std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
                           std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
-        constexpr u32_t saturated_k = std::numeric_limits<u16_t>::max();
+        constexpr u32_t saturated_k = (std::numeric_limits<u16_t>::max)();
         constexpr __mmask32 every_lane_k = ~__mmask32 {0};
         std::size_t const rows = query.size();
         u32_t const gap = costs.gap;
@@ -1117,7 +1117,7 @@ struct packed_haswell_needleman_wunsch_kit_t {
     static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
                           std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
                           std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
-        constexpr u32_t saturated_k = std::numeric_limits<u16_t>::max();
+        constexpr u32_t saturated_k = (std::numeric_limits<u16_t>::max)();
         constexpr u32_t every_lane_k = ~u32_t {0};
         std::size_t const rows = query.size();
         u32_t const gap = costs.gap;
@@ -1268,7 +1268,7 @@ struct packed_neon_needleman_wunsch_kit_t {
     static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
                           std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
                           std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
-        constexpr u32_t saturated_k = std::numeric_limits<u16_t>::max();
+        constexpr u32_t saturated_k = (std::numeric_limits<u16_t>::max)();
         std::size_t const rows = query.size();
         u32_t const gap = costs.gap;
         void* aligned = scratch.data();
