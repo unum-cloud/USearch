@@ -284,6 +284,12 @@ def _add_to_compiled(
     if generate_labels:
         start_id = len(compiled)
         keys = np.arange(start_id, start_id + count_vectors, dtype=Key)
+        # After removals or explicit keys, `len` can point at keys already in use
+        if start_id and np.any(compiled.contains_many(keys)):
+            start_id = int(np.max(compiled.get_keys_in_slice())) + 1
+            if start_id + count_vectors >= np.iinfo(Key).max:
+                raise ValueError("No free keys above the largest existing key, pass `keys` explicitly")
+            keys = np.arange(start_id, start_id + count_vectors, dtype=Key)
     else:
         if not isinstance(keys, Iterable):
             assert count_vectors == 1, "Each vector must have a key"
