@@ -258,6 +258,39 @@ struct utf8_neon_levenshtein_kit_t {
 };
 #endif // STRINGZILLA_TARGET_NEON
 
+#if STRINGZILLA_TARGET_POWERVSX
+
+/** IBM Power VSX: two candidates per register, four registers per position, a byte transpose. */
+struct u8_powervsx_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_bytes_k;
+    static constexpr auto init = sz_levenshtein_engine_init_powervsx;
+    static constexpr auto distances = sz_levenshtein_distances_powervsx;
+};
+
+/** IBM Power VSX over UTF-8 runes: two candidates per register, four registers per position. */
+struct utf8_powervsx_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    static constexpr sz_levenshtein_symbol_t symbol_k = sz_levenshtein_runes_k;
+    static constexpr auto init = sz_levenshtein_engine_init_powervsx;
+    static constexpr auto distances = sz_levenshtein_distances_powervsx;
+};
+#else
+
+/** The kits this build cannot carry, kept so @c levenshtein_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct u8_powervsx_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+struct utf8_powervsx_levenshtein_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // STRINGZILLA_TARGET_POWERVSX
+
 /** The widest Levenshtein kit over the symbols @p symbol_ names this build compiled in among the
  *  backends @p caps_ admits, newest first; each kit states its @c capability_k and its
  *  @c compiled_k, so an unselected kit's body never has to exist. */
@@ -273,7 +306,8 @@ struct levenshtein_ladder<sz_levenshtein_bytes_k, caps_> {
         u8_icelake_levenshtein_kit_t,   //
         u8_skylake_levenshtein_kit_t,   //
         u8_haswell_levenshtein_kit_t,   //
-        u8_neon_levenshtein_kit_t       //
+        u8_neon_levenshtein_kit_t,      //
+        u8_powervsx_levenshtein_kit_t   //
         >::type;
     static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
@@ -287,7 +321,8 @@ struct levenshtein_ladder<sz_levenshtein_runes_k, caps_> {
         utf8_icelake_levenshtein_kit_t, //
         utf8_skylake_levenshtein_kit_t, //
         utf8_haswell_levenshtein_kit_t, //
-        utf8_neon_levenshtein_kit_t     //
+        utf8_neon_levenshtein_kit_t,    //
+        utf8_powervsx_levenshtein_kit_t //
         >::type;
     static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
@@ -362,6 +397,25 @@ struct u8_neon_overlap_kit_t {
 };
 #endif // STRINGZILLA_TARGET_NEON
 
+#if STRINGZILLA_TARGET_POWERVSX
+
+/** IBM Power VSX: two positions per hashing step, four keys per sort and probe step. */
+struct u8_powervsx_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    static constexpr auto init = sz_overlap_engine_init_powervsx;
+    static constexpr auto scores = sz_overlap_scores_powervsx;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c overlap_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct u8_powervsx_overlap_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // STRINGZILLA_TARGET_POWERVSX
+
 /** The widest overlap kit this build compiled in among the backends @p caps_ admits, newest first;
  *  each kit states its @c capability_k and its @c compiled_k, so an unselected kit's body never
  *  has to exist. */
@@ -376,7 +430,8 @@ struct overlap_ladder<caps_> {
         u8_serial_overlap_kit_t,        //
         u8_skylake_overlap_kit_t,       //
         u8_haswell_overlap_kit_t,       //
-        u8_neon_overlap_kit_t           //
+        u8_neon_overlap_kit_t,          //
+        u8_powervsx_overlap_kit_t       //
         >::type;
     static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };
@@ -1373,6 +1428,158 @@ struct packed_neon_needleman_wunsch_kit_t {
 };
 #endif // STRINGZILLA_TARGET_NEON
 
+#if STRINGZILLA_TARGET_POWERVSX
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("power9-vector"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("power9-vector")
+#endif
+
+/**
+ *  @brief IBM Power VSX: 8 candidates per register, one @c u16 cell each, a column at a time.
+ *
+ *  The Skylake sweep with byte codes: each column looks its codes up once per class the query holds
+ *  with one @c vperm over that class's 32-byte row, widened to the lanes.
+ */
+struct packed_powervsx_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+
+    /** Candidates one group sweeps, the @c u16 lanes of a VSX register. */
+    static constexpr std::size_t lanes_k = sizeof(__vector unsigned short) / sizeof(u16_t);
+
+    /** Scratch bytes a round takes, @p query_codes the query's and @p longest_codes the candidates'
+     *  at most: a register per query code and one more, and a byte per lane per candidate code. */
+    static constexpr std::size_t scratch_bytes(std::size_t query_codes, std::size_t longest_codes) noexcept {
+        return (query_codes + 2) * sizeof(__vector unsigned short) + longest_codes * lanes_k;
+    }
+
+    /** Scores every candidate of @p candidates into its slot of @p distances, @p order taken in
+     *  groups of @ref lanes_k. */
+    static void distances(needleman_wunsch_costs_t const& costs, std::span<u8_t const> query,
+                          std::span<bytes_view_t const> candidates, std::span<u32_t const> order, sz_size_t radius,
+                          std::span<sz_size_t> distances, bytes_span_t scratch) noexcept {
+        constexpr u32_t saturated_k = (std::numeric_limits<u16_t>::max)();
+        std::size_t const rows = query.size();
+        u32_t const gap = costs.gap;
+        void* aligned = scratch.data();
+        std::size_t space = scratch.size();
+        __vector unsigned short* const column = static_cast<__vector unsigned short*>(
+            std::align(sizeof(__vector unsigned short), sizeof(__vector unsigned short), aligned, space));
+        u8_t* const codes = reinterpret_cast<u8_t*>(column + rows + 1);
+
+        // A row of the table per class the query holds, one lookup table of 32 costs each.
+        u32_t query_classes = 0;
+        for (u8_t const code : query) query_classes = max_of<u32_t>(query_classes, code + 1u);
+        __vector unsigned char rows_low_u8x16[needleman_wunsch_classes_k];
+        __vector unsigned char rows_high_u8x16[needleman_wunsch_classes_k];
+        __vector unsigned short profile_u16x8[needleman_wunsch_classes_k];
+        for (u32_t code = 0; code != query_classes; ++code) {
+            rows_low_u8x16[code] = vec_xl(0, costs.substitutions[code]);
+            rows_high_u8x16[code] = vec_xl(16, costs.substitutions[code]);
+        }
+        __vector unsigned short const byte_u16x8 = vec_splats(static_cast<unsigned short>(0xFF));
+        __vector unsigned short const saturated_u16x8 = vec_splats(static_cast<unsigned short>(saturated_k));
+        __vector unsigned short const gap_u16x8 = vec_splats(static_cast<unsigned short>(gap));
+        __vector unsigned short const radius_u16x8 = vec_splats(
+            static_cast<unsigned short>(min_of<sz_size_t>(radius, saturated_k)));
+
+        for (std::size_t first = 0; first < order.size(); first += lanes_k) {
+            std::size_t const lanes = min_of(lanes_k, order.size() - first);
+            u16_t lengths[lanes_k] = {};
+            u16_t finished[lanes_k] = {};
+            u32_t scalar = 0;
+            std::size_t longest = 0;
+            for (std::size_t lane = 0; lane != lanes_k; ++lane) {
+                if (lane >= lanes) {
+                    finished[lane] = static_cast<u16_t>(saturated_k);
+                    continue;
+                }
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                std::size_t const length = packed_codes_count(candidate.data(), candidate.size(), costs.code_bits);
+                if (length > saturated_k) scalar |= u32_t {1} << lane;
+                else lengths[lane] = static_cast<u16_t>(length), longest = max_of(longest, length);
+                // Padding lanes, empty ones and scalar ones count as finished from the start.
+                if (!lengths[lane]) finished[lane] = static_cast<u16_t>(saturated_k);
+            }
+            std::memset(codes, 0, longest * lanes_k);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                bytes_view_t const candidate = candidates[order[first + lane]];
+                for (std::size_t index = 0; index != lengths[lane]; ++index)
+                    codes[index * lanes_k + lane] = static_cast<u8_t>(
+                        packed_code_at(candidate.data(), index, costs.code_bits));
+            }
+
+            for (std::size_t row = 0; row <= rows; ++row)
+                column[row] = vec_splats(static_cast<unsigned short>(min_of<std::size_t>(row * gap, saturated_k)));
+            __vector unsigned short const lengths_u16x8 = vec_xl(0, lengths);
+            __vector unsigned short finished_u16x8 = vec_xl(0, finished);
+            __vector unsigned short results_u16x8 = column[rows];
+            for (std::size_t index = 0; index != longest && !vec_all_eq(finished_u16x8, saturated_u16x8); ++index) {
+                __vector unsigned char const codes_u8x16 = vec_xl_len(codes + index * lanes_k, lanes_k);
+                for (u32_t code = 0; code != query_classes; ++code)
+                    profile_u16x8[code] = vec_and(
+                        reinterpret_cast<__vector unsigned short>(vec_unpackh(reinterpret_cast<__vector signed char>(
+                            vec_perm(rows_low_u8x16[code], rows_high_u8x16[code], codes_u8x16)))),
+                        byte_u16x8);
+                __vector unsigned short diagonal_u16x8 = column[0];
+                __vector unsigned short above_u16x8 = vec_adds(diagonal_u16x8, gap_u16x8);
+                __vector unsigned short minimum_u16x8 = above_u16x8;
+                column[0] = above_u16x8;
+                for (std::size_t row = 1; row <= rows; ++row) {
+                    __vector unsigned short const left_u16x8 = column[row];
+                    __vector unsigned short const aligned_u16x8 = vec_adds(diagonal_u16x8,
+                                                                           profile_u16x8[query[row - 1]]);
+                    __vector unsigned short const opened_u16x8 = vec_min(aligned_u16x8,
+                                                                         vec_adds(left_u16x8, gap_u16x8));
+                    above_u16x8 = vec_min(opened_u16x8, vec_adds(above_u16x8, gap_u16x8));
+                    diagonal_u16x8 = left_u16x8;
+                    column[row] = above_u16x8;
+                    minimum_u16x8 = vec_min(minimum_u16x8, above_u16x8);
+                }
+                __vector unsigned short const ended_u16x8 = vec_andc(
+                    reinterpret_cast<__vector unsigned short>(
+                        vec_cmpeq(lengths_u16x8, vec_splats(static_cast<unsigned short>(index + 1)))),
+                    finished_u16x8);
+                results_u16x8 = vec_sel(results_u16x8, above_u16x8, ended_u16x8);
+                finished_u16x8 = vec_or(finished_u16x8, ended_u16x8);
+                // Every alignment crosses each column, so none ends below the column's minimum.
+                __vector unsigned short const past_u16x8 = vec_andc(
+                    reinterpret_cast<__vector unsigned short>(vec_cmpgt(minimum_u16x8, radius_u16x8)), finished_u16x8);
+                results_u16x8 = vec_sel(results_u16x8, minimum_u16x8, past_u16x8);
+                finished_u16x8 = vec_or(finished_u16x8, past_u16x8);
+            }
+
+            u16_t results[lanes_k];
+            vec_xst(results_u16x8, 0, results);
+            u32_t* const scalar_column = static_cast<u32_t*>(aligned);
+            for (std::size_t lane = 0; lane != lanes; ++lane) {
+                u32_t const slot = order[first + lane];
+                bool const rescored = (scalar >> lane & 1u) || (results[lane] == saturated_k && radius >= saturated_k);
+                distances[slot] = rescored
+                                      ? needleman_wunsch_serial(costs, query, candidates[slot], radius, scalar_column)
+                                      : results[lane];
+            }
+        }
+    }
+};
+
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#else
+
+/** The kit this build cannot carry, kept so @c needleman_wunsch_ladder stays one list rather than a
+ *  run of preprocessor branches. */
+struct packed_powervsx_needleman_wunsch_kit_t {
+    static constexpr sz_capability_t capability_k = sz_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // STRINGZILLA_TARGET_POWERVSX
+
 /** The widest Needleman-Wunsch kit this build compiled in among the backends @p caps_ admits,
  *  newest first. */
 template <sz_capability_t caps_>
@@ -1386,7 +1593,8 @@ struct needleman_wunsch_ladder<caps_> {
         packed_serial_needleman_wunsch_kit_t,  //
         packed_skylake_needleman_wunsch_kit_t, //
         packed_haswell_needleman_wunsch_kit_t, //
-        packed_neon_needleman_wunsch_kit_t     //
+        packed_neon_needleman_wunsch_kit_t,    //
+        packed_powervsx_needleman_wunsch_kit_t //
         >::type;
     static constexpr sz_capability_t picked_k = kit_t::capability_k;
 };

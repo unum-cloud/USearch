@@ -3515,10 +3515,10 @@ auto invoke_under_target_(arguments_types_&&... arguments) noexcept {
 
 #if NUMKONG_TARGET_NEONBFDOT
 #if defined(__clang__)
-#pragma clang attribute push(__attribute__((target("arch=armv8.6-a+simd+bf16"))), apply_to = function)
+#pragma clang attribute push(__attribute__((target("arch=armv8.2-a+simd+bf16"))), apply_to = function)
 #elif defined(__GNUC__)
 #pragma GCC push_options
-#pragma GCC target("arch=armv8.6-a+simd+bf16")
+#pragma GCC target("arch=armv8.2-a+simd+bf16")
 #endif
 
 /** Runs @p loop_type_ for NEON BFDOT kits, under their target so their kernels inline. */
@@ -4302,6 +4302,82 @@ struct u1x8_smebi32_tiles_kit_t {
 };
 #endif // NUMKONG_TARGET_SMEBI32
 
+#if NUMKONG_TARGET_POWERMMA
+
+/** bf16 tiles kit - IBM POWER MMA. */
+struct bf16_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::bf16_t;
+    static constexpr std::size_t tile_columns_k = 8;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_bf16_powermma;
+    static constexpr auto pack = nk_dots_pack_bf16_powermma;
+    static constexpr auto dots_packed = nk_dots_packed_bf16_powermma;
+};
+
+/** f16 tiles kit - IBM POWER MMA. */
+struct f16_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::f16_t;
+    static constexpr std::size_t tile_columns_k = 8;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_f16_powermma;
+    static constexpr auto pack = nk_dots_pack_f16_powermma;
+    static constexpr auto dots_packed = nk_dots_packed_f16_powermma;
+};
+
+/** i8 tiles kit - IBM POWER MMA. */
+struct i8_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::i8_t;
+    static constexpr std::size_t tile_columns_k = 8;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_i8_powermma;
+    static constexpr auto pack = nk_dots_pack_i8_powermma;
+    static constexpr auto dots_packed = nk_dots_packed_i8_powermma;
+};
+
+/** u8 tiles kit - IBM POWER MMA. */
+struct u8_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::u8_t;
+    static constexpr std::size_t tile_columns_k = 8;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_u8_powermma;
+    static constexpr auto pack = nk_dots_pack_u8_powermma;
+    static constexpr auto dots_packed = nk_dots_packed_u8_powermma;
+};
+
+#else
+
+/** The kits this build cannot carry, kept so @c tiles_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct bf16_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = false;
+};
+struct f16_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = false;
+};
+struct i8_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = false;
+};
+struct u8_powermma_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_POWERMMA
+
 /** Matrix-engine capability cascade for every scalar, over the same @p caps_ bitmask as
  *  @c quads_ladder. The primary template resolves to @c no_tiles_kit_t, and only the scalars
  *  some engine multiplies specialize it. */
@@ -4319,7 +4395,8 @@ struct tiles_ladder<nk::bf16_t, caps_> {
         caps_,                          //
         no_tiles_kit_t,                 //
         bf16_sme_tiles_kit_t,           //
-        bf16_sapphireamx_tiles_kit_t    //
+        bf16_sapphireamx_tiles_kit_t,   //
+        bf16_powermma_tiles_kit_t       //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -4344,7 +4421,8 @@ struct tiles_ladder<nk::i8_t, caps_> {
         caps_,                          //
         no_tiles_kit_t,                 //
         i8_sme_tiles_kit_t,             //
-        i8_sapphireamx_tiles_kit_t      //
+        i8_sapphireamx_tiles_kit_t,     //
+        i8_powermma_tiles_kit_t         //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -4370,7 +4448,8 @@ struct tiles_ladder<nk::f16_t, caps_> {
         caps_,                          //
         no_tiles_kit_t,                 //
         f16_sme_tiles_kit_t,            //
-        f16_graniteamx_tiles_kit_t      //
+        f16_graniteamx_tiles_kit_t,     //
+        f16_powermma_tiles_kit_t        //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
@@ -4383,7 +4462,8 @@ struct tiles_ladder<nk::u8_t, caps_> {
         caps_,                          //
         no_tiles_kit_t,                 //
         u8_sme_tiles_kit_t,             //
-        u8_sapphireamx_tiles_kit_t      //
+        u8_sapphireamx_tiles_kit_t,     //
+        u8_powermma_tiles_kit_t         //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;

@@ -135,6 +135,28 @@ struct i32_rvv_geospatial_kit_t {
 };
 #endif // NUMKONG_TARGET_RVV
 
+#if NUMKONG_TARGET_POWERVSX
+
+/** The geospatial kernels for IBM Power VSX. */
+struct i32_powervsx_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_powervsx;
+    static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
+    static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
+    static constexpr auto terrain_heights = nk_terrain_heights_packed_f32_serial;
+    static constexpr auto clearances = nk_clearances_packed_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c geospatial_ladder stays one list rather than a run
+ *  of preprocessor branches. */
+struct i32_powervsx_geospatial_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_POWERVSX
+
 #if NUMKONG_TARGET_V128RELAXED
 
 /** The geospatial kernels for WebAssembly Relaxed SIMD. */
@@ -173,6 +195,7 @@ struct geospatial_ladder<caps_> {
         i32_haswell_geospatial_kit_t,    //
         i32_neon_geospatial_kit_t,       //
         i32_rvv_geospatial_kit_t,        //
+        i32_powervsx_geospatial_kit_t,   //
         i32_v128relaxed_geospatial_kit_t //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;

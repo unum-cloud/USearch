@@ -235,6 +235,37 @@ struct f32_rvv_shapes_kit_t {
 };
 #endif // NUMKONG_TARGET_RVV
 
+#if NUMKONG_TARGET_POWERVSX
+
+/** The f32 shape kernels for IBM Power VSX. */
+struct f32_powervsx_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::f32_t;
+    using distance_t = nk_f64_t;
+    static constexpr auto cast = nk_cast_powervsx;
+    static constexpr auto pack_size = nk_shapes_pack_size_f32_serial;
+    static constexpr auto pack = nk_shapes_pack_f32_powervsx;
+    static constexpr auto unpack = nk_shapes_unpack_f32_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f32_serial;
+    static constexpr auto chamfers = nk_chamfers_packed_f32_powervsx;
+    static constexpr auto hausdorffs = nk_hausdorffs_packed_f32_powervsx;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f32_serial;
+    static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f32_powervsx;
+    static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f32_powervsx;
+    static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f32_serial;
+    static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f32_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f32_powervsx_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_POWERVSX
+
 #if NUMKONG_TARGET_V128RELAXED
 
 /** The f32 shape kernels for WebAssembly Relaxed SIMD. */
@@ -442,6 +473,37 @@ struct f16_rvv_shapes_kit_t {
 };
 #endif // NUMKONG_TARGET_RVV
 
+#if NUMKONG_TARGET_POWERVSX
+
+/** The f16 shape kernels for IBM Power VSX. */
+struct f16_powervsx_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = true;
+    using scalar_t = nk::f16_t;
+    using distance_t = nk_f32_t;
+    static constexpr auto cast = nk_cast_powervsx;
+    static constexpr auto pack_size = nk_shapes_pack_size_f16_serial;
+    static constexpr auto pack = nk_shapes_pack_f16_powervsx;
+    static constexpr auto unpack = nk_shapes_unpack_f16_serial;
+    static constexpr auto packed_shape = nk_shapes_packed_shape_f16_serial;
+    static constexpr auto chamfers = nk_chamfers_packed_f16_powervsx;
+    static constexpr auto hausdorffs = nk_hausdorffs_packed_f16_powervsx;
+    static constexpr auto chamfers_workspace_size = nk_chamfers_workspace_size_f16_serial;
+    static constexpr auto wassersteinprocrustes = nk_wassersteinprocrustes_packed_f16_powervsx;
+    static constexpr auto gromovwassersteins = nk_gromovwassersteins_packed_f16_powervsx;
+    static constexpr auto wassersteinprocrustes_workspace_size = nk_wassersteinprocrustes_workspace_size_f16_serial;
+    static constexpr auto gromovwassersteins_workspace_size = nk_gromovwassersteins_workspace_size_f16_serial;
+};
+#else
+
+/** The kit this build cannot carry, kept so @c shapes_ladder stays one list rather than a run of
+ *  preprocessor branches. */
+struct f16_powervsx_shapes_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr bool compiled_k = false;
+};
+#endif // NUMKONG_TARGET_POWERVSX
+
 #if NUMKONG_TARGET_V128RELAXED
 
 /** The f16 shape kernels for WebAssembly Relaxed SIMD. */
@@ -490,6 +552,7 @@ struct shapes_ladder<nk::f16_t, caps_> {
         f16_neonfhm_shapes_kit_t,       //
         f16_neon_shapes_kit_t,          //
         f16_rvv_shapes_kit_t,           //
+        f16_powervsx_shapes_kit_t,      //
         f16_v128relaxed_shapes_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
@@ -505,6 +568,7 @@ struct shapes_ladder<nk::f32_t, caps_> {
         f32_haswell_shapes_kit_t,       //
         f32_neon_shapes_kit_t,          //
         f32_rvv_shapes_kit_t,           //
+        f32_powervsx_shapes_kit_t,      //
         f32_v128relaxed_shapes_kit_t    //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
