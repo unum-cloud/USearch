@@ -156,6 +156,8 @@ def self_recall(
         wanted = int(ceil(len(keys) * sample)) if isinstance(sample, float) else sample
         chosen = np.random.default_rng(0).choice(len(keys), wanted, replace=False)
         keys = keys[chosen]
+        if vectors is not None:
+            vectors = np.atleast_2d(vectors)[chosen]
 
     if vectors is None:
         vectors = np.concatenate([np.array(index.get(key, arena)) for key in keys], axis=0)

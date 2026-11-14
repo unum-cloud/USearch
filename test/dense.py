@@ -764,6 +764,20 @@ def test_recall_survives_quantization(executor, quantization: Scalar):
     assert recall >= recall_floor(quantization), f"{quantization} recall collapsed to {recall}"
 
 
+@pytest.mark.parametrize(("sample", "count_queries"), [(0.5, 4), (3, 3)])
+def test_self_recall_samples_supplied_vectors(executor, sample: float | int, count_queries: int):
+    """Sampled recall keeps supplied vector rows paired with their keys."""
+    vectors = np.eye(8, dtype=np.float32)
+    keys = integers_to_keys(np.arange(8))
+    index = DenseIndex.init_ram(dimensions=8)
+    index.on(executor).insert(keys, vectors)
+
+    stats = self_recall(index.on(executor), Arena(executor), sample=sample, keys=keys, vectors=vectors)
+
+    assert stats.count_queries == count_queries
+    assert stats.mean_recall == 1.0
+
+
 @pytest.mark.parametrize("quantization", [Scalar.BF16, Scalar.F16, Scalar.I8], ids=attrgetter("name"))
 def test_distances_agree_with_the_oracle(executor, quantization: Scalar):
     """A reported distance matches what NumKong computes for the same pair, within tolerance."""
