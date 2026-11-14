@@ -75,3 +75,33 @@ def test_missing_matrix_raises(tmp_path):
     """A missing file is a `FileNotFoundError`, never a silent None."""
     with pytest.raises(FileNotFoundError):
         load_matrix(str(tmp_path / "absent.fbin"))
+
+
+@pytest.mark.parametrize("view", [False, True])
+@pytest.mark.parametrize(
+    ("start_row", "count_rows"),
+    [(-1, None), (5, None), (2, 5), (0, -1), (1, 4)],
+)
+def test_matrix_row_range_out_of_bounds_raises(tmp_path, view: bool, start_row: int, count_rows):
+    """A row range reaching outside the file is a `ValueError`, not an `OSError` or a bad reshape."""
+    path = str(tmp_path / "matrix.fbin")
+    save_matrix(np.arange(12, dtype=np.float32).reshape(4, 3), path)
+    with pytest.raises(ValueError, match="rows"):
+        load_matrix(path, start_row=start_row, count_rows=count_rows, view=view)
+
+
+def test_matrix_row_range_edges_are_valid(tmp_path):
+    """The empty tail and the full file are both in range."""
+    original = np.arange(12, dtype=np.float32).reshape(4, 3)
+    path = str(tmp_path / "matrix.fbin")
+    save_matrix(original, path)
+    assert load_matrix(path, start_row=4).shape == (0, 3)
+    assert np.array_equal(load_matrix(path, start_row=1, count_rows=3), original[1:])
+
+
+def test_matrix_truncated_header_raises(tmp_path):
+    """A file shorter than the 8-byte header is a `ValueError` naming the file."""
+    path = tmp_path / "short.fbin"
+    path.write_bytes(bytes([1, 0]))
+    with pytest.raises(ValueError, match="header"):
+        load_matrix(str(path))
