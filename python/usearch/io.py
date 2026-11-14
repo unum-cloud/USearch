@@ -57,8 +57,8 @@ def load_matrix(
     Reads *count_rows* rows starting at *start_row*, or every row when *count_rows* is None. Setting
     *view* memory-maps the file rather than loading it into RAM, which is how a dataset larger than
     memory is read. A ``.u1x8bin`` or ``.b1bin`` row comes back as its packed bytes. Raises
-    `FileNotFoundError` for a missing file and `ValueError` for an extension naming no scalar type
-    or a file whose size its header contradicts.
+    `FileNotFoundError` for a missing file and `ValueError` for an extension naming no scalar type,
+    a file whose size its header contradicts, or rows outside the file.
     """
     if dtype is None:
         dtype = _dtype_for(filename)
@@ -76,6 +76,8 @@ def load_matrix(
             raise ValueError(f"{filename} holds {file.tell():,} bytes, but its header declares {expected:,}")
 
         count = rows - start_row if count_rows is None else count_rows
+        if not 0 <= start_row <= start_row + count <= rows:
+            raise ValueError(f"rows {start_row}:{start_row + count} fall outside the {rows} rows of {filename}")
         offset = 8 + start_row * columns * scalar.itemsize
         if view:
             return np.memmap(file, dtype=scalar, mode="r", offset=offset, shape=(count, columns))
