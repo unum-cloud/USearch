@@ -57,8 +57,9 @@ def load_matrix(
     Reads *count_rows* rows starting at *start_row*, or every row when *count_rows* is None. Setting
     *view* memory-maps the file rather than loading it into RAM, which is how a dataset larger than
     memory is read. A ``.u1x8bin`` or ``.b1bin`` row comes back as its packed bytes. Raises
-    `FileNotFoundError` for a missing file and `ValueError` for an extension naming no scalar type
-    or a file whose size its header contradicts.
+    `FileNotFoundError` for a missing file and `ValueError` for an extension naming no scalar type,
+    a file whose header is truncated or whose size it contradicts, or a *start_row* or *count_rows*
+    reaching outside the file's rows.
     """
     if dtype is None:
         dtype = _dtype_for(filename)
@@ -67,7 +68,12 @@ def load_matrix(
     scalar = np.dtype(dtype)
 
     with open(filename, "rb") as file:
-        rows, columns = (int(extent) for extent in np.fromfile(file, count=2, dtype=np.int32))
+        header = np.fromfile(file, count=2, dtype=np.int32)
+        if header.size != 2:
+            raise ValueError(f"{filename} holds {header.size * 4} bytes, too few for its 8-byte header")
+        rows, columns = (int(extent) for extent in header)
+        if rows < 0 or columns < 0:
+            raise ValueError(f"{filename} declares a negative shape of {rows} x {columns}")
         if filename.endswith(_BIT_EXTENSIONS):
             columns = (columns + 7) // 8
         file.seek(0, 2)
@@ -75,7 +81,11 @@ def load_matrix(
         if file.tell() != expected:
             raise ValueError(f"{filename} holds {file.tell():,} bytes, but its header declares {expected:,}")
 
+        if not 0 <= start_row <= rows:
+            raise ValueError(f"start_row={start_row} is outside the {rows} rows of {filename}")
         count = rows - start_row if count_rows is None else count_rows
+        if not 0 <= count <= rows - start_row:
+            raise ValueError(f"count_rows={count} is outside the {rows - start_row} rows left in {filename}")
         offset = 8 + start_row * columns * scalar.itemsize
         if view:
             return np.memmap(file, dtype=scalar, mode="r", offset=offset, shape=(count, columns))
