@@ -40,16 +40,51 @@
 #include <random>       // `std::random_device`
 #include <regex>        // `std::regex`, `std::regex_search` - the filter
 #include <span>         // `std::span`
-#include <string>       // `std::string`
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::errc`
 #include <variant>      // `std::variant`
 
 #include <fmt/format.h>
 
-#include "usearch/usearch.h" // the enumerators flags name and their spellings
+#include <stringzilla/stringzilla.hpp> // `sz::string_t`
+
+#include "usearch/usearch.h"           // the enumerators flags name and their spellings
+#include "usearch/utilities/types.hpp" // `sz`
+
+/** Prints an owning StringZilla string as the text it holds, never as a range of characters. */
+template <>
+struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
+    fmt::format_context::iterator format(ashvardanian::stringzilla::string_t const& text,
+                                         fmt::format_context& context) const {
+        return fmt::formatter<std::string_view>::format(text, context);
+    }
+};
 
 namespace unum::usearch::tools {
+
+/** Exits with status 1 after printing that @p what could not be allocated. */
+[[noreturn]] inline void exit_out_of_memory(std::string_view what) noexcept {
+    fmt::println(stderr, "out of memory for {}", what);
+    std::exit(1);
+}
+
+/** Appends @p format over @p args to @p text, exiting with status 1 when it cannot grow. */
+template <typename... args_types_>
+void append_formatted(sz::string_t& text, fmt::format_string<args_types_ const&...> format,
+                      args_types_ const&... args) noexcept {
+    std::size_t const length = text.size();
+    if (text.resize(length + fmt::formatted_size(format, args...)) != sz::status_t::success_k)
+        exit_out_of_memory("a text");
+    fmt::format_to(text.data() + length, format, args...);
+}
+
+/** @p format over @p args as an owning string, exiting with status 1 when it cannot allocate. */
+template <typename... args_types_>
+sz::string_t formatted(fmt::format_string<args_types_ const&...> format, args_types_ const&... args) noexcept {
+    sz::string_t text;
+    append_formatted(text, format, args...);
+    return text;
+}
 
 /** Outcome of parsing one value or a whole argument list. */
 enum class argument_status_t {
@@ -420,10 +455,12 @@ template <typename enumeration_type_>
 
 /** The variable that sets @p flag's default, the name RetriEval reads too: <tt>--top-k</tt> reads
  *  @c RETRIEVAL_TOP_K. */
-[[nodiscard]] inline std::string retrieval_variable(flag_t const& flag) {
-    std::string variable = "RETRIEVAL_";
-    for (char const letter : flag.name.substr(2))
-        variable += letter == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(letter)));
+[[nodiscard]] inline sz::string_t retrieval_variable(flag_t const& flag) noexcept {
+    sz::string_t variable = formatted("RETRIEVAL_{}", flag.name.substr(2));
+    for (std::size_t letter = std::string_view {"RETRIEVAL_"}.size(); letter != variable.size(); ++letter)
+        variable[letter] = variable[letter] == '-'
+                               ? '_'
+                               : static_cast<char>(std::toupper(static_cast<unsigned char>(variable[letter])));
     return variable;
 }
 
@@ -460,7 +497,7 @@ inline void print_usage(std::string_view synopsis, std::span<flag_t const> flags
  *  <tt>--top-k="0" does not parse, expected a positive count</tt>, and exits with status 1. */
 inline void parse_or_exit(int argc, char const* const* argv, std::string_view synopsis, std::span<flag_t const> flags) {
     for (flag_t const& flag : flags) {
-        std::string const variable = retrieval_variable(flag);
+        sz::string_t const variable = retrieval_variable(flag);
         char const* const value = std::getenv(variable.c_str());
         if (!value || !*value || assign_variable_(flag, value) == argument_status_t::parsed_k) continue;
         bool const toggle = std::holds_alternative<switch_t*>(flag.destination);

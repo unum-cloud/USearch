@@ -26,6 +26,7 @@
 #include <cstdint> // `std::uint64_t`, `std::int32_t`
 #include <cstdio>  // `stderr`
 #include <cstdlib> // `EXIT_SUCCESS`, `EXIT_FAILURE`
+#include <cstring> // `std::memcpy` - the rows of queries
 
 #include <fcntl.h>    // `open`, `O_RDONLY`
 #include <sys/stat.h> // `fstat`
@@ -33,9 +34,7 @@
 
 #include <array>       // `std::array`
 #include <limits>      // `std::numeric_limits`
-#include <string>      // `std::string`
 #include <string_view> // `std::string_view`
-#include <vector>      // `std::vector`
 
 #include <fmt/format.h>
 
@@ -80,7 +79,7 @@ struct dense_arrow_t {
     std::size_t keys_column = arrow_no_column_k;
 
     /** Row-number or widened keys of the rows the insert takes next. */
-    std::vector<usearch_key_t> keys;
+    st::vector<usearch_key_t> keys;
 };
 
 /** The RetriEval file an insert reads and its keys, closed whichever way the insert ends. */
@@ -106,9 +105,9 @@ struct dense_source_t {
 
 /** One of two alternating staging buffers: the file fills one while the index ingests the other. */
 struct dense_staging_t {
-    std::vector<usearch_byte_t> rows;
-    std::vector<usearch_byte_t> key_integers;
-    std::vector<usearch_key_t> keys;
+    st::vector<usearch_byte_t> rows;
+    st::vector<usearch_byte_t> key_integers;
+    st::vector<usearch_key_t> keys;
     usearch_outcome_t outcome {};
 
     dense_staging_t() = default;
@@ -131,7 +130,7 @@ static bool dense_read_at(int descriptor, void* buffer, std::size_t length, std:
 
 /** Prints a failed call's status and message under the rank that saw it; true when it failed. */
 static bool dense_failed(world_t const& world, usearch_outcome_t const& outcome, std::string_view verb) {
-    return report_failure(outcome, fmt::format("{}{}", rank_label(world), verb));
+    return report_failure(outcome, "{}{}", rank_label(world), verb);
 }
 
 /** Opens @p path and checks its counters against its size. */
@@ -194,7 +193,7 @@ static bool dense_open_keys(world_t const& world, std::string_view path, dense_s
 /** The device this rank builds on: the entry of `USEARCH_DEVICES` at the node-local rank, wrapping
  *  around, or that position among every listed device when it is unset. */
 static bool dense_device_of(world_t const& world, std::size_t devices_count, std::int32_t& device) {
-    std::vector<std::int32_t> const listed = devices_from_environment();
+    st::vector<std::int32_t> const listed = devices_from_environment();
     if (listed.empty()) {
         device = static_cast<std::int32_t>(world.local_rank % devices_count);
         return true;
@@ -223,8 +222,10 @@ static bool dense_session_for_ram(world_t const& world, count_t const& threads, 
         return false;
     }
     session.residency = usearch_residency_ram_k;
-    session.memory_domains = {static_cast<std::int32_t>(found)};
-    std::vector<std::int32_t> domains;
+    session.memory_domains.clear();
+    if (st::failed(session.memory_domains.push_back(static_cast<std::int32_t>(found))))
+        exit_out_of_memory("the memory domains");
+    st::vector<std::int32_t> domains;
     usearch_outcome_t outcome {};
     usearch_executor_for_ram_t executor {.executor = &session.executor,
                                          .outcome = &outcome,
@@ -234,21 +235,21 @@ static bool dense_session_for_ram(world_t const& world, count_t const& threads, 
     return !dense_failed(world, outcome, "creating the CPU executor");
 }
 
-/** Inserts the slice, reading one staging while the index ingests the other. */
-static bool dense_insert_slice(world_t const& world, dense_settings_t const& settings, dense_source_t const& source,
-                               handle<dense_verbs_t> const& index) {
+/** Inserts the slice, reading one staging while the index ingests the other, and reporting each
+ *  batch into @p phase; a stop keeps the batches handed over, and shortens the slice to them. */
+static bool dense_insert_slice(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
+                               handle<dense_verbs_t> const& index, verb_phase_t& phase) {
     std::size_t const batch_rows = min_of(settings.checkpoint.batch.value, source.slice_rows);
     std::array<dense_staging_t, 2> stagings;
-    for (dense_staging_t& staging : stagings) {
-        staging.rows.resize(batch_rows * source.row_bytes);
-        staging.keys.resize(batch_rows);
-        staging.key_integers.resize(batch_rows * source.key_bytes);
-    }
+    for (dense_staging_t& staging : stagings)
+        if (st::failed(staging.rows.resize(st::assume_uninitialized, batch_rows * source.row_bytes)) ||
+            st::failed(staging.keys.resize(st::assume_uninitialized, batch_rows)) ||
+            st::failed(staging.key_integers.resize(st::assume_uninitialized, batch_rows * source.key_bytes)))
+            exit_out_of_memory("the staging buffers");
 
-    for (std::size_t offset = 0, turn = 0; offset < source.slice_rows; offset += batch_rows, turn ^= 1) {
+    std::size_t offset = 0;
+    for (std::size_t turn = 0; offset < source.slice_rows; turn ^= 1) {
         dense_staging_t& staging = stagings[turn];
-        // A zeroed outcome already reads as final, so a staging's first turn waits on nothing.
-        if (usearch_outcome_wait(&staging.outcome) != usearch_status_success_k) break;
         std::size_t const count = min_of(batch_rows, source.slice_rows - offset);
         std::uint64_t const row = source.first_row + offset;
         if (!dense_read_at(source.descriptor, staging.rows.data(), count * source.row_bytes,
@@ -283,7 +284,11 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
             .vectors = {staging.rows.data(), source.row_bytes, source.columns, source.scalar},
             .expansion_factor = settings.checkpoint.expansion_add.value,
         };
+        // The executor runs one call at a time; a zeroed outcome already reads as final.
+        if (usearch_outcome_wait(&stagings[turn ^ 1].outcome) != usearch_status_success_k) break;
         usearch_dense_insert(&insert);
+        offset += count;
+        if (verb_progress(offset, source.slice_rows, &phase) == usearch_cancel_k) break;
     }
 
     bool failed = false;
@@ -291,6 +296,7 @@ static bool dense_insert_slice(world_t const& world, dense_settings_t const& set
         usearch_outcome_wait(&staging.outcome);
         failed = dense_failed(world, staging.outcome, "insert") || failed;
     }
+    source.slice_rows = offset;
     return !failed;
 }
 
@@ -301,11 +307,11 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
                                std::uint64_t first_row) {
     usearch_rows_view_t rows {};
     usearch_keys_view_t keys {};
-    std::string failure = arrow_rows_of(arrow.input, arrow.vectors_column, rows);
+    sz::string_t failure = arrow_rows_of(arrow.input, arrow.vectors_column, rows);
     if (failure.empty() && arrow.keys_column != arrow_no_column_k)
         failure = arrow_keys_of(arrow.input, arrow.keys_column, arrow.keys, keys);
     else if (failure.empty()) {
-        arrow.keys.resize(first_position + count);
+        if (st::failed(arrow.keys.resize(first_position + count))) exit_out_of_memory("the keys");
         for (std::size_t position = 0; position != count; ++position)
             arrow.keys[first_position + position] = std::bit_cast<usearch_key_t>(uuid_of(first_row + position));
         keys = {arrow.keys.data(), sizeof(usearch_key_t)};
@@ -335,14 +341,15 @@ static bool dense_insert_batch(world_t const& world, dense_settings_t const& set
 }
 
 /** Inserts the slice of an Arrow input batch by batch, the columns read in place, and answers how
- *  many rows it took into @p source; an input shorter than an explicit slice fails. */
+ *  many rows it took into @p source; an input shorter than an explicit slice fails, and a stop
+ *  keeps the batches inserted. */
 static bool dense_insert_arrow(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
                                dense_arrow_t& arrow, handle<dense_verbs_t> const& index) {
     std::uint64_t const begin = source.first_row;
     std::uint64_t const end = source.slice_rows == dense_rows_unknown_k ? dense_rows_unknown_k
                                                                         : begin + source.slice_rows;
     std::uint64_t row = 0;
-    for (bool more = true; more && row < end;) {
+    for (bool more = true; more && row < end && !stop_requested;) {
         std::uint64_t const batch_end = row + arrow.input.rows();
         std::uint64_t const taken_begin = max_of(row, begin), taken_end = min_of(batch_end, end);
         if (taken_begin < taken_end &&
@@ -351,17 +358,17 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
             return false;
         row = batch_end;
         if (row >= end) break;
-        if (std::string const failure = arrow.input.next(more); !failure.empty()) {
+        if (sz::string_t const failure = arrow.input.next(more); !failure.empty()) {
             fmt::println(stderr, "{}{}", rank_label(world), failure);
             return false;
         }
     }
-    if (row <= begin || (end != dense_rows_unknown_k && row < end)) {
+    if (!stop_requested && (row <= begin || (end != dense_rows_unknown_k && row < end))) {
         fmt::println(stderr, "{}--first-entry={} --entries={} reach past the {} rows of {}", rank_label(world),
                      settings.checkpoint.first_entry.value, settings.checkpoint.entries.value, row, arrow.input.name());
         return false;
     }
-    source.slice_rows = static_cast<std::size_t>(min_of(row, end) - begin);
+    source.slice_rows = row > begin ? static_cast<std::size_t>(min_of(row, end) - begin) : 0;
     return true;
 }
 
@@ -370,13 +377,13 @@ static bool dense_insert_arrow(world_t const& world, dense_settings_t const& set
  *  share, and otherwise leaves the count unknown, as a pipe has it. */
 static bool dense_open_arrow(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
                              dense_arrow_t& arrow) {
-    std::string failure = arrow.input.open(settings.input);
+    sz::string_t failure = arrow.input.open(settings.input);
     if (failure.empty()) failure = arrow_pick_rows(arrow.input, settings.vectors_column, arrow.vectors_column);
     if (failure.empty() && !settings.keys_column.empty())
         failure = arrow_pick_column(arrow.input, settings.keys_column, arrow.keys_column);
     bool more = failure.empty();
     while (failure.empty() && more && (failure = arrow.input.next(more)).empty() && more && !arrow.input.rows()) {}
-    if (failure.empty() && !more) failure = fmt::format("{} holds no rows", arrow.input.name());
+    if (failure.empty() && !more) failure = formatted("{} holds no rows", arrow.input.name());
     usearch_rows_view_t rows {};
     if (failure.empty()) failure = arrow_rows_of(arrow.input, arrow.vectors_column, rows);
     if (!failure.empty()) {
@@ -404,7 +411,7 @@ static bool dense_open_arrow(world_t const& world, dense_settings_t const& setti
 static bool dense_insert_setup(world_t const& world, dense_settings_t const& settings, std::string_view vectors,
                                usearch_dense_metric_t metric, dense_source_t& source, dense_arrow_t& arrow,
                                session_t& session, handle<dense_verbs_t>& index) {
-    std::string const rank = rank_label(world);
+    rank_label_t const rank = rank_label(world);
     if (settings.input.empty()) {
         if (!dense_open_vectors(world, vectors, source)) return false;
         if (!settings.keys.empty() && !dense_open_keys(world, settings.keys, source)) return false;
@@ -457,8 +464,9 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
     if (session.residency == usearch_residency_vram_k) {
         std::int32_t device = 0;
         if (!dense_device_of(world, devices_count, device)) return false;
-        session.devices = {device};
-        std::vector<std::int32_t> ordinals;
+        session.devices.clear();
+        if (st::failed(session.devices.push_back(std::int32_t {device}))) exit_out_of_memory("the devices");
+        st::vector<std::int32_t> ordinals;
         usearch_executor_for_vram_t executor {.executor = &session.executor,
                                               .outcome = &outcome,
                                               .vram = session.vram_options(1, ordinals)};
@@ -489,9 +497,10 @@ static bool dense_insert_setup(world_t const& world, dense_settings_t const& set
 /** Inserts this rank's share, refines it and saves it to @p address, printing each step to
  *  @p steps. */
 static bool dense_construct(world_t const& world, dense_settings_t const& settings, dense_source_t& source,
-                            dense_arrow_t& arrow, handle<dense_verbs_t> const& index, std::string const& address,
+                            dense_arrow_t& arrow, handle<dense_verbs_t> const& index, sz::string_t const& address,
                             checkpoint_clock_t::time_point started, std::FILE* steps) {
-    bool const inserted = settings.input.empty() ? dense_insert_slice(world, settings, source, index)
+    verb_phase_t phase {.name = "insert", .unit = "entries", .stream = steps, .label = rank_label(world)};
+    bool const inserted = settings.input.empty() ? dense_insert_slice(world, settings, source, index, phase)
                                                  : dense_insert_arrow(world, settings, source, arrow, index);
     if (!inserted) return false;
     bool const on_device = index.residency == usearch_residency_vram_k;
@@ -501,8 +510,8 @@ static bool dense_construct(world_t const& world, dense_settings_t const& settin
                  on_device ? index.session->devices[0] : index.session->memory_domains[0],
                  checkpoint_seconds_since(started));
     checkpoint_settings_t const& checkpoint = settings.checkpoint;
-    return checkpoint_refine_passes(world, index, checkpoint.max_refines.value,
-                                    {checkpoint.expansion_refine.value, checkpoint.memory_limit.value}, steps) &&
+    return checkpoint_refine_rounds(world, index, checkpoint.max_refines.value,
+                                    {checkpoint.expansion_refine.value, checkpoint.memory_limit.value}, phase) &&
            checkpoint_save(world, index, address, steps);
 }
 
@@ -522,7 +531,7 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
          &settings.stored_dtype},
         {"--metric", "name", "defaults to angular: inner, angular, euclidean, hamming or jaccard", &settings.metric},
     }};
-    std::vector<flag_t> const flags = insert_flags(settings.checkpoint, modality_flags);
+    st::vector<flag_t> const flags = insert_flags(settings.checkpoint, modality_flags);
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
     if (std::optional<int> const exit = parse_verb(
@@ -550,8 +559,8 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
         if (speaks) fmt::println(stderr, "--metric=\"{}\" names no metric", settings.metric);
         return EXIT_FAILURE;
     }
-    std::optional<std::string> const admitted = distributed ? std::optional<std::string> {save}
-                                                            : checkpoints_admit_save(save);
+    std::optional<sz::string_t> const admitted = distributed ? std::optional<sz::string_t> {formatted("{}", save)}
+                                                             : checkpoints_admit_save(save);
     if (!admitted) return EXIT_FAILURE;
 
     std::FILE* const steps = save == "-" ? stderr : stdout;
@@ -564,25 +573,29 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
     if (world.barrier(!dense_insert_setup(world, settings, positionals[0], metric, source, arrow, session, index)))
         return EXIT_FAILURE;
 
-    std::string const address = distributed ? checkpoint_part_path(save, world.rank, world.size) : *admitted;
+    sz::string_t const address = distributed ? checkpoint_part_path(save, world.rank, world.size)
+                                             : formatted("{}", *admitted);
     bool const built = dense_construct(world, settings, source, arrow, index, address, started, steps);
     if (world.barrier(!built)) return EXIT_FAILURE;
     if (!distributed) return EXIT_SUCCESS;
 
     std::array<std::uint64_t, 2> const sent {checkpoint_file_bytes(address), source.slice_rows};
-    std::vector<std::uint64_t> gathered(speaks ? sent.size() * world.size : 0);
+    st::vector<std::uint64_t> gathered;
+    if (st::failed(gathered.resize(speaks ? sent.size() * world.size : 0))) exit_out_of_memory("the part sizes");
     world.gather(sent, gathered);
     if (!speaks) return EXIT_SUCCESS;
-    std::vector<safegraphs_part_t> parts(world.size);
-    for (std::size_t part = 0; part != parts.size(); ++part)
+    st::vector<safegraphs_part_t> parts;
+    if (st::failed(parts.resize(world.size))) exit_out_of_memory("the parts");
+    std::uint64_t committed = 0;
+    for (std::size_t part = 0; part != parts.size(); ++part) {
         parts[part] = {.bytes = gathered[part * sent.size()], .nodes = gathered[part * sent.size() + 1]};
+        committed += parts[part].nodes;
+    }
     if (!checkpoint_write_manifest(save, parts)) {
         fmt::println(stderr, "rank 0: cannot write {}", save);
         return EXIT_FAILURE;
     }
-    std::size_t const entries = settings.checkpoint.entries.value;
-    fmt::println("committed {} over {} parts of {} entries in {:.1f} s", save, world.size,
-                 entries ? entries : source.rows - settings.checkpoint.first_entry.value,
+    fmt::println("committed {} over {} parts of {} entries in {:.1f} s", save, world.size, committed,
                  checkpoint_seconds_since(started));
     return EXIT_SUCCESS;
 }
@@ -597,15 +610,15 @@ int modality_split(dense_verbs_t, world_t& world, int argc, char const* const* a
 static std::optional<checkpoint_queries<dense_verbs_t>> dense_read_queries(std::string_view input,
                                                                            std::string_view vectors_column,
                                                                            std::string_view keys_column,
-                                                                           std::vector<usearch_byte_t>& rows) {
+                                                                           st::vector<usearch_byte_t>& rows) {
     arrow_input_t source;
     std::size_t vectors = arrow_no_column_k, keys = arrow_no_column_k;
-    std::string failure = source.open(input);
+    sz::string_t failure = source.open(input);
     if (failure.empty()) failure = arrow_pick_rows(source, vectors_column, vectors);
     if (failure.empty() && !keys_column.empty()) failure = arrow_pick_column(source, keys_column, keys);
 
     checkpoint_queries<dense_verbs_t> queries;
-    std::vector<usearch_key_t> widened;
+    st::vector<usearch_key_t> widened;
     while (failure.empty()) {
         bool more = false;
         failure = source.next(more);
@@ -616,15 +629,19 @@ static std::optional<checkpoint_queries<dense_verbs_t>> dense_read_queries(std::
         if (failure.empty() && keys != arrow_no_column_k) failure = arrow_keys_of(source, keys, widened, batch_keys);
         if (!failure.empty()) break;
         if (queries.count && (batch.columns != queries.queries.columns || batch.scalar != queries.queries.scalar)) {
-            failure = fmt::format("{} changes its rows' type between batches", source.name());
+            failure = formatted("{} changes its rows' type between batches", source.name());
             break;
         }
         queries.queries.columns = batch.columns, queries.queries.scalar = batch.scalar;
         queries.queries.stride = batch.stride;
         auto const* const bytes = static_cast<usearch_byte_t const*>(batch.data);
+        std::size_t const held = rows.size();
+        if (st::failed(rows.resize(st::assume_uninitialized, held + source.rows() * batch.stride)))
+            exit_out_of_memory("the queries");
         for (std::size_t row = 0; row != source.rows(); ++row) {
-            rows.insert(rows.end(), bytes + row * batch.stride, bytes + (row + 1) * batch.stride);
-            if (keys != arrow_no_column_k) queries.keys.push_back(batch_keys.data[row]);
+            std::memcpy(rows.data() + held + row * batch.stride, bytes + row * batch.stride, batch.stride);
+            if (keys != arrow_no_column_k && st::failed(queries.keys.push_back(usearch_key_t {batch_keys.data[row]})))
+                exit_out_of_memory("the query keys");
         }
         queries.count += source.rows();
     }
@@ -646,7 +663,7 @@ int modality_search(dense_verbs_t, world_t& world, int argc, char const* const* 
         {"--index", "address", "the checkpoint in place of the positional, or - for standard input", &index_address},
     }};
     mapped_rows_t queries_file;
-    std::vector<usearch_byte_t> query_rows;
+    st::vector<usearch_byte_t> query_rows;
     return checkpoint_search<dense_verbs_t>(
         world, argc, argv, "usearch dense search <address> --query-vectors <path> [flags]", flags,
         [&]() -> std::optional<checkpoint_queries<dense_verbs_t>> {
@@ -676,8 +693,8 @@ int modality_search(dense_verbs_t, world_t& world, int argc, char const* const* 
 /** The rows a get gathered: every key once per entry, the entries' bytes packed, and the schema of
  *  their column, taken from the library's first export. */
 struct dense_retrieved_t {
-    std::vector<usearch_key_t> keys;
-    std::vector<usearch_byte_t> rows;
+    st::vector<usearch_key_t> keys;
+    st::vector<usearch_byte_t> rows;
     ArrowSchema vector {};
 
     dense_retrieved_t() = default;
@@ -720,19 +737,19 @@ static bool dense_get_key(handle<dense_verbs_t> const& index, usearch_key_t key,
         exported.array.release(&exported.array);
     }
     std::size_t const offset = retrieved.rows.size(), bytes = written * vectors.stride;
-    retrieved.rows.resize(offset + bytes);
+    if (st::failed(retrieved.rows.resize(st::assume_uninitialized, offset + bytes))) exit_out_of_memory("the rows");
     if (!download(retrieved.rows.data() + offset, vectors.data, bytes)) {
         fmt::println(stderr, "cannot read the rows back off their device");
         return false;
     }
-    retrieved.keys.insert(retrieved.keys.end(), written, key);
+    if (st::failed(retrieved.keys.resize(retrieved.keys.size() + written, key))) exit_out_of_memory("the keys");
     return true;
 }
 
 int dense_get(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
     std::string_view index_address, input, keys_column, outputs_dtype;
-    std::vector<flag_t> const flags = with_session_flags(
+    st::vector<flag_t> const flags = with_session_flags(
         settings.session,
         {
             {"--index", "address", "required: the checkpoint at any address, or - for standard input", &index_address},
@@ -772,7 +789,7 @@ int dense_get(world_t& world, int argc, char const* const* argv) {
 
     arrow_input_t source;
     std::size_t keys = arrow_no_column_k;
-    std::string failure = source.open(input);
+    sz::string_t failure = source.open(input);
     if (failure.empty()) failure = arrow_pick_column(source, keys_column, keys);
     if (!failure.empty()) {
         fmt::println(stderr, "{}", failure);
@@ -788,7 +805,7 @@ int dense_get(world_t& world, int argc, char const* const* argv) {
 
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     dense_retrieved_t retrieved;
-    std::vector<usearch_key_t> widened;
+    st::vector<usearch_key_t> widened;
     std::size_t asked = 0, missing = 0;
     while (true) {
         bool more = false;
@@ -804,7 +821,7 @@ int dense_get(world_t& world, int argc, char const* const* argv) {
         }
         asked += source.rows();
     }
-    if (failure.empty() && retrieved.keys.empty()) failure = "none of the keys is in the index";
+    if (failure.empty() && retrieved.keys.empty()) failure = formatted("none of the keys is in the index");
     if (failure.empty())
         failure = arrow_vectors_write(settings.output, retrieved.keys, retrieved.vector,
                                       std::as_bytes(std::span {retrieved.rows}));

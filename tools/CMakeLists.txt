@@ -8,7 +8,10 @@ add_executable(
 )
 usearch_setup_target(usearch_tools HOST)
 set_target_properties(usearch_tools PROPERTIES OUTPUT_NAME usearch)
-target_link_libraries(usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::static yyjson)
+target_link_libraries(
+    usearch_tools PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::static yyjson smashtable::header
+                          stringzilla::header
+)
 install(TARGETS usearch_tools RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
 
 find_package(
@@ -23,7 +26,14 @@ if (MPI_C_FOUND)
     usearch_setup_target(usearch_tools_mpi HOST)
     set_target_properties(usearch_tools_mpi PROPERTIES OUTPUT_NAME usearch-mpi)
     target_link_libraries(
-        usearch_tools_mpi PRIVATE ${USEARCH_PUNNED_LIBRARIES} fmt::fmt forkunion::static yyjson MPI::MPI_C
+        usearch_tools_mpi
+        PRIVATE ${USEARCH_PUNNED_LIBRARIES}
+                fmt::fmt
+                forkunion::static
+                yyjson
+                smashtable::header
+                stringzilla::header
+                MPI::MPI_C
     )
     install(TARGETS usearch_tools_mpi RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
 endif ()

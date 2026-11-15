@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <csignal> // `std::sig_atomic_t` - the stop a signal asks for
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
 #include <cstdio>  // `std::FILE`, `stdout`, `stderr` - where a step prints
@@ -23,18 +24,17 @@
 
 #include <sys/stat.h> // `stat`, `S_ISREG` - a saved part's bytes
 
-#include <algorithm>   // `std::min`
-#include <bit>         // `std::bit_cast` - entry numbers into keys
-#include <array>       // `std::array` - the flag tables
-#include <chrono>      // `std::chrono::steady_clock`
-#include <iterator>    // `std::back_inserter`
-#include <optional>    // `std::optional`
-#include <span>        // `std::span`
-#include <string>      // `std::string`
-#include <string_view> // `std::string_view`
-#include <type_traits> // `std::is_same_v` - the dense-only widening
-#include <utility>     // `std::move`
-#include <vector>      // `std::vector`
+#include <algorithm>        // `std::min`
+#include <bit>              // `std::bit_cast` - entry numbers into keys
+#include <array>            // `std::array` - the flag tables
+#include <chrono>           // `std::chrono::steady_clock`
+#include <initializer_list> // `std::initializer_list` - a verb's own flags
+#include <limits>           // `std::numeric_limits` - the digits of a rank
+#include <optional>         // `std::optional`
+#include <span>             // `std::span`
+#include <string_view>      // `std::string_view`
+#include <type_traits>      // `std::is_same_v` - the dense-only widening
+#include <utility>          // `std::move`
 
 #include <fmt/format.h>
 
@@ -71,9 +71,23 @@ struct world_t {
     void gather(std::span<std::uint64_t const> sent, std::span<std::uint64_t> received) noexcept;
 };
 
-/** What leads a rank's lines while several run, like "rank 3: ", and nothing in a world of one. */
-inline std::string rank_label(world_t const& world) {
-    return world.size > 1 ? fmt::format("rank {}: ", world.rank) : std::string {};
+/** What leads a rank's lines while several run, like "rank 3: ", formatted in place. */
+struct rank_label_t {
+    std::array<char, sizeof("rank : ") + std::numeric_limits<std::size_t>::digits10 + 1> characters {};
+    std::size_t length = 0;
+};
+
+/** The text @p label prints as. */
+inline std::string_view format_as(rank_label_t const& label) noexcept {
+    return {label.characters.data(), label.length};
+}
+
+/** The label of this rank's lines, empty in a world of one. */
+inline rank_label_t rank_label(world_t const& world) noexcept {
+    rank_label_t label;
+    if (world.size > 1)
+        label.length = fmt::format_to_n(label.characters.data(), label.characters.size(), "rank {}: ", world.rank).size;
+    return label;
 }
 
 /** Whether a verb that runs on one process may run here, rank 0 saying why not under several. */
@@ -122,15 +136,88 @@ inline double checkpoint_seconds_since(checkpoint_clock_t::time_point started) n
     return std::chrono::duration<double>(checkpoint_clock_t::now() - started).count();
 }
 
+/** Set by the first SIGINT or SIGTERM: every long verb stops at its next barrier, saves what stands
+ *  where it saves, and the process exits with @ref exit_stopped_k. */
+inline volatile std::sig_atomic_t stop_requested = 0;
+
+/** The exit status of a verb a signal stopped, as shells report a command SIGINT ended. */
+inline constexpr int exit_stopped_k = 130;
+
+/** The phase a verb is in: what the shared progress handler prints, and what a stop names. */
+struct verb_phase_t {
+    std::string_view name;
+    std::string_view unit;
+    std::FILE* stream = stdout;
+    rank_label_t label {};
+    checkpoint_clock_t::time_point printed {};
+};
+
+/** The handler every long verb passes: prints the phase's advance at most once a second, and
+ *  answers cancel once a signal asked the process to stop. */
+inline usearch_continuation_t verb_progress(std::size_t completed, std::size_t total, void* state) noexcept {
+    verb_phase_t& phase = *static_cast<verb_phase_t*>(state);
+    checkpoint_clock_t::time_point const now = checkpoint_clock_t::now();
+    if (now - phase.printed >= std::chrono::seconds(1)) {
+        phase.printed = now;
+        fmt::println(phase.stream, "{}{}: {} of {} {}", phase.label, phase.name, completed, total, phase.unit);
+    }
+    return stop_requested ? usearch_cancel_k : usearch_continue_k;
+}
+
+/** The C handler reporting into @p phase. */
+inline usearch_progress_t verb_progress_of(verb_phase_t& phase) noexcept { return {verb_progress, &phase, 0}; }
+
+/** Prints in which phase a signal stopped the verb. */
+inline void verb_stopped(verb_phase_t const& phase) noexcept {
+    fmt::println(phase.stream, "{}stopped in {}", phase.label, phase.name);
+}
+
+/** The word a refinement round's verdict prints as. */
+inline std::string_view refine_verdict_name(usearch_refine_verdict_t verdict) noexcept {
+    switch (verdict) {
+    case usearch_refine_improved_k: return "improved";
+    case usearch_refine_converged_k: return "converged";
+    case usearch_refine_stalled_k: return "stalled";
+    case usearch_refine_stopped_k: return "stopped";
+    }
+    return "unknown";
+}
+
 /** The path of part @p part, counted from zero, of the @p parts the manifest at @p manifest_path
  *  commits; empty when it cannot be formatted. */
-inline std::string checkpoint_part_path(std::string_view manifest_path, std::size_t part, std::size_t parts) {
+inline sz::string_t checkpoint_part_path(std::string_view manifest_path, std::size_t part, std::size_t parts) noexcept {
     growing_buffer<char> named {global_allocator};
-    return std::string {safegraphs_part_path(named, safegraphs_stem(manifest_path), part, parts).value};
+    return formatted("{}", safegraphs_part_path(named, safegraphs_stem(manifest_path), part, parts).value);
+}
+
+/** Appends the parts the checkpoint at @p address spans to @p parts: each part a manifest names,
+ *  beside it, or the address itself for a monolith, a transport ID or standard input; answers
+ *  false after printing why. */
+inline bool checkpoint_parts_of(std::string_view address, st::vector<sz::string_t>& parts) noexcept {
+    if (address != "-" && !names_transport_id(address)) {
+        auto const [mapping, map_status] = mapped_file_t::read(address);
+        if (failed(map_status)) {
+            fmt::println(stderr, "cannot read {}", address);
+            return false;
+        }
+        if (!safegraphs_is_monolith(mapping.view())) {
+            std::string_view const directory = address.substr(0, address.size() - safegraphs_basename(address).size());
+            auto per_part = [&](safegraphs_part_t part) noexcept {
+                if (st::failed(parts.push_back(formatted("{}{}", directory, part.path))))
+                    exit_out_of_memory("the parts");
+            };
+            auto const [summary, summary_status] = safegraphs_read_manifest(address, std::allocator<byte_t> {},
+                                                                            per_part);
+            if (failed(summary_status)) fmt::println(stderr, "{} holds no SafeGraphs monolith or manifest", address);
+            return succeeded(summary_status);
+        }
+    }
+    if (st::failed(parts.push_back(formatted("{}", address)))) exit_out_of_memory("the parts");
+    return true;
 }
 
 /** Bytes the regular file at @p path holds, or zero for a device, an SPDK address or a failure. */
-inline std::uint64_t checkpoint_file_bytes(std::string const& path) noexcept {
+inline std::uint64_t checkpoint_file_bytes(sz::string_t const& path) noexcept {
     struct stat file_stat;
     bool const measured = stat(path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode);
     return measured ? static_cast<std::uint64_t>(file_stat.st_size) : 0;
@@ -148,13 +235,11 @@ inline bool checkpoint_write_manifest(std::string_view manifest_path, std::span<
     }));
 }
 
-/** The text a key prints as: the entry number it was minted from, or its 32 hex digits. */
-inline std::string checkpoint_key_text(uuid128_t const& key) {
-    if (std::optional<u64_t> const number = identity_of(key)) return fmt::format("{}", *number);
-    std::string text;
-    for (std::byte const byte : key.bytes)
-        fmt::format_to(std::back_inserter(text), "{:02x}", std::to_integer<unsigned>(byte));
-    return text;
+/** Appends the text @p key prints as to @p text: the entry number it was minted from, or its 32 hex
+ *  digits. */
+inline void checkpoint_append_key(sz::string_t& text, uuid128_t const& key) noexcept {
+    if (std::optional<u64_t> const number = identity_of(key)) return append_formatted(text, "{}", *number);
+    for (std::byte const byte : key.bytes) append_formatted(text, "{:02x}", std::to_integer<unsigned>(byte));
 }
 
 /** Every setting the checkpoint verbs take, each spelled as its flag with dashes; @c session holds
@@ -179,24 +264,24 @@ struct checkpoint_settings_t {
 };
 
 /** @p verb_flags, then the flags of the session every verb opens, then @p modality_flags. */
-inline std::vector<flag_t> with_session_flags(settings_t& session, std::vector<flag_t> verb_flags,
-                                              std::span<flag_t const> modality_flags = {}) {
+inline st::vector<flag_t> with_session_flags(settings_t& session, std::initializer_list<flag_t> verb_flags,
+                                             std::span<flag_t const> modality_flags = {}) noexcept {
     std::array<flag_t, 4> const shared = session_flags(session);
-    verb_flags.insert(verb_flags.end(), shared.begin(), shared.end());
-    verb_flags.insert(verb_flags.end(), modality_flags.begin(), modality_flags.end());
-    return verb_flags;
+    return joined_flags({verb_flags, shared, modality_flags});
 }
 
 /** @ref with_session_flags for a verb that refines, with the two flags every such verb takes. */
-inline std::vector<flag_t> with_refine_flags(checkpoint_settings_t& settings, std::vector<flag_t> verb_flags,
-                                             std::span<flag_t const> modality_flags = {}) {
-    verb_flags.push_back({"--expansion-refine", "count",
-                          "defaults to the library's derivation: candidates while refining",
-                          &settings.expansion_refine});
-    verb_flags.push_back({"--memory-limit", "bytes",
-                          "defaults to a storage chunk per tile: bytes a pass holds past the index, like 40G",
-                          &settings.memory_limit});
-    return with_session_flags(settings.session, std::move(verb_flags), modality_flags);
+inline st::vector<flag_t> with_refine_flags(checkpoint_settings_t& settings, std::initializer_list<flag_t> verb_flags,
+                                            std::span<flag_t const> modality_flags = {}) noexcept {
+    std::array<flag_t, 2> const refine {{
+        {"--expansion-refine", "count", "defaults to the library's derivation: candidates of walks beside the rounds",
+         &settings.expansion_refine},
+        {"--memory-limit", "bytes",
+         "defaults to the library's derivation: bytes an NVMe refine holds for one part, like 40G",
+         &settings.memory_limit},
+    }};
+    std::array<flag_t, 4> const shared = session_flags(settings.session);
+    return joined_flags({verb_flags, refine, shared, modality_flags});
 }
 
 /** The flag every verb calling the library in batches takes. */
@@ -205,7 +290,8 @@ inline flag_t batch_flag(checkpoint_settings_t& settings) noexcept {
 }
 
 /** The flags every insert takes, then @p modality_flags. */
-inline std::vector<flag_t> insert_flags(checkpoint_settings_t& settings, std::span<flag_t const> modality_flags) {
+inline st::vector<flag_t> insert_flags(checkpoint_settings_t& settings,
+                                       std::span<flag_t const> modality_flags) noexcept {
     return with_refine_flags(
         settings,
         {
@@ -218,7 +304,7 @@ inline std::vector<flag_t> insert_flags(checkpoint_settings_t& settings, std::sp
             {"--connectivity", "count", "defaults to the library's derivation: graph degree", &settings.connectivity},
             {"--expansion-add", "count", "defaults to the library's derivation: candidates while inserting",
              &settings.expansion_add},
-            {"--max-refines", "count", "defaults to 0: refinement passes after ingestion, stopping early once settled",
+            {"--max-refines", "count", "defaults to 0: refinement rounds after ingestion, until one is not improved",
              &settings.max_refines},
             batch_flag(settings),
         },
@@ -240,7 +326,7 @@ template <typename verbs_type_>
 struct checkpoint_queries {
     typename verbs_type_::queries_t queries {};
     std::size_t count = 0;
-    std::vector<usearch_key_t> keys {};
+    st::vector<usearch_key_t> keys {};
 };
 
 /** Loads the checkpoint standard input carries into RAM on @p session; prints what failed and
@@ -253,17 +339,16 @@ handle<verbs_type_> checkpoint_read_piped(session_t& session, usearch_residency_
                      usearch_residency_name(residency));
         return {};
     }
-    std::vector<byte_t> bytes;
+    st::vector<byte_t> bytes;
     if (!read_standard_input(bytes)) {
         fmt::println(stderr, "cannot read a checkpoint off standard input");
         return {};
     }
     usearch_outcome_t outcome {};
     typename verbs_type_::index_t loaded = nullptr;
-    std::vector<std::int32_t> placement;
-    usearch_bytes_view_t const buffer {reinterpret_cast<usearch_byte_t const*>(bytes.data()), bytes.size()};
-    verbs_type_::load_ram_buffer(&loaded, session.executor, buffer, session.ram_options(0, placement), geometry,
-                                 &outcome);
+    st::vector<std::int32_t> placement;
+    verbs_type_::load_ram_buffer(&loaded, session.executor, bytes_view(bytes), session.ram_options(0, placement),
+                                 geometry, &outcome);
     report_failure(outcome, "Loading the checkpoint off standard input");
     return {loaded, session, residency, geometry};
 }
@@ -301,10 +386,10 @@ bool checkpoint_save_piped(handle<verbs_type_> const& index, std::FILE* stream) 
     usearch_bytes_view_t monolith {};
     verbs_type_::save_buffer(index.get(), index.executor(), index.session->arena, &monolith, &outcome);
     if (report_failure(outcome, "saving to standard output")) return false;
-    std::vector<byte_t> copied;
+    st::vector<byte_t> copied;
     void const* bytes = monolith.data;
     if (index.residency == usearch_residency_vram_k) {
-        copied.resize(monolith.length);
+        if (st::failed(copied.resize(st::assume_uninitialized, monolith.length))) exit_out_of_memory("the checkpoint");
         if (!download(copied.data(), monolith.data, monolith.length)) {
             fmt::println(stderr, "cannot read the checkpoint back off its device");
             return false;
@@ -323,13 +408,13 @@ bool checkpoint_save_piped(handle<verbs_type_> const& index, std::FILE* stream) 
 /** Saves @p index under @p address, or to standard output for @c -, and prints the step under this
  *  rank to @p stream. */
 template <typename verbs_type_>
-bool checkpoint_save(world_t const& world, handle<verbs_type_> const& index, std::string const& address,
+bool checkpoint_save(world_t const& world, handle<verbs_type_> const& index, sz::string_t const& address,
                      std::FILE* stream = stdout) {
     if (address == "-") return checkpoint_save_piped(index, stream);
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     usearch_outcome_t outcome {};
     verbs_type_::save(index.get(), index.executor(), bytes_view(address), &outcome);
-    if (report_failure(outcome, fmt::format("{}saving {}", rank_label(world), address))) return false;
+    if (report_failure(outcome, "{}saving {}", rank_label(world), address)) return false;
     double const seconds = checkpoint_seconds_since(started);
     if (std::uint64_t const bytes = checkpoint_file_bytes(address))
         fmt::println(stream, "{}saved {}: {} bytes in {:.1f} s", rank_label(world), address, bytes, seconds);
@@ -337,25 +422,54 @@ bool checkpoint_save(world_t const& world, handle<verbs_type_> const& index, std
     return true;
 }
 
-/** Runs up to @p passes refinements over @p index under @p refine, stopping once one changes
- *  nothing, and prints each under this rank to @p stream. */
+/** Runs up to @p rounds refinement rounds over @p index under @p refine, until one concludes other
+ *  than improved or a signal stops one, printing each under this rank to the stream of @p phase and
+ *  naming the phase a stop came in; false after printing a failure. */
 template <typename verbs_type_>
-bool checkpoint_refine_passes(world_t const& world, handle<verbs_type_> const& index, std::size_t passes,
-                              usearch_refine_options_t refine, std::FILE* stream = stdout) {
-    for (std::size_t pass = 0; pass != passes; ++pass) {
+bool checkpoint_refine_rounds(world_t const& world, handle<verbs_type_> const& index, std::size_t rounds,
+                              usearch_refine_options_t refine, verb_phase_t& phase) {
+    // Rounds run through one plan, so they share their root and a stop closes the round in hand; a
+    // loaded NVMe handle rounds part by part within each call and takes none.
+    typename verbs_type_::refine_plan_t plan = nullptr;
+    bool const planned = index.residency != usearch_residency_nvme_k;
+    auto finish_plan = [&](usearch_refine_report_t* report) noexcept {
+        usearch_outcome_t outcome {};
+        if (plan)
+            verbs_type_::refine_plan_finish(index.get(), index.executor(), std::exchange(plan, nullptr), report,
+                                            &outcome);
+        return !report_failure(outcome, "{}finishing the refine plan", rank_label(world));
+    };
+    for (std::size_t round = 0; round != rounds && !stop_requested; ++round) {
+        phase.name = "refine", phase.unit = "entries";
         checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
         usearch_outcome_t outcome {};
         usearch_refine_report_t report {};
         usearch_traversal_stats_t stats {};
+        usearch_phase_t stopped {};
         verbs_type_::refine(index.get(), index.executor(), &report, &outcome, refine.expansion_factor,
-                            refine.memory_limit, &stats);
-        if (report_failure(outcome, fmt::format("{}refining", rank_label(world)))) return false;
-        fmt::println(stream, "{}refined pass {}: {} changed, {} of {} reachable in {:.1f} s, {:.1f} distances per row",
-                     rank_label(world), pass + 1, report.changed, report.reachability.reachable,
-                     report.reachability.audited, checkpoint_seconds_since(started),
-                     double(stats.computed_distances) / double(std::max<std::size_t>(report.reselected, 1)));
-        if (!report.changed) break;
+                            refine.memory_limit, &stats, verb_progress_of(phase), planned ? &plan : nullptr, &stopped);
+        if (outcome.status != usearch_status_cancelled_k && report_failure(outcome, "{}refining", rank_label(world)))
+            return finish_plan(nullptr), false;
+        if (outcome.status == usearch_status_cancelled_k && plan) {
+            if (stopped.name) phase.name = stopped.name;
+            if (!finish_plan(&report)) return false;
+        }
+        fmt::println(phase.stream,
+                     "{}refined round {}: {}; {} neighborhoods, widest {}; "               //
+                     "{} links added, {} dropped, {} of {} entries changed; "              //
+                     "{} of {} in one component in {:.1f} s, {:.1f} distances per entry; " //
+                     "{} unreached and {} stranded islands, opened with {} and {}",
+                     rank_label(world), round + 1, refine_verdict_name(report.verdict), report.neighborhoods,
+                     report.widest_neighborhood, report.added_links, report.dropped_links, report.changed,
+                     report.reselected, report.reachability.reachable, report.reachability.audited,
+                     checkpoint_seconds_since(started),
+                     double(stats.computed_distances) / double(max_of<std::size_t>(report.reachability.audited, 1)),
+                     report.reachability.unreached_islands, report.reachability.stranded_islands,
+                     report.opening.unreached_islands, report.opening.stranded_islands);
+        if (report.verdict != usearch_refine_improved_k) break;
     }
+    if (!finish_plan(nullptr)) return false;
+    if (stop_requested) verb_stopped(phase);
     return true;
 }
 
@@ -366,7 +480,7 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
                       std::span<flag_t const> modality_flags, open_entries_type_&& open_entries) {
     checkpoint_settings_t settings;
     settings.session.residency = usearch_residency_unknown_k;
-    std::vector<flag_t> const flags = insert_flags(settings, modality_flags);
+    st::vector<flag_t> const flags = insert_flags(settings, modality_flags);
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
@@ -382,7 +496,7 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
         fmt::println(stderr, "--residency=nvme builds nothing; insert in ram or vram, then view the checkpoint");
         return EXIT_FAILURE;
     }
-    std::optional<std::string> const admitted = checkpoints_admit_save(settings.save);
+    std::optional<sz::string_t> const admitted = checkpoints_admit_save(settings.save);
     if (!admitted) return EXIT_FAILURE;
     std::FILE* const steps = settings.save == "-" ? stderr : stdout;
     std::optional<checkpoint_entries<verbs_type_>> const entries = open_entries(positionals[0], settings);
@@ -403,119 +517,173 @@ int checkpoint_insert(world_t& world, int argc, char const* const* argv, std::st
     handle<verbs_type_> index = open_index<verbs_type_>(session, entries->geometry, 1);
     if (!index) return EXIT_FAILURE;
     std::size_t const batch = std::min(settings.batch.value, count);
-    std::vector<usearch_key_t> keys(batch);
-    for (std::size_t offset = 0; offset < count; offset += batch) {
-        std::size_t const sliced = std::min(batch, count - offset);
+    st::vector<usearch_key_t> keys;
+    if (st::failed(keys.resize(batch))) exit_out_of_memory("the keys");
+    verb_phase_t phase {.name = "insert", .unit = "entries", .stream = steps};
+    std::size_t inserted = 0;
+    while (inserted < count) {
+        std::size_t const sliced = min_of(batch, count - inserted);
         for (std::size_t position = 0; position != sliced; ++position)
-            keys[position] = std::bit_cast<usearch_key_t>(uuid_of(first + offset + position));
+            keys[position] = std::bit_cast<usearch_key_t>(uuid_of(first + inserted + position));
         usearch_outcome_t outcome {};
         verbs_type_::insert(index.get(), index.executor(), sliced, keys_view(std::span {keys}.first(sliced)),
-                            verbs_type_::slice(entries->values, first + offset), settings.expansion_add.value, nullptr,
-                            &outcome);
+                            verbs_type_::slice(entries->values, first + inserted), settings.expansion_add.value,
+                            nullptr, &outcome);
         if (report_failure(outcome, "inserting")) return EXIT_FAILURE;
+        inserted += sliced;
+        if (verb_progress(inserted, count, &phase) == usearch_cancel_k) break;
     }
-    fmt::println(steps, "inserted entries {} to {} in {} in {:.1f} s", first, first + count,
+    fmt::println(steps, "inserted entries {} to {} in {} in {:.1f} s", first, first + inserted,
                  usearch_residency_name(index.residency), checkpoint_seconds_since(started));
-    bool const built = checkpoint_refine_passes(world, index, settings.max_refines.value,
+    bool const built = checkpoint_refine_rounds(world, index, settings.max_refines.value,
                                                 {settings.expansion_refine.value, settings.memory_limit.value},
-                                                steps) &&
+                                                phase) &&
                        checkpoint_save(world, index, *admitted, steps);
     return built ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-/** Loads a base and absorbs its donors into it one at a time, then saves the merged index. */
+/** Loads a base and absorbs every donor into it in one call, then saves the merged index; a
+ *  manifest stands for its parts, so the first part named is the base. */
 template <typename verbs_type_>
 int checkpoint_absorb(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
-    std::vector<flag_t> const flags = with_refine_flags(
+    st::vector<flag_t> const flags = with_refine_flags(
         settings, {{"--save", "address", "required: where the merged index is saved", &settings.save}});
     // Every argument is at most one positional, so the arguments bound the donors.
-    std::vector<std::string_view> positionals(static_cast<std::size_t>(argc));
+    st::vector<std::string_view> positionals;
+    if (st::failed(positionals.resize(static_cast<std::size_t>(argc)))) exit_out_of_memory("the arguments");
     std::size_t given = 0;
-    std::string const synopsis = fmt::format("usearch {} absorb <base> <donors>... --save <address> [flags]",
-                                             verbs_type_::name_k);
+    sz::string_t const synopsis = formatted("usearch {} absorb <base|manifest> [donors]... --save <address> [flags]",
+                                            verbs_type_::name_k);
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given < 2 || settings.save.empty()) {
-        fmt::println(stderr, "a base, at least one donor and --save are required");
+    if (!given || settings.save.empty()) {
+        fmt::println(stderr, "a base and its donors, or a manifest of several parts, and --save are required");
         return EXIT_FAILURE;
     }
-    std::optional<std::string> const admitted = checkpoints_admit_save(settings.save);
+    st::vector<sz::string_t> parts;
+    for (std::string_view const address : std::span {positionals}.first(given))
+        if (!checkpoint_parts_of(address, parts)) return EXIT_FAILURE;
+    if (parts.size() < 2) {
+        fmt::println(stderr, "{} names one part, and absorbing needs a donor", positionals[0]);
+        return EXIT_FAILURE;
+    }
+    std::optional<sz::string_t> const admitted = checkpoints_admit_save(settings.save);
     if (!admitted) return EXIT_FAILURE;
     std::FILE* const steps = settings.save == "-" ? stderr : stdout;
 
     settings.session.devices = devices_from_environment();
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
-    handle<verbs_type_> base = checkpoint_open<verbs_type_>(session, positionals[0], settings.session.residency, {},
-                                                            steps);
+    handle<verbs_type_> base = checkpoint_open<verbs_type_>(session, parts[0], settings.session.residency, {}, steps);
     if (!base) return EXIT_FAILURE;
-    for (std::string_view const donor_address : std::span {positionals}.subspan(1, given - 1)) {
-        handle<verbs_type_> donor = checkpoint_open<verbs_type_>(session, donor_address, settings.session.residency, {},
-                                                                 steps);
+    st::vector<handle<verbs_type_>> donors;
+    st::vector<typename verbs_type_::index_t> donor_indexes;
+    std::size_t donor_entries = 0;
+    for (sz::string_t const& part : std::span {parts}.subspan(1)) {
+        handle<verbs_type_> donor = checkpoint_open<verbs_type_>(session, part, settings.session.residency, {}, steps);
         if (!donor) return EXIT_FAILURE;
-        std::size_t const donor_entries = describe(donor).size;
-        checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
-        usearch_outcome_t outcome {};
-        usearch_refine_report_t report {};
-        // A consumed donor's handle is nulled; a refused one stays for its owner to free.
-        verbs_type_::absorb(base.get(), base.executor(), &donor.index, 1, &outcome, &report,
-                            settings.expansion_refine.value, settings.memory_limit.value);
-        if (report_failure(outcome, fmt::format("absorbing {}", donor_address))) return EXIT_FAILURE;
-        fmt::println(steps, "absorbed {}: {} entries in {:.1f} s, {} changed, {} of {} reachable", donor_address,
-                     donor_entries, checkpoint_seconds_since(started), report.changed, report.reachability.reachable,
-                     report.reachability.audited);
+        donor_entries += describe(donor).size;
+        if (st::failed(donor_indexes.push_back(donor.get())) || st::failed(donors.push_back(std::move(donor))))
+            exit_out_of_memory("the donors");
     }
+    checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
+    usearch_outcome_t outcome {};
+    usearch_refine_report_t report {};
+    verb_phase_t phase {.name = "absorb", .unit = "entries", .stream = steps};
+    // A plan names the phase a stop came in; a loaded NVMe base takes none.
+    typename verbs_type_::absorb_plan_t plan = nullptr;
+    usearch_phase_t stopped_in {};
+    verbs_type_::absorb(base.get(), base.executor(), donor_indexes, &outcome, &report, settings.expansion_refine.value,
+                        settings.memory_limit.value, verb_progress_of(phase),
+                        base.residency == usearch_residency_nvme_k ? nullptr : &plan, &stopped_in);
+    bool const stopped = outcome.status == usearch_status_cancelled_k;
+    if (plan) {
+        if (stopped && stopped_in.name) phase.name = stopped_in.name;
+        usearch_outcome_t finished {};
+        verbs_type_::absorb_plan_finish(base.get(), base.executor(), plan, &report, &finished);
+        if (report_failure(finished, "finishing the absorb plan")) return EXIT_FAILURE;
+    }
+    // A consumed donor's slot is nulled, so its handle lets go; a refused one its handle frees.
+    for (std::size_t donor = 0; donor != donors.size(); ++donor)
+        if (!donor_indexes[donor]) donors[donor].index = nullptr;
+    if (!stopped && report_failure(outcome, "absorbing {} donors", donors.size())) return EXIT_FAILURE;
+    fmt::println(steps, "absorbed {} donors: {} entries in {:.1f} s, {} changed, {} of {} reachable", donors.size(),
+                 donor_entries, checkpoint_seconds_since(started), report.changed, report.reachability.reachable,
+                 report.reachability.audited);
+    if (stopped) verb_stopped(phase);
     return checkpoint_save(world, base, *admitted, steps) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+/** Opens the manifest at @p address on @p session's NVMe executor as a writable index, which a
+ *  refine rewrites part by part; only dense checkpoints have one, so the rest report what C reports
+ *  for a verb it lacks. Prints the step to @p stream, or what failed and an empty handle. */
+template <typename verbs_type_>
+handle<verbs_type_> checkpoint_load_nvme(session_t& session, std::string_view address, std::FILE* stream) {
+    checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
+    usearch_outcome_t outcome {usearch_status_unsupported_k, "Only dense checkpoints load writable from NVMe"};
+    typename verbs_type_::index_t loaded = nullptr;
+    if constexpr (std::is_same_v<verbs_type_, dense_verbs_t>)
+        verbs_type_::load_nvme(&loaded, session.storage, bytes_view(address), session.nvme_options(),
+                               session.nvme_ram_options(), &outcome);
+    if (report_failure(outcome, "Loading {}", address)) return {};
+    fmt::println(stream, "loaded {} writable in {:.1f} s", address, checkpoint_seconds_since(started));
+    return {loaded, session, usearch_residency_nvme_k, {}};
+}
+
 /** Loads a checkpoint, a dense one widened to a larger connectivity when asked, re-selects its
- *  neighbors pass after pass, and saves it. */
+ *  neighbors pass after pass, and saves it; with @c --residency=nvme it refines the manifest in
+ *  place, which commits every pass itself. */
 template <typename verbs_type_>
 int checkpoint_refine(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
     settings.max_refines = {.value = 1};
-    std::vector<flag_t> const flags = with_refine_flags(
+    st::vector<flag_t> const flags = with_refine_flags(
         settings,
         {
-            {"--save", "address", "required: where the refined index is saved", &settings.save},
+            {"--save", "address", "required unless --residency=nvme refines in place: where the refined index is saved",
+             &settings.save},
             {"--connectivity", "count", "defaults to the checkpoint's: a wider graph degree to refine a dense one into",
              &settings.connectivity},
-            {"--max-refines", "count", "defaults to 1: refinement passes, stopping early once settled",
+            {"--max-refines", "count", "defaults to 1: refinement rounds, until one is not improved",
              &settings.max_refines},
         });
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
-    std::string const synopsis = fmt::format("usearch {} refine <address> --save <address> [flags]",
-                                             verbs_type_::name_k);
+    sz::string_t const synopsis = formatted("usearch {} refine <address> [--save <address>] [flags]",
+                                            verbs_type_::name_k);
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
-    if (given != 1 || settings.save.empty()) {
-        fmt::println(stderr, "a checkpoint and --save are required");
+    bool const in_place = settings.session.residency == usearch_residency_nvme_k;
+    if (given != 1 || settings.save.empty() != in_place) {
+        fmt::println(stderr, "a checkpoint is required, and --save unless --residency=nvme refines it in place");
         return EXIT_FAILURE;
     }
     typename verbs_type_::geometry_t widened {};
     if constexpr (std::is_same_v<verbs_type_, dense_verbs_t>) widened.connectivity = settings.connectivity.value;
-    else if (settings.connectivity.value) {
-        fmt::println(stderr, "--connectivity widens dense checkpoints only");
+    if (settings.connectivity.value && (in_place || !std::is_same_v<verbs_type_, dense_verbs_t>)) {
+        fmt::println(stderr, "--connectivity widens dense checkpoints loaded into RAM or VRAM only");
         return EXIT_FAILURE;
     }
-    std::optional<std::string> const admitted = checkpoints_admit_save(settings.save);
-    if (!admitted) return EXIT_FAILURE;
+    std::optional<sz::string_t> const admitted = in_place ? std::optional<sz::string_t> {}
+                                                          : checkpoints_admit_save(settings.save);
+    if (!in_place && !admitted) return EXIT_FAILURE;
     std::FILE* const steps = settings.save == "-" ? stderr : stdout;
 
     settings.session.devices = devices_from_environment();
     session_t session = open_session(settings.session, usearch_cpu_class_unknown_k);
     if (!session) return EXIT_FAILURE;
-    handle<verbs_type_> index = checkpoint_open<verbs_type_>(session, positionals[0], settings.session.residency,
-                                                             widened, steps);
+    handle<verbs_type_> index = in_place ? checkpoint_load_nvme<verbs_type_>(session, positionals[0], steps)
+                                         : checkpoint_open<verbs_type_>(session, positionals[0],
+                                                                        settings.session.residency, widened, steps);
+    verb_phase_t phase {.name = "load", .unit = "entries", .stream = steps};
     bool const refined = index &&
-                         checkpoint_refine_passes(world, index, settings.max_refines.value,
+                         checkpoint_refine_rounds(world, index, settings.max_refines.value,
                                                   {settings.expansion_refine.value, settings.memory_limit.value},
-                                                  steps) &&
-                         checkpoint_save(world, index, *admitted, steps);
+                                                  phase) &&
+                         (in_place || checkpoint_save(world, index, *admitted, steps));
     return refined ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -525,7 +693,7 @@ template <typename verbs_type_, typename receiver_geometry_type_>
 int checkpoint_split(world_t& world, int argc, char const* const* argv, std::span<flag_t const> modality_flags,
                      receiver_geometry_type_&& receiver_geometry) {
     checkpoint_settings_t settings;
-    std::vector<flag_t> const flags = with_refine_flags(
+    st::vector<flag_t> const flags = with_refine_flags(
         settings,
         {
             {"--parts", "count", "required: receivers to split into, at least 2", &settings.parts},
@@ -534,8 +702,8 @@ int checkpoint_split(world_t& world, int argc, char const* const* argv, std::spa
         modality_flags);
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
-    std::string const synopsis = fmt::format("usearch {} split <address> --parts <count> --save <path> [flags]",
-                                             verbs_type_::name_k);
+    sz::string_t const synopsis = formatted("usearch {} split <address> --parts <count> --save <path> [flags]",
+                                            verbs_type_::name_k);
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
@@ -555,27 +723,43 @@ int checkpoint_split(world_t& world, int argc, char const* const* argv, std::spa
     if (!index) return EXIT_FAILURE;
     std::size_t const parts_count = settings.parts.value;
     typename verbs_type_::metadata_t const metadata = describe(index).metadata;
-    std::vector<handle<verbs_type_>> receivers;
-    std::vector<typename verbs_type_::index_t> receiver_indexes;
+    st::vector<handle<verbs_type_>> receivers;
+    st::vector<typename verbs_type_::index_t> receiver_indexes;
     for (std::size_t part = 0; part != parts_count; ++part) {
-        receivers.push_back(open_index<verbs_type_>(session, receiver_geometry(metadata), 1));
-        if (!receivers.back()) return EXIT_FAILURE;
-        receiver_indexes.push_back(receivers.back().get());
+        handle<verbs_type_> receiver = open_index<verbs_type_>(session, receiver_geometry(metadata), 1);
+        if (!receiver) return EXIT_FAILURE;
+        if (st::failed(receiver_indexes.push_back(receiver.get())) ||
+            st::failed(receivers.push_back(std::move(receiver))))
+            exit_out_of_memory("the receivers");
     }
 
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     usearch_outcome_t outcome {};
     usearch_refine_report_t report {};
+    verb_phase_t phase {.name = "split", .unit = "entries"};
+    // A plan names the phase a stop came in; a loaded NVMe index takes none.
+    typename verbs_type_::split_plan_t plan = nullptr;
+    usearch_phase_t stopped_in {};
     verbs_type_::split(index.get(), index.executor(), receiver_indexes.data(), parts_count, 0, &report, &outcome,
-                       settings.expansion_refine.value, settings.memory_limit.value);
-    if (report_failure(outcome, "splitting")) return EXIT_FAILURE;
+                       settings.expansion_refine.value, settings.memory_limit.value, verb_progress_of(phase),
+                       index.residency == usearch_residency_nvme_k ? nullptr : &plan, &stopped_in);
+    bool const stopped = outcome.status == usearch_status_cancelled_k;
+    if (plan) {
+        if (stopped && stopped_in.name) phase.name = stopped_in.name;
+        usearch_outcome_t finished {};
+        verbs_type_::split_plan_finish(index.get(), index.executor(), plan, &report, &finished);
+        if (report_failure(finished, "finishing the split plan")) return EXIT_FAILURE;
+    }
+    if (!stopped && report_failure(outcome, "splitting")) return EXIT_FAILURE;
     fmt::println("split into {} parts in {:.1f} s, {} changed, {} of {} reachable", parts_count,
                  checkpoint_seconds_since(started), report.changed, report.reachability.reachable,
                  report.reachability.audited);
+    if (stopped) verb_stopped(phase);
 
-    std::vector<safegraphs_part_t> parts(parts_count);
+    st::vector<safegraphs_part_t> parts;
+    if (st::failed(parts.resize(parts_count))) exit_out_of_memory("the parts");
     for (std::size_t part = 0; part != parts_count; ++part) {
-        std::string const part_path = checkpoint_part_path(settings.save, part, parts_count);
+        sz::string_t const part_path = checkpoint_part_path(settings.save, part, parts_count);
         std::size_t const nodes = describe(receivers[part]).size;
         if (!checkpoint_save(world, receivers[part], part_path)) return EXIT_FAILURE;
         parts[part] = {.bytes = checkpoint_file_bytes(part_path), .nodes = nodes};
@@ -593,10 +777,10 @@ template <typename verbs_type_>
 int checkpoint_health(world_t& world, int argc, char const* const* argv) {
     checkpoint_settings_t settings;
     settings.session.residency = usearch_residency_nvme_k;
-    std::vector<flag_t> const flags = with_session_flags(settings.session, {});
+    st::vector<flag_t> const flags = with_session_flags(settings.session, {});
     std::array<std::string_view, 1> positionals;
     std::size_t given = 0;
-    std::string const synopsis = fmt::format("usearch {} health <address> [flags]", verbs_type_::name_k);
+    sz::string_t const synopsis = formatted("usearch {} health <address> [flags]", verbs_type_::name_k);
     if (std::optional<int> const exit = parse_verb(world, argc, argv, synopsis, flags, positionals, given))
         return *exit;
     if (!runs_alone(world)) return EXIT_FAILURE;
@@ -616,8 +800,11 @@ int checkpoint_health(world_t& world, int argc, char const* const* argv) {
     usearch_reachability_t reachability {};
     verbs_type_::health(index.get(), index.executor(), &reachability, &outcome);
     if (report_failure(outcome, "auditing")) return EXIT_FAILURE;
-    fmt::println("{}: {} of {} reachable over {} sweeps in {:.1f} s", positionals[0], reachability.reachable,
-                 reachability.audited, reachability.sweeps, checkpoint_seconds_since(started));
+    fmt::println("{}: {} of {} in one component, {} unreached islands, {} stranded islands, " //
+                 "depth {} from the root in {:.1f} s; {} unlinked, {} underlinked, {} beyond the most populated depth",
+                 positionals[0], reachability.reachable, reachability.audited, reachability.unreached_islands,
+                 reachability.stranded_islands, reachability.depth_from_root, checkpoint_seconds_since(started),
+                 reachability.unlinked, reachability.underlinked, reachability.beyond_most_populated_depth);
     return EXIT_SUCCESS;
 }
 
@@ -628,8 +815,8 @@ inline constexpr std::size_t key_rows_header_bytes_k = 2 * sizeof(std::uint32_t)
  *  into @p keys, @p columns per row, and how many keys each row holds into @p counts: the
  *  little-endian @c u32 per row that may trail the keys, else every row full. False after printing
  *  why, or when it holds other than @p rows rows. */
-inline bool read_key_rows(std::string_view path, std::size_t rows, std::vector<usearch_key_t>& keys,
-                          std::size_t& columns, std::vector<std::size_t>& counts) {
+inline bool read_key_rows(std::string_view path, std::size_t rows, st::vector<usearch_key_t>& keys,
+                          std::size_t& columns, st::vector<std::size_t>& counts) noexcept {
     auto const [file, status] = mapped_file_t::read(path);
     bytes_view_t const bytes = file.view();
     std::array<std::uint32_t, 2> counters {};
@@ -646,14 +833,14 @@ inline bool read_key_rows(std::string_view path, std::size_t rows, std::vector<u
                      counters[1], rows);
         return false;
     }
-    keys.resize(rows * columns);
+    counts.clear();
+    if (st::failed(keys.resize(rows * columns)) || st::failed(counts.resize(rows, columns))) exit_out_of_memory(path);
     byte_t const* const integers = bytes.data() + key_rows_header_bytes_k;
     // Little-endian integers into keys stored most significant byte first.
     for (std::size_t key = 0; key != keys.size(); ++key)
         for (std::size_t byte = 0; byte != sizeof(usearch_key_t); ++byte)
             keys[key].bytes[sizeof(usearch_key_t) - 1 - byte] = std::to_integer<usearch_byte_t>(
                 integers[key * sizeof(usearch_key_t) + byte]);
-    counts.assign(rows, columns);
     if (bytes.size() < keys_bytes + rows * sizeof(std::uint32_t)) return true;
     for (std::size_t row = 0; row != rows; ++row) {
         std::uint32_t count = 0;
@@ -677,7 +864,7 @@ inline bool write_key_rows(std::string_view path, copied_matches_t const& found,
     byte_t* const bytes = file.span().data();
     std::array<std::uint32_t, 2> const counters {static_cast<std::uint32_t>(rows), static_cast<std::uint32_t>(columns)};
     std::memcpy(bytes, counters.data(), key_rows_header_bytes_k);
-    std::vector<std::size_t> const offsets = match_offsets(found);
+    st::vector<std::size_t> const offsets = match_offsets(found);
     for (std::size_t row = 0; row != rows; ++row) {
         std::uint32_t const count = static_cast<std::uint32_t>(std::min(found.counts[row], columns));
         std::memcpy(bytes + keys_bytes + row * sizeof(std::uint32_t), &count, sizeof(count));
@@ -708,7 +895,7 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
                       std::string_view const& index_address = {}) {
     checkpoint_settings_t settings;
     std::string_view hints_path, matches_path;
-    std::vector<flag_t> const flags = with_session_flags(
+    st::vector<flag_t> const flags = with_session_flags(
         settings.session,
         {
             {"--wanted", "count", "defaults to 10: matches per query", &settings.wanted},
@@ -750,18 +937,21 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
         fmt::println(stderr, "the queries hold none");
         return EXIT_FAILURE;
     }
-    std::vector<usearch_key_t> hint_keys;
-    std::vector<std::size_t> hint_counts;
+    st::vector<usearch_key_t> hint_keys;
+    st::vector<std::size_t> hint_counts;
     std::size_t hint_columns = 0;
     if (!hints_path.empty() && !read_key_rows(hints_path, queries->count, hint_keys, hint_columns, hint_counts))
         return EXIT_FAILURE;
     usearch_matches_view_t const hints {hint_keys.data(), nullptr, hint_counts.data(), hint_columns};
-    std::vector<usearch_key_t> query_keys = queries->keys;
-    std::vector<std::size_t> query_key_counts;
+    st::vector<usearch_key_t> query_keys;
+    st::vector<std::size_t> query_key_counts;
     std::size_t query_key_columns = 1;
-    if (query_keys.empty() && settings.query_keys.empty())
+    if (st::failed(query_keys.assign(queries->keys))) exit_out_of_memory("the query keys");
+    if (query_keys.empty() && settings.query_keys.empty()) {
         for (std::size_t query = 0; query != queries->count; ++query)
-            query_keys.push_back(std::bit_cast<usearch_key_t>(uuid_of(query)));
+            if (st::failed(query_keys.push_back(std::bit_cast<usearch_key_t>(uuid_of(query)))))
+                exit_out_of_memory("the query keys");
+    }
     else if (query_keys.empty() &&
              !read_key_rows(settings.query_keys, queries->count, query_keys, query_key_columns, query_key_counts))
         return EXIT_FAILURE;
@@ -780,29 +970,39 @@ int checkpoint_search(world_t& world, int argc, char const* const* argv, std::st
     checkpoint_clock_t::time_point const started = checkpoint_clock_t::now();
     copied_matches_t found;
     usearch_traversal_stats_t totals {};
-    usearch_outcome_t const outcome = search_queries(
-        index, queries->queries, queries->count, settings.batch.value, settings.wanted.value,
-        settings.expansion_search.value, settings.traversal, totals, found, hints_path.empty() ? nullptr : &hints);
+    verb_phase_t phase {.name = "search", .unit = "queries", .stream = steps};
+    usearch_outcome_t const outcome = search_queries(index, queries->queries, queries->count, settings.batch.value,
+                                                     settings.wanted.value, settings.expansion_search.value,
+                                                     settings.traversal, totals, found,
+                                                     hints_path.empty() ? nullptr : &hints, verb_progress_of(phase));
+    // A stopped search writes none of its outputs, which would hold some of the queries alone.
+    if (outcome.status == usearch_status_cancelled_k) {
+        verb_stopped(phase);
+        return EXIT_SUCCESS;
+    }
     if (report_failure(outcome, "searching")) return EXIT_FAILURE;
     double const seconds = checkpoint_seconds_since(started);
     if (!matches_path.empty() && !write_key_rows(matches_path, found, settings.wanted.value)) return EXIT_FAILURE;
     if (!settings.output.empty())
-        if (std::string const failure = arrow_matches_write(settings.output, query_keys, found); !failure.empty()) {
+        if (sz::string_t const failure = arrow_matches_write(settings.output, query_keys, found); !failure.empty()) {
             fmt::println(stderr, "{}", failure);
             return EXIT_FAILURE;
         }
 
-    std::vector<std::size_t> const offsets = match_offsets(found);
-    std::string line;
+    st::vector<std::size_t> const offsets = match_offsets(found);
+    sz::string_t line;
     for (std::size_t query = 0; settings.output.empty() && query != queries->count; ++query) {
-        line = fmt::format("query {}:", query);
-        for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match)
-            fmt::format_to(std::back_inserter(line), " {} {}", checkpoint_key_text(found.keys[match]),
-                           found.scores[match]);
+        line.clear();
+        append_formatted(line, "query {}:", query);
+        for (std::size_t match = offsets[query]; match != offsets[query + 1]; ++match) {
+            append_formatted(line, " ");
+            checkpoint_append_key(line, found.keys[match]);
+            append_formatted(line, " {}", found.scores[match]);
+        }
         fmt::println("{}", line);
     }
-    std::string const missing = hints_path.empty() ? std::string {}
-                                                   : fmt::format(", {} hints missing", totals.missing_hints);
+    sz::string_t const missing = hints_path.empty() ? sz::string_t {}
+                                                    : formatted(", {} hints missing", totals.missing_hints);
     fmt::println(steps,
                  "searched {} queries for the top {} in {:.3f} s: {:.0f} queries per second, {:.1f} distances each{}",
                  queries->count, settings.wanted.value, seconds, static_cast<double>(queries->count) / seconds,

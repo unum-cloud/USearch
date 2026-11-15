@@ -22,16 +22,14 @@
 #include <cstdio>  // `stderr`
 #include <cstring> // `std::memcmp`, `std::memcpy`, `std::memset`
 
+#include <array>        // `std::array` - a slot's first page
 #include <chrono>       // `std::chrono::steady_clock` - the copy rates
 #include <filesystem>   // `std::filesystem::is_block_file`, `is_character_file`, `resize_file` - drives, staged parts
-#include <iterator>     // `std::back_inserter`
 #include <memory>       // `std::allocator`
 #include <optional>     // `std::optional`
 #include <span>         // `std::span`
-#include <string>       // `std::string`
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::error_code`
-#include <vector>       // `std::vector`
 
 #include <fmt/format.h>
 
@@ -39,6 +37,8 @@
 #include "usearch/utilities/nvme_device.hpp"       // `file_medium_t`, `medium_bytes_of`, `names_transport_id`
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_header`, `safegraphs_read_manifest`
 #include "usearch/utilities/types.hpp"             // `divide_round_up`, `little_endian`, `u64_t`
+
+#include "abi.hpp" // `formatted`, `exit_out_of_memory`
 
 namespace unum::usearch::tools {
 using namespace unum::usearch::utilities;
@@ -67,12 +67,12 @@ struct slot_drive_t {
 struct slot_file_t {
     u64_t first_slot = 0;
     u64_t bytes = 0;
-    std::string owner;
+    sz::string_t owner;
 };
 
 /** One part a placement copies: the file or slot holding it, and its bytes. */
 struct staged_part_t {
-    std::string address;
+    sz::string_t address;
     u64_t bytes = 0;
 };
 
@@ -117,17 +117,17 @@ inline bool slot_probe_safegraphs(slot_drive_t const& drive, u64_t offset, bytes
     u64_t const header_length = slot_integer_at<u64_t>(probe, prefix_t::magic_k.size());
     if (header_length > drive.bytes - offset - sizeof(prefix_t)) return false;
     std::size_t const header_bytes = static_cast<std::size_t>(sizeof(prefix_t) + header_length);
-    std::vector<byte_t> longer;
+    st::vector<byte_t> longer;
     bytes_view_t header = probe.first(min_of(header_bytes, probe.size()));
     if (header_bytes > probe.size()) {
-        longer.resize(header_bytes);
+        if (st::failed(longer.resize(st::assume_uninitialized, header_bytes))) exit_out_of_memory("a header");
         if (failed(drive.file.read_at(offset, longer))) return false;
         header = longer;
     }
-    std::string metric, producer;
+    sz::string_t metric, producer;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
-        if (field.key == "metric") metric = field.value;
-        else if (field.key == "created_by") producer = field.value;
+        if (field.key == "metric") metric = formatted("{}", field.value);
+        else if (field.key == "created_by") producer = formatted("{}", field.value);
     };
     // Producer columns such as the norms extend the monolith, so the header lists them too.
     growing_buffer<safegraphs_named_column_t, std::allocator<byte_t>> extra_columns {std::allocator<byte_t> {}};
@@ -136,9 +136,12 @@ inline bool slot_probe_safegraphs(slot_drive_t const& drive, u64_t offset, bytes
     if (failed(status) || parsed.monolith_bytes() > drive.bytes - offset) return false;
     file.first_slot = offset / slot_bytes_k;
     file.bytes = parsed.monolith_bytes();
-    file.owner = fmt::format("SafeGraphs of {} nodes of {}, metric \"{}\"", parsed.nodes(),
-                             dtype_name(parsed.value.dtype), metric);
-    if (!producer.empty()) fmt::format_to(std::back_inserter(file.owner), ", created by \"{}\"", producer);
+    if (producer.empty())
+        file.owner = formatted("SafeGraphs of {} nodes of {}, metric \"{}\"", parsed.nodes(),
+                               dtype_name(parsed.value.dtype), metric);
+    else
+        file.owner = formatted("SafeGraphs of {} nodes of {}, metric \"{}\", created by \"{}\"", parsed.nodes(),
+                               dtype_name(parsed.value.dtype), metric, producer);
     return true;
 }
 
@@ -148,14 +151,14 @@ inline bool slot_probe_safegraphs(slot_drive_t const& drive, u64_t offset, bytes
 inline bool slot_classify(slot_drive_t const& drive, u64_t offset, bytes_view_t probe, slot_file_t& file) {
     if (slot_probe_safegraphs(drive, offset, probe, file)) return true;
     if (probe[0] == byte_t {} && !std::memcmp(probe.data(), probe.data() + 1, probe.size() - 1)) return false;
-    file.first_slot = offset / slot_bytes_k, file.bytes = slot_bytes_k, file.owner = slot_foreign_k;
+    file.first_slot = offset / slot_bytes_k, file.bytes = slot_bytes_k, file.owner = formatted("{}", slot_foreign_k);
     return true;
 }
 
 /** Reads the file or foreign slot opening at byte @p offset of @p drive into @p file; false where
  *  the slot is free. */
 inline bool slot_probe(slot_drive_t const& drive, u64_t offset, slot_file_t& file) {
-    std::vector<byte_t> probe(slot_probe_bytes_k);
+    std::array<byte_t, slot_probe_bytes_k> probe;
     if (probe.size() > drive.bytes - min_of(offset, drive.bytes) || failed(drive.file.read_at(offset, probe)))
         return false;
     return slot_classify(drive, offset, probe, file);
@@ -163,9 +166,9 @@ inline bool slot_probe(slot_drive_t const& drive, u64_t offset, slot_file_t& fil
 
 /** Maps every live and foreign slot on @p drive into @p files in slot order; false after printing
  *  a failed read. */
-inline bool slot_map(slot_drive_t const& drive, std::string_view location, std::vector<slot_file_t>& files) {
+inline bool slot_map(slot_drive_t const& drive, std::string_view location, st::vector<slot_file_t>& files) {
     u64_t const slots = drive.bytes / slot_bytes_k;
-    std::vector<byte_t> probe(slot_probe_bytes_k);
+    std::array<byte_t, slot_probe_bytes_k> probe;
     for (u64_t slot = 0; slot < slots;) {
         if (failed(drive.file.read_at(slot * slot_bytes_k, probe))) {
             fmt::println(stderr, "cannot read slot {} of {}", slot, location);
@@ -177,7 +180,7 @@ inline bool slot_map(slot_drive_t const& drive, std::string_view location, std::
             continue;
         }
         slot += slots_covered(file.bytes);
-        files.push_back(std::move(file));
+        if (st::failed(files.push_back(std::move(file)))) exit_out_of_memory("the slots");
     }
     return true;
 }
@@ -212,16 +215,16 @@ inline u64_t slot_run_end(std::span<slot_file_t const> files, u64_t slots, u64_t
  *  file or a transport ID as given, and a drive bounded to the free run its slot starts, since
  *  nothing sizes a save before it writes. A drive takes a byte base on a slot boundary, at a slot
  *  no live file covers. */
-inline std::optional<std::string> checkpoints_admit_save(std::string_view address) {
-    if (address == "-") return std::string {address};
+inline std::optional<sz::string_t> checkpoints_admit_save(std::string_view address) {
+    if (address == "-") return formatted("{}", address);
     // A drive bound to SPDK is out of the kernel's reach, and only the library maps it.
-    if (names_transport_id(address)) return std::string {address};
+    if (names_transport_id(address)) return formatted("{}", address);
     auto const [parsed, status] = parse_file_address(address);
     if (failed(status)) {
         fmt::println(stderr, "{} is no address", address);
         return std::nullopt;
     }
-    std::string const location {parsed.location};
+    std::string_view const location = parsed.location;
     std::error_code error;
     // A generic char node takes only NVMe commands, and the library's writers issue none.
     if (std::filesystem::is_character_file(std::filesystem::path {location}, error)) {
@@ -231,7 +234,7 @@ inline std::optional<std::string> checkpoints_admit_save(std::string_view addres
                      address, location);
         return std::nullopt;
     }
-    if (!slot_names_device(location)) return std::string {address};
+    if (!slot_names_device(location)) return formatted("{}", address);
     if (parsed.location.size() == address.size()) {
         fmt::println(stderr,
                      "{} names a drive without a byte base, and no call sizes a save before it writes; name a free " //
@@ -244,7 +247,7 @@ inline std::optional<std::string> checkpoints_admit_save(std::string_view addres
         return std::nullopt;
     }
     slot_drive_t drive;
-    std::vector<slot_file_t> files;
+    st::vector<slot_file_t> files;
     if (!slot_open(location, drive) || !slot_map(drive, location, files)) return std::nullopt;
     u64_t const slots = drive.bytes / slot_bytes_k, first = parsed.byte_base / slot_bytes_k;
     if (first >= slots) {
@@ -257,8 +260,8 @@ inline std::optional<std::string> checkpoints_admit_save(std::string_view addres
     }
     // The save may grow up to the next live file, and the library refuses a byte past it.
     u64_t const run = slot_run_end(files, slots, first) - first;
-    if (parsed.byte_limit && parsed.byte_limit <= run * slot_bytes_k) return std::string {address};
-    return fmt::format("{}@{}GiB+{}GiB", location, first, run);
+    if (parsed.byte_limit && parsed.byte_limit <= run * slot_bytes_k) return formatted("{}", address);
+    return formatted("{}@{}GiB+{}GiB", location, first, run);
 }
 
 /** Copies the @p length bytes at the address @p from onto @p location from byte @p base, a chunk
@@ -275,7 +278,7 @@ inline bool slot_copy(std::string_view from, std::string_view location, u64_t ba
     steady_clock_t::time_point started = steady_clock_t::now();
     for (u64_t offset = 0; offset < length; offset += copy_chunk_bytes_k) {
         std::size_t const chunk = static_cast<std::size_t>(min_of<u64_t>(copy_chunk_bytes_k, length - offset));
-        auto [staged, staged_status] = mapped_file_t::write(fmt::format("{}@{}", location, base + offset), chunk);
+        auto [staged, staged_status] = mapped_file_t::write(formatted("{}@{}", location, base + offset), chunk);
         if (succeeded(staged_status)) std::memcpy(staged.span().data(), copied.data() + offset, chunk);
         if (failed(staged_status) || failed(staged.sync())) {
             fmt::println(stderr, "cannot write {} bytes at {} of {}", chunk, base + offset, location);
@@ -288,7 +291,7 @@ inline bool slot_copy(std::string_view from, std::string_view location, u64_t ba
 
     // A direct write drops the cached pages it covers, so the read back comes from the drive.
     started = steady_clock_t::now();
-    auto [target, target_status] = mapped_file_t::read(fmt::format("{}@{}", location, base));
+    auto [target, target_status] = mapped_file_t::read(formatted("{}@{}", location, base));
     if (failed(target_status) || target.size() < length) {
         fmt::println(stderr, "cannot read back {} bytes at {} of {}", length, base, location);
         return false;
@@ -313,14 +316,16 @@ inline bool place_parts_on_slots(std::string_view address, std::span<std::string
     auto const [parsed, parse_status] = parse_file_address(address);
     slot_drive_t drive;
     if (failed(parse_status) || !slot_open(parsed.location, drive)) return false;
-    std::vector<staged_part_t> parts;
+    st::vector<staged_part_t> parts;
     slot_file_t monolith;
-    if (slot_probe(drive, parsed.byte_base, monolith) && monolith.owner != slot_foreign_k)
-        parts.push_back({std::string {address}, monolith.bytes});
+    if (slot_probe(drive, parsed.byte_base, monolith) && std::string_view {monolith.owner} != slot_foreign_k) {
+        if (st::failed(parts.push_back({formatted("{}", address), monolith.bytes}))) exit_out_of_memory("the parts");
+    }
     else {
         std::string_view const directory = address.substr(0, address.size() - safegraphs_basename(address).size());
         auto per_part = [&](safegraphs_part_t part) noexcept {
-            parts.push_back({fmt::format("{}{}", directory, part.path), part.bytes});
+            if (st::failed(parts.push_back({formatted("{}{}", directory, part.path), part.bytes})))
+                exit_out_of_memory("the parts");
         };
         auto const [summary, summary_status] = safegraphs_read_manifest(address, std::allocator<byte_t> {}, per_part);
         if (failed(summary_status)) {
@@ -334,7 +339,7 @@ inline bool place_parts_on_slots(std::string_view address, std::span<std::string
         return false;
     }
     for (std::size_t part = 0; part != parts.size(); ++part) {
-        std::optional<std::string> const admitted = checkpoints_admit_save(paths[part]);
+        std::optional<sz::string_t> const admitted = checkpoints_admit_save(paths[part]);
         if (!admitted) return false;
         auto const [target, target_status] = parse_file_address(*admitted);
         if (names_transport_id(*admitted) || !slot_names_device(target.location)) {
@@ -350,7 +355,7 @@ inline bool place_parts_on_slots(std::string_view address, std::span<std::string
     }
     std::error_code error;
     for (std::size_t part = 0; part != parts.size(); ++part) {
-        std::filesystem::path const staged {parts[part].address};
+        std::filesystem::path const staged {std::string_view {parts[part].address}};
         if (!std::filesystem::is_regular_file(staged, error)) continue;
         if (part) std::filesystem::remove(staged, error);
         else if (auto const [header, header_status] = safegraphs_read_header(parts[part].address);

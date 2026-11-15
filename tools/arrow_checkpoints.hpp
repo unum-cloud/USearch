@@ -43,6 +43,7 @@
 #include <cstdio>  // `std::remove`
 #include <cstring> // `std::memcpy`
 
+#include <algorithm>   // `std::ranges::equal` - the queries two searches asked
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_cast` - distances off the wire
 #include <charconv>    // `std::from_chars`
@@ -50,10 +51,7 @@
 #include <limits>      // `std::numeric_limits`
 #include <optional>    // `std::optional`
 #include <span>        // `std::span`
-#include <string>      // `std::string`
 #include <string_view> // `std::string_view`
-#include <utility>     // `std::pair`
-#include <vector>      // `std::vector`
 
 #include <fmt/format.h>
 
@@ -96,15 +94,15 @@ struct arrow_summary_t {
     std::size_t bytes = 0;
 
     /** The metric the checkpoint records, empty when it records none. */
-    std::string metric;
+    sz::string_t metric;
 };
 
 /** @p shape as the @c safegraphs:shape metadata spells it. */
-inline std::string arrow_shape_text(column_shape_t shape) {
+inline sz::string_t arrow_shape_text(column_shape_t shape) noexcept {
     if (auto const* matrix = std::get_if<matrix_shape_t>(&shape))
-        return fmt::format("[{},{}]", matrix->rows, matrix->columns);
-    if (auto const* vector = std::get_if<vector_shape_t>(&shape)) return fmt::format("[{}]", vector->columns);
-    return "[]";
+        return formatted("[{},{}]", matrix->rows, matrix->columns);
+    if (auto const* vector = std::get_if<vector_shape_t>(&shape)) return formatted("[{}]", vector->columns);
+    return formatted("[]");
 }
 
 /** The shape @p text spells as @ref arrow_shape_text does, or nothing. */
@@ -185,12 +183,18 @@ inline dtype_t arrow_dtype_of(ipc_field_t const& element) noexcept {
     }
 }
 
+/** One string field a checkpoint's header carries, copied out of the header's parse. */
+struct arrow_custom_field_t {
+    sz::string_t key;
+    sz::string_t value;
+};
+
 /** One column of a part as an Arrow field, holding the child and the metadata the field views, so
  *  it stays in place while the field is used. */
 struct arrow_field_t {
 
     /** The text @c safegraphs:shape names. */
-    std::string shape;
+    sz::string_t shape;
 
     /** The field's own pairs: the UUID extension's where the field is a UUID, then the dtype and
      *  the shape. */
@@ -323,8 +327,11 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
         position += bytes.size();
     };
     // Each writer measures on an empty output first, answering the bytes it needs.
-    std::vector<byte_t> metadata;
-    auto measured = [&](std::size_t needed) { return metadata.resize(needed), bytes_span_t {metadata}; };
+    st::vector<byte_t> metadata;
+    auto measured = [&](std::size_t needed) noexcept {
+        if (st::failed(metadata.resize(needed))) exit_out_of_memory("the Arrow metadata");
+        return bytes_span_t {metadata};
+    };
     ipc_status_t status = ipc_status_t::success_k;
     std::size_t needed = 0, metadata_written = 0;
 
@@ -335,7 +342,7 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
         status = ipc_write_schema(schema, options, position, measured(needed), metadata_written);
     if (status == ipc_status_t::success_k) write(std::span {metadata}.first(metadata_written));
 
-    std::vector<ipc_block_t> blocks;
+    st::vector<ipc_block_t> blocks;
     std::array<ipc_gather_t, ipc_buffers_max_k> gathers;
     for (ipc_batch_t const& batch : batches) {
         if (status != ipc_status_t::success_k) break;
@@ -345,8 +352,10 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
             status = ipc_write_batch(schema, batch, options, position, measured(needed), metadata_written, gathers,
                                      body_bytes);
         if (status != ipc_status_t::success_k) break;
-        blocks.push_back({static_cast<std::int64_t>(position), static_cast<std::int32_t>(metadata_written),
-                          static_cast<std::int64_t>(body_bytes)});
+        if (st::failed(
+                blocks.push_back({static_cast<std::int64_t>(position), static_cast<std::int32_t>(metadata_written),
+                                  static_cast<std::int64_t>(body_bytes)})))
+            exit_out_of_memory("the Arrow blocks");
         write(std::span {metadata}.first(metadata_written));
         for (std::size_t buffer = 0; buffer != batch.buffers.size(); ++buffer)
             write(gathers[buffer].bytes), write(std::span {zeros_k}.first(gathers[buffer].padding));
@@ -374,40 +383,51 @@ inline bool arrow_write_messages(native_file_t file, arrow_framing_t framing, ip
  *  @param[out] summary What the file holds.
  *  @return Why the export stopped, leaving no file, or nothing once the file is complete.
  */
-inline std::string arrow_export(std::string_view checkpoint, std::string const& arrow_path, arrow_summary_t& summary) {
+inline sz::string_t arrow_export(std::string_view checkpoint, std::string_view arrow_path, arrow_summary_t& summary) {
     using allocator_t = std::allocator<byte_t>;
     growing_buffer<mapped_file_t, allocator_t> mappings {allocator_t {}};
     growing_buffer<safegraphs_catalog_part_t, allocator_t> parts {allocator_t {}};
     growing_buffer<safegraphs_named_column_t, allocator_t> extra_columns {allocator_t {}};
     if (status_t const listed = safegraphs_catalog(checkpoint, mappings, parts, extra_columns, allocator_t {});
         failed(listed))
-        return fmt::format("{} holds no SafeGraphs checkpoint: {}", checkpoint, status_to_string(listed));
+        return formatted("{} holds no SafeGraphs checkpoint: {}", checkpoint, status_to_string(listed));
 
     // Every part carries the whole schema, so the first one's header and string metadata name it.
     safegraphs_header_t const& first = parts[0].header;
-    std::vector<std::pair<std::string, std::string>> custom_fields;
-    auto keep_field = [&](safegraphs_custom_field_t field) { custom_fields.emplace_back(field.key, field.value); };
+    st::vector<arrow_custom_field_t> custom_fields;
+    auto keep_field = [&](safegraphs_custom_field_t field) noexcept {
+        if (st::failed(custom_fields.push_back({formatted("{}", field.key), formatted("{}", field.value)})))
+            exit_out_of_memory("the metadata");
+    };
     if (status_t const read = safegraphs_read_header(parts[0].monolith, allocator_t {}, keep_field).status;
         failed(read))
-        return fmt::format("{} has a header that does not parse: {}", checkpoint, status_to_string(read));
-    std::vector<ipc_key_value_t> schema_metadata;
-    for (auto const& [key, value] : custom_fields) schema_metadata.push_back({key, value});
+        return formatted("{} has a header that does not parse: {}", checkpoint, status_to_string(read));
+    st::vector<ipc_key_value_t> schema_metadata;
+    for (arrow_custom_field_t const& field : custom_fields)
+        if (st::failed(schema_metadata.push_back({field.key, field.value}))) exit_out_of_memory("the metadata");
 
-    std::vector<std::string_view> names {"key", "value", "neighbors"};
-    std::vector<safegraphs_column_t const*> columns {&first.key, &first.value, &first.neighbors};
-    for (safegraphs_named_column_t const& extra : first.extra_columns)
-        names.push_back(extra.name.view()), columns.push_back(&extra.column);
-    std::vector<arrow_field_t> laid(columns.size());
-    std::vector<ipc_field_t> fields;
-    for (std::size_t column = 0; column != columns.size(); ++column) {
+    std::size_t const columns_count = 3 + first.extra_columns.size();
+    st::vector<std::string_view> names;
+    st::vector<safegraphs_column_t const*> columns;
+    st::vector<arrow_field_t> laid;
+    st::vector<ipc_field_t> fields;
+    if (st::failed(names.resize(columns_count)) || st::failed(columns.resize(columns_count)) ||
+        st::failed(laid.resize(columns_count)) || st::failed(fields.resize(columns_count)))
+        exit_out_of_memory("the columns");
+    names[0] = "key", names[1] = "value", names[2] = "neighbors";
+    columns[0] = &first.key, columns[1] = &first.value, columns[2] = &first.neighbors;
+    for (std::size_t extra = 0; extra != first.extra_columns.size(); ++extra)
+        names[3 + extra] = first.extra_columns[extra].name.view(),
+                  columns[3 + extra] = &first.extra_columns[extra].column;
+    for (std::size_t column = 0; column != columns_count; ++column) {
         if (!arrow_field_of(names[column], *columns[column], laid[column]))
-            return fmt::format("{} holds a {} column of {} Arrow has no layout for", checkpoint, names[column],
-                               dtype_name(columns[column]->dtype));
-        fields.push_back(laid[column].field);
+            return formatted("{} holds a {} column of {} Arrow has no layout for", checkpoint, names[column],
+                             dtype_name(columns[column]->dtype));
+        fields[column] = laid[column].field;
     }
     ipc_schema_t const schema {fields, schema_metadata};
     if (ipc_check_schema(schema) != ipc_status_t::success_k)
-        return fmt::format("{} holds {} columns, more than an Arrow schema here takes", checkpoint, columns.size());
+        return formatted("{} holds {} columns, more than an Arrow schema here takes", checkpoint, columns_count);
 
     // A part whose columns or rows disagree with the schema would make a batch no reader accepts.
     for (safegraphs_catalog_part_t const& part : parts) {
@@ -421,12 +441,14 @@ inline std::string arrow_export(std::string_view checkpoint, std::string const& 
         alike = alike && header.value.nodes() == part.nodes && header.neighbors.nodes() == part.nodes;
         for (safegraphs_named_column_t const& extra : header.extra_columns)
             alike = alike && extra.column.nodes() == part.nodes;
-        if (!alike) return fmt::format("{} holds parts whose columns differ", checkpoint);
+        if (!alike) return formatted("{} holds parts whose columns differ", checkpoint);
     }
 
     // Every batch views its part's mapping, so laying them out here copies nothing.
-    std::vector<arrow_batch_t> batches(parts.size());
-    std::vector<ipc_batch_t> views;
+    st::vector<arrow_batch_t> batches;
+    st::vector<ipc_batch_t> views;
+    if (st::failed(batches.resize(parts.size())) || st::failed(views.resize(parts.size())))
+        exit_out_of_memory("the batches");
     for (std::size_t part = 0; part != parts.size(); ++part) {
         safegraphs_catalog_part_t const& source = parts[part];
         safegraphs_header_t const& header = source.header;
@@ -436,20 +458,21 @@ inline std::string arrow_export(std::string_view checkpoint, std::string const& 
         batch.append(laid[2], header, source.monolith, header.neighbors, source.nodes);
         for (std::size_t extra = 0; extra != header.extra_columns.size(); ++extra)
             batch.append(laid[3 + extra], header, source.monolith, header.extra_columns[extra].column, source.nodes);
-        views.push_back(batch.view(source.nodes));
+        views[part] = batch.view(source.nodes);
         summary.nodes += source.nodes;
     }
 
-    native_file_t const file = open_native_file(arrow_path.c_str(), file_access_t::truncate_read_write_k,
+    sz::string_t const terminated = formatted("{}", arrow_path);
+    native_file_t const file = open_native_file(terminated.c_str(), file_access_t::truncate_read_write_k,
                                                 file_buffering_t::buffered_k);
-    if (file == invalid_native_file_k) return fmt::format("cannot create {}", arrow_path);
+    if (file == invalid_native_file_k) return formatted("cannot create {}", arrow_path);
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, arrow_framing_t::file_k, schema, views, position);
     if (failed(close_native_file(file)) || !framed) {
-        std::remove(arrow_path.c_str());
-        return fmt::format("writing {} failed", arrow_path);
+        std::remove(terminated.c_str());
+        return formatted("writing {} failed", arrow_path);
     }
-    summary.parts = parts.size(), summary.bytes = position, summary.metric = parts[0].metric.view();
+    summary.parts = parts.size(), summary.bytes = position, summary.metric = formatted("{}", parts[0].metric.view());
     return {};
 }
 
@@ -460,20 +483,20 @@ inline std::string arrow_export(std::string_view checkpoint, std::string const& 
  *      stream framing for @c - or an @c .arrows path, and a file's otherwise.
  *  @return Why the write stopped, leaving no file, or nothing once it is complete.
  */
-inline std::string arrow_write_batch(std::string_view path, ipc_schema_t const& schema, ipc_batch_t const& batch) {
+inline sz::string_t arrow_write_batch(std::string_view path, ipc_schema_t const& schema, ipc_batch_t const& batch) {
     bool const piped = path == "-";
-    std::string const arrow_path {path};
+    sz::string_t const arrow_path = formatted("{}", path);
     native_file_t const file = piped ? standard_output_native_file()
                                      : open_native_file(arrow_path.c_str(), file_access_t::truncate_read_write_k,
                                                         file_buffering_t::buffered_k);
-    if (file == invalid_native_file_k) return fmt::format("cannot create {}", path);
+    if (file == invalid_native_file_k) return formatted("cannot create {}", path);
     arrow_framing_t const framing = piped || path.ends_with(".arrows") ? arrow_framing_t::stream_k
                                                                        : arrow_framing_t::file_k;
     std::size_t position = 0;
     bool const framed = arrow_write_messages(file, framing, schema, {&batch, 1}, position);
     if ((!piped && failed(close_native_file(file))) || !framed) {
         if (!piped) std::remove(arrow_path.c_str());
-        return fmt::format("writing {} failed", path);
+        return formatted("writing {} failed", path);
     }
     return {};
 }
@@ -494,8 +517,8 @@ inline ipc_field_t arrow_keys_field(std::string_view name) noexcept {
  *  @param[in] matches What each query found, nearest first.
  *  @return Why the write stopped, leaving no file, or nothing once it is complete.
  */
-inline std::string arrow_matches_write(std::string_view path, std::span<usearch_key_t const> queries,
-                                       copied_matches_t const& matches) {
+inline sz::string_t arrow_matches_write(std::string_view path, std::span<usearch_key_t const> queries,
+                                        copied_matches_t const& matches) {
     std::array<ipc_field_t, 2> const match_fields {{
         arrow_keys_field("key"),
         {.name = "distance", .type = ipc_type_t::floating_point_k, .width = 64},
@@ -505,7 +528,8 @@ inline std::string arrow_matches_write(std::string_view path, std::span<usearch_
         arrow_keys_field("query"),
         {.name = "matches", .type = ipc_type_t::large_list_k, .children = {&match, 1}},
     }};
-    std::vector<std::int64_t> offsets(queries.size() + 1);
+    st::vector<std::int64_t> offsets;
+    if (st::failed(offsets.resize(queries.size() + 1))) exit_out_of_memory("the match offsets");
     for (std::size_t query = 0; query != queries.size(); ++query)
         offsets[query + 1] = offsets[query] + static_cast<std::int64_t>(matches.counts[query]);
 
@@ -536,15 +560,15 @@ inline std::string arrow_matches_write(std::string_view path, std::span<usearch_
  *  @param[in] rows The packed rows.
  *  @return Why the write stopped, leaving no file, or nothing once it is complete.
  */
-inline std::string arrow_vectors_write(std::string_view path, std::span<usearch_key_t const> keys, ArrowSchema& vector,
-                                       bytes_view_t rows) {
+inline sz::string_t arrow_vectors_write(std::string_view path, std::span<usearch_key_t const> keys, ArrowSchema& vector,
+                                        bytes_view_t rows) {
     std::array<ipc_field_t, ipc_fields_max_k> fields_pool {};
     std::array<ipc_key_value_t, 4 * ipc_fields_max_k> pairs_pool {};
     ipc_schema_pools_t pools {fields_pool, pairs_pool};
     ArrowSchema* const exported = &vector;
     std::span<ipc_field_t const> imported;
     if (ipc_import_schemas(&exported, 1, pools, imported) != ipc_status_t::success_k)
-        return fmt::format("the rows export as a type {} takes no field for", path);
+        return formatted("the rows export as a type {} takes no field for", path);
     ipc_field_t named = imported[0];
     named.name = "vector";
     std::array<ipc_field_t, 2> const fields {arrow_keys_field("key"), named};
@@ -570,19 +594,20 @@ inline constexpr std::size_t arrow_no_column_k = (std::numeric_limits<std::size_
 
 /** Reads standard input to its end into @p bytes, as a checkpoint piped in arrives; false once a
  *  read failed. */
-inline bool read_standard_input(std::vector<byte_t>& bytes) {
+inline bool read_standard_input(st::vector<byte_t>& bytes) noexcept {
     native_file_event_t const event;
     std::size_t length = 0;
-    bytes.resize(std::size_t {1} << 20);
+    if (st::failed(bytes.resize(st::assume_uninitialized, std::size_t {1} << 20))) exit_out_of_memory("standard input");
     while (true) {
-        if (length == bytes.size()) bytes.resize(bytes.size() * 2);
+        if (length == bytes.size() && st::failed(bytes.resize(st::assume_uninitialized, bytes.size() * 2)))
+            exit_out_of_memory("standard input");
         i64_t const landed = read_native_file(standard_input_native_file(), event, bytes_span_t {bytes}.subspan(length),
                                               length);
         if (landed < 0) return false;
         if (!landed) break;
         length += static_cast<std::size_t>(landed);
     }
-    bytes.resize(length);
+    if (st::failed(bytes.resize(length))) exit_out_of_memory("standard input");
     return true;
 }
 
@@ -596,7 +621,7 @@ inline bool read_standard_input(std::vector<byte_t>& bytes) {
  *  mapping or the body last read, until the next call.
  */
 class arrow_input_t {
-    std::string name_;
+    sz::string_t name_;
     mapped_file_t mapping_;
     bytes_view_t remaining_;
     native_file_t descriptor_ = invalid_native_file_k;
@@ -607,7 +632,7 @@ class arrow_input_t {
     std::size_t sniffed_size_ = 0;
     std::size_t sniffed_taken_ = 0;
 
-    std::vector<byte_t> schema_metadata_, metadata_, body_;
+    st::vector<byte_t> schema_metadata_, metadata_, body_;
     std::array<ipc_field_t, ipc_fields_max_k> fields_ {};
     std::array<ipc_key_value_t, 4 * ipc_fields_max_k> pairs_ {};
     std::array<ipc_node_t, ipc_fields_max_k> nodes_ {};
@@ -615,7 +640,7 @@ class arrow_input_t {
     ipc_schema_t schema_;
     ipc_batch_t batch_;
 
-    std::vector<char> text_;
+    st::vector<char> text_;
     ipc_arrow_storage_t storage_ {};
     ArrowSchema columns_schema_ {};
     ArrowArray columns_array_ {};
@@ -642,32 +667,32 @@ class arrow_input_t {
 
     /** The next @p count bytes, viewing the mapping or read into @p storage, fewer only at the
      *  end. */
-    bytes_view_t take_(std::size_t count, std::vector<byte_t>& storage) {
+    bytes_view_t take_(std::size_t count, st::vector<byte_t>& storage) noexcept {
         if (descriptor_ == invalid_native_file_k) {
             bytes_view_t const taken = remaining_.first(min_of(count, remaining_.size()));
             remaining_ = remaining_.subspan(taken.size());
             return taken;
         }
-        storage.resize(count);
+        if (st::failed(storage.resize(st::assume_uninitialized, count))) exit_out_of_memory("an Arrow message");
         return bytes_view_t {storage}.first(read_(storage));
     }
 
     /** Why the input stopped at @p status. */
-    std::string refused_(ipc_status_t status) const {
+    sz::string_t refused_(ipc_status_t status) const noexcept {
         switch (status) {
-        case ipc_status_t::truncated_k: return fmt::format("{} ends inside a message or before its end", name_);
+        case ipc_status_t::truncated_k: return formatted("{} ends inside a message or before its end", name_);
         case ipc_status_t::unsupported_k:
-            return fmt::format("{} is compressed, dictionary-encoded or big-endian, or holds a null or a column " //
-                               "type this reader takes none of",                                                  //
-                               name_);
-        case ipc_status_t::too_small_k: return fmt::format("{} holds more than {} fields", name_, ipc_fields_max_k);
-        default: return fmt::format("{} is malformed Arrow IPC", name_);
+            return formatted("{} is compressed, dictionary-encoded or big-endian, or holds a null or a column " //
+                             "type this reader takes none of",                                                  //
+                             name_);
+        case ipc_status_t::too_small_k: return formatted("{} holds more than {} fields", name_, ipc_fields_max_k);
+        default: return formatted("{} is malformed Arrow IPC", name_);
         }
     }
 
     /** Reads the next message into @p message, its metadata kept in @p metadata and its body in
      *  @p body; @p ended turns true at the end of the stream. */
-    std::string read_message_(std::vector<byte_t>& metadata, ipc_message_t& message, bytes_view_t& body, bool& ended) {
+    sz::string_t read_message_(st::vector<byte_t>& metadata, ipc_message_t& message, bytes_view_t& body, bool& ended) {
         std::array<byte_t, 8> prefix {};
         bytes_span_t const whole {prefix};
         std::uint32_t metadata_bytes = 0;
@@ -686,11 +711,11 @@ class arrow_input_t {
         if (status = ipc_read_message(framed, message); status != ipc_status_t::success_k) return refused_(status);
         std::size_t const body_bytes = static_cast<std::size_t>(message.body_bytes);
         body = take_(body_bytes, body_);
-        return body.size() == body_bytes ? std::string {} : refused_(ipc_status_t::truncated_k);
+        return body.size() == body_bytes ? sz::string_t {} : refused_(ipc_status_t::truncated_k);
     }
 
     /** Sniffs the first bytes, then reads the schema that leads every Arrow input. */
-    std::string start_() {
+    sz::string_t start_() {
         bytes_view_t head = remaining_.first(min_of(sniffed_.size(), remaining_.size()));
         if (descriptor_ != invalid_native_file_k) {
             sniffed_size_ = read_(sniffed_);
@@ -700,28 +725,30 @@ class arrow_input_t {
             return head.size() >= magic.size() && std::memcmp(head.data(), magic.data(), magic.size()) == 0;
         };
         if (opens_with("PAR1"))
-            return fmt::format("{} is Parquet, which this tool has no reader for; rewrite it as Arrow IPC", name_);
+            return formatted("{} is Parquet, which this tool has no reader for; rewrite it as Arrow IPC", name_);
         if (opens_with(ipc_file_magic_k.substr(0, 6))) {
             std::array<byte_t, ipc_file_magic_k.size()> magic {};
             if (read_(magic) != magic.size()) return refused_(ipc_status_t::truncated_k);
         }
         else if (!opens_with("\xFF\xFF\xFF\xFF"))
-            return fmt::format("{} is neither an Arrow file nor an Arrow stream", name_);
+            return formatted("{} is neither an Arrow file nor an Arrow stream", name_);
 
         ipc_message_t message;
         bytes_view_t body;
         bool ended = false;
-        if (std::string failure = read_message_(schema_metadata_, message, body, ended); !failure.empty())
+        if (sz::string_t failure = read_message_(schema_metadata_, message, body, ended); !failure.empty())
             return failure;
         if (ended || message.kind != ipc_message_kind_t::schema_k)
-            return fmt::format("{} does not start with a schema", name_);
+            return formatted("{} does not start with a schema", name_);
         if (ipc_status_t const status = ipc_read_schema(message, fields_, pairs_, schema_);
             status != ipc_status_t::success_k)
             return refused_(status);
-        text_.resize(ipc_arrow_metadata_bytes(schema_.metadata) + ipc_arrow_text_bytes(schema_.fields) + 1);
+        if (st::failed(
+                text_.resize(ipc_arrow_metadata_bytes(schema_.metadata) + ipc_arrow_text_bytes(schema_.fields) + 1)))
+            exit_out_of_memory("the Arrow schema");
         storage_.text = text_;
         ipc_status_t const exported = ipc_schema_to_arrow(schema_, storage_, columns_schema_);
-        return exported == ipc_status_t::success_k ? std::string {} : refused_(exported);
+        return exported == ipc_status_t::success_k ? sz::string_t {} : refused_(exported);
     }
 
   public:
@@ -734,45 +761,45 @@ class arrow_input_t {
     }
 
     /** Opens @p path, standard input for @c -, and reads its schema; answers why it cannot. */
-    std::string open(std::string_view path) {
-        name_ = path == "-" ? std::string {"standard input"} : std::string {path};
+    sz::string_t open(std::string_view path) {
+        name_ = formatted("{}", path == "-" ? std::string_view {"standard input"} : path);
         if (path == "-") {
             descriptor_ = standard_input_native_file();
             return start_();
         }
         std::error_code unknown;
-        if (std::filesystem::is_regular_file(name_, unknown)) {
+        if (std::filesystem::is_regular_file(std::filesystem::path {path}, unknown)) {
             auto [mapping, status] = mapped_file_t::read(path);
-            if (failed(status)) return fmt::format("cannot read {}: {}", name_, status_to_string(status));
+            if (failed(status)) return formatted("cannot read {}: {}", name_, status_to_string(status));
             mapping_ = std::move(mapping);
             remaining_ = mapping_.view();
             return start_();
         }
         owned_descriptor_ = open_native_file(name_.c_str(), file_access_t::read_only_k, file_buffering_t::buffered_k);
-        if (owned_descriptor_ == invalid_native_file_k) return fmt::format("cannot read {}", name_);
+        if (owned_descriptor_ == invalid_native_file_k) return formatted("cannot read {}", name_);
         descriptor_ = owned_descriptor_;
         return start_();
     }
 
     /** Reads the next record batch, @p more turning false at the end of the input; answers why it
      *  stopped. */
-    std::string next(bool& more) {
+    sz::string_t next(bool& more) {
         more = false;
         ipc_message_t message;
         bytes_view_t body;
         bool ended = false;
-        if (std::string failure = read_message_(metadata_, message, body, ended); !failure.empty()) return failure;
+        if (sz::string_t failure = read_message_(metadata_, message, body, ended); !failure.empty()) return failure;
         if (ended) return {};
         if (message.kind != ipc_message_kind_t::record_batch_k)
-            return fmt::format("{} repeats its schema mid-stream", name_);
+            return formatted("{} repeats its schema mid-stream", name_);
         ipc_status_t status = ipc_read_batch(message, body, schema_, nodes_, buffers_, batch_);
         if (status == ipc_status_t::success_k) status = ipc_validate_batch(schema_, batch_);
         if (status == ipc_status_t::success_k) status = ipc_batch_to_arrow(schema_, batch_, storage_, columns_array_);
         more = status == ipc_status_t::success_k;
-        return more ? std::string {} : refused_(status);
+        return more ? sz::string_t {} : refused_(status);
     }
 
-    std::string const& name() const noexcept { return name_; }
+    std::string_view name() const noexcept { return name_; }
     ipc_schema_t const& schema() const noexcept { return schema_; }
 
     /** The batch @ref next read. */
@@ -796,27 +823,27 @@ class arrow_input_t {
 };
 
 /** Why the column @p name of @p input cannot be read, for a converter's refusal @p status. */
-inline std::string arrow_column_refused(arrow_input_t const& input, std::string_view name, usearch_status_t status) {
+inline sz::string_t arrow_column_refused(arrow_input_t const& input, std::string_view name,
+                                         usearch_status_t status) noexcept {
     switch (status) {
-    case usearch_status_invalid_argument_k: return fmt::format("{} holds a null in {}", input.name(), name);
+    case usearch_status_invalid_argument_k: return formatted("{} holds a null in {}", input.name(), name);
     case usearch_status_unsupported_layout_k:
-        return fmt::format("{} holds {} as a type no converter reads", input.name(), name);
+        return formatted("{} holds {} as a type no converter reads", input.name(), name);
     default:
-        return fmt::format("{} holds {} that a converter refuses with {}", input.name(), name,
-                           usearch_status_name(status));
+        return formatted("{} holds {} that a converter refuses with {}", input.name(), name,
+                         usearch_status_name(status));
     }
 }
 
 /** Finds the column @p name of @p input into @p column, or answers why it cannot. */
-inline std::string arrow_pick_column(arrow_input_t const& input, std::string_view name, std::size_t& column) {
+inline sz::string_t arrow_pick_column(arrow_input_t const& input, std::string_view name, std::size_t& column) noexcept {
     column = input.column_named(name);
-    return column == arrow_no_column_k ? fmt::format("{} holds no column named {}", input.name(), name)
-                                       : std::string {};
+    return column == arrow_no_column_k ? formatted("{} holds no column named {}", input.name(), name) : sz::string_t {};
 }
 
 /** Finds the column of rows @p name names, or else the only one of @p input, into @p column, or
  *  answers why it cannot. */
-inline std::string arrow_pick_rows(arrow_input_t const& input, std::string_view name, std::size_t& column) {
+inline sz::string_t arrow_pick_rows(arrow_input_t const& input, std::string_view name, std::size_t& column) noexcept {
     if (!name.empty()) return arrow_pick_column(input, name, column);
     std::size_t found = 0;
     std::span<ipc_field_t const> const fields = input.schema().fields;
@@ -828,12 +855,12 @@ inline std::string arrow_pick_rows(arrow_input_t const& input, std::string_view 
         column = position, ++found;
     }
     if (found == 1) return {};
-    return fmt::format("{} holds {} fixed-size columns of rows; name one with --vectors-column", input.name(), found);
+    return formatted("{} holds {} fixed-size columns of rows; name one with --vectors-column", input.name(), found);
 }
 
 /** Views the rows of column @p column, named @p name, of the batch @p input last read, through the
  *  converter every caller uses. */
-inline std::string arrow_rows_of(arrow_input_t const& input, std::size_t column, usearch_rows_view_t& rows) {
+inline sz::string_t arrow_rows_of(arrow_input_t const& input, std::size_t column, usearch_rows_view_t& rows) noexcept {
     std::size_t count = 0;
     usearch_status_t const status = usearch_rows_view_from_arrow(input.column_schema(column),
                                                                  input.column_array(column), &rows, &count);
@@ -847,26 +874,26 @@ inline std::string arrow_rows_of(arrow_input_t const& input, std::size_t column,
  *
  *  @return Why it cannot, a negative integer naming no key.
  */
-inline std::string arrow_keys_of(arrow_input_t const& input, std::size_t column, std::vector<usearch_key_t>& widened,
-                                 usearch_keys_view_t& keys) {
+inline sz::string_t arrow_keys_of(arrow_input_t const& input, std::size_t column, st::vector<usearch_key_t>& widened,
+                                  usearch_keys_view_t& keys) noexcept {
     ipc_field_t const& field = input.schema().fields[column];
     if (field.type != ipc_type_t::int_k) {
         std::size_t count = 0;
         usearch_status_t const status = usearch_keys_view_from_arrow(input.column_schema(column),
                                                                      input.column_array(column), &keys, &count);
-        return status == usearch_status_success_k ? std::string {} : arrow_column_refused(input, field.name, status);
+        return status == usearch_status_success_k ? sz::string_t {} : arrow_column_refused(input, field.name, status);
     }
     if (field.width != 64)
-        return fmt::format("{} holds {} as {}-bit integers, not 64-bit", input.name(), field.name, field.width);
+        return formatted("{} holds {} as {}-bit integers, not 64-bit", input.name(), field.name, field.width);
     ArrowArray const& integers = *input.column_array(column);
     std::size_t const rows = static_cast<std::size_t>(integers.length);
     if (rows && !integers.buffers[1]) return arrow_column_refused(input, field.name, usearch_status_malformed_k);
     auto const* const bytes = static_cast<byte_t const*>(integers.buffers[1]);
-    widened.resize(rows);
+    if (st::failed(widened.resize(rows))) exit_out_of_memory("the keys");
     for (std::size_t row = 0; row != rows; ++row) {
         std::uint64_t const integer = ipc_load_little<std::uint64_t>(bytes + row * sizeof(std::uint64_t));
         if (field.signedness == ipc_signedness_t::signed_k && static_cast<std::int64_t>(integer) < 0)
-            return fmt::format("{} holds a negative key in {}", input.name(), field.name);
+            return formatted("{} holds a negative key in {}", input.name(), field.name);
         widened[row] = std::bit_cast<usearch_key_t>(uuid_of(integer));
     }
     keys = {widened.data(), sizeof(usearch_key_t)};
@@ -955,8 +982,8 @@ struct arrow_part_t {
     ipc_batch_t batch;
 
     /** Every column the batch restores, in the schema's order. */
-    std::vector<safegraphs_column_t> columns;
-    std::vector<safegraphs_named_column_t> extra_columns;
+    st::vector<safegraphs_column_t> columns;
+    st::vector<safegraphs_named_column_t> extra_columns;
     safegraphs_header_t header;
 
     /** Bytes of the monolith, and where it starts in the checkpoint. */
@@ -978,35 +1005,36 @@ struct arrow_part_t {
  *  @param[out] summary What the checkpoint holds.
  *  @return Why the import stopped, or nothing.
  */
-inline std::string arrow_import(std::string const& arrow_path, std::string_view metric, std::string& checkpoint,
-                                arrow_summary_t& summary) {
+inline sz::string_t arrow_import(std::string_view arrow_path, std::string_view metric, st::vector<byte_t>& checkpoint,
+                                 arrow_summary_t& summary) {
     auto [mapping, mapping_status] = mapped_file_t::read(arrow_path);
-    if (failed(mapping_status)) return fmt::format("cannot read {}: {}", arrow_path, status_to_string(mapping_status));
+    if (failed(mapping_status)) return formatted("cannot read {}: {}", arrow_path, status_to_string(mapping_status));
     bytes_view_t const file = mapping.view();
 
     std::array<ipc_field_t, ipc_fields_max_k> fields_pool {};
     std::array<ipc_key_value_t, 4 * ipc_fields_max_k> pairs_pool {};
     ipc_schema_t schema;
-    std::vector<ipc_block_t> blocks;
+    st::vector<ipc_block_t> blocks;
     std::size_t blocks_count = 0;
     ipc_status_t status = ipc_read_footer(file, fields_pool, pairs_pool, schema, blocks, blocks_count);
     if (status == ipc_status_t::too_small_k) {
-        blocks.resize(blocks_count);
+        if (st::failed(blocks.resize(blocks_count))) exit_out_of_memory("the Arrow blocks");
         status = ipc_read_footer(file, fields_pool, pairs_pool, schema, blocks, blocks_count);
     }
-    if (status != ipc_status_t::success_k) return fmt::format("{} is no Arrow IPC file this reader takes", arrow_path);
-    if (!blocks_count) return fmt::format("{} holds no record batch", arrow_path);
+    if (status != ipc_status_t::success_k) return formatted("{} is no Arrow IPC file this reader takes", arrow_path);
+    if (!blocks_count) return formatted("{} holds no record batch", arrow_path);
 
     // The three graph columns are found by name, and every other column is a producer's.
-    std::vector<arrow_column_t> columns(schema.fields.size());
+    st::vector<arrow_column_t> columns;
+    if (st::failed(columns.resize(schema.fields.size()))) exit_out_of_memory("the columns");
     std::array<std::size_t, 3> graph_columns {columns.size(), columns.size(), columns.size()};
     std::size_t first_buffer = 0;
     for (std::size_t index = 0; index != schema.fields.size(); ++index) {
         ipc_field_t const& field = schema.fields[index];
         if (!arrow_column_of(field, columns[index]))
-            return fmt::format("{} holds a {} column no SafeGraphs column lays out like", arrow_path, field.name);
+            return formatted("{} holds a {} column no SafeGraphs column lays out like", arrow_path, field.name);
         if (field.name.size() >= safegraphs_name_capacity_k)
-            return fmt::format("{} names a column {}, longer than a SafeGraphs name", arrow_path, field.name);
+            return formatted("{} names a column {}, longer than a SafeGraphs name", arrow_path, field.name);
         columns[index].first_buffer = first_buffer;
         first_buffer += ipc_buffers_of(field.type) + ipc_buffers_of(field.children);
         if (field.name == "key") graph_columns[0] = index;
@@ -1014,17 +1042,20 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
         if (field.name == "neighbors") graph_columns[2] = index;
     }
     for (std::size_t const found : graph_columns)
-        if (found == columns.size()) return fmt::format("{} lacks a key, value or neighbors column", arrow_path);
+        if (found == columns.size()) return formatted("{} lacks a key, value or neighbors column", arrow_path);
 
     std::string_view const recorded = arrow_metadata_value(schema.metadata, "metric");
     if (!metric.empty() && !recorded.empty() && metric != recorded)
-        return fmt::format("{} records the {} metric, not {}", arrow_path, recorded, metric);
-    std::vector<safegraphs_custom_field_t> custom_fields;
-    if (recorded.empty() && !metric.empty()) custom_fields.push_back({"metric", metric});
+        return formatted("{} records the {} metric, not {}", arrow_path, recorded, metric);
+    st::vector<safegraphs_custom_field_t> custom_fields;
+    if (recorded.empty() && !metric.empty() && st::failed(custom_fields.push_back({"metric", metric})))
+        exit_out_of_memory("the metadata");
     for (ipc_key_value_t const& pair : schema.metadata)
-        if (pair.key != "alignment") custom_fields.push_back({pair.key, pair.value});
+        if (pair.key != "alignment" && st::failed(custom_fields.push_back({pair.key, pair.value})))
+            exit_out_of_memory("the metadata");
 
-    std::vector<arrow_part_t> parts(blocks_count);
+    st::vector<arrow_part_t> parts;
+    if (st::failed(parts.resize(blocks_count))) exit_out_of_memory("the parts");
     std::size_t const alignment = safegraphs_alignment_default_k;
     for (std::size_t index = 0; index != blocks_count; ++index) {
         arrow_part_t& part = parts[index];
@@ -1043,7 +1074,7 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
                                     schema, part.nodes, part.buffers, part.batch);
         if (status == ipc_status_t::success_k) status = ipc_validate_batch(schema, part.batch);
         if (status != ipc_status_t::success_k)
-            return fmt::format("{} holds a record batch {} that does not validate", arrow_path, index);
+            return formatted("{} holds a record batch {} that does not validate", arrow_path, index);
 
         // Each column takes its prefix sums, then its values, every buffer on the alignment.
         std::size_t const rows = static_cast<std::size_t>(part.batch.length);
@@ -1064,17 +1095,18 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
                 };
                 // A sliced producer's offsets start past zero, where SafeGraphs sums always start.
                 if (rows && sum_at(0))
-                    return fmt::format("{} holds a {} column whose offsets start past zero", arrow_path,
-                                       column.field->name);
+                    return formatted("{} holds a {} column whose offsets start past zero", arrow_path,
+                                     column.field->name);
                 std::uint64_t const elements = rows ? sum_at(rows) : 0;
                 restored.offsets = prefix_sums_t {column.sums_dtype, place((rows + 1) * sum_bytes)};
                 restored.data = place(static_cast<std::size_t>(elements) * column.element_bytes);
             }
             else restored.data = place(rows * column.element_bytes);
-            part.columns.push_back(restored);
+            if (st::failed(part.columns.push_back(safegraphs_column_t {restored}))) exit_out_of_memory("the columns");
             if (column_index != graph_columns[0] && column_index != graph_columns[1] &&
-                column_index != graph_columns[2])
-                part.extra_columns.push_back({safegraphs_name_t {column.field->name}, restored});
+                column_index != graph_columns[2] &&
+                st::failed(part.extra_columns.push_back({safegraphs_name_t {column.field->name}, restored})))
+                exit_out_of_memory("the columns");
         }
         part.header.key = part.columns[graph_columns[0]];
         part.header.value = part.columns[graph_columns[1]];
@@ -1082,22 +1114,24 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
         part.header.alignment = alignment;
         part.header.extra_columns = part.extra_columns;
         auto const [data_offset, offset_status] = safegraphs_data_offset(part.header, custom_fields);
-        if (failed(offset_status)) return fmt::format("cannot lay out a header: {}", status_to_string(offset_status));
+        if (failed(offset_status)) return formatted("cannot lay out a header: {}", status_to_string(offset_status));
         part.header.data_offset = data_offset;
         part.bytes = data_offset + end;
         summary.nodes += rows;
     }
 
     // One batch is a lone monolith, and several follow the manifest that leads their buffer.
-    std::vector<std::size_t> offsets(parts.size());
+    st::vector<std::size_t> offsets;
+    if (st::failed(offsets.resize(parts.size()))) exit_out_of_memory("the part offsets");
     auto part_at = [&](std::size_t part) {
         return safegraphs_part_t {.bytes = parts[part].bytes,
                                   .nodes = static_cast<std::size_t>(parts[part].batch.length)};
     };
     auto const [total, layout_status] = safegraphs_buffer_layout(parts.size(), part_at, alignment, offsets);
-    if (failed(layout_status)) return fmt::format("cannot lay out a manifest: {}", status_to_string(layout_status));
-    checkpoint.assign(total, '\0');
-    bytes_span_t const buffer = std::as_writable_bytes(std::span {checkpoint});
+    if (failed(layout_status)) return formatted("cannot lay out a manifest: {}", status_to_string(layout_status));
+    checkpoint.clear();
+    if (st::failed(checkpoint.resize(total))) exit_out_of_memory("the checkpoint");
+    bytes_span_t const buffer {checkpoint};
     for (std::size_t index = 0; index != parts.size(); ++index) {
         arrow_part_t& part = parts[index];
         part.offset = offsets[index];
@@ -1115,19 +1149,19 @@ inline std::string arrow_import(std::string const& arrow_path, std::string_view 
             copy(restored.data, part.batch.buffers[column.values_buffer()]);
         }
         if (status_t const framed = safegraphs_write_header(monolith, part.header, custom_fields); failed(framed))
-            return fmt::format("cannot write a header: {}", status_to_string(framed));
+            return formatted("cannot write a header: {}", status_to_string(framed));
     }
     if (status_t const led = safegraphs_commit_buffer(buffer, parts.size(), part_at, offsets); failed(led))
-        return fmt::format("cannot write the manifest: {}", status_to_string(led));
+        return formatted("cannot write the manifest: {}", status_to_string(led));
 
     summary.parts = parts.size(), summary.bytes = checkpoint.size();
-    summary.metric = metric.empty() ? recorded : metric;
+    summary.metric = formatted("{}", metric.empty() ? recorded : metric);
     return {};
 }
 
 /** What @ref arrow_matches_read answers: the key of every query, and what each one found. */
 struct arrow_matches_t {
-    std::vector<uuid128_t> queries;
+    st::vector<uuid128_t> queries;
     copied_matches_t matches;
 };
 
@@ -1150,21 +1184,23 @@ inline bool arrow_fields_hold_matches(std::span<ipc_field_t const> fields) noexc
 }
 
 /** Appends the rows of @p batch, validated against the schema of matches, to @p read. */
-inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read) {
+inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read) noexcept {
     bytes_view_t const queries = batch.buffers[1], offsets = batch.buffers[3];
     bytes_view_t const keys = batch.buffers[6], distances = batch.buffers[8];
     std::size_t const rows = static_cast<std::size_t>(batch.length);
     for (std::size_t row = 0; row != rows; ++row) {
-        read.queries.emplace_back();
-        std::memcpy(read.queries.back().bytes, queries.data() + row * sizeof(uuid128_t), sizeof(uuid128_t));
+        uuid128_t query;
+        std::memcpy(query.bytes, queries.data() + row * sizeof(uuid128_t), sizeof(uuid128_t));
+        if (st::failed(read.queries.push_back(std::move(query)))) exit_out_of_memory("the queries");
         std::int64_t const first = ipc_load_little<std::int64_t>(offsets.data() + row * sizeof(std::int64_t));
         std::int64_t const last = ipc_load_little<std::int64_t>(offsets.data() + (row + 1) * sizeof(std::int64_t));
-        read.matches.counts.push_back(static_cast<std::size_t>(last - first));
+        if (st::failed(read.matches.counts.push_back(static_cast<std::size_t>(last - first))))
+            exit_out_of_memory("the matches");
         for (std::size_t match = static_cast<std::size_t>(first); match != static_cast<std::size_t>(last); ++match) {
-            read.matches.keys.emplace_back();
-            std::memcpy(read.matches.keys.back().bytes, keys.data() + match * sizeof(uuid128_t), sizeof(uuid128_t));
+            usearch_key_t key;
+            std::memcpy(key.bytes, keys.data() + match * sizeof(uuid128_t), sizeof(uuid128_t));
             std::uint64_t const bits = ipc_load_little<std::uint64_t>(distances.data() + match * sizeof(std::uint64_t));
-            read.matches.scores.push_back(std::bit_cast<f64_t>(bits));
+            append_match(read.matches, key, std::bit_cast<f64_t>(bits));
         }
     }
 }
@@ -1176,13 +1212,13 @@ inline void arrow_append_matches(ipc_batch_t const& batch, arrow_matches_t& read
  *  @param[out] read The queries and their matches.
  *  @return Why the read stopped, or nothing.
  */
-inline std::string arrow_matches_read(std::string const& arrow_path, arrow_matches_t& read) {
+inline sz::string_t arrow_matches_read(std::string_view arrow_path, arrow_matches_t& read) {
     arrow_input_t input;
-    if (std::string failure = input.open(arrow_path); !failure.empty()) return failure;
+    if (sz::string_t failure = input.open(arrow_path); !failure.empty()) return failure;
     if (!arrow_fields_hold_matches(input.schema().fields))
-        return fmt::format("{} is no Arrow IPC of a search's matches", arrow_path);
+        return formatted("{} is no Arrow IPC of a search's matches", arrow_path);
     for (bool more = true;;) {
-        if (std::string failure = input.next(more); !failure.empty()) return failure;
+        if (sz::string_t failure = input.next(more); !failure.empty()) return failure;
         if (!more) return {};
         arrow_append_matches(input.batch(), read);
     }
