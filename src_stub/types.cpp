@@ -365,11 +365,11 @@ char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
     }
 }
 
-usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_cpu_class_t const cpu_class : cpu_classes_k) {
-        if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
-    }
-    return usearch_cpu_class_unknown_k;
+usearch_status_t usearch_cpu_class_from_name(usearch_bytes_view_t name, usearch_cpu_class_t* cpu_class) {
+    for (usearch_cpu_class_t const listed_class : cpu_classes_k)
+        if (named(name, usearch_cpu_class_name(listed_class)))
+            return *cpu_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
@@ -390,11 +390,11 @@ char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
     }
 }
 
-usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name) {
-    for (usearch_gpu_class_t const gpu_class : gpu_classes_k) {
-        if (named(name, usearch_gpu_class_name(gpu_class))) return gpu_class;
-    }
-    return usearch_gpu_class_unknown_k;
+usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t name, usearch_gpu_class_t* gpu_class) {
+    for (usearch_gpu_class_t const listed_class : gpu_classes_k)
+        if (named(name, usearch_gpu_class_name(listed_class)))
+            return *gpu_class = listed_class, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
 }
 
 char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {

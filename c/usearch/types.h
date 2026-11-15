@@ -1560,14 +1560,14 @@ USEARCH_EXPORT char const* usearch_load_path_name(usearch_load_path_t load_path)
 /** The canonical spelling of a CPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class);
 
-/** Reads a CPU class back; @c usearch_cpu_class_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name);
+/** Reads a CPU class back into @p cpu_class, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_cpu_class_from_name(usearch_bytes_view_t name, usearch_cpu_class_t* cpu_class);
 
 /** The canonical spelling of a GPU class, as the dispatch ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
 
-/** Reads a GPU class back; @c usearch_gpu_class_unknown_k when unrecognized. */
-USEARCH_EXPORT usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name);
+/** Reads a GPU class back into @p gpu_class, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_gpu_class_from_name(usearch_bytes_view_t name, usearch_gpu_class_t* gpu_class);
 
 /** The canonical spelling of an NVMe class, as the I/O engine ladder names its rungs. */
 USEARCH_EXPORT char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class);

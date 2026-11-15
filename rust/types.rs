@@ -428,9 +428,15 @@ extern "C" {
     pub fn usearch_capabilities_compiled() -> *const c_char;
     pub fn usearch_capabilities_available() -> *const c_char;
     pub fn usearch_cpu_class_name(cpu_class: usearch_cpu_class_t) -> *const c_char;
-    pub fn usearch_cpu_class_from_name(name: usearch_bytes_view_t) -> usearch_cpu_class_t;
+    pub fn usearch_cpu_class_from_name(
+        name: usearch_bytes_view_t,
+        cpu_class: *mut usearch_cpu_class_t,
+    ) -> usearch_status_t;
     pub fn usearch_gpu_class_name(gpu_class: usearch_gpu_class_t) -> *const c_char;
-    pub fn usearch_gpu_class_from_name(name: usearch_bytes_view_t) -> usearch_gpu_class_t;
+    pub fn usearch_gpu_class_from_name(
+        name: usearch_bytes_view_t,
+        gpu_class: *mut usearch_gpu_class_t,
+    ) -> usearch_status_t;
     pub fn usearch_nvme_class_name(nvme_class: usearch_nvme_class_t) -> *const c_char;
     pub fn usearch_nvme_class_from_name(name: usearch_bytes_view_t) -> usearch_nvme_class_t;
 
@@ -2314,19 +2320,24 @@ mod tests {
 
     #[test]
     fn class_names_read_back() {
-        type FromName = unsafe extern "C" fn(usearch_bytes_view_t) -> c_int;
+        type FromName = unsafe extern "C" fn(usearch_bytes_view_t, *mut c_int) -> usearch_status_t;
         type Name = unsafe extern "C" fn(c_int) -> *const c_char;
-        let classes: [(FromName, Name); 3] = [
+        let classes: [(FromName, Name); 2] = [
             (usearch_cpu_class_from_name, usearch_cpu_class_name),
             (usearch_gpu_class_from_name, usearch_gpu_class_name),
-            (usearch_nvme_class_from_name, usearch_nvme_class_name),
         ];
         // Classes keep their registry values forever; a class this build lacks spells "unknown".
         for (from_name, name) in classes {
             for code in (1..=c_int::from(u8::MAX)).filter(|&code| spelling(name, code) != "unknown") {
                 let spelled = spelling(name, code);
-                assert_eq!(read_spelling(spelled, from_name, name, Some), Ok(code), "{spelled}");
+                assert_eq!(read_named(spelled, from_name, Some), Ok(code), "{spelled}");
             }
+            assert!(read_named("unknown", from_name, Some).is_err());
+        }
+        for code in (1..=c_int::from(u8::MAX)).filter(|&code| spelling(usearch_nvme_class_name, code) != "unknown") {
+            let spelled = spelling(usearch_nvme_class_name, code);
+            let parsed = read_spelling(spelled, usearch_nvme_class_from_name, usearch_nvme_class_name, Some);
+            assert_eq!(parsed, Ok(code), "{spelled}");
         }
         assert_eq!(CPUClass::Serial.to_string(), "serial");
         assert_eq!(CPUClass::Monoversioned.to_string(), "monoversioned");

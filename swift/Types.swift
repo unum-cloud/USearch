@@ -836,7 +836,7 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no class carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_cpu_class_from_name, usearch_cpu_class_name),
+        guard let raw = parsed(name, usearch_cpu_class_from_name, usearch_cpu_class_unknown_k),
             raw != usearch_cpu_class_unknown_k
         else { return nil }
         self.raw = raw
@@ -880,9 +880,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no class carries.
     public init?(name: String) {
-        guard let raw = parsed(name, usearch_gpu_class_from_name, usearch_gpu_class_name),
-            raw != usearch_gpu_class_unknown_k
-        else { return nil }
+        guard let raw = parsed(name, usearch_gpu_class_from_name, usearch_gpu_class_unknown_k) else { return nil }
         self.raw = raw
     }
 
