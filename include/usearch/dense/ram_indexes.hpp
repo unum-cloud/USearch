@@ -10,7 +10,7 @@
  *  evenly; searches scatter over every shard and gather through
  *  @ref unum::usearch::utilities::merge_search_results, resolving matches into the caller's keys,
  *  so shards with colliding ID spaces merge into one ranking. Checkpoints ride @c shard_save_plan
- *  and @c shard_load_plan, every step fanned out over the executor's threads.
+ *  and @c shard_load_plan, every task fanned out over the executor's threads.
  */
 #pragma once
 
@@ -328,7 +328,7 @@ struct ram_indexes {
      *      single-threaded sibling of the batched form, taking a context where it takes an executor.
      *
      *  Safe to call concurrently with itself, with the batched form, and with searches: the shard
-     *  is chosen by one relaxed read-modify-write, and everything past the dispense is a step that
+     *  is chosen by one relaxed read-modify-write, and everything past the dispense is a task that
      *  cannot fail. It holds the gate's shared side for the call, and a refine, an absorb, a split,
      *  a compaction or a load holding the index closed answers @c contended_k.
      *
@@ -452,12 +452,12 @@ struct ram_indexes {
      *  Rows are split across the open shard generation's shards round-robin from the starting shard
      *  on, each taking the next ID of its shard's range; rows past what fits under the bound fill
      *  fresh shard generations in turn, split the same way. The plan holds only reversible claims
-     *  until its first step dispenses the ranges, so a plan dropped before then releases
+     *  until its first task dispenses the ranges, so a plan dropped before then releases
      *  everything, and a caller spanning several indexes plans on all of them before stepping any,
      *  committing or refusing as a whole. Once stepped, its ranges hold every later turn on their
      *  shards until it finishes, so it must finish. A row walking an empty shard waits for that
      *  shard's row zero to be wired, so one thread alone places the rows holding it before any
-     *  later ones. Planning, each step and @ref finish hold the gate's shared side for their own
+     *  later ones. Planning, each task and @ref finish hold the gate's shared side for their own
      *  call alone, and claims outstanding refuse every close with @c contended_k.
      */
     struct [[nodiscard]] insert_plan_t {
@@ -486,14 +486,14 @@ struct ram_indexes {
          *
          *  It fails only before its rows are dispensed.
          *
-         *  The first step dispenses every shard's range under the dispensing mutex, so no two
+         *  The first task dispenses every shard's range under the dispensing mutex, so no two
          *  batches' ranges cross order between the shards. Rows outside the plan or of another
          *  width place nothing, and @ref finish refuses until every row is placed. One caller at a
          *  time, like the executor.
          *
          *  @par Statuses:
          *  - @c contended_k A refine, an absorb or a load holds a shard's dispenser closed;
-         *    nothing was dispensed, so a later step may retry and a dropped plan releases its
+         *    nothing was dispensed, so a later task may retry and a dropped plan releases its
          *    claims.
          *  - @c config_mismatch_k Rows outside the plan or of another width, or not one context
          *    per executor thread.
@@ -622,7 +622,7 @@ struct ram_indexes {
         growing_buffer<shard_capacity_claim_t, forkunion_allocator_t> claims_;
 
         /** Every shard's range from the open shard generation's first in placement order, empty
-         *  where no row goes; none before the first step. */
+         *  where no row goes; none before the first task. */
         growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> ranges_;
 
         /** The executor's one-caller hold, kept while the plan's threads may run. */
@@ -641,7 +641,7 @@ struct ram_indexes {
         /** Rows placed so far. */
         std::size_t inserted_entries_ = 0;
 
-        /** What every step's walks spent, which @ref finish reports. */
+        /** What every task's walks spent, which @ref finish reports. */
         insert_result_t spent_ {};
 
         /** The index inserted into; null in the empty plan a refused @ref plan_insert returns, and
@@ -656,7 +656,7 @@ struct ram_indexes {
      *      capacity, all of them reversible.
      *
      *  Every fallible step happens here but the sizing of the contexts each step is handed, so the
-     *  plan's rows can only be placed, and nothing is dispensed until the plan's first step. The
+     *  plan's rows can only be placed, and nothing is dispensed until the plan's first task. The
      *  rotation comes from the rows routed so far, which keeps a stream of small batches from
      *  drifting onto shard zero. A batch crossing the bound tops the open shard generation up and
      *  opens as many fresh shard generations as its other rows fill, so it is placed whole; a
@@ -682,7 +682,7 @@ struct ram_indexes {
         plan.owner_ = this;
         if (!rows) return {std::move(plan), status_t::success_k};
 
-        // One caller per executor; the steps walk the driver's contexts, so nothing here rewinds.
+        // One caller per executor; the tasks walk the driver's contexts, so nothing here rewinds.
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
         plan.executor_claim_ = std::move(executor_claim);
@@ -714,63 +714,60 @@ struct ram_indexes {
     /**
      *  @brief One refine in flight over every shard, holding every dispenser closed meanwhile.
      *
-     *  It owns its shards' passes and part starts, so nothing about it lives in the index, and
-     *  it walks on the contexts each call hands it; @ref run continues it after a cancel, and
-     *  @ref finish heals what a stopped pass leaves and reopens. Every shard's @c refine_plan_t
-     *  drains over the threads phase by phase, each thread pulling steps from its own shard
-     *  first and stealing from the rest in the tail, so a pass costs one sweep of the graph
-     *  however the shards are filled. An absorb's plan moves its donors in one after another,
-     *  the rows each appended walking as tiles of one pass per shard before the next moves in,
-     *  so every donor walks into everything absorbed before it; the pass audits once, after the
-     *  first move, and verifies and heals once, after the last. A split's plan opens every
-     *  shard's split at planning, the receivers' shards file the keys their parts received, and
-     *  the phase boundary that publishes the parts empties this index inside its window. Every
-     *  index the plan reads or moves closes at planning and stays closed until the plan dies, or
-     *  for a donor until it moves in.
+     *  It owns its shards' rounds, so nothing about it lives in the index, and it runs on the
+     *  contexts each call hands it; @ref run continues it after a cancel, and @ref finish ends what
+     *  a cancel left and reopens. Every shard's @c refine_plan_t drains over the threads phase by
+     *  phase, each thread pulling tasks from its own shard first and stealing from the rest in the
+     *  tail, so a round costs one sweep of the graph however the shards are filled. An absorb's
+     *  plan moves every donor in first, with no distance, then runs one round per shard, which
+     *  links the moved rows in beside the resident ones. A split's plan opens every shard's split
+     *  at planning, the receivers' shards file the keys their parts received, the phase boundary
+     *  that publishes the parts empties this index inside its window, and every receiver shard then
+     *  runs one round. Every index the plan reads or moves closes at planning and stays closed
+     *  until the plan dies, or for a donor until it moves in.
      */
     struct [[nodiscard]] refine_plan_t {
         refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
 
         /** An empty plan over @p allocator; only @ref plan_absorb and @ref plan_split fill it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
-            : shard_plans_(allocator), cursors_(allocator), part_bases_(allocator), part_offsets_(allocator),
-              stitched_parts_(allocator), moves_(allocator), receiver_shards_(allocator) {}
+            : shard_plans_(allocator), cursors_(allocator), moves_(allocator), receiver_shards_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : shard_plans_(std::move(other.shard_plans_)), cursors_(std::move(other.cursors_)),
-              part_bases_(std::move(other.part_bases_)), part_offsets_(std::move(other.part_offsets_)),
-              stitched_parts_(std::move(other.stitched_parts_)), moves_(std::move(other.moves_)),
-              donors_(std::exchange(other.donors_, {})), absorbed_donors_(other.absorbed_donors_),
-              receivers_(other.receivers_), closed_receivers_(std::exchange(other.closed_receivers_, 0)),
-              receiver_shards_(std::move(other.receiver_shards_)), config_(other.config_), visited_(other.visited_),
-              population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
+              moves_(std::move(other.moves_)), donors_(std::exchange(other.donors_, {})),
+              absorbed_donors_(other.absorbed_donors_), receivers_(other.receivers_),
+              closed_receivers_(std::exchange(other.closed_receivers_, 0)),
+              receiver_shards_(std::move(other.receiver_shards_)), config_(other.config_),
+              owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        /** An unfinished plan heals nothing: it reopens, and the graph is as the last step left
+        /** An unfinished plan runs nothing more: it reopens, and the graph is as the last task left
          *  it. */
         ~refine_plan_t() noexcept { release_(); }
 
         /**
-         *  @brief Runs the pending phases on @p executor until the pass ends or @p on_visited
-         *      cancels; @c cancelled_k means a later call continues exactly where this one stopped.
+         *  @brief Runs the pending phases on @p executor until every shard's round ends or
+         *      @p on_visited cancels, where a later call continues after @c cancelled_k.
          *
-         *  Moves the donors still pending in one at a time, each stitched before the next, as
-         *  @ref plan_absorb describes; a failing one stays pending and closed, with every later
-         *  one, for the next call, and a moved one stays empty, closed and sealed. The executor is
+         *  Moves every donor still pending in first, as @ref plan_absorb describes; a failing one
+         *  stays pending and closed, with every later one, for the next call, and a moved one stays
+         *  empty, closed and sealed. The rounds open once every donor moved in, and the executor is
          *  held only for the call.
          *
          *  @param[in,out] executor The executor the plan was opened over.
-         *  @param[in,out] traversals The caller's context of every executor thread, which the walks
+         *  @param[in,out] traversals The caller's context of every executor thread, which the tasks
          *      run on; the call sizes them.
-         *  @param[in] on_visited Fires per re-selected tile with the nodes visited so far and the
-         *      population; a @c cancel_k answer stops the drain where its steps ran.
+         *  @param[in] on_visited Fires at every barrier of the rounds with the units of the phase
+         *      it closed, done and in all, summed over the shards; a @c cancel_k answer stops the
+         *      drain where its tasks ran.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index, or @p executor holds no pool or no
          *    workers.
-         *  - @c config_mismatch_k @p traversals holds other than one context per thread, or a
-         *    move step meets rows outside its plan.
+         *  - @c config_mismatch_k @p traversals holds other than one context per thread, or a move
+         *    task meets rows outside its plan.
          *  - @c contended_k Another call holds @p executor, its pool runs another dispatch, or a
          *    donor stopped emptying under the move.
          *  - @c overflow_k A move passes a shard's rows, or a queue capacity wraps when rounded.
@@ -780,35 +777,28 @@ struct ram_indexes {
                      progress_type_&& on_visited = {}) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (executor.size() != traversals.size()) return status_t::config_mismatch_k;
+            // Every donor moves in before the rounds open, which link the moved rows in with the
+            // resident ones; the moves take the executor's claim themselves.
+            if (status_t const moved = move_pending_(executor); failed(moved)) return moved;
             auto [executor_claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
-            while (true) {
-                // A pass still walking continues; once every one paused, or before the first opens,
-                // the next donor moves in and the passes take its rows.
-                if ((shard_plans_.empty() || paused_()) && absorbed_donors_ != donors_.size()) {
-                    ram_indexes*& donor = donors_[absorbed_donors_];
-                    note_stitched_parts_();
-                    if (status_t const absorbed = owner_->absorb_(*donor, moves_of_(donors_.subspan(absorbed_donors_)),
-                                                                  executor, *this);
-                        failed(absorbed))
-                        return absorbed;
-                    donor = nullptr;
-                    ++absorbed_donors_;
-                    if (status_t const resumed = resume_shards_(); failed(resumed)) return resumed;
-                }
-                if (shard_plans_.empty())
-                    if (status_t const opened = open_shards_(traversals.size()); failed(opened)) return opened;
-                // Only once a donor moved in does every shard have the geometry the walks size by.
-                if (status_t const sized = size_walks_(traversals); failed(sized)) return sized;
-                if (status_t const drained = drain_(executor, traversals, on_visited); failed(drained)) return drained;
-                if (absorbed_donors_ == donors_.size()) return status_t::success_k;
-            }
+            if (shard_plans_.empty())
+                if (status_t const opened = open_shards_(); failed(opened)) return opened;
+            // Only once a donor moved in does every shard have the geometry the contexts size by.
+            if (status_t const sized = size_rounds_(traversals); failed(sized)) return sized;
+            if (status_t const drained = drain_(executor, traversals, on_visited); failed(drained)) return drained;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (failed(plan.status())) return plan.status();
+            return status_t::success_k;
         }
 
         /**
-         *  @brief Stops any re-selection, merges what walked, audits and heals on the caller's
-         *      @p traversals, one per executor thread, reopens the dispensers, and reports the
-         *      passes of the donors moved in so far; the rest stay pending.
+         *  @brief Ends the rounds on the caller's @p traversals, one per executor thread, reopens
+         *      the dispensers, and reports the rounds; donors still pending stay so.
+         *
+         *  A refine's rounds stop at the barrier each stands at, their closing health checks
+         *  running on. A round after moves runs to its end, since only its restitch links in a
+         *  moved part that nothing links into.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index, or @p executor holds no pool or no
@@ -822,32 +812,63 @@ struct ram_indexes {
             if (executor.size() != traversals.size()) return {{}, status_t::config_mismatch_k};
             auto [executor_claim, claim_status] = executor.claim();
             if (failed(claim_status)) return {{}, claim_status};
-            status_t healed = status_t::success_k;
+            status_t closed = status_t::success_k;
             if (!shard_plans_.empty()) {
-                // The steps a stopped re-selection left go unrun, the open tile still merges, and a
-                // stopped heal phase continues.
-                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                    bool const reselecting = shard_plans_[shard].reselecting();
-                    shard_plans_[shard].stop();
-                    if (!reselecting) continue;
-                    static_cast<void>(shard_plans_[shard].advance());
-                    cursors_[shard] = 0;
-                }
-                dummy_progress_t heal_alone;
-                healed = size_walks_(traversals);
-                if (succeeded(healed)) healed = drain_(executor, traversals, heal_alone);
+                if (moves_.empty() && receivers_.empty())
+                    for (typename index_t::refine_plan_t& plan : shard_plans_) plan.stop();
+                dummy_progress_t closing_alone;
+                closed = size_rounds_(traversals);
+                if (succeeded(closed)) closed = drain_(executor, traversals, closing_alone);
             }
             refine_report_t const result = running();
             release_();
-            return {result, healed};
+            return {result, closed};
         }
 
-        /** The totals so far, summed over the shards' passes, which carry over every donor: what
-         *  @ref finish reports once it healed. */
+        /** The totals so far, summed over the shards' rounds: what @ref finish reports once they
+         *  ended. */
         refine_report_t running() const noexcept {
             refine_report_t result;
-            for (typename index_t::refine_plan_t const& plan : shard_plans_) result += plan.finish().value;
+            for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
+                if (shard) result += shard_plans_[shard].finish().value;
+                else result = shard_plans_[shard].finish().value;
             return result;
+        }
+
+        /** The phase the shards' rounds are in, by the name a progress line prints: the first shard
+         *  still rounding names it. */
+        char const* phase_name() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.phase_name();
+            return shard_plans_.empty() ? "health" : shard_plans_[0].phase_name();
+        }
+
+        /** Where that phase sits among a round's eight; zero once every shard's round ended. */
+        std::size_t ordinal() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.ordinal();
+            return 0;
+        }
+
+        /** Units of that phase done and in all, summed over the shards as the drain sums them. */
+        std::size_t completed() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.completed();
+            return sum;
+        }
+        std::size_t total() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.total();
+            return sum;
+        }
+
+        /** Opens every shard's next round once each one's ended, from the roots their closing
+         *  audits kept; a no-op while any shard is mid-round. The dispensers stay closed. */
+        void next_round() noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return;
+            for (typename index_t::refine_plan_t& plan : shard_plans_) plan.next_round();
+            std::memset(cursors_.data(), 0, cursors_.size() * sizeof(std::size_t));
         }
 
       private:
@@ -869,13 +890,13 @@ struct ram_indexes {
             return to_span(moves_).subspan(moves_.size() - later - count, count);
         }
 
-        /** Moves every donor still pending in without walking it, for the heal to re-link. */
+        /** Moves every donor still pending in, with no distance, for the rounds to link in. */
         status_t move_pending_(executor_t& executor) noexcept {
+            if (absorbed_donors_ == donors_.size()) return status_t::success_k;
             auto [executor_claim, claim_status] = executor.claim();
             if (failed(claim_status)) return claim_status;
             for (; absorbed_donors_ != donors_.size(); ++absorbed_donors_) {
                 ram_indexes*& donor = donors_[absorbed_donors_];
-                note_stitched_parts_();
                 if (status_t const absorbed = owner_->absorb_(*donor, moves_of_(donors_.subspan(absorbed_donors_)),
                                                               executor, *this);
                     failed(absorbed))
@@ -894,101 +915,47 @@ struct ram_indexes {
             for (; closed_receivers_; --closed_receivers_) receivers_[closed_receivers_ - 1]->shards_.reopen();
         }
 
-        /** Sizes the caller's @p traversals for the passes' walks. */
-        status_t size_walks_(std::span<traversal_context_t> traversals) noexcept {
-            // A split walks its receivers, which keep the geometry once this index empties.
-            ram_indexes& walked = receivers_.empty() ? *owner_ : *receivers_[0];
-            return walked.size_traversals_(traversals, insert_config_t {config_.expansion_factor}, 0);
+        /** Sizes the caller's @p traversals for every shard's round: what a gather or restitch task
+         *  touches. */
+        status_t size_rounds_(std::span<traversal_context_t> traversals) noexcept {
+            // A split runs its receivers, which keep the geometry once this index empties.
+            ram_indexes& stitched = receivers_.empty() ? *owner_ : *receivers_[0];
+            if (status_t const sized = stitched.size_traversals_(traversals, insert_config_t {config_.expansion_factor},
+                                                                 0);
+                failed(sized))
+                return sized;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                for (traversal_context_t& traversal : traversals)
+                    if (status_t const reserved = plan.reserve(traversal); failed(reserved)) return reserved;
+            return status_t::success_k;
         }
 
-        /** Opens every shard's pass over its parts; the shards are the ones closed at planning, and
-         *  a shard generation opened since takes no part. A budget, past the walks of @p threads
-         *  threads, splits over the shards by their rows. */
-        status_t open_shards_(std::size_t threads) noexcept {
-            std::size_t rows = 0;
-            for (std::size_t shard = 0; shard != cursors_.size(); ++shard) rows += owner_->shards_[shard].index->size();
-            std::size_t const walks = threads * owner_->shards_[0].index->traversal_memory_usage(
-                                                    insert_config_t {config_.expansion_factor});
-            std::size_t const budget = config_.memory_limit;
-            std::size_t const row_budget = budget > walks && rows ? (budget - walks) / rows : 0;
+        /** Opens one round on every shard closed at planning; a shard generation opened since takes
+         *  no part. */
+        status_t open_shards_() noexcept {
             for (std::size_t shard = 0; shard != cursors_.size(); ++shard) {
-                refine_config_t config = config_;
-                // A budget the walks exhaust leaves each shard one byte, which refuses a tile.
-                if (budget)
-                    config.memory_limit = max_of<std::size_t>(row_budget * owner_->shards_[shard].index->size(), 1);
-                std::span<node_id_t const> const parts = parts_of_(shard);
-                // A refine re-selects every row; an absorb only the rows the pending donor
-                // appended, after the resident part and the parts stitched before.
-                iota_view<node_id_t> nodes {0, node_id_unknown_k};
-                if (!part_offsets_.empty()) {
-                    std::size_t const first_part = max_of<std::size_t>(stitched_parts_[shard], 1);
-                    nodes.first = first_part < parts.size() ? parts[first_part] : node_id_unknown_k;
-                }
-                auto [plan, status] = owner_->shards_[shard].index->plan_refine(nodes, {}, parts, config);
+                auto [plan, status] = owner_->shards_[shard].index->plan_round(config_);
                 if (failed(status)) return shard_plans_.clear(), status;
-                // Later donors join this pass, so its audit carries over them and only
-                // the last verifies.
-                if (absorbed_donors_ != donors_.size()) plan.hold();
                 shard_plans_.push_back_reserved(std::move(plan));
             }
-            for (typename index_t::refine_plan_t const& plan : shard_plans_) population_ += plan.planned_nodes();
             return status_t::success_k;
-        }
-
-        /** The run of @c part_bases_ of @p shard; empty with no donors. */
-        std::span<node_id_t const> parts_of_(std::size_t shard) const noexcept {
-            if (part_offsets_.empty()) return {};
-            return {part_bases_.data() + part_offsets_[shard], part_offsets_[shard + 1] - part_offsets_[shard]};
-        }
-
-        /** Whether every shard's pass paused for rows a later donor appends. */
-        bool paused_() const noexcept {
-            for (typename index_t::refine_plan_t const& plan : shard_plans_)
-                if (!plan.paused()) return false;
-            return true;
-        }
-
-        /** Takes the rows the donor that moved last appended into every shard's paused pass, which
-         *  pauses again after them unless no donor remains. */
-        status_t resume_shards_() noexcept {
-            bool const last = absorbed_donors_ == donors_.size();
-            for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                typename index_t::refine_plan_t& plan = shard_plans_[shard];
-                population_ -= plan.planned_nodes();
-                status_t const resumed = plan.resume(parts_of_(shard));
-                population_ += plan.planned_nodes();
-                if (failed(resumed)) return resumed;
-                if (last) plan.release();
-            }
-            return status_t::success_k;
-        }
-
-        /** Counts, per shard, the parts recorded so far: the ones stitched before the pending
-         *  donor's move. */
-        void note_stitched_parts_() noexcept {
-            for (std::size_t shard = 0; shard != stitched_parts_.size(); ++shard) {
-                std::size_t const first = part_offsets_[shard], bound = part_offsets_[shard + 1];
-                std::size_t count = 0;
-                while (first + count != bound && part_bases_[first + count] != node_id_unknown_k) ++count;
-                stitched_parts_[shard] = count;
-            }
         }
 
         /** Drains every shard's pending phases from where the cursors stand, advancing each plan
-         *  between them, until none follows or a step fails or cancels. */
+         *  between them, until none follows or a task fails or cancels. */
         template <typename progress_type_>
         status_t drain_(executor_t& executor, std::span<traversal_context_t> traversals,
                         progress_type_& on_visited) noexcept {
-            auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step,
+            auto run_task = [&](std::size_t shard, typename index_t::refine_plan_t::task_t const& task,
                                 std::size_t thread) noexcept -> status_t {
-                return shard_plans_[shard].run(step, traversals[thread]);
+                return shard_plans_[shard].run(task, traversals[thread]);
             };
             std::span<std::size_t> const cursors = to_writable_span(cursors_);
             status_t drained = status_t::success_k;
             std::size_t advancing = 0;
             do {
-                // Every claimed step ran, so a stopped drain's cursors say where the next starts.
-                drained = owner_->drain_steps_(shard_plans_, cursors, executor, run_step);
+                // Every claimed task ran, so a stopped drain's cursors say where the next starts.
+                drained = owner_->drain_tasks_(shard_plans_, cursors, executor, run_task);
                 if (failed(drained)) break;
                 // The boundary publishing a split's parts shows a search every receiver shard's
                 // rows and keys or none, and forgets this index's inside its window, so the gate is
@@ -1005,9 +972,10 @@ struct ram_indexes {
                     for (ram_indexes* receiver : receivers_) receiver->shards_.begin_commit();
                 }
                 advancing = 0;
-                std::size_t walked = 0;
+                std::size_t completed = 0, total = 0;
                 for (typename index_t::refine_plan_t& plan : shard_plans_) {
-                    walked += plan.reselecting() ? plan.tile().size() : 0;
+                    completed += plan.completed();
+                    total += plan.total();
                     advancing += plan.advance();
                 }
                 if (moving) {
@@ -1016,10 +984,9 @@ struct ram_indexes {
                     owner_->shards_.end_window();
                 }
                 std::memset(cursors.data(), 0, cursors.size_bytes());
-                // Progress moves once per tile, past the barrier, so a cancel resumes at the merge.
-                if (!walked) continue;
-                visited_ += walked;
-                if (on_visited(visited_, population_) == continuation_t::cancel_k) {
+                // A round hears every barrier with the phase it closed, in that phase's own units;
+                // a split's moves hear none.
+                if (total && on_visited(completed, total) == continuation_t::cancel_k) {
                     drained = status_t::cancelled_k;
                     break;
                 }
@@ -1027,23 +994,11 @@ struct ram_indexes {
             return drained;
         }
 
-        /** Every shard's own pass in placement order; none until the donors moved in. */
+        /** Every shard's own round in placement order; none until the donors moved in. */
         growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
 
-        /** One step cursor per shard into its current phase. */
+        /** One task cursor per shard into its current phase. */
         growing_buffer<std::size_t, forkunion_allocator_t> cursors_;
-
-        /** The parts the moves appended, ascending per shard, @c node_id_unknown_k past the
-         *  last. */
-        growing_buffer<node_id_t, forkunion_allocator_t> part_bases_;
-
-        /** Where each shard's run of @c part_bases_ starts, and one past the last; empty with no
-         *  donors. */
-        growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
-
-        /** Per shard, the parts of its run stitched before the pending donor moved in; empty with
-         *  no donors. */
-        growing_buffer<std::size_t, forkunion_allocator_t> stitched_parts_;
 
         /** One move per source shard, in move order, as @c plan_moves_ packed them;
          *  empty with no donors. */
@@ -1065,28 +1020,22 @@ struct ram_indexes {
          *  scatters into. */
         growing_buffer<index_t*, forkunion_allocator_t> receiver_shards_;
 
-        /** The passes' knobs. */
+        /** The rounds' knobs. */
         refine_config_t config_ {};
-
-        /** Nodes re-selected across every call so far. */
-        std::size_t visited_ = 0;
-
-        /** The population @c on_visited reports: the nodes every shard's re-selection steps over
-         *  for the donors moved in so far, or a split's rows. */
-        std::size_t population_ = 0;
 
         /** The index refined, closed while the plan lives; null in an empty plan and once
          *  finished. */
         ram_indexes* owner_ = nullptr;
     };
 
-    /** Opens a refine of every shard: closes the dispensers and opens the shards' passes, as
-     *  @ref plan_absorb does with no donors. Re-selection claims no identity and moves no
-     *  watermark, so searches run throughout.
+    /**
+     *  @brief Opens a refine of every shard: closes the dispensers and opens one round per shard,
+     *      as @ref plan_absorb does with no donors.
+     *
+     *  A round claims no identity and moves no watermark, so searches run throughout.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed, or @p executor has no
-     *    threads.
+     *  - @c uninitialized_k No shard is placed, or @p executor has no threads.
      *  - @c contended_k A call holds the gate, or a batch or plan holds a shard's dispenser.
      */
     expected<refine_plan_t> plan_refine(refine_config_t config, executor_t const& executor) noexcept {
@@ -1094,23 +1043,22 @@ struct ram_indexes {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every published node across the shards, then heals
-     *      the islands that leaves: @ref plan_refine, then @c run and @c finish.
+     *  @brief Runs one refinement round on every shard, through @ref plan_refine, @c run and
+     *      @c finish in turn.
      *
-     *  Re-selection claims no identity and moves no watermark, so searches run throughout and a
-     *  stopped pass leaves the graph correct. Every shard's dispenser stays closed for the pass, so
-     *  a batch in flight refuses it with @c contended_k, and an insertion arriving meanwhile is
+     *  A round claims no identity and moves no watermark, so searches run throughout and a stopped
+     *  round leaves the graph correct. Every shard's dispenser stays closed for the round, so a
+     *  batch in flight refuses it with @c contended_k, and an insertion arriving meanwhile is
      *  refused.
      *
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in,out] executor The threads and their scratch.
-     *  @param[in] on_visited Fires per re-selected tile with the nodes visited so far and the
-     *      population; a @c cancel_k answer skips the rest of the re-selection, still heals, and
-     *      reports @c cancelled_k.
+     *  @param[in] on_visited Fires at every barrier with the units of the phase it closed, done and
+     *      in all; a @c cancel_k answer stops the rounds where they stand, their closing health
+     *      checks still running, and reports @c cancelled_k.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed, or @p executor holds no
-     *    threads, pool or arenas.
+     *  - @c uninitialized_k No shard is placed, or @p executor holds no threads, pool or arenas.
      *  - @c contended_k A call holds the gate, a batch or plan holds a shard's dispenser, another
      *    call holds @p executor, or its pool runs another dispatch.
      *  - @c overflow_k A queue capacity wraps when rounded.
@@ -1127,23 +1075,21 @@ struct ram_indexes {
      *  @brief Opens an absorb of @p donors, whose plan's first phase moves every row of each into
      *      this index, one donor after another: donor shards, largest first, each append to the
      *      shard with the fewest rows that keeps it under @ref shard_capacity, one on its own
-     *      memory domain on ties, with its edges rebased and its keys beside it, as a part of its
-     *      own.
+     *      memory domain on ties, with its edges rebased and its keys beside it; then one round per
+     *      shard links the moved rows in.
      *
      *  Each donor moves in through one plan that does every fallible thing first: the donor's gate
-     *  and a load claiming all the rows each receiving shard takes. Its chunk steps then drain over
+     *  and a load claiming all the rows each receiving shard takes. Its chunk tasks then drain over
      *  the threads, each copying the donor's chunks straight into the shard's own, keys beside
      *  them, and cannot fail; one task per receiving shard files its keys, and every shard's rows
      *  publish inside one commit bracket, so a search and a lookup see all of them or none. The
      *  donor then forgets its rows in place inside its window, keeping its shards and their
-     *  capacity, its slot in @p donors nulls, it stays closed and sealed, consumed, and its shards
-     *  become parts of the receiving shards in the plan. A shard empty beforehand keeps the first
-     *  part moving into it as its resident part.
+     *  capacity, its slot in @p donors nulls, and it stays closed and sealed, consumed.
      *
      *  Every fallible step of every move happens here or in the move's own plan per donor, never in
-     *  a step. Once a donor moved in, the plan's re-selection walks the rows it appended across
-     *  everything absorbed before them and merges, before the next donor moves in; a cancel pauses
-     *  only that walk.
+     *  a task. Once every donor moved in, every shard runs one round, whose gather files the moved
+     *  rows into neighborhoods beside the resident ones and whose restitch links them; no phase
+     *  walks. A cancel pauses the rounds, and @c finish runs them to their end.
      *
      *  Searches of this index and of the donors run throughout. This index and every donor close
      *  here, each under its own gate, so the packing never goes stale: this index stays closed
@@ -1173,6 +1119,8 @@ struct ram_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.config_ = config;
+        // Tiles follow the cores the call runs on unless the caller overrides them.
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != donors.size(); ++closing)
             if (status_t const closed = donors[closing]->close_gated_(); failed(closed)) {
                 while (closing) donors[--closing]->shards_.reopen();
@@ -1184,30 +1132,31 @@ struct ram_indexes {
                 failed(packed))
                 return {{}, packed};
         // The moves may have opened a shard generation, whose shards take part like the others.
-        std::size_t const receiving_shards = donors.empty() ? shards : plan.part_offsets_.size() - 1;
+        std::size_t const receiving_shards = shards_.size();
         if (failed(plan.shard_plans_.reserve_exactly(receiving_shards)) ||
-            failed(plan.cursors_.resize(receiving_shards)) ||
-            (!donors.empty() && failed(plan.stitched_parts_.resize(receiving_shards))))
+            failed(plan.cursors_.resize(receiving_shards)))
             return {{}, status_t::bad_alloc_k};
         if (donors.empty())
-            if (status_t const opened = plan.open_shards_(threads); failed(opened)) return {{}, opened};
+            if (status_t const opened = plan.open_shards_(); failed(opened)) return {{}, opened};
         return {std::move(plan), status_t::success_k};
     }
 
     /**
      *  @brief Moves every row of each of @p donors into this index and links them in:
-     *      @ref plan_absorb, then @c run and @c finish. @p on_visited answers as in @ref refine,
-     *      for the re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *      @ref plan_absorb, then @c run and then @c finish.
+     *
+     *  @p on_visited hears the rounds as in @ref refine; a cancel still ends the rounds that link
+     *      the moved rows in, and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed, or @p executor holds no threads, pool or arenas.
      *  - @c config_mismatch_k A null donor, this index itself, another kernel or geometry, or a
-     *    move step meeting rows outside its plan.
-     *  - @c contended_k A call or plan holds this index or a donor, another call holds
-     *    @p executor, its pool runs another dispatch, or a donor stopped emptying.
+     *    move task meeting rows outside its plan.
+     *  - @c contended_k A call or plan holds this index or a donor, another call holds @p executor,
+     *    its pool runs another dispatch, or a donor stopped emptying.
      *  - @c unsupported_k A donor shard is past @ref shard_capacity.
-     *  - @c overflow_k No shard takes a move, a move passes a shard's rows, or a queue
-     *    capacity wraps.
+     *  - @c overflow_k No shard takes a move, a move passes a shard's rows, or a queue capacity
+     *    wraps when rounded.
      */
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_report_t> absorb(std::span<ram_indexes*> donors, refine_config_t config, executor_t& executor,
@@ -1225,7 +1174,7 @@ struct ram_indexes {
      *  - @c uninitialized_k No shard is placed, or @p executor holds no
      *    threads, pool or arenas.
      *  - @c config_mismatch_k @p donor is this index itself, of another kernel or geometry, or a
-     *    move step meets rows outside its plan.
+     *    move task meets rows outside its plan.
      *  - @c contended_k A call or plan holds this index or @p donor, another call holds
      *    @p executor, its pool runs another dispatch, or @p donor stopped emptying.
      *  - @c unsupported_k A donor shard is past @ref shard_capacity.
@@ -1245,10 +1194,11 @@ struct ram_indexes {
      *  Every shard's split opens here, as @c index_t::plan_split describes, and so does every other
      *  fallible thing: this index and every receiver closed, each under its own gate. The plan's
      *  first phases then partition and scatter every shard over the threads, each key going beside
-     *  its row, one step per receiver shard files its keys, and the boundary publishing the parts
+     *  its row, one task per receiver shard files its keys, and the boundary publishing the parts
      *  shows a search and a lookup every receiver shard's rows or none, while this index forgets
      *  its rows in place inside its window, keeping its shards and their capacity. Every receiver
-     *  shard then re-selects the rows that lost a link and heals; a cancel pauses only that walk.
+     *  shard then runs one round, which links in what the dropped links left apart; a cancel pauses
+     *  the rounds, and @c finish runs them to their end.
      *
      *  Searches of this index and of the receivers run throughout, a search of this index retrying
      *  around the window that empties it; an insertion into any of them arriving meanwhile is
@@ -1283,6 +1233,7 @@ struct ram_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.receivers_ = receivers;
+        if (!config.refine.cache_bytes) config.refine.cache_bytes = executor.cache_bytes_per_core();
         plan.config_ = config.refine;
         // A shard generation opened before the close would hold rows no shard's split moves.
         if (shards_.size() != shards) return {{}, status_t::contended_k};
@@ -1304,17 +1255,18 @@ struct ram_indexes {
             if (failed(status)) return {{}, status};
             plan.shard_plans_.push_back_reserved(std::move(split));
         }
-        plan.population_ = size();
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Moves every row of this index into one graph-local part per receiver and links each in:
-     *  @ref plan_split, then @c run and @c finish. @p on_visited answers as in @ref refine, for the
-     *  re-selection alone; a cancel still heals and reports @c cancelled_k.
+    /**
+     *  @brief Moves every row of this index into one graph-local part per receiver and links each
+     *      in: @ref plan_split, then @c run and then @c finish.
+     *
+     *  @p on_visited hears the rounds as in @ref refine; a cancel still ends the receivers' rounds,
+     *      and reports @c cancelled_k.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k No shard is placed, or @p executor holds no
-     *    threads, pool or arenas.
+     *  - @c uninitialized_k No shard is placed, or @p executor holds no threads, pool or arenas.
      *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
      *    index itself, another kernel, geometry or shard count.
      *  - @c contended_k A call or plan holds this index or a receiver, a shard generation opened
@@ -1330,11 +1282,11 @@ struct ram_indexes {
     }
 
     /**
-     *  @brief Reachability of every shard from as many landmarks as one search draws, swept level
-     *      by level over the threads. Read-only, so concurrent insertions leave fresh nodes
+     *  @brief Reachability of every shard from as many landmarks as one search draws, swept depth
+     *      by depth over the threads. Read-only, so concurrent insertions leave fresh nodes
      *      uncounted; bracketed by the epoch as every reader is.
      *
-     *  @param[in,out] executor The threads the levels sweep on; each shard's bitsets come from the
+     *  @param[in,out] executor The threads the depths sweep on; each shard's bitsets come from the
      *      shard's own allocator.
      *
      *  @par Statuses:
@@ -1444,6 +1396,7 @@ struct ram_indexes {
         requires floating_scalar<scalar_t>
     {
         if (kernel() != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         return search_rows_(queries, heads, executor, traversals, config, matches.keys, matches.scores, matches.counts,
                             dummy_predicate_t {}, {});
     }
@@ -1483,6 +1436,7 @@ struct ram_indexes {
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         if (config.traversal == traversal_t::scan_k)
             return scan_ranked_(queries, executor, traversals, config, matches.keys, matches.scores, matches.counts,
                                 predicate);
@@ -1514,6 +1468,7 @@ struct ram_indexes {
                                         std::span<traversal_context_t> traversals,
                                         ranked_hints_view<key_t> hints = {}) noexcept {
         if (config.traversal == traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         return search_rows_(queries, dummy_heads_t {}, executor, traversals, config, matches.keys, matches.scores,
                             matches.counts, predicate, hints);
     }
@@ -1539,6 +1494,7 @@ struct ram_indexes {
                                         std::span<traversal_context_t> traversals,
                                         ranked_hints_view<key_t> = {}) noexcept {
         if (config.traversal != traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         return scan_ranked_(queries, executor, traversals, config, matches.keys, matches.scores, matches.counts,
                             predicate);
     }
@@ -1609,6 +1565,7 @@ struct ram_indexes {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (status_t const refusal = products.refusal(rows_count, scored); failed(refusal)) return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         auto multiply_rows = [&]() noexcept -> expected<search_result_t> {
             if (config.traversal == traversal_t::scan_k) {
                 std::memset(scored.data(), 0, scored.size_bytes());
@@ -1748,6 +1705,7 @@ struct ram_indexes {
         if (!queries_count) return {{}, status_t::success_k};
 
         search_config_t config = maxsim_config.search;
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         std::size_t const wanted = maxsim_config.wanted, stride = matches.stride;
         // Every query walks its rows on one thread, so the driver sizes walks whatever nominates.
         traversal_t const nominating = config.traversal;
@@ -1870,6 +1828,7 @@ struct ram_indexes {
         if (outputs.rows != rows_count || outputs.columns != columns || (!carry.empty() && carry.size() != rows_count))
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
 
         // Past the token's imported heads, their `f32` rows, then their softmax states.
         using slice_t = arena_allocator<byte_t>;
@@ -1932,6 +1891,20 @@ struct ram_indexes {
          *  none. */
         ram_indexes* owner = nullptr;
 
+        /** Bytes one request to the drives under a load's parts carries, the least across them;
+         *  zero for a buffer. */
+        std::size_t request_bytes = 0;
+
+        /** Learns the request size of the drives under @p mappings, which sizes every shard
+         *  plan's runs. */
+        status_t open_sources(std::span<mapped_file_t> mappings) noexcept {
+            for (mapped_file_t const& mapping : mappings) {
+                std::size_t const bytes = mapping.request_bytes();
+                request_bytes = request_bytes ? min_of(request_bytes, bytes ? bytes : request_bytes) : bytes;
+            }
+            return status_t::success_k;
+        }
+
         /**
          *  Closes every shard of the loading index under its unique side.
          *
@@ -1972,15 +1945,16 @@ struct ram_indexes {
         }
 
         /**
-         *  @brief Opens the load plan of @p rows in shard @p shard, the shard's own @c plan_load.
+         *  @brief Opens the load plan of @p rows in shard @p shard, the shard's own @c plan_load,
+         *      in runs of about one request.
          *
          *  @par Statuses:
          *  - @c contended_k A dispensed batch has yet to publish, or another claim won first.
          *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
          */
-        static expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
-                                                                       std::size_t rows) noexcept {
-            return shards[shard].index->plan_load(rows);
+        expected<typename index_t::load_plan_t> open_shard_load(shards_t& shards, std::size_t shard,
+                                                                std::size_t rows) const noexcept {
+            return shards[shard].index->plan_load(rows, request_bytes);
         }
         static void end_save(shards_t&) noexcept {}
     };
@@ -1990,7 +1964,7 @@ struct ram_indexes {
     using save_plan_t = shard_save_plan<shards_t, checkpoint_residency_t>;
 
     /** One load in flight across every shard: the mapped parts, one shard plan each, and the flat
-     *  steps their rows arrive in - one per part's share of one storage chunk. */
+     *  tasks their rows arrive in - one per part's share of one run. */
     using load_plan_t = shard_load_plan<shards_t, checkpoint_residency_t>;
 
     /**
@@ -2099,7 +2073,7 @@ struct ram_indexes {
     }
 
     /**
-     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its steps
+     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its tasks
      *      fanned out over @p executor.
      *
      *  @param[in] path The monolith's path, or the manifest's.
@@ -2124,7 +2098,7 @@ struct ram_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(path, config);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan, executor); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan, executor); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
@@ -2147,13 +2121,13 @@ struct ram_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(buffer, config);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan, executor); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan, executor); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
     /**
      *  @brief Restores the checkpoint at @p path into the placed shards - the one-shot over
-     *      @ref plan_load, its steps fanned out over @p executor.
+     *      @ref plan_load, its tasks fanned out over @p executor.
      *
      *  The index must be empty. A cancelled or failed load clears it and reports why, so nothing
      *  is published and the next load starts clean.
@@ -2164,7 +2138,7 @@ struct ram_indexes {
      *    dispensed batch has yet to publish, another call holds @p executor, or its pool runs
      *    another dispatch.
      *  - @c config_mismatch_k The index holds entries, the checkpoint's geometry, dtypes or metric
-     *    differ from the shards', or a step's rows rebase past its plan.
+     *    differ from the shards', or a task's rows rebase past its plan.
      *  - @c invalid_argument_k The checkpoint or a part path does not parse.
      *  - @c malformed_k The checkpoint lists no part, a part, its header or its key column does
      *    not parse, or its connectivity or dimensions are unusable.
@@ -2178,7 +2152,7 @@ struct ram_indexes {
         {
             auto [plan, status] = plan_load(path, config);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan, executor);
+            settled = drain_tasks_(plan, executor);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         // Nothing is published by a failed or cancelled load: the shards go back to empty, once
@@ -2189,8 +2163,8 @@ struct ram_indexes {
     }
 
     /**
-     *  Restores the checkpoint held in @p buffer - the one-shot over the bytes form of
-     *  @ref plan_load.
+     *  @brief Restores the checkpoint held in @p buffer - the one-shot over the bytes form
+     *      of @ref plan_load.
      *
      *  @par Statuses:
      *  - @c uninitialized_k No shard is placed, or @p executor holds no pool, arenas or workers.
@@ -2198,7 +2172,7 @@ struct ram_indexes {
      *    dispensed batch has yet to publish, another call holds @p executor, or its pool runs
      *    another dispatch.
      *  - @c config_mismatch_k The index holds entries, the checkpoint's geometry, dtypes or metric
-     *    differ from the shards', or a step's rows rebase past its plan.
+     *    differ from the shards', or a task's rows rebase past its plan.
      *  - @c malformed_k The manifest lists no part, a part, its header or its key column does not
      *    parse, or its connectivity or dimensions are unusable.
      *  - @c unknown_kind_k A shard reserving for the checkpoint cannot finalize its kernel.
@@ -2211,7 +2185,7 @@ struct ram_indexes {
         {
             auto [plan, status] = plan_load(buffer, config);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan, executor);
+            settled = drain_tasks_(plan, executor);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         if (failed(settled)) [[maybe_unused]]
@@ -2504,7 +2478,7 @@ struct ram_indexes {
     }
 
     /** Stored rows one gather block holds: as many as share @p cache_bytes with one pack, never
-     *  fewer than a kit step, and one step when the cache is unknown. */
+     *  fewer than a kit task, and one task when the cache is unknown. */
     std::size_t block_rows_(std::size_t cache_bytes) const noexcept
         requires index_t::has_tiles_k
     {
@@ -2921,7 +2895,7 @@ struct ram_indexes {
 
         if constexpr (index_t::has_tiles_k)
             if (rows >= tiles_kit_t::tile_columns_k) {
-                if (failed(traversal.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k, 0)))
+                if (failed(traversal.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k)))
                     return status_t::bad_alloc_k;
                 tiled_fold_t fold {*this, query_rows, staged, config.cache_bytes, watermarks, traversal};
                 if (status_t const nominated = nominate([&](key_t const& key) noexcept { fold.add(key, rank_key); });
@@ -3075,11 +3049,7 @@ struct ram_indexes {
                                             progress_type_& on_visited) noexcept {
         carved_traversals_t traversals {arena_allocator<traversal_context_t, forkunion_allocator_t>(executor.arena(0))};
         if (status_t const carved = carve_traversals_(traversals, executor); failed(carved)) return {{}, carved};
-        status_t ran = plan.run(executor, to_writable_span(traversals), on_visited);
-        // A one-shot call consumes every donor however it stops: the rest move in unwalked, and the
-        // heal re-links them.
-        if (ran == status_t::cancelled_k)
-            if (status_t const moved = plan.move_pending_(executor); failed(moved)) ran = moved;
+        status_t const ran = plan.run(executor, to_writable_span(traversals), on_visited);
         auto const [result, finish_status] = plan.finish(executor, to_writable_span(traversals));
         return {result, failed(finish_status) ? finish_status : ran};
     }
@@ -3089,7 +3059,7 @@ struct ram_indexes {
     /**
      *  @brief Packs every shard of @p sources into a shard of this index under @p bound rows, as
      *      @ref shard_set::pack does with @p rank choosing among the shards with room, opening a
-     *      shard generation when none has room; then sizes @p plan's part runs to match.
+     *      shard generation when none has room, into @p plan's moves.
      *
      *  Move order numbers the source shards: this index's own first when it is among
      *  @p sources, then every other source's in order.
@@ -3121,21 +3091,16 @@ struct ram_indexes {
             return shards_.open_shard_generation_past_seal_(
                 shards_.open_shard_generation(), [this](shard_t const& built) noexcept { return build_shard_(built); });
         };
-        if (status_t const packed = shards_.pack(to_writable_span(plan.moves_), own, bound, source_shard, domain_of,
-                                                 rank, open);
-            failed(packed))
-            return packed;
-        return shards_t::size_parts(to_span(plan.moves_), shards_.size(), plan.part_offsets_, plan.part_bases_);
+        return shards_.pack(to_writable_span(plan.moves_), own, bound, source_shard, domain_of, rank, open);
     }
 
     /** Moves in every row of @p donor that @p moves, one per donor shard, name, under the closed
      *  dispensers of both indexes and the executor's claim @p refining holds: the donor's gate and
-     *  every other fallible step first, then the chunk steps, which cannot fail, each copying its
-     *  rows' keys, then one task per receiving shard files them, then one commit bracket publishes,
-     *  and the moved shards enter the plan's parts. A donor other than this index then forgets its
-     *  rows in place inside its window; this index as its own donor compacts in place, its moved
-     *  shards forgetting their rows and keys inside one window around the bracket, the emptied
-     *  shards staying as idle slots. */
+     *  every other fallible step first, then the chunk tasks, which cannot fail, each copying its
+     *  rows' keys, then one task per receiving shard files them, then one commit bracket publishes.
+     *  A donor other than this index then forgets its rows in place inside its window; this index
+     *  as its own donor compacts in place, its moved shards forgetting their rows and keys inside
+     *  one window around the bracket, the emptied shards staying as idle slots. */
     status_t absorb_(ram_indexes& donor, std::span<shard_move_t const> moves, executor_t& executor,
                      refine_plan_t& refining) noexcept {
         std::size_t const shards = refining.cursors_.size();
@@ -3165,9 +3130,9 @@ struct ram_indexes {
             plans.push_back_reserved(std::move(plan));
         }
 
-        // A step is one storage chunk of a receiving shard, which the donor parts moving there
-        // fill in turn, each with its keys; a chunk may straddle several parts.
-        auto copy_chunk = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk,
+        // A task is one run of a receiving shard, which the donor parts moving there fill in turn,
+        // each filing its keys; a run may straddle several parts.
+        auto copy_chunk = [&](std::size_t into, typename index_t::load_plan_t::task_t const& chunk,
                               std::size_t) noexcept -> status_t {
             iota_view<node_id_t> placed {plans[into].base, plans[into].base};
             for (std::size_t from = 0; from != donors && placed.bound < chunk.index_nodes.bound; ++from) {
@@ -3175,25 +3140,21 @@ struct ram_indexes {
                 index_t const& part = *donor.shards_[from].index;
                 iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(part.size())};
                 placed = {placed.bound, placed.bound + source_range.bound};
-                typename index_t::load_plan_t::step_t step = chunk;
-                step.index_nodes = {max_of(chunk.index_nodes.first, placed.first),
+                typename index_t::load_plan_t::task_t task = chunk;
+                task.index_nodes = {max_of(chunk.index_nodes.first, placed.first),
                                     min_of(chunk.index_nodes.bound, placed.bound)};
-                if (step.index_nodes.first >= step.index_nodes.bound) continue;
-                step.source_nodes = {step.index_nodes.first - placed.first, step.index_nodes.bound - placed.first};
-                if (status_t const loaded = plans[into].load(step, part, source_range); failed(loaded)) return loaded;
+                if (task.index_nodes.first >= task.index_nodes.bound) continue;
+                task.source_nodes = {task.index_nodes.first - placed.first, task.index_nodes.bound - placed.first};
+                if (status_t const loaded = plans[into].load(task, part, source_range); failed(loaded)) return loaded;
             }
             return status_t::success_k;
         };
-        if (status_t const copied = drain_steps_(plans, to_writable_span(cursors), executor, copy_chunk);
+        // Every run filed its keys, invisible until its shard's watermark moves.
+        if (status_t const copied = drain_tasks_(plans, to_writable_span(cursors), executor, copy_chunk);
             failed(copied))
             return copied;
-        // Each receiving shard's map takes one writer, its keys invisible until its watermark
-        // moves.
-        auto publish_keys = [&](std::size_t into, std::size_t, std::size_t) noexcept { plans[into].publish_keys(); };
-        if (failed(executor.for_tasks(shards, publish_keys)))
-            for (std::size_t into = 0; into != shards; ++into) publish_keys(into, 0, 0);
 
-        // Every step ran, so no plan refuses; the bracket shows a search and a lookup every shard's
+        // Every task ran, so no plan refuses; the bracket shows a search and a lookup every shard's
         // rows or none. In place, the window around it makes a reader overlapping the moves retry
         // rather than miss or double a row.
         status_t published = status_t::success_k;
@@ -3201,13 +3162,7 @@ struct ram_indexes {
         shards_.begin_commit();
         for (typename index_t::load_plan_t& plan : plans)
             if (succeeded(published)) published = plan.finish();
-        if (succeeded(published)) {
-            // Each moved shard becomes a part of its own in the plan, which sized every shard's
-            // run.
-            shards_.record_parts(donor.shards_, moves, plans, refining.part_bases_.data(),
-                                 to_span(refining.part_offsets_));
-            if (in_place) forget_moved_(moves);
-        }
+        if (succeeded(published) && in_place) forget_moved_(moves);
         shards_.end_commit();
         if (in_place) shards_.end_window();
         if (failed(published) || in_place) return published;
@@ -3226,21 +3181,21 @@ struct ram_indexes {
                 shards_[from].index->forget_(static_cast<node_id_t>(shards_[from].index->size()));
     }
 
-    /** One reachability audit over every shard's plan: the bitsets restart, then every level
-     *  sweeps every step and advances each plan once, until no level expands a node. */
+    /** One reachability audit over every shard's plan as planned: every depth sweeps every task and
+     *  advances each plan once, until no level expands a node. Restarting a fresh plan would keep
+     *  its drawn root as an earlier audit's, which never gives way to a larger island. */
     template <typename plan_type_>
     status_t sweep_reachability_(growing_buffer<plan_type_, forkunion_allocator_t>& plans,
                                  std::span<std::size_t> cursors, executor_t& executor) noexcept {
-        for (plan_type_& plan : plans) plan.restart_sweep();
-        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t) noexcept {
-            return plans[shard].sweep(step), status_t::success_k;
+        auto sweep_task = [&](std::size_t shard, auto const& task, std::size_t) noexcept {
+            return plans[shard].sweep(task), status_t::success_k;
         };
         for (std::size_t expanded = 1; expanded;) {
             std::memset(cursors.data(), 0, cursors.size_bytes());
-            if (status_t const drained = drain_steps_(plans, cursors, executor, sweep_step); failed(drained))
+            if (status_t const drained = drain_tasks_(plans, cursors, executor, sweep_task); failed(drained))
                 return drained;
             expanded = 0;
-            for (plan_type_& plan : plans) expanded += plan.advance_level();
+            for (plan_type_& plan : plans) expanded += plan.advance_depth();
         }
         return status_t::success_k;
     }
@@ -3505,14 +3460,14 @@ struct ram_indexes {
      *      a query's block starts is scored, and every row beating a query's threshold goes
      *      through @p sink.
      *
-     *  Each block of queries takes a thread and its traversal, scans every shard below one snapshot
-     *  of the watermarks, hands each arriving row to @p sink with the shard, and closes the shard,
-     *  then the block. A block at least one tile wide, on a platform with a matrix engine for the
-     *  scalar, streams through it a pack at a time, in blocks of rows sized by @p config's cache
-     *  bytes; a single query scores four rows at a time. Either way the shards' own kit finalizes
-     *  the distances, so they match the walk's. The sink's scratch sits in each traversal's staged
-     *  queries past what the scan stages, so nothing allocates once warm. The callers placed a
-     *  shard, checked a non-empty batch and zeroed the sink's counts.
+     *  Each thread takes one group of an even share of the queries and its traversal, scans every
+     *  shard below one snapshot of the watermarks, hands each arriving row to @p sink with the
+     *  shard, and closes the shard, then the group, so the rows pass once per thread. The shards'
+     *  scorer streams their rows in blocks sized by @p config's cache bytes against blocks of the
+     *  group, and the shards' own kit finalizes the distances, so they match the walk's. The
+     *  sink's scratch sits in each traversal's staged queries past what the scan stages, so
+     *  nothing allocates once warm. The callers placed a shard, checked a non-empty batch and
+     *  zeroed the sink's counts.
      */
     template <typename sink_type_, typename predicate_type_>
     expected<search_result_t> scan_rows_(rows_view_t queries, executor_t& executor,
@@ -3522,13 +3477,13 @@ struct ram_indexes {
         std::size_t const width = index_t::scan_width(queries_count, executor.size());
         std::size_t const scan_bytes = round_up_to_multiple<std::size_t>(shards_[0].index->scan_staged_bytes(width),
                                                                          default_alignment_k);
-        auto scan_block = [&](std::size_t block, std::size_t thread, traversal_context_t& traversal,
+        auto scan_group = [&](std::size_t group, std::size_t thread, traversal_context_t& traversal,
                               std::span<node_id_t const> watermarks, u64_t) noexcept {
-            std::size_t const first = block * width;
-            rows_view_t const block_queries = queries.slice(first, min_of(width, queries_count - first));
+            std::size_t const first = group * width;
+            rows_view_t const group_queries = queries.slice(first, min_of(width, queries_count - first));
             byte_t* const staged = traversal.staged_queries.data() + scan_bytes;
-            // A rerun block starts its sink over.
-            sink.open(first, block_queries.rows, staged);
+            // A rerun group starts its sink over.
+            sink.open(first, group_queries.rows, staged);
             for (std::size_t shard = 0; shard != watermarks.size(); ++shard) {
                 shard_t const& slot = shards_[shard];
                 auto keep = [&](std::size_t column, scored_node_t const candidate) noexcept {
@@ -3536,25 +3491,25 @@ struct ram_indexes {
                 };
                 status_t scanned = status_t::success_k;
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
-                    scanned = slot.index->scan_(block_queries, dummy_predicate_t {}, keep, traversal, config,
+                    scanned = slot.index->scan_(group_queries, dummy_predicate_t {}, keep, traversal, config,
                                                 watermarks[shard]);
                 else {
                     keyed_t const& shard_keys = slot.index->keys();
                     auto const key_of = [&shard_keys](node_id_t node) noexcept { return shard_keys[node]; };
-                    scanned = slot.index->scan_(block_queries,
+                    scanned = slot.index->scan_(group_queries,
                                                 node_predicate {thread_predicate(predicate, thread), key_of}, keep,
                                                 traversal, config, watermarks[shard]);
                 }
                 if (failed(scanned)) return scanned;
-                if (status_t const closed = sink.close_shard(first, block_queries, slot, traversal, staged);
+                if (status_t const closed = sink.close_shard(first, group_queries, slot, traversal, staged);
                     failed(closed))
                     return closed;
             }
-            return sink.close(first, block_queries.rows, staged);
+            return sink.close(first, group_queries.rows, staged);
         };
         return for_each_row_(divide_round_up(queries_count, width), executor, traversals, search_config_t {},
-                             scan_bytes + sink.staged_bytes(width), scan_block, sink.counts, predicate,
-                             scan_round_capacity<typename index_t::tiles_kit_t>());
+                             scan_bytes + sink.staged_bytes(width), scan_group, sink.counts, predicate,
+                             index_t::scan_scorer_t::step_rows_k);
     }
 
     /** The hint keys a query takes, at most one per landmark a walk draws, with one cleared byte
@@ -3677,6 +3632,9 @@ struct ram_indexes {
             traversal.walk_width = walk_width(executor.size(), live, rows_count - row, filling);
             status_t refusal = status_t::contended_k;
             for (std::size_t attempt = 0; attempt != 2; ++attempt) {
+                // Landmarks follow the row, never the thread that took it, so walks repeat
+                // run to run.
+                traversal.random_generator = seeded_stream(u64_t(row) + 1);
                 u64_t const epoch = shards_.read_epoch();
                 std::span<node_id_t const> const watermarks = snapshot_(traversal);
                 status_t const ran = !watermarks.empty() ? per_row(row, thread, traversal, watermarks, epoch)
@@ -3724,15 +3682,15 @@ struct ram_indexes {
      *      home shard first, then helps the rest, one atomic cursor per shard being the whole
      *      schedule.
      *
-     *  @p per_step runs one step on the thread that pulled it and answers its status, and the
+     *  @p per_task runs one task on the thread that pulled it and answers its status, and the
      *  first failure wins.
      *
-     *  @p cursors is the caller's, one entry per plan, so an audit reuses one across its levels
+     *  @p cursors is the caller's, one entry per plan, so an audit reuses one across its depths
      *  rather than allocating per level.
      */
-    template <typename plan_type_, typename per_step_type_>
-    status_t drain_steps_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, std::span<std::size_t> cursors,
-                          executor_t& executor, per_step_type_& per_step) noexcept {
+    template <typename plan_type_, typename per_task_type_>
+    status_t drain_tasks_(growing_buffer<plan_type_, forkunion_allocator_t>& plans, std::span<std::size_t> cursors,
+                          executor_t& executor, per_task_type_& per_task) noexcept {
         std::size_t const shards = plans.size();
         if (cursors.size() != shards) return status_t::config_mismatch_k;
         status_t outcome = status_t::success_k;
@@ -3741,13 +3699,13 @@ struct ram_indexes {
             for (std::size_t visited = 0; visited != shards; ++visited) {
                 std::size_t const shard = (home + visited) % shards;
                 atomic_ref<std::size_t> const cursor {cursors[shard]};
-                auto const steps = plans[shard].steps();
-                // The failure check comes before the claim, so every claimed step runs and the
+                auto const tasks = plans[shard].tasks();
+                // The failure check comes before the claim, so every claimed task runs and the
                 // cursor says where a stopped plan stopped.
                 while (!failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) {
                     std::size_t const position = cursor.fetch_add(1, std::memory_order_relaxed);
-                    if (position >= steps.size()) break;
-                    status_t const stepped = per_step(shard, steps[position], thread);
+                    if (position >= tasks.size()) break;
+                    status_t const stepped = per_task(shard, tasks[position], thread);
                     if (succeeded(stepped)) continue;
                     status_t expected_status = status_t::success_k;
                     atomic_ref<status_t>(outcome).compare_exchange_strong(
@@ -3760,35 +3718,44 @@ struct ram_indexes {
         return atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
     }
 
-    /** Fans @p plan 's steps out over the executor's threads: each thread drains the run of the
-     *  shard it is home to first, then helps the rest, one atomic cursor per shard being the whole
-     *  schedule. A save writes each step straight into its part, a load reads each straight out of
-     *  its part, and the first failure wins and stops the rest. */
+    /** Fans @p plan 's tasks out over the executor's threads: each thread drains the run of the
+     *  shard it is home to first, then helps the rest, one atomic cursor per shard being the
+     *  whole schedule. A save writes each task straight into its part, a load reads each
+     *  straight out of its part through one staging span per thread, and the first failure wins
+     *  and stops the rest. */
     template <typename plan_type_>
-    status_t drain_steps_(plan_type_& plan, executor_t& executor) noexcept {
+    status_t drain_tasks_(plan_type_& plan, executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
-        auto const steps = plan.steps();
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
-            planned.save(step);
+        auto const tasks = plan.tasks();
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::task_t const& task) {
+            planned.save(task);
         };
 
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {shards_.allocator()};
         if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
+        // A load reads each run's keys through a staging span per thread, carved after a rewind.
+        std::size_t staging_bytes = 0;
+        if constexpr (!saving_k) {
+            staging_bytes = plan.staging_bytes();
+            if (status_t const rewound = executor.reserve(staging_bytes); failed(rewound)) return rewound;
+        }
         status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
+            bytes_span_t const staging = bytes_of(executor.arena(thread).allocate(staging_bytes, default_alignment_k),
+                                                  staging_bytes);
             std::size_t const home = pick_home_shard_(thread, executor);
             for (std::size_t visited = 0; visited != shards; ++visited) {
                 std::size_t const shard = (home + visited) % shards;
-                iota_view<std::size_t> const own = plan.steps_of(shard);
+                iota_view<std::size_t> const own = plan.tasks_of(shard);
                 atomic_ref<std::size_t> const cursor {cursors[shard]};
                 for (std::size_t taken = cursor.fetch_add(1, std::memory_order_relaxed); taken < own.size();
                      taken = cursor.fetch_add(1, std::memory_order_relaxed)) {
                     if (failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
                     status_t stepped = status_t::success_k;
-                    if constexpr (saving_k) stepped = plan.save(steps[own.first + taken]);
-                    else stepped = plan.load(steps[own.first + taken]);
+                    if constexpr (saving_k) stepped = plan.save(tasks[own.first + taken]);
+                    else stepped = plan.load(tasks[own.first + taken], staging);
                     if (succeeded(stepped)) continue;
                     status_t expected_status = status_t::success_k;
                     atomic_ref<status_t>(outcome).compare_exchange_strong(

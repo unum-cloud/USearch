@@ -274,7 +274,7 @@ class nvme_indexes {
 
     /**
      *  @ref nvme_parts_catalog::health over every part: a forward sweep from as many landmarks as
-     *  one search draws, so @c back_sweeps stays zero.
+     *  one search draws, so @c depth_to_root stays zero.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.

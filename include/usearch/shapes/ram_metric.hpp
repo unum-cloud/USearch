@@ -646,16 +646,14 @@ class shapes_metric {
     template <typename query_allocator_type_>
     void reset(std::span<nk::shapes_packed<scalar_t, query_allocator_type_> const> queries) noexcept {
         if (queries.size() == 1) return reset(queries.front());
-        staged_count_ = 0, round_arena_.clear(), queries_.clear(), widest_points_ = 0;
-        last_status_ = queries_.reserve(queries.size());
-        for (std::size_t query = 0; succeeded(last_status_) && query != queries.size(); ++query) {
-            if (queries[query].size() != 1) last_status_ = status_t::shape_mismatch_k;
-            else {
-                queries_.push_back_reserved(queries[query][0]);
-                widest_points_ = max_of(widest_points_, queries[query].max_points());
-            }
-        }
-        query_packs_ = to_span(queries_);
+        open_batch_(queries);
+    }
+
+    /** Opens rounds scoring every query @p queries borrows at once, as the span of packs does. */
+    template <typename query_allocator_type_>
+    void reset(std::span<nk::shapes_packed<scalar_t, query_allocator_type_> const* const> queries) noexcept {
+        if (queries.size() == 1) return reset(*queries.front());
+        open_batch_(queries);
     }
 
     /** Stages one candidate's pack, or refuses once the quad is full. */
@@ -704,6 +702,27 @@ class shapes_metric {
     }
 
   private:
+
+    /** Gathers the pack of every query @p queries holds or borrows into the table the kernels
+     *  read. */
+    template <typename query_type_>
+    void open_batch_(std::span<query_type_ const> queries) noexcept {
+        staged_count_ = 0, round_arena_.clear(), queries_.clear(), widest_points_ = 0;
+        last_status_ = queries_.reserve(queries.size());
+        for (std::size_t query = 0; succeeded(last_status_) && query != queries.size(); ++query)
+            add_query_(basic::borrowed_query(queries[query]));
+        query_packs_ = to_span(queries_);
+    }
+
+    /** Files the one cloud of @p query in the batch's table, within its reservation. */
+    template <typename query_allocator_type_>
+    void add_query_(nk::shapes_packed<scalar_t, query_allocator_type_> const& query) noexcept {
+        if (query.size() != 1) last_status_ = status_t::shape_mismatch_k;
+        else {
+            queries_.push_back_reserved(query[0]);
+            widest_points_ = max_of(widest_points_, query.max_points());
+        }
+    }
 
     /** Scores every query against the quad in one call into @p results, @b [queries,candidates],
      *  with the kernel of the metric's one kind. */

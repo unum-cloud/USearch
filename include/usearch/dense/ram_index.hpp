@@ -243,70 +243,187 @@ void ask_contenders(admits_type_& admits, quad<node_id_t> const& nodes, quad<sca
     });
 }
 
-/**
- *  @brief Scores every row of @p rows, the first being node @p first, against the queries packed in
- *      @p packed, keeping each row that beats some query's threshold and that @p admits lets in.
- *
- *  Rows stream through the matrix engine @c stream_rows_k at a time into @p dots, as deep as the
- *  logical width of @p rows, which must be the width the queries were packed at. Each row of dots
- *  finalizes against four queries at a time through @p quads_kit_type_, so the distances match a
- *  walk's; @p query_sumsqs and every row of @p dots are read in whole quads past the last query.
- *  @p row_sumsq maps a row of @p rows to its stored sum of squares, @p keep takes a query's column
- *  and the scored node, and answers that query's new threshold. @p admits hears each row beating
- *  some threshold once, a quad of them at a time, or gathered until the step's end when it
- *  aggregates, while the step's dots still hold its distances.
- */
-template <typename tiles_kit_type_, typename quads_kit_type_, typename row_sumsq_type_, typename admits_type_,
-          typename keep_type_>
-void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type_::scalar_t> rows, node_id_t first,
-                void const* packed, std::span<typename quads_kit_type_::scalar_t::dot_result_t const> query_sumsqs,
-                std::span<f32_t> thresholds,
-                nk::matrix_span<typename quads_kit_type_::scalar_t::dot_result_t::raw_t> dots,
-                row_sumsq_type_&& row_sumsq, admits_type_& admits, keep_type_& keep) noexcept {
-    using dot_result_t = typename quads_kit_type_::scalar_t::dot_result_t;
+/** The scorer of an exact scan's blocks where no matrix engine multiplies the scalar: a block of
+ *  queries stays resident in cache while each stored row of a task scores against four of them a
+ *  call, through @c score_step_loop under the kit's target. */
+template <quads_kit quads_kit_type_>
+struct quads_scorer {
+    using scalar_t = typename quads_kit_type_::scalar_t;
+    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
+    using raw_dot_t = typename scalar_t::dot_result_t::raw_t;
+
+    /** A quad of rows a task: the most an aggregating predicate gathers between settles. */
+    static constexpr std::size_t step_rows_k = quad_lanes_k;
+
+    /** A quad of queries a call, the multiple a scan's groups round to. */
+    static constexpr std::size_t step_columns_k = quad_lanes_k;
+
+    /** Dots a task stages per row: none, since the kit finalizes in registers. */
+    static constexpr std::size_t dots_columns_k = 0;
+
+    nk_kernel_kind_t kernel;
+    nk::matrix_view<scalar_t> queries;
+    std::span<norms_t const> query_norms;
+
+    /** Unused: the queries score where they lie. */
+    byte_t const* packed;
+
+    /** Unused: the kit finalizes its dots in registers. */
+    nk::matrix_span<raw_dot_t> dots;
+
+    /** Queries a block of @p columns holds: half of @p cache_bytes in rows of @p row_bytes, the row
+     *  block taking the other half, and every one when no cache is named. */
+    static std::size_t block_columns(std::size_t columns, std::size_t cache_bytes, std::size_t row_bytes) noexcept {
+        if (!cache_bytes) return columns;
+        return min_of(max_of(cache_bytes / (2 * row_bytes), step_columns_k), columns);
+    }
+
+    /** Bytes the packs of a block take: none. */
+    static std::size_t packs_bytes(std::size_t, std::size_t) noexcept { return 0; }
+
+    /** Packs nothing, as the queries score where they lie. */
+    static void pack(nk::matrix_view<scalar_t>, byte_t*) noexcept {}
+
+    /** Scores @p task against the block into @p step_distances, @b [rows,queries]. */
+    void score(nk::matrix_view<scalar_t> task, std::span<norms_t const> row_norms,
+               nk::matrix_span<f32_t> step_distances) const noexcept {
+        invoke_under_target_<score_step_loop, quads_kit_type_>(kernel, task, row_norms, queries, query_norms,
+                                                               step_distances);
+    }
+};
+
+/** The scorer of an exact scan's blocks where a matrix engine multiplies the scalar: a block of
+ *  queries is packed once, stored rows stream against the pack a task at a time, and every quad
+ *  of a row's dots finalizes through @p quads_kit_type_, so the distances match a walk's. */
+template <typename tiles_kit_type_, quads_kit quads_kit_type_>
+struct tiles_scorer {
+    using scalar_t = typename quads_kit_type_::scalar_t;
+    using dot_result_t = typename scalar_t::dot_result_t;
+    using norms_t = vector_norms<dot_result_t>;
     using raw_dot_t = typename dot_result_t::raw_t;
     using finalized_vec_t = typename quads_kit_type_::finalized_vec_t;
-    using row_distances_t = std::array<f32_t, tiles_kit_type_::pack_columns_k>;
-    static_assert(sizeof(finalized_vec_t) == 4 * sizeof(raw_dot_t), "A finalizer takes four dot lanes");
-    std::size_t const rows_count = rows.extent(0), dimensions = rows.extent(1), columns = thresholds.size();
-    for (std::size_t offset = 0; offset < rows_count; offset += tiles_kit_type_::stream_rows_k) {
-        std::size_t const step_rows = min_of(tiles_kit_type_::stream_rows_k, rows_count - offset);
-        nk::matrix_view<typename quads_kit_type_::scalar_t> const step = rows(nk::range(offset, offset + step_rows),
-                                                                              nk::slice);
+    static_assert(sizeof(finalized_vec_t) == quad_lanes_k * sizeof(raw_dot_t), "A finalizer takes four dot lanes");
+
+    /** Rows one engine call streams against a pack: the most an aggregating predicate gathers
+     *  between settles. */
+    static constexpr std::size_t step_rows_k = tiles_kit_type_::stream_rows_k;
+
+    /** Queries one engine tile holds, the multiple a scan's groups round to. */
+    static constexpr std::size_t step_columns_k = tiles_kit_type_::tile_columns_k;
+
+    /** Dots a task stages per row: one per query a pack holds. */
+    static constexpr std::size_t dots_columns_k = tiles_kit_type_::pack_columns_k;
+
+    nk_kernel_kind_t kernel;
+    nk::matrix_view<scalar_t> queries;
+    std::span<norms_t const> query_norms;
+
+    /** The block's pack, which @ref pack wrote. */
+    byte_t const* packed;
+
+    /** One task's raw dots, @b [rows,pack], read a quad at a time past the block's last query. */
+    nk::matrix_span<raw_dot_t> dots;
+
+    /** Queries a block of @p columns holds: one pack, whatever the cache. */
+    static std::size_t block_columns(std::size_t columns, std::size_t, std::size_t) noexcept {
+        return min_of(dots_columns_k, columns);
+    }
+
+    /** Bytes the packs of @p columns queries of @p dimensions take, each pack on its own line. */
+    static std::size_t packs_bytes(std::size_t columns, std::size_t dimensions) noexcept {
+        nk_size_t pack_bytes = 0;
+        [[maybe_unused]] nk_status_t const sized = tiles_kit_type_::pack_size(dots_columns_k, dimensions, &pack_bytes);
+        assert(sized == nk_success_k && "A matrix engine sizes any pack");
+        return divide_round_up(columns, dots_columns_k) *
+               round_up_to_multiple<std::size_t>(pack_bytes, default_alignment_k);
+    }
+
+    /** Packs the block of @p queries, at most a pack of them, into @p packed. */
+    static void pack(nk::matrix_view<scalar_t> queries, byte_t* packed) noexcept {
+        std::size_t const columns = queries.extent(0);
+        [[maybe_unused]] nk_status_t const packing = tiles_kit_type_::pack(
+            queries.raw_values_data(), columns, queries.extent(1), static_cast<std::size_t>(queries.stride_bytes(0)),
+            packed, 0, columns, nullptr);
+        assert(packing == nk_success_k && "A matrix engine packs any block");
+    }
+
+    /** Scores @p task against the pack into @p step_distances, @b [rows,queries]: one engine call,
+     *  then the seats swapped, as the finalizer's are symmetric, the row against four queries. */
+    void score(nk::matrix_view<scalar_t> task, std::span<norms_t const> row_norms,
+               nk::matrix_span<f32_t> step_distances) const noexcept {
+        std::size_t const rows = task.extent(0), columns = queries.extent(0);
         [[maybe_unused]] nk_status_t const scored = tiles_kit_type_::dots_packed(
-            step.raw_values_data(), packed, dots.data(), step_rows, columns, dimensions,
-            static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
+            task.raw_values_data(), packed, dots.data(), rows, columns, task.extent(1),
+            static_cast<std::size_t>(task.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
             nullptr);
         assert(scored == nk_success_k && "A matrix engine scores any call");
-        auto distances_of = [&](std::size_t row) noexcept {
-            // The finalizer's seats are symmetric, so the stored row takes the query's against four
-            // queries.
-            row_distances_t row_distances;
-            std::span<raw_dot_t const> const row_dots = to_span(dots.row(row - offset).as_vector());
-            dot_result_t const sumsq = row_sumsq(row);
-            for (std::size_t column = 0; column < columns; column += quad_lanes_k) {
-                quad<f32_t> const column_distances = convert_to_distances<quads_kit_type_>(
-                    kernel, *reinterpret_cast<finalized_vec_t const*>(&row_dots[column]), sumsq,
-                    *reinterpret_cast<finalized_vec_t const*>(&query_sumsqs[column]));
-                std::memcpy(&row_distances[column], column_distances.data(), sizeof(column_distances));
+        for (std::size_t row = 0; row != rows; ++row) {
+            raw_dot_t const* const row_dots = &dots(row, 0);
+            dot_result_t const row_sumsq = row_norms.empty() ? dot_result_t {} : row_norms[row].sumsq;
+            f32_t* const distances = &step_distances(row, 0);
+            for (std::size_t first = 0; first < columns; first += quad_lanes_k) {
+                std::size_t const lanes = min_of(quad_lanes_k, columns - first);
+                alignas(16) quad<dot_result_t> sumsqs;
+                for (std::size_t lane = 0; lane != quad_lanes_k; ++lane)
+                    sumsqs[lane] = query_norms[first + min_of(lane, lanes - 1)].sumsq;
+                quad<f32_t> const lane_distances = convert_to_distances<quads_kit_type_>(
+                    kernel, *reinterpret_cast<finalized_vec_t const*>(row_dots + first), row_sumsq,
+                    *reinterpret_cast<finalized_vec_t const*>(sumsqs.data()));
+                std::memcpy(distances + first, lane_distances.data(), lanes * sizeof(f32_t));
             }
-            return row_distances;
+        }
+    }
+};
+
+/** The scorer of an exact scan's blocks: the matrix engine's where the class has one for the
+ *  scalar, the walk's quads kit otherwise. */
+template <typename tiles_kit_type_, quads_kit quads_kit_type_>
+struct scan_scorer {
+    using scorer_t = tiles_scorer<tiles_kit_type_, quads_kit_type_>;
+};
+
+template <quads_kit quads_kit_type_>
+struct scan_scorer<no_tiles_kit_t, quads_kit_type_> {
+    using scorer_t = quads_scorer<quads_kit_type_>;
+};
+
+/**
+ *  @brief Scores every row of @p rows, the first being node @p first, against the block of
+ *      queries @p scorer holds, keeping each row that beats some query's threshold and that
+ *      @p admits lets in.
+ *
+ *  Rows go through @p scorer a task at a time into @p step_distances, @b [rows,queries], beside
+ *  their @p row_norms, empty when the rows keep none. @p keep takes a query's column and the scored
+ *  node, and answers that query's new threshold. @p admits hears each row beating some threshold
+ *  once, a quad of them at a time, or gathered until the task's end when it aggregates, while
+ *  @p step_distances still hold the task's distances.
+ */
+template <typename scorer_type_, typename admits_type_, typename keep_type_>
+void scan_block(scorer_type_ const& scorer, nk::matrix_view<typename scorer_type_::scalar_t> rows, node_id_t first,
+                std::span<typename scorer_type_::norms_t const> row_norms, std::span<f32_t> thresholds,
+                nk::matrix_span<f32_t> step_distances, admits_type_& admits, keep_type_& keep) noexcept {
+    std::size_t const rows_count = rows.extent(0), columns = thresholds.size();
+    for (std::size_t offset = 0; offset < rows_count; offset += scorer_type_::step_rows_k) {
+        std::size_t const step_rows = min_of(scorer_type_::step_rows_k, rows_count - offset);
+        scorer.score(rows(nk::range(offset, offset + step_rows), nk::slice),
+                     row_norms.empty() ? row_norms : row_norms.subspan(offset, step_rows), step_distances);
+        auto distances_of = [&](std::size_t row) noexcept {
+            return std::span<f32_t const>(&step_distances(row - offset, 0), columns);
         };
         auto keep_entry = [&](scan_payload_t row) noexcept {
-            row_distances_t const row_distances = distances_of(row);
+            std::span<f32_t const> const distances = distances_of(row);
             node_id_t const node = static_cast<node_id_t>(first + row);
             for (std::size_t column = 0; column != columns; ++column)
-                if (row_distances[column] < thresholds[column])
-                    thresholds[column] = keep(column, scored_node_t {node, row_distances[column]});
+                if (distances[column] < thresholds[column])
+                    thresholds[column] = keep(column, scored_node_t {node, distances[column]});
         };
         quad<node_id_t> nodes;
         quad<scan_payload_t> payloads;
         std::size_t filled = 0;
         for (std::size_t row = offset; row != offset + step_rows; ++row) {
-            row_distances_t const row_distances = distances_of(row);
+            std::span<f32_t const> const distances = distances_of(row);
             bool closer = false;
-            for (std::size_t column = 0; column != columns; ++column)
-                closer |= row_distances[column] < thresholds[column];
+            for (std::size_t column = 0; column != columns; ++column) closer |= distances[column] < thresholds[column];
             if (!closer) continue;
             nodes[filled] = static_cast<node_id_t>(first + row), payloads[filled] = static_cast<scan_payload_t>(row);
             if (++filled != quad_lanes_k) continue;
@@ -323,8 +440,9 @@ void scan_tiles(nk_kernel_kind_t kernel, nk::matrix_view<typename quads_kit_type
  *      dots of each segment's rows, those below @p segment_ends[s] and at or past the previous end,
  *      raise segment s's row of @p maxima, one column per packed query row.
  *
- *  Rows stream through the matrix engine @c stream_rows_k at a time into @p dots, as @c scan_tiles
- *  streams them; a matrix engine answers inner products, which MaxSim takes as they are.
+ *  Rows stream through the matrix engine @c stream_rows_k at a time into @p dots, as a
+ *  @c tiles_scorer streams them; a matrix engine answers inner products, which MaxSim takes
+ *  as they are.
  */
 template <typename tiles_kit_type_, typename scalar_type_>
 void fold_tiles(nk::matrix_view<scalar_type_> rows, void const* packed, std::span<std::size_t const> segment_ends,
@@ -336,10 +454,10 @@ void fold_tiles(nk::matrix_view<scalar_type_> rows, void const* packed, std::spa
     std::size_t segment = 0;
     for (std::size_t offset = 0; offset < rows_count; offset += tiles_kit_type_::stream_rows_k) {
         std::size_t const step_rows = min_of(tiles_kit_type_::stream_rows_k, rows_count - offset);
-        nk::matrix_view<scalar_type_> const step = rows(nk::range(offset, offset + step_rows), nk::slice);
+        nk::matrix_view<scalar_type_> const task = rows(nk::range(offset, offset + step_rows), nk::slice);
         [[maybe_unused]] nk_status_t const scored = tiles_kit_type_::dots_packed(
-            step.raw_values_data(), packed, dots.data(), step_rows, columns, dimensions,
-            static_cast<std::size_t>(step.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
+            task.raw_values_data(), packed, dots.data(), step_rows, columns, dimensions,
+            static_cast<std::size_t>(task.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)), nullptr, 0,
             nullptr);
         assert(scored == nk_success_k && "A matrix engine scores any call");
         for (std::size_t row = 0; row != step_rows; ++row) {
@@ -373,14 +491,6 @@ void fold_quads(nk::vector_view<scalar_type_> row, vector_norms<typename scalar_
                                                                            lane_norms);
         for (std::size_t lane = 0; lane != lanes; ++lane) update(maxima[first + lane], scored.dots[lane]);
     }
-}
-
-/** The most rows an exact scan asks an aggregating predicate between two settles: one streamed step
- *  of @p tiles_kit_type_ where it is a matrix engine, one quad otherwise. */
-template <typename tiles_kit_type_>
-constexpr std::size_t scan_round_capacity() noexcept {
-    if constexpr (std::is_same_v<tiles_kit_type_, no_tiles_kit_t>) return quad_lanes_k;
-    else return max_of<std::size_t>(tiles_kit_type_::stream_rows_k, quad_lanes_k);
 }
 
 #pragma region Rescorings
@@ -645,12 +755,11 @@ struct traversal_context {
     using dot_result_t = typename scalar_t::dot_result_t;
     using raw_dot_t = typename dot_result_t::raw_t;
     using dots_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<raw_dot_t>;
-    using sumsqs_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<dot_result_t>;
     using distances_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<f32_t>;
     using bytes_tensor_t = nk::tensor<std::byte, visits_allocator_t, 1>;
     using dots_tensor_t = nk::tensor<raw_dot_t, dots_allocator_t, 2>;
-    using sumsqs_tensor_t = nk::tensor<dot_result_t, sumsqs_allocator_t, 2>;
-    using thresholds_tensor_t = nk::tensor<f32_t, distances_allocator_t, 2>;
+    using distances_tensor_t = nk::tensor<f32_t, distances_allocator_t, 2>;
+    using thresholds_tensor_t = nk::tensor<f32_t, distances_allocator_t, 1>;
 
     /** One selection's output: @b [kept] scored nodes. The tensor's live shape is the fill and
      *  @c capacity() the reservation, so no separate count exists. */
@@ -715,15 +824,26 @@ struct traversal_context {
      *  packed block. */
     bytes_tensor_t staged_queries;
 
-    /** The raw dots one step of stored rows scores against a packed block, @b [rows,queries]. */
+    /** The raw dots one task of stored rows scores against a packed block, @b [rows,queries]. */
     dots_tensor_t step_dots;
 
-    /** An exact scan's query sums of squares, @b [packs,queries], zero past each pack's last
-     *  query, since a finalizer reads them a quad at a time. */
-    sumsqs_tensor_t query_sumsqs;
+    /** The distances one task of stored rows scores against a block of an exact scan's queries,
+     *  @b [rows,queries]. */
+    distances_tensor_t step_distances;
 
-    /** An exact scan's worst kept distance of every query, @b [packs,queries]. */
+    /** An exact scan's query norms, one per query of its group. */
+    norms_tensor_t query_norms;
+
+    /** An exact scan's worst kept distance of every query of its group. */
     thresholds_tensor_t thresholds;
+
+    /** Per entry of the neighborhood in hand, its nearest neighborhood-mates by position, a
+     *  max-heap each: @b [capacity,connectivity]; a gather keeps each entry's nearest hub in the
+     *  first @b [capacity]. */
+    selection_t neighborhood_mates;
+
+    /** The stored norms of the entries a neighborhood gathers, in its order: @b [capacity]. */
+    norms_tensor_t neighborhood_norms;
 
     /** Total one-to-one distance computations, padding lanes excluded. Every counter here runs
      *  across calls: an operation snapshots on entry and reports the difference. */
@@ -804,21 +924,45 @@ struct traversal_context {
         return status_t::success_k;
     }
 
-    /** Sizes the exact scan's @p rows by @p columns dots tile, and its sums of squares and
-     *  thresholds for @p packs packs of @p columns queries; geometry is fixed at construction, so
-     *  the tile allocates once per context, and the rest grow to the most packs a block holds. */
-    status_t reserve_tiles(std::size_t rows, std::size_t columns, std::size_t packs) noexcept {
-        if (step_dots.numel() < rows * columns) {
-            auto dots = dots_tensor_t::uninitialized({rows, columns}, dots_allocator_t(allocator_));
-            if (!dots) return status_t::bad_alloc_k;
-            step_dots = std::move(dots.value);
+    /** Sizes the @p rows by @p columns dots tile a matrix engine answers; geometry is fixed at
+     *  construction, so the tile allocates once per context. */
+    status_t reserve_tiles(std::size_t rows, std::size_t columns) noexcept {
+        if (step_dots.numel() >= rows * columns) return status_t::success_k;
+        auto dots = dots_tensor_t::uninitialized({rows, columns}, dots_allocator_t(allocator_));
+        if (!dots) return status_t::bad_alloc_k;
+        step_dots = std::move(dots.value);
+        return status_t::success_k;
+    }
+
+    /** Sizes an exact scan's query norms and thresholds for @p columns queries, the distances one
+     *  task of @p step_rows rows scores against them, and the dots tile of @p dots_columns a row
+     *  a matrix engine answers; each grows to the widest group the context scans. */
+    status_t reserve_scan(std::size_t columns, std::size_t step_rows, std::size_t dots_columns) noexcept {
+        if (failed(reserve_tiles(step_rows, dots_columns))) return status_t::bad_alloc_k;
+        if (step_distances.extent(0) < step_rows || step_distances.extent(1) < columns) {
+            auto distances = distances_tensor_t::uninitialized({step_rows, columns}, distances_allocator_t(allocator_));
+            if (!distances) return status_t::bad_alloc_k;
+            step_distances = std::move(distances.value);
         }
-        if (query_sumsqs.numel() >= packs * columns) return status_t::success_k;
-        auto sumsqs = sumsqs_tensor_t::uninitialized({packs, columns}, sumsqs_allocator_t(allocator_));
-        auto limits = thresholds_tensor_t::uninitialized({packs, columns}, distances_allocator_t(allocator_));
-        if (!sumsqs || !limits) return status_t::bad_alloc_k;
-        query_sumsqs = std::move(sumsqs.value);
+        if (query_norms.extent(0) >= columns) return status_t::success_k;
+        auto norms = norms_tensor_t::uninitialized({columns}, norms_allocator_t(allocator_));
+        auto limits = thresholds_tensor_t::uninitialized({columns}, distances_allocator_t(allocator_));
+        if (!norms || !limits) return status_t::bad_alloc_k;
+        query_norms = std::move(norms.value);
         thresholds = std::move(limits.value);
+        return status_t::success_k;
+    }
+
+    /** Sizes a neighborhood's scratch for @p capacity entries under @p connectivity; each tensor
+     *  grows once per context. */
+    status_t reserve_neighborhoods(std::size_t capacity, std::size_t connectivity) noexcept {
+        if (neighborhood_mates.numel() >= capacity * connectivity && neighborhood_norms.numel() >= capacity)
+            return status_t::success_k;
+        auto mates = selection_t::uninitialized({capacity * connectivity}, candidates_allocator_t(allocator_));
+        auto norms = norms_tensor_t::uninitialized({capacity}, norms_allocator_t(allocator_));
+        if (!mates || !norms) return status_t::bad_alloc_k;
+        neighborhood_mates = std::move(mates.value);
+        neighborhood_norms = std::move(norms.value);
         return status_t::success_k;
     }
 
@@ -906,7 +1050,7 @@ struct ram_index {
     template <typename, template <typename> class, typename>
     friend struct utilities::shard_set;
 
-    /** The distance kit @c src/ picked; its step is the row pitch the chunks round to. */
+    /** The distance kit @c src/ picked; its task is the row pitch the chunks round to. */
     using quads_kit_t = quads_kit_type_;
 
     /** The matrix-engine kit an exact scan streams through, @c no_tiles_kit_t where no engine
@@ -915,6 +1059,9 @@ struct ram_index {
 
     /** Whether a matrix engine multiplies the scalar, so many queries scan through it at once. */
     inline static constexpr bool has_tiles_k = !std::is_same_v<tiles_kit_t, no_tiles_kit_t>;
+
+    /** The scorer every exact-scan block takes, from the kits the class picked. */
+    using scan_scorer_t = typename scan_scorer<tiles_kit_t, quads_kit_t>::scorer_t;
 
     /** The casts, scales and blends rows import and export through, and the unit-RMS narrowing an
      *  angular import from wide floats takes. */
@@ -1119,8 +1266,9 @@ struct ram_index {
         return divide_round_up<std::size_t>(geometry.dimensions, nk::dimensions_per_value<scalar_t>());
     }
 
-    /** Storage values per row as the chunks hold it: whole steps of the picked quads kit, zero-tailed like the GPU's
-     *  fragments, so every step load stays aligned. Checkpoints and copies keep the logical @ref stored_row_values. */
+    /** Storage values per row as the chunks hold it: whole tasks of the picked quads kit,
+     *  zero-tailed like the GPU's fragments, so every task load stays aligned. Checkpoints and
+     *  copies keep the logical @ref stored_row_values. */
     static std::size_t padded_row_values(geometry_t geometry) noexcept {
         std::size_t const step_values = quads_kit_t::step_dimensions / nk::dimensions_per_value<scalar_t>();
         return round_up_to_multiple(stored_row_values(geometry), step_values);
@@ -1148,7 +1296,7 @@ struct ram_index {
     }
 
     /** Where a save writes: row-major columns the caller sized from @ref saved_shape, handed
-     *  over at planning so no step names a destination of its own. */
+     *  over at planning so no task names a destination of its own. */
     struct columns_t {
 
         /** The vectors matrix, one packed row per node. */
@@ -1439,7 +1587,7 @@ struct ram_index {
      *
      *  Releasing is automatic and two-sided, so an abandoned claim leaves the physical-rows sum as
      *  it found it. Rows an ID was dispensed against never come back, which is why consuming a
-     *  claim and dispensing against it are the same step. @ref dense_ram_index_concurrency
+     *  claim and dispensing against it are the same task. @ref dense_ram_index_concurrency
      */
     struct [[nodiscard]] capacity_claim_t {
         capacity_claim_t() noexcept = default;
@@ -1487,8 +1635,8 @@ struct ram_index {
     };
 
     /**
-     *  Claims storage for @p count rows without assigning any identity - the step a batch
-     *  spanning several indexes runs on every one of them before touching any.
+     *  @brief Claims storage for @p count rows without assigning any identity - the task a batch
+     *      spanning several indexes runs on every one of them before touching any.
      *
      *  @par Statuses:
      *  - @c overflow_k @p count passes the reserved ceiling or the chunk directory.
@@ -1577,66 +1725,81 @@ struct ram_index {
     using reachability_t = dense::reachability_t;
 
     /**
-     *  @brief One reachability audit in flight: a landmark sweep over the published nodes both
-     *      ways, one level per sweep of every step, until a level marks nothing. Read-only on the
-     *      graph, so concurrent insertions merely leave fresh nodes uncounted.
+     *  @brief One reachability audit in flight: the strong component of one drawn root, and the
+     *      islands outside it. Read-only on the graph, so concurrent insertions leave fresh nodes
+     *      uncounted and nothing else.
      *
-     *  Steps are disjoint first-chunk-sized ID ranges, so any number of threads may @ref sweep
-     *  different steps of one level at once; @ref advance_level is the level boundary, one caller.
-     *  Reached bits only turn on and a node expands once, so the sweep converges to the exact sets
-     *  of nodes the landmarks reach and nodes reaching a landmark back.
+     *  Tasks are the published IDs one bitset word at a time, so any number of threads may
+     *  @ref sweep different tasks of one pass at once; @ref advance_depth is the boundary, one
+     *  caller. A depth expands only the entries the depth before it reached, so depths count from
+     *  the root and in-link and shallower in-link counts are exact, whatever order the tasks run
+     *  in; the same read marks an entry's way to the root when one of its links leads to an entry
+     *  already reaching the root. Once a depth reaches nothing, rechecks re-read the entries
+     *  reached but not yet marked. One thread then gathers the islands, the entries outside the
+     *  root's component, into a compact adjacency of their links and finds their strong components;
+     *  a drawn root whose component is smaller than one of them gives way once to that island's
+     *  first entry. A count pass then reads every row once more for the in-link counts, and the
+     *  islands' roles and weak components follow.
      */
     struct health_plan_t {
 
-        /** One unit of a level's fan-out. */
-        struct step_t {
+        /** One unit of a pass's fan-out. */
+        struct task_t {
 
-            /** The step's position in the plan - what a fan-out hands to a thread. */
+            /** The task's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
 
-            /** The IDs this step sweeps. */
+            /** The IDs this task sweeps. */
             iota_view<node_id_t> nodes;
         };
 
         using bitset_allocator_t =
             typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u1x64_t>;
         using growing_bitset_t = growing_buffer<u1x64_t, bitset_allocator_t>;
-        using levels_allocator_t = typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u8_t>;
-        using growing_levels_t = growing_buffer<u8_t, levels_allocator_t>;
+        using byte_column_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u8_t>;
+        using growing_byte_column_t = growing_buffer<u8_t, byte_column_allocator_t>;
+        using island_ids_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<node_id_t>;
+        using island_ids_t = growing_buffer<node_id_t, island_ids_allocator_t>;
 
-        /** The level of a node no sweep reached, 255; the deepest a reached node records is 254,
-         *  at which the levels saturate: every node reached from there on reads 254, the sweep
-         *  stops ordering its expansions and counts no parents, so no merge drops a link for a
-         *  level it cannot tell. */
-        inline static constexpr u8_t unknown_level_k = (std::numeric_limits<u8_t>::max)();
+        /** The depth of a node no sweep reached, 255; the deepest a reached node records is 254,
+         *  at which the depths saturate: every node reached from there on reads 254 and counts no
+         *  shallower in-links, so no merge drops a link for a depth it cannot tell. */
+        inline static constexpr u8_t unknown_depth_k = (std::numeric_limits<u8_t>::max)();
 
         /** The audit's bitsets, one run of words each in @c bits_, in this order. */
         enum bitset_t : std::size_t {
 
-            /** Reached from a landmark. */
+            /** Reached from the root. */
             reached_k,
 
-            /** Linked from at least one reached row. */
-            linked_once_k,
+            /** Reaches the root through some link in its row. */
+            reaches_root_k,
 
-            /** Linked from two reached rows, so one link may go to a reconnection. */
-            linked_twice_k,
-
-            /** Its neighbors already swept. */
-            expanded_k,
-
-            /** Reaches a landmark through some neighbor in its row. */
-            reaches_back_k,
-
-            /** Reached a landmark back before the current level began. */
-            back_settled_k,
-
-            /** Linked to two nodes that reached back before it did, so one link may go to a
-             *  reconnection. */
-            back_linked_twice_k,
+            /** Links to two entries of smaller depth to root, so one link may go
+             *  to a reconnection. */
+            two_ways_to_root_k,
 
             /** The bitsets in all. */
             bitsets_k,
+        };
+
+        /** An island node's roles, the bits of its byte in @c island_roles_; the first two are its
+         *  strong component's. */
+        enum island_role_t : u8_t {
+
+            /** No entry outside its component links into it. */
+            unreached_island_k = 1,
+
+            /** No link leaves its component. */
+            stranded_island_k = 2,
+
+            /** It links into the root's component. */
+            links_to_component_k = 4,
+
+            /** An entry of the root's component links to it. */
+            linked_from_component_k = 8,
         };
 
         /** Lanes one word carries - what an ID splits on. */
@@ -1650,79 +1813,111 @@ struct ram_index {
         /** The watermark snapshot the audit covers; IDs strictly below it are swept. */
         node_id_t visible = 0;
 
-        /** Landmark seeds, stride-spread across the published IDs. */
-        std::size_t seed_count = 0;
-
-        /** An unbound plan - a refused audit's answer; it owns bitsets, so it names an allocator. */
+        /** An unbound plan - a refused audit's answer, and what @ref widen sizes; it owns its
+         *  columns, so it names an allocator. */
         explicit health_plan_t(bitset_allocator_t const& allocator) noexcept
-            : bits_(allocator), levels_(levels_allocator_t {allocator}), back_levels_(levels_allocator_t {allocator}),
-              parents_(levels_allocator_t {allocator}) {}
-        health_plan_t(ram_index const& index, node_id_t visible, std::size_t seed_count, growing_bitset_t&& bits,
-                      growing_levels_t&& levels, growing_levels_t&& back_levels, growing_levels_t&& parents) noexcept
-            : visible(visible), seed_count(seed_count), index_(&index), bits_(std::move(bits)),
-              levels_(std::move(levels)), back_levels_(std::move(back_levels)), parents_(std::move(parents)) {
-            restart_sweep();
-        }
+            : bits_(allocator), depths_from_root_(byte_column_allocator_t {allocator}),
+              depths_to_root_(byte_column_allocator_t {allocator}),
+              shallower_in_links_(byte_column_allocator_t {allocator}), in_links_(byte_column_allocator_t {allocator}),
+              island_nodes_(island_ids_allocator_t {allocator}), island_components_(island_ids_allocator_t {allocator}),
+              island_parents_(island_ids_allocator_t {allocator}), island_entries_(island_ids_allocator_t {allocator}),
+              island_roles_(byte_column_allocator_t {allocator}), island_walk_(island_ids_allocator_t {allocator}) {}
         health_plan_t(health_plan_t&& other) noexcept
-            : visible(other.visible), seed_count(other.seed_count), index_(std::exchange(other.index_, nullptr)),
-              bits_(std::move(other.bits_)), levels_(std::move(other.levels_)),
-              back_levels_(std::move(other.back_levels_)), parents_(std::move(other.parents_)),
-              expanded_in_level_(other.expanded_in_level_), reached_back_in_level_(other.reached_back_in_level_),
-              sweeps_(other.sweeps_), back_sweeps_(other.back_sweeps_), level_(other.level_) {}
+            : visible(other.visible), index_(std::exchange(other.index_, nullptr)), bits_(std::move(other.bits_)),
+              depths_from_root_(std::move(other.depths_from_root_)), depths_to_root_(std::move(other.depths_to_root_)),
+              shallower_in_links_(std::move(other.shallower_in_links_)), in_links_(std::move(other.in_links_)),
+              depth_entries_(other.depth_entries_), island_nodes_(std::move(other.island_nodes_)),
+              island_components_(std::move(other.island_components_)),
+              island_parents_(std::move(other.island_parents_)), island_entries_(std::move(other.island_entries_)),
+              island_roles_(std::move(other.island_roles_)), island_walk_(std::move(other.island_walk_)),
+              root_(other.root_), drawn_root_(other.drawn_root_), largest_island_(other.largest_island_),
+              largest_island_entries_(other.largest_island_entries_), reached_in_depth_(other.reached_in_depth_),
+              marked_in_depth_(other.marked_in_depth_), swept_entries_(other.swept_entries_),
+              unlinked_(other.unlinked_), underlinked_(other.underlinked_),
+              unreached_islands_(other.unreached_islands_), stranded_islands_(other.stranded_islands_),
+              components_(other.components_), depth_from_root_(other.depth_from_root_),
+              depth_to_root_(other.depth_to_root_), depth_(other.depth_), phase_(other.phase_),
+              islands_status_(other.islands_status_) {}
         health_plan_t& operator=(health_plan_t&& other) noexcept {
             visible = other.visible;
-            seed_count = other.seed_count;
             index_ = std::exchange(other.index_, nullptr);
             bits_ = std::move(other.bits_);
-            levels_ = std::move(other.levels_);
-            back_levels_ = std::move(other.back_levels_);
-            parents_ = std::move(other.parents_);
-            expanded_in_level_ = other.expanded_in_level_;
-            reached_back_in_level_ = other.reached_back_in_level_;
-            sweeps_ = other.sweeps_;
-            back_sweeps_ = other.back_sweeps_;
-            level_ = other.level_;
+            depths_from_root_ = std::move(other.depths_from_root_);
+            depths_to_root_ = std::move(other.depths_to_root_);
+            shallower_in_links_ = std::move(other.shallower_in_links_);
+            in_links_ = std::move(other.in_links_);
+            depth_entries_ = other.depth_entries_;
+            island_nodes_ = std::move(other.island_nodes_);
+            island_components_ = std::move(other.island_components_);
+            island_parents_ = std::move(other.island_parents_);
+            island_entries_ = std::move(other.island_entries_);
+            island_roles_ = std::move(other.island_roles_);
+            island_walk_ = std::move(other.island_walk_);
+            root_ = other.root_;
+            drawn_root_ = other.drawn_root_;
+            largest_island_ = other.largest_island_;
+            largest_island_entries_ = other.largest_island_entries_;
+            reached_in_depth_ = other.reached_in_depth_;
+            marked_in_depth_ = other.marked_in_depth_;
+            swept_entries_ = other.swept_entries_;
+            unlinked_ = other.unlinked_;
+            underlinked_ = other.underlinked_;
+            unreached_islands_ = other.unreached_islands_;
+            stranded_islands_ = other.stranded_islands_;
+            components_ = other.components_;
+            depth_from_root_ = other.depth_from_root_;
+            depth_to_root_ = other.depth_to_root_;
+            depth_ = other.depth_;
+            phase_ = other.phase_;
+            islands_status_ = other.islands_status_;
             return *this;
         }
         health_plan_t(health_plan_t const&) = delete;
         health_plan_t& operator=(health_plan_t const&) = delete;
 
-        /** Step @p position of the plan, the nodes of one bitset word, since @ref sweep writes its
-         *  expanded bits without atomics; an empty step past the end. */
-        step_t operator[](std::size_t position) const noexcept {
-            step_t step;
-            if (position >= steps().size()) return step;
+        /** Task @p position of the plan, the nodes of one bitset word, since a task writes its own
+         *  nodes' depths to root without contention; an empty task past the end. */
+        task_t operator[](std::size_t position) const noexcept {
+            task_t task;
+            if (position >= tasks().size()) return task;
             std::size_t const first = position * lanes_k;
             std::size_t const bound = min_of(first + lanes_k, static_cast<std::size_t>(visible));
-            step.position = position;
-            step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            return step;
+            task.position = position;
+            task.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            return task;
         }
 
-        /** The plan's steps, positionally, one per bitset word; every level sweeps all of them. */
-        indexed_range<health_plan_t> steps() const noexcept { return {this, index_ ? words_for(visible) : 0u}; }
+        /** The plan's tasks, positionally, one per bitset word; every pass sweeps all of them. */
+        indexed_range<health_plan_t> tasks() const noexcept { return {this, index_ ? words_for(visible) : 0u}; }
 
-        /** Turns the audit onto @p index 's IDs below @p visible, which its bitsets must span, with
-         *  as many seeds as a search draws there, and restarts the sweep. */
+        /** Turns the audit onto @p index 's IDs below @p visible, which its columns must span, and
+         *  restarts the sweep from a fresh draw. */
         void rebind(ram_index const& index, node_id_t visible) noexcept {
             index_ = &index;
             this->visible = visible;
-            seed_count = min_of<std::size_t>(index.connectivity(), visible);
+            root_ = node_id_unknown_k;
             restart_sweep();
         }
 
         /**
-         *  @brief Takes the IDs up to @p visible in without a sweep: the rows appended since read
-         *      unreached both ways, at no level, with no parents, the bitsets regrown to span them.
+         *  @brief Takes the IDs up to @p visible in without a sweep.
+         *
+         *  The rows appended since read unreached both ways, at no depth, with no shallower
+         *  in-links or in-links, the bitsets regrow to span every one of them, and room is placed
+         *  for an island node per bitset word.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The bitsets or the levels cannot grow; the audit stays as it was.
+         *  - @c bad_alloc_k The bitsets, the depths or the islands' room cannot grow; the audit
+         *    stays as it was.
          */
         status_t widen(node_id_t visible) noexcept {
             if (visible <= this->visible) return status_t::success_k;
             std::size_t const words = words_(), wider = words_for(visible);
-            if (failed(bits_.reserve_exactly(bitsets_k * wider)) || failed(levels_.reserve_exactly(visible)) ||
-                failed(back_levels_.reserve_exactly(visible)) || failed(parents_.reserve_exactly(visible)))
+            if (failed(bits_.reserve_exactly(bitsets_k * wider)) ||
+                failed(depths_from_root_.reserve_exactly(visible)) ||
+                failed(depths_to_root_.reserve_exactly(visible)) ||
+                failed(shallower_in_links_.reserve_exactly(visible)) || failed(in_links_.reserve_exactly(visible)) ||
+                failed(reserve_islands_(wider)))
                 return status_t::bad_alloc_k;
             bits_.extend_uninitialized(bitsets_k * wider);
             // Back to front, each run moves up past where the next one lower still reads.
@@ -1731,222 +1926,299 @@ struct ram_index {
                 std::memset(bits_.data() + bitset * wider + words, 0, (wider - words) * sizeof(u1x64_t));
             }
             std::size_t const added = visible - this->visible;
-            for (growing_levels_t* column : {&levels_, &back_levels_, &parents_})
+            for (growing_byte_column_t* column :
+                 {&depths_from_root_, &depths_to_root_, &shallower_in_links_, &in_links_})
                 column->extend_uninitialized(max_of<std::size_t>(column->size(), visible));
-            std::memset(levels_.data() + this->visible, unknown_level_k, added);
-            std::memset(back_levels_.data() + this->visible, unknown_level_k, added);
-            std::memset(parents_.data() + this->visible, 0, added);
+            std::memset(depths_from_root_.data() + this->visible, unknown_depth_k, added);
+            std::memset(depths_to_root_.data() + this->visible, unknown_depth_k, added);
+            std::memset(shallower_in_links_.data() + this->visible, 0, added);
+            std::memset(in_links_.data() + this->visible, 0, added);
             this->visible = visible;
             return status_t::success_k;
         }
 
-        /** Clears the bitsets and the levels and marks the seeds both ways at level zero: the next
-         *  @ref sweep starts level one. */
+        /** Clears every column and starts from the root an earlier sweep kept, or else from a
+         *  seeded draw, marked both ways at depth zero: the next @ref sweep starts depth one. */
         void restart_sweep() noexcept {
-            for (u1x64_t& lanes : bits_) lanes = 0;
-            if (visible) {
-                std::memset(levels_.data(), unknown_level_k, visible);
-                std::memset(back_levels_.data(), unknown_level_k, visible);
-                std::memset(parents_.data(), 0, visible);
-            }
-            for (std::size_t seed = 0; seed != seed_count; ++seed) {
-                node_id_t const landmark = static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) /
-                                                                  seed_count);
-                insert_(reached_k, landmark);
-                insert_(reaches_back_k, landmark);
-                levels_[landmark] = 0;
-                back_levels_[landmark] = 0;
-            }
-            expanded_in_level_ = 0;
-            reached_back_in_level_ = 0;
-            sweeps_ = 0;
-            back_sweeps_ = 0;
-            level_ = 0;
-            snapshot_back_();
+            // Opening and closing health checks share their root, so a different draw cannot
+            // read as progress.
+            bool const kept = root_ < visible;
+            node_id_t const root = kept      ? root_
+                                   : visible ? static_cast<node_id_t>(seeded_bijection(0, visible, 0))
+                                             : node_id_unknown_k;
+            drawn_root_ = kept ? node_id_unknown_k : root;
+            start_from_(root);
         }
 
         /**
-         *  @brief Expands every reached, not yet expanded node of @p step, its neighbors below
-         *      the watermark turning reached one level past it, and marks every node of it a
-         *      neighbor of which reached back before this level.
+         *  @brief Runs @p task of the current pass: expands the entries of this depth, marking
+         *      their way to the root in the same read; re-reads the entries reached but not yet
+         *      marked; or counts every entry's links.
          *
-         *  Safe on any thread for disjoint steps - the expanded bits are the step's own, the
-         *  reached bits and the levels are set through relaxed atomics, and the back-settled bits
-         *  stay fixed for the level. A node reached earlier in the same level expands at once, so
-         *  every reached node's level is one past that of the node linking to it first, and its
-         *  parents are the nodes one level before it linking to it, which the merge keeps one of.
+         *  Safe on any thread for disjoint tasks: the reached bits, depths, depths to root and
+         *  counts other tasks read are written through relaxed atomics, and a task marks only its
+         *  own nodes, each once.
          *
-         *  @return The nodes this call expanded or found reaching back.
+         *  @return The nodes this call reached, marked or counted.
          */
-        std::size_t sweep(step_t const& step) noexcept {
-            std::size_t expanded_count = 0, reached_back_count = 0;
-            u8_t const next_level = static_cast<u8_t>(min_of<std::size_t>(level_ + 1, unknown_level_k - 1));
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                // A level stored after its reached bit reads unknown for a moment; the next
-                // level expands it.
-                u8_t const own_level = level_of_(levels_, node_id);
-                bool const expanding = contains_(reached_k, node_id) && own_level != unknown_level_k &&
-                                       !contains_(expanded_k, node_id);
-                bool const pulling = !contains_(reaches_back_k, node_id);
-                if (!expanding && !pulling) continue;
-                if (expanding) {
-                    insert_exclusive_(expanded_k, node_id);
-                    ++expanded_count;
+        std::size_t sweep(task_t const& task) noexcept {
+            if (task.nodes.empty()) return 0;
+            if (phase_ == phase_t::expand_k) return expand_(task);
+            if (phase_ == phase_t::recheck_k) return recheck_reaches_root_(task);
+            if (phase_ == phase_t::count_links_k) return count_in_and_out_links_(task);
+            return 0;
+        }
+
+        /** The boundary between passes, one caller after every task ran: files the entries a
+         *  depth reached, turns to the rechecks once a depth reaches nothing, gathers the
+         *  islands and keeps the root or re-roots once a recheck marks nothing, and labels the
+         *  islands after the count; zero means the audit converged or could not gather them. */
+        std::size_t advance_depth() noexcept {
+            if (phase_ == phase_t::expand_k) {
+                std::size_t const reached = std::exchange(reached_in_depth_, 0);
+                swept_entries_ += reached + std::exchange(marked_in_depth_, 0);
+                if (!reached) {
+                    phase_ = phase_t::recheck_k;
+                    return 1;
                 }
-                // Slot 0 is the lock word, acquired once and waited out; the tail slots are
-                // relaxed reads, tolerating a re-linker's stale-but-valid mix.
-                node_ids_view_t const row = index_->neighbors_for(chunk_schedule_t::locate(node_id));
-                node_id_t first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
-                while (first_value == node_id_unknown_k && node_id < index_->size()) {
-                    wait_type_ {}(row.data(), node_id_unknown_k, candidates_count_t(0), fu::wait_capped_t {});
-                    first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
-                }
-                // A forgotten row stays the sentinel; the caller's epoch voids this sweep.
-                if (first_value == node_id_unknown_k) continue;
-                if (first_value == node_id) continue; // Published with no neighbors.
-                u8_t const child_level = static_cast<u8_t>(min_of<unsigned>(own_level + 1u, unknown_level_k - 1));
-                std::size_t settled_neighbors = 0;
-                for (std::size_t slot = 0; slot != row.size(); ++slot) {
-                    node_id_t const target =
-                        slot ? atomic_ref<node_id_t const>(row[slot]).load(std::memory_order_relaxed) : first_value;
-                    if (target == node_id_unknown_k) break;
-                    if (target >= visible || target == node_id) continue;
-                    settled_neighbors += pulling && contains_(back_settled_k, target);
-                    if (!expanding) continue;
-                    // The first reached in-link reaches the target and a second may give one up to
-                    // a reconnection; a seed is reached before anything links to it, so links count
-                    // apart.
-                    if (!insert_(linked_once_k, target)) {
-                        if (!insert_(reached_k, target))
-                            atomic_ref<u8_t>(levels_[target]).store(child_level, std::memory_order_relaxed);
-                    }
-                    else if (!contains_(linked_twice_k, target)) insert_(linked_twice_k, target);
-                    // A level stored after this read counts no parent, nor does the saturated
-                    // level: an undercount keeps a link, never drops one.
-                    if (level_of_(levels_, target) == child_level && child_level != unknown_level_k - 1)
-                        count_parent_(target);
-                }
-                if (settled_neighbors) {
-                    insert_(reaches_back_k, node_id);
-                    back_levels_[node_id] = next_level;
-                    ++reached_back_count;
-                    if (settled_neighbors > 1) insert_exclusive_(back_linked_twice_k, node_id);
-                }
+                depth_entries_[min_of<std::size_t>(++depth_, unknown_depth_k - 1u)] += reached;
+                ++depth_from_root_;
+                return reached;
             }
-            atomic_ref<std::size_t>(expanded_in_level_).store_add(expanded_count, std::memory_order_relaxed);
-            atomic_ref<std::size_t>(reached_back_in_level_).store_add(reached_back_count, std::memory_order_relaxed);
-            return expanded_count + reached_back_count;
+            if (phase_ == phase_t::recheck_k) {
+                std::size_t const marked = std::exchange(marked_in_depth_, 0);
+                if (!marked) return choose_root_();
+                swept_entries_ += marked;
+                ++depth_to_root_;
+                return 1;
+            }
+            if (phase_ == phase_t::count_links_k) {
+                label_islands_();
+                phase_ = phase_t::done_k;
+            }
+            return 0;
         }
 
-        /** The level boundary, one caller after every step swept: counts the level in each
-         *  direction that moved, settles what reached back, and returns what it reached; zero means
-         *  the sweep converged. */
-        std::size_t advance_level() noexcept {
-            std::size_t const expanded = std::exchange(expanded_in_level_, 0);
-            std::size_t const reached_back = std::exchange(reached_back_in_level_, 0);
-            sweeps_ += expanded != 0;
-            back_sweeps_ += reached_back != 0;
-            if (reached_back) snapshot_back_();
-            ++level_;
-            return expanded + reached_back;
+        /** The depth from the root the sweep reached @p node_id at, @c unknown_depth_k
+         *  for none, which any thread may read between depths. */
+        u8_t depth_from_root(node_id_t node_id) const noexcept { return depths_from_root_[node_id]; }
+
+        /** One past the depth to root of the entry that marked @p node_id 's way to the
+         *  root, zero for the root, @c unknown_depth_k for none, which any thread may
+         *  read between depths. */
+        u8_t depth_to_root(node_id_t node_id) const noexcept { return depths_to_root_[node_id]; }
+
+        /** Reached entries linking to @p node_id, saturating at 255, which any thread may read
+         *  between depths. */
+        u8_t in_links(node_id_t node_id) const noexcept {
+            return atomic_ref<u8_t const>(in_links_[node_id]).load(std::memory_order_relaxed);
         }
 
-        /** The level the sweep reached @p node_id at, @c unknown_level_k for none, which any thread
-         *  may read between levels. */
-        u8_t level(node_id_t node_id) const noexcept { return levels_[node_id]; }
+        /** The depth holding the most entries, the shallowest of equals: the depth the deep stratum
+         *  draws past. */
+        u8_t most_populated_depth() const noexcept {
+            std::size_t most_populated = 0;
+            for (std::size_t depth = 1; depth != depth_entries_.size(); ++depth)
+                if (depth_entries_[depth] > depth_entries_[most_populated]) most_populated = depth;
+            return static_cast<u8_t>(most_populated);
+        }
 
-        /** The level @p node_id reached a landmark back at, @c unknown_level_k for none, which any
-         *  thread may read between levels. */
-        u8_t back_level(node_id_t node_id) const noexcept { return back_levels_[node_id]; }
-
-        /** Takes one of @p node_id 's links from the level before it for a merge that drops
-         *  it, answering whether another remains; a refusal leaves it untouched, so no row
-         *  loses the last parent it is reached through. A count saturated at 255 refuses
+        /** Takes one of @p node_id 's links from the depth before it for a merge that drops it,
+         *  answering whether another remains; a refusal leaves it untouched, so no row loses
+         *  the last shallower in-link it is reached through. A count saturated at 255 refuses
          *  early, never late. */
-        bool release_parent(node_id_t node_id) noexcept {
-            atomic_ref<u8_t> const parents {parents_[node_id]};
-            u8_t observed = parents.load(std::memory_order_relaxed);
+        bool take_shallower_in_link_if_spare(node_id_t node_id) noexcept {
+            atomic_ref<u8_t> const shallower_in_links {shallower_in_links_[node_id]};
+            u8_t observed = shallower_in_links.load(std::memory_order_relaxed);
             while (observed > 1 &&
-                   !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed - 1), std::memory_order_relaxed,
-                                                  std::memory_order_relaxed)) {}
+                   !shallower_in_links.compare_exchange_weak(observed, static_cast<u8_t>(observed - 1),
+                                                             std::memory_order_relaxed, std::memory_order_relaxed)) {}
             return observed > 1;
         }
 
-        /** The nodes of @p step the sweep did not reach both ways, written into @p scratch in ID
-         *  order; the filled prefix is returned, truncated to the scratch's length. */
-        std::span<node_id_t const> islands(step_t const& step, node_ids_span_t scratch) const noexcept {
+        /** Takes the link from @p owner to @p resident for a swap: one not from the depth before
+         *  the resident goes freely, a shallower in-link only while another remains, as @ref
+         * take_shallower_in_link_if_spare takes it, so no depth ever rises. */
+        bool take_link_for_swap_if_spare(node_id_t owner, node_id_t resident) noexcept {
+            u8_t const owner_depth = depth_from_root(owner);
+            u8_t const child_depth = owner_depth < unknown_depth_k - 1 ? static_cast<u8_t>(owner_depth + 1)
+                                                                       : unknown_depth_k;
+            return child_depth == unknown_depth_k || depth_from_root(resident) != child_depth ||
+                   take_shallower_in_link_if_spare(resident);
+        }
+
+        /** Takes the link from @p owner to @p resident for a swap under the owner's lock,
+         *  answering whether the reach rule releases it: never the resident's last shallower
+         *  in-link, and a link toward the root only while the owner keeps another at that
+         *  depth to root. */
+        bool take_link_under_lock_if_spare(node_id_t owner, node_id_t resident) noexcept {
+            bool const way_to_root = reaches_root(owner) && depth_to_root(owner) != 0 &&
+                                     depth_to_root(resident) < depth_to_root(owner);
+            if (way_to_root && !contains_(two_ways_to_root_k, owner)) return false;
+            if (!take_link_for_swap_if_spare(owner, resident)) return false;
+            if (way_to_root) release_(two_ways_to_root_k, owner);
+            return true;
+        }
+
+        /** Files a link from @p owner to island entry @p member written since the sweep in the
+         *  columns a merge keeps reach by: a member at no depth takes the one past the owner's,
+         *  with the owner as its one shallower in-link, and an owner with no way to the root
+         *  takes one past the member's depth to root, so no later re-selection drops the link.
+         *  Only the task healing that island writes its entry's columns. */
+        void record_heal_link(node_id_t owner, node_id_t member) noexcept {
+            u8_t const owner_depth = depth_from_root(owner);
+            if (depth_from_root(member) == unknown_depth_k && owner_depth < unknown_depth_k - 1) {
+                atomic_ref<u8_t>(depths_from_root_[member])
+                    .store(static_cast<u8_t>(owner_depth + 1), std::memory_order_relaxed);
+                atomic_ref<u8_t>(shallower_in_links_[member]).store(1, std::memory_order_relaxed);
+            }
+            u8_t const member_depth_to_root = depth_to_root(member);
+            if (depth_to_root(owner) == unknown_depth_k && member_depth_to_root < unknown_depth_k - 1)
+                atomic_ref<u8_t>(depths_to_root_[owner])
+                    .store(static_cast<u8_t>(member_depth_to_root + 1), std::memory_order_relaxed);
+        }
+
+        /** Entries the sweeps reached plus entries they marked a way to the root for, of twice the
+         *  audited ones: what a caller's progress counts. */
+        std::size_t swept() const noexcept { return swept_entries_; }
+
+        /** Counts a link written into @p node_id since the sweep, saturating. */
+        void count_in_link(node_id_t node_id) noexcept { static_cast<void>(count_in_link_(node_id)); }
+
+        /** Whether @p node_id hangs by one thread: a single shallower in-link, or a way to the
+         *  root through a single entry of the depth to root it was marked at. */
+        bool hangs_by_one_link(node_id_t node_id) const noexcept {
+            if (atomic_ref<u8_t const>(shallower_in_links_[node_id]).load(std::memory_order_relaxed) == 1) return true;
+            return reaches_root(node_id) && depth_to_root(node_id) != 0 && !contains_(two_ways_to_root_k, node_id);
+        }
+
+        /** Entries outside the root's component, the islands' nodes, ranked by ID. */
+        std::size_t islands() const noexcept { return island_nodes_.size(); }
+
+        /** Whether island node @p rank names its strong component, being its first. */
+        bool island_first(std::size_t rank) const noexcept { return island_components_[rank] == rank; }
+
+        /** Island node @p rank 's @ref island_role_t bits, its component's two first among them. */
+        u8_t island_roles(std::size_t rank) const noexcept { return island_roles_[rank]; }
+
+        /** The entry standing for island node @p rank 's component: a member a link reaches
+         *  or leaves the root's component through when one does, then the least linked, ties
+         *  by a keyed draw. */
+        node_id_t island_entry(std::size_t rank) const noexcept {
+            return island_nodes_[island_entries_[island_components_[rank]]];
+        }
+
+        /** The entry of the root's component linking to the entry standing for island node
+         *  @p rank 's component, or none. */
+        node_id_t island_entry_parent(std::size_t rank) const noexcept {
+            return island_parents_[island_entries_[island_components_[rank]]];
+        }
+
+        /** Whether @p node_id stands for an unreached or a stranded island. */
+        bool component_entry(node_id_t node_id) const noexcept {
+            if (in_component(node_id)) return false;
+            std::span<node_id_t const> const nodes = to_span(island_nodes_);
+            std::size_t const rank = static_cast<std::size_t>(lower_bound(nodes, node_id) - nodes.data());
+            if (rank == nodes.size() || nodes[rank] != node_id) return false;
+            node_id_t const component = island_components_[rank];
+            return island_entries_[component] == rank &&
+                   (island_roles_[component] & (unreached_island_k | stranded_island_k)) != 0;
+        }
+
+        /** The nodes of @p task outside the root's component, written into @p scratch in ID order;
+         *  the filled prefix is returned, truncated to the scratch's length. */
+        std::span<node_id_t const> islands(task_t const& task, node_ids_span_t scratch) const noexcept {
             std::size_t count = 0;
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound && count != scratch.size(); ++node_id)
-                if (!reached(node_id) || !reaches_back(node_id)) scratch[count++] = node_id;
+            for (node_id_t node_id = task.nodes.first; node_id < task.nodes.bound && count != scratch.size(); ++node_id)
+                if (!in_component(node_id)) scratch[count++] = node_id;
             return {scratch.data(), count};
         }
 
-        /** The landmark whose share of the ID space holds @p node_id - the nearest seed below it
-         *  in ID order, reached both ways by construction since every sweep starts from it. */
-        node_id_t landmark_covering(node_id_t node_id) const noexcept {
-            if (!seed_count || !visible) return node_id_unknown_k;
-            std::size_t const seed = static_cast<std::size_t>(node_id) * seed_count / visible;
-            return static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) / seed_count);
-        }
-
-        /** Whether @p node_id was reached - readable by any thread between levels. */
+        /** Whether @p node_id was reached - readable by any thread between depths. */
         bool reached(node_id_t node_id) const noexcept { return contains_(reached_k, node_id); }
 
-        /** Whether @p node_id reaches a landmark - readable by any thread between levels. */
-        bool reaches_back(node_id_t node_id) const noexcept { return contains_(reaches_back_k, node_id); }
+        /** Whether @p node_id reaches the root - readable by any thread between depths. */
+        bool reaches_root(node_id_t node_id) const noexcept { return contains_(reaches_root_k, node_id); }
+
+        /** Whether @p node_id is in the root's strong component: reached from it, reaching it. */
+        bool in_component(node_id_t node_id) const noexcept { return reached(node_id) && reaches_root(node_id); }
 
         /** Takes one of @p node_id 's reached in-links for a reconnection, answering whether
          *  another remains; a refusal leaves it untouched, so no row loses the last link it is
          *  reached by. */
-        bool release_link(node_id_t node_id) noexcept { return release_(linked_twice_k, node_id); }
-
-        /** Takes one of @p node_id 's out-links for a reconnection, answering whether its row still
-         *  reaches back through a node that did a level earlier; a row with no way back has none to
-         *  lose. */
-        bool release_out_link(node_id_t node_id) noexcept {
-            return !contains_(reaches_back_k, node_id) || release_(back_linked_twice_k, node_id);
+        bool take_in_link_if_spare(node_id_t node_id) noexcept {
+            return fu::atomic_fetch_sub_if_at_least(atomic_ref<u8_t>(in_links_[node_id]), u8_t {1}, u8_t {1},
+                                                    std::memory_order_relaxed) > 1;
         }
 
         /**
-         *  The report: the nodes reached both ways and the levels each direction took.
-         *  @c internal_k when a level is still pending, since the count would then be a lower
-         *  bound.
+         *  @brief The report: the entries of the root's component, the depths each direction took,
+         *      the in-link counts, and the islands' components. @c internal_k while a pass is
+         *      pending, since the counts would then be lower bounds.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The audit is bound to no index.
+         *  - @c bad_alloc_k The islands' adjacency could not be placed.
+         *  - @c overflow_k The islands hold more links than a node ID counts.
          */
         expected<reachability_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            if (expanded_in_level_ || reached_back_in_level_) return {{}, status_t::internal_k};
+            if (phase_ != phase_t::done_k) return {{}, status_t::internal_k};
+            if (failed(islands_status_)) return {{}, islands_status_};
             reachability_t result;
             result.audited_nodes = visible;
             std::size_t const words = words_();
-            for (std::size_t word = 0; word != words; ++word)
+            for (std::size_t word = 0; word != words_for(visible); ++word)
                 result.reachable_nodes += static_cast<std::size_t>(
-                    std::popcount(bits_[reached_k * words + word] & bits_[reaches_back_k * words + word]));
-            result.sweeps = sweeps_;
-            result.back_sweeps = back_sweeps_;
+                    std::popcount(bits_[reached_k * words + word] & bits_[reaches_root_k * words + word]));
+            result.depth_from_root = depth_from_root_;
+            result.depth_to_root = depth_to_root_;
+            result.unlinked = unlinked_;
+            result.underlinked = underlinked_;
+            for (std::size_t depth = most_populated_depth() + 1u; depth < depth_entries_.size(); ++depth)
+                result.beyond_most_populated_depth += depth_entries_[depth];
+            result.unreached_islands = unreached_islands_;
+            result.stranded_islands = stranded_islands_;
+            result.components = components_;
             return {result, status_t::success_k};
         }
 
       private:
 
+        enum class phase_t : u8_t { expand_k, recheck_k, count_links_k, done_k };
+
+        /** The smallest depth to root among the links one read met, and how many links met it. */
+        struct way_to_root_t {
+            u8_t lowest = unknown_depth_k;
+            std::size_t at_lowest = 0;
+
+            void note(u8_t depth_to_root) noexcept {
+                if (depth_to_root < lowest) lowest = depth_to_root, at_lowest = 1;
+                else at_lowest += depth_to_root == lowest && depth_to_root != unknown_depth_k;
+            }
+        };
+
         /** Words per bitset. */
         std::size_t words_() const noexcept { return bits_.size() / bitsets_k; }
 
+        /** The lanes of @p word below the watermark. */
+        u1x64_t visible_lanes_(std::size_t word) const noexcept {
+            std::size_t const lanes = min_of<std::size_t>(visible - word * lanes_k, lanes_k);
+            return lanes == lanes_k ? ~u1x64_t {0} : (u1x64_t {1} << lanes) - 1;
+        }
+
+        u1x64_t word_(bitset_t bitset, std::size_t word) const noexcept {
+            return atomic_ref<u1x64_t const>(bits_[bitset * words_() + word]).load(std::memory_order_relaxed);
+        }
+
         bool contains_(bitset_t bitset, node_id_t node_id) const noexcept {
-            u1x64_t const lanes =
-                atomic_ref<u1x64_t const>(bits_[bitset * words_() + node_id / lanes_k]).load(std::memory_order_relaxed);
-            return (lanes >> (node_id % lanes_k)) & 1u;
+            return (word_(bitset, node_id / lanes_k) >> (node_id % lanes_k)) & 1u;
         }
 
         /** Sets @p node_id 's bit and answers whether it was already set. */
         bool insert_(bitset_t bitset, node_id_t node_id) noexcept {
             return atomic_ref<u1x64_t>(bits_[bitset * words_() + node_id / lanes_k])
                 .fetch_test_and_set_bit(static_cast<unsigned>(node_id % lanes_k), std::memory_order_relaxed);
-        }
-        void insert_exclusive_(bitset_t bitset, node_id_t node_id) noexcept {
-            bits_[bitset * words_() + node_id / lanes_k] |= u1x64_t {1} << (node_id % lanes_k);
         }
 
         /** Clears @p node_id 's bit and answers whether it was set. */
@@ -1955,26 +2227,411 @@ struct ram_index {
                 .fetch_test_and_reset_bit(static_cast<unsigned>(node_id % lanes_k), std::memory_order_relaxed);
         }
 
-        static u8_t level_of_(growing_levels_t const& levels, node_id_t node_id) noexcept {
-            return atomic_ref<u8_t const>(levels[node_id]).load(std::memory_order_relaxed);
+        static u8_t depth_of_(growing_byte_column_t const& column, node_id_t node_id) noexcept {
+            return atomic_ref<u8_t const>(column[node_id]).load(std::memory_order_relaxed);
         }
 
-        /** Counts one more link into @p node_id from the level before it, saturating. */
-        void count_parent_(node_id_t node_id) noexcept {
-            atomic_ref<u8_t> const parents {parents_[node_id]};
-            u8_t observed = parents.load(std::memory_order_relaxed);
+        static void add_(std::size_t& into, std::size_t value) noexcept {
+            atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
+        }
+
+        /** Counts one more link into @p node_id from the depth before it, saturating. */
+        void count_shallower_in_link_(node_id_t node_id) noexcept {
+            atomic_ref<u8_t> const shallower_in_links {shallower_in_links_[node_id]};
+            u8_t observed = shallower_in_links.load(std::memory_order_relaxed);
             while (observed != (std::numeric_limits<u8_t>::max)() &&
-                   !parents.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1), std::memory_order_relaxed,
-                                                  std::memory_order_relaxed)) {}
+                   !shallower_in_links.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1),
+                                                             std::memory_order_relaxed, std::memory_order_relaxed)) {}
         }
 
-        /** What the next level reaches back through: the nodes that reached back so far. */
-        void snapshot_back_() noexcept {
+        /** Counts one more reached link into @p node_id, saturating; answers how many it had. */
+        u8_t count_in_link_(node_id_t node_id) noexcept {
+            return fu::atomic_fetch_add_if_at_most(atomic_ref<u8_t>(in_links_[node_id]), u8_t {1},
+                                                   (std::numeric_limits<u8_t>::max)(), std::memory_order_relaxed);
+        }
+
+        /** Calls @p visit with every link of @p node_id 's row below the watermark but its own,
+         *  waiting out a row still being published; a forgotten row stays the sentinel and yields
+         *  none, the caller's epoch voiding the audit. */
+        template <typename visit_type_>
+        void for_each_link_(node_id_t node_id, visit_type_&& visit) const noexcept {
+            // Slot 0 is the lock word, acquired once and waited out; the tail slots are relaxed
+            // reads, tolerating a re-linker's stale-but-valid mix.
+            node_ids_view_t const row = index_->neighbors_for(chunk_schedule_t::locate(node_id));
+            node_id_t first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
+            while (first_value == node_id_unknown_k && node_id < index_->size()) {
+                wait_type_ {}(row.data(), node_id_unknown_k, candidates_count_t(0), fu::wait_capped_t {});
+                first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
+            }
+            if (first_value == node_id_unknown_k || first_value == node_id) return;
+            for (std::size_t slot = 0; slot != row.size(); ++slot) {
+                node_id_t const target = slot ? atomic_ref<node_id_t const>(row[slot]).load(std::memory_order_relaxed)
+                                              : first_value;
+                if (target == node_id_unknown_k) break;
+                if (target < visible && target != node_id) visit(target);
+            }
+        }
+
+        /** Clears what one root's sweep fills and marks @p root both ways at depth zero; with no
+         *  root the audit is over. */
+        void start_from_(node_id_t root) noexcept {
+            if (!bits_.empty()) std::memset(bits_.data(), 0, bits_.size() * sizeof(u1x64_t));
+            if (visible) {
+                std::memset(depths_from_root_.data(), unknown_depth_k, visible);
+                std::memset(depths_to_root_.data(), unknown_depth_k, visible);
+                std::memset(shallower_in_links_.data(), 0, visible);
+                std::memset(in_links_.data(), 0, visible);
+            }
+            depth_entries_.fill(0);
+            for (island_ids_t* column : {&island_nodes_, &island_components_, &island_parents_, &island_entries_})
+                column->clear();
+            island_roles_.clear();
+            largest_island_ = node_id_unknown_k;
+            largest_island_entries_ = 0;
+            unlinked_ = underlinked_ = unreached_islands_ = stranded_islands_ = components_ = 0;
+            reached_in_depth_ = marked_in_depth_ = 0;
+            swept_entries_ = root == node_id_unknown_k ? 0 : 2;
+            depth_from_root_ = depth_to_root_ = depth_ = 0;
+            islands_status_ = status_t::success_k;
+            root_ = root;
+            phase_ = root == node_id_unknown_k ? phase_t::done_k : phase_t::expand_k;
+            if (root == node_id_unknown_k) return;
+            insert_(reached_k, root);
+            insert_(reaches_root_k, root);
+            depths_from_root_[root] = 0;
+            depths_to_root_[root] = 0;
+            depth_entries_[0] = 1;
+        }
+
+        /** Certifies @p node_id 's way to the root one past the lowest depth to root it links
+         *  to, answering whether it links to any entry reaching back; two links at that depth
+         *  spare one link for a reconnection to take. */
+        bool mark_reaches_root_(node_id_t node_id, way_to_root_t const& way_to_root) noexcept {
+            if (way_to_root.lowest == unknown_depth_k) return false;
+            u8_t const depth_to_root = static_cast<u8_t>(
+                min_of<unsigned>(way_to_root.lowest + 1u, unknown_depth_k - 1u));
+            atomic_ref<u8_t>(depths_to_root_[node_id]).store(depth_to_root, std::memory_order_relaxed);
+            insert_(reaches_root_k, node_id);
+            if (way_to_root.at_lowest > 1 && way_to_root.lowest < depth_to_root) insert_(two_ways_to_root_k, node_id);
+            return true;
+        }
+
+        /** Expands the entries of @p task at this depth: each link counts an in-link and the first
+         *  reaches its target one depth deeper; the same read marks the entry's way to the root. */
+        std::size_t expand_(task_t const& task) noexcept {
+            // Past the deepest recorded level an entry marks its expansion in its parents byte,
+            // which no link counts into there.
+            bool const saturated = depth_ >= unknown_depth_k - 1u;
+            u8_t const own_depth = static_cast<u8_t>(min_of<std::size_t>(depth_, unknown_depth_k - 1u));
+            u8_t const child_depth = static_cast<u8_t>(min_of<std::size_t>(depth_ + 1, unknown_depth_k - 1u));
+            std::size_t reached_count = 0, marked_count = 0;
+            for (u1x64_t lanes = word_(reached_k, task.position); lanes; lanes &= lanes - 1) {
+                node_id_t const node_id = static_cast<node_id_t>(task.position * lanes_k + std::countr_zero(lanes));
+                if (depth_of_(depths_from_root_, node_id) != own_depth) continue;
+                if (saturated && std::exchange(shallower_in_links_[node_id], u8_t {1})) continue;
+                way_to_root_t way_to_root;
+                for_each_link_(node_id, [&](node_id_t target) noexcept {
+                    // Every reached in-link counts, saturating; the first one reaches the target.
+                    if (!count_in_link_(target) && !insert_(reached_k, target)) {
+                        atomic_ref<u8_t>(depths_from_root_[target]).store(child_depth, std::memory_order_relaxed);
+                        ++reached_count;
+                    }
+                    // A depth still unknown is one another task reached this depth and is storing.
+                    u8_t const target_depth = depth_of_(depths_from_root_, target);
+                    if (child_depth != unknown_depth_k - 1 &&
+                        (target_depth == child_depth || target_depth == unknown_depth_k))
+                        count_shallower_in_link_(target);
+                    way_to_root.note(depth_of_(depths_to_root_, target));
+                });
+                marked_count += depth_to_root(node_id) == unknown_depth_k && mark_reaches_root_(node_id, way_to_root);
+            }
+            add_(reached_in_depth_, reached_count);
+            add_(marked_in_depth_, marked_count);
+            return reached_count + marked_count;
+        }
+
+        /** Re-reads the entries of @p task reached but not yet marked, marking each that now
+         *  links to an entry reaching back. */
+        std::size_t recheck_reaches_root_(task_t const& task) noexcept {
+            std::size_t marked_count = 0;
+            for (u1x64_t lanes = word_(reached_k, task.position) & ~word_(reaches_root_k, task.position); lanes;
+                 lanes &= lanes - 1) {
+                node_id_t const node_id = static_cast<node_id_t>(task.position * lanes_k + std::countr_zero(lanes));
+                way_to_root_t way_to_root;
+                for_each_link_(
+                    node_id, [&](node_id_t target) noexcept { way_to_root.note(depth_of_(depths_to_root_, target)); });
+                marked_count += mark_reaches_root_(node_id, way_to_root);
+            }
+            add_(marked_in_depth_, marked_count);
+            return marked_count;
+        }
+
+        /** Counts the entries of @p task no reached entry links to and those linked to by fewer
+         *  entries than they link to, and files the least entry of the root's component linking to
+         *  each island node as its parent. */
+        std::size_t count_in_and_out_links_(task_t const& task) noexcept {
+            std::span<node_id_t const> const islands = to_span(island_nodes_);
+            std::size_t unlinked = 0, underlinked = 0;
+            for (node_id_t node_id = task.nodes.first; node_id < task.nodes.bound; ++node_id) {
+                bool const member = in_component(node_id);
+                std::size_t out_links = 0;
+                for_each_link_(node_id, [&](node_id_t target) noexcept {
+                    ++out_links;
+                    if (!member || in_component(target)) return;
+                    std::size_t const rank = static_cast<std::size_t>(lower_bound(islands, target) - islands.data());
+                    if (rank != islands.size() && islands[rank] == target)
+                        fu::atomic_min(atomic_ref<node_id_t>(island_parents_[rank]), node_id,
+                                       std::memory_order_relaxed);
+                });
+                unlinked += in_links_[node_id] == 0;
+                underlinked += in_links_[node_id] < out_links;
+            }
+            add_(unlinked_, unlinked);
+            add_(underlinked_, underlinked);
+            return task.nodes.size();
+        }
+
+        /** Closes one root's sweep once a recheck marked nothing: gathers the islands and their
+         *  strong components, then sweeps once more from the first entry of the largest island
+         *  when it outgrows the drawn root's component, or turns to the count; an island
+         *  adjacency that cannot be placed ends the audit with its status. */
+        std::size_t choose_root_() noexcept {
             std::size_t const words = words_();
-            // An empty index holds no bitset, and `memcpy` refuses null even for zero bytes.
-            if (!words) return;
-            std::memcpy(bits_.data() + back_settled_k * words, bits_.data() + reaches_back_k * words,
-                        words * sizeof(u1x64_t));
+            std::size_t component = 0;
+            for (std::size_t word = 0; word != words_for(visible); ++word)
+                component += static_cast<std::size_t>(
+                    std::popcount(bits_[reached_k * words + word] & bits_[reaches_root_k * words + word]));
+            gather_islands_(visible - component);
+            if (succeeded(islands_status_)) close_islands_();
+            if (failed(islands_status_)) {
+                phase_ = phase_t::done_k;
+                return 0;
+            }
+            if (root_ == drawn_root_ && largest_island_entries_ > component) {
+                drawn_root_ = node_id_unknown_k;
+                start_from_(largest_island_);
+                return 1;
+            }
+            phase_ = phase_t::count_links_k;
+            return 1;
+        }
+
+        /** Gathers the @p islands entries outside the root's component in ascending order,
+         *  marks those linking into the component, and marks the way to the root of those,
+         *  which no sweep reached. */
+        void gather_islands_(std::size_t islands) noexcept {
+            if (failed(reserve_islands_(islands))) {
+                islands_status_ = status_t::bad_alloc_k;
+                return;
+            }
+            std::size_t const words = words_();
+            for (std::size_t word = 0; word != words_for(visible); ++word)
+                for (u1x64_t lanes = ~(bits_[reached_k * words + word] & bits_[reaches_root_k * words + word]) &
+                                     visible_lanes_(word);
+                     lanes; lanes &= lanes - 1)
+                    island_nodes_.push_back_reserved(static_cast<node_id_t>(word * lanes_k + std::countr_zero(lanes)));
+            island_parents_.extend_uninitialized(islands);
+            for (node_id_t& parent : island_parents_) parent = node_id_unknown_k;
+            island_roles_.extend_uninitialized(islands);
+            if (islands) std::memset(island_roles_.data(), 0, islands);
+            std::span<node_id_t const> const nodes = to_span(island_nodes_);
+            for (std::size_t rank = 0; rank != islands; ++rank) {
+                way_to_root_t way_to_root;
+                for_each_link_(nodes[rank], [&](node_id_t target) noexcept {
+                    if (!in_component(target)) return;
+                    island_roles_[rank] |= links_to_component_k;
+                    way_to_root.note(depth_to_root(target));
+                });
+                // A reached island never links into the component, or a recheck marked it.
+                mark_reaches_root_(nodes[rank], way_to_root);
+            }
+        }
+
+        /** Places the columns of @p islands island nodes; their links stay in the graph's rows. */
+        status_t reserve_islands_(std::size_t islands) noexcept {
+            if (failed(island_nodes_.reserve_exactly(islands)) || failed(island_components_.reserve_exactly(islands)) ||
+                failed(island_parents_.reserve_exactly(islands)) || failed(island_entries_.reserve_exactly(islands)) ||
+                failed(island_roles_.reserve_exactly(islands)) || failed(island_walk_.reserve_exactly(5 * islands)))
+                return status_t::bad_alloc_k;
+            return status_t::success_k;
+        }
+
+        /** The rank of island node @p node_id among the islands' nodes. */
+        std::size_t island_rank_(node_id_t node_id) const noexcept {
+            std::span<node_id_t const> const nodes = to_span(island_nodes_);
+            return static_cast<std::size_t>(lower_bound(nodes, node_id) - nodes.data());
+        }
+
+        /** Calls @p visit with the rank of every island node that island node @p rank links to. */
+        template <typename visit_type_>
+        void for_each_island_link_(std::size_t rank, visit_type_&& visit) const noexcept {
+            for_each_link_(island_nodes_[rank], [&](node_id_t target) noexcept {
+                if (!in_component(target)) visit(island_rank_(target));
+            });
+        }
+
+        /** The rank of the next island node that island node @p rank links to from slot @p cursor
+         *  on, moving the cursor past it, or the islands' count once the row ends; Tarjan's walk
+         *  resumes rows this way rather than keep a copy of the islands' links. */
+        std::size_t next_island_link_(std::size_t rank, node_id_t& cursor) const noexcept {
+            node_id_t const node_id = island_nodes_[rank];
+            node_ids_view_t const row = index_->neighbors_for(chunk_schedule_t::locate(node_id));
+            while (cursor < row.size()) {
+                node_id_t const target = atomic_ref<node_id_t const>(row[cursor++]).load(std::memory_order_relaxed);
+                // A sentinel ends the row: past its last link, or in slot zero a row held
+                // by a writer.
+                if (target == node_id_unknown_k) break;
+                if (target < visible && target != node_id && !in_component(target)) return island_rank_(target);
+            }
+            cursor = static_cast<node_id_t>(row.size());
+            return island_nodes_.size();
+        }
+
+        /** Pops the strong component Tarjan's walk closed at @p rank off @p stack, names it by
+         *  the rank of its first node, marks its nodes done in @p lowest, and marks the way to
+         *  the root of its nodes, its successors' being final. */
+        void close_component_(node_id_t* stack, std::size_t& stacked, std::size_t rank, node_id_t* lowest) noexcept {
+            std::size_t from = stacked;
+            while (stack[--from] != rank) {}
+            std::span<node_id_t const> const members {stack + from, stacked - from};
+            stacked = from;
+            node_id_t first = members[0];
+            for (node_id_t const member : members) first = min_of(first, member);
+            if (members.size() > largest_island_entries_)
+                largest_island_entries_ = members.size(), largest_island_ = island_nodes_[first];
+            for (node_id_t const member : members) {
+                island_components_[member] = first;
+                lowest[member] = node_id_unknown_k;
+            }
+            for (bool marked = true; marked;) {
+                marked = false;
+                for (node_id_t const member : members) {
+                    if (depth_to_root(island_nodes_[member]) != unknown_depth_k) continue;
+                    way_to_root_t way_to_root;
+                    for_each_island_link_(member, [&](std::size_t next) noexcept {
+                        way_to_root.note(depth_to_root(island_nodes_[next]));
+                    });
+                    marked |= mark_reaches_root_(island_nodes_[member], way_to_root);
+                }
+            }
+        }
+
+        /** Finds the islands' strong components by Tarjan's walk over their links, on one thread
+         *  and without recursion, noting the largest. */
+        void close_islands_() noexcept {
+            std::size_t const islands = island_nodes_.size();
+            if (!islands) return;
+            if (failed(island_walk_.resize(5 * islands)) || failed(island_components_.resize(islands))) {
+                islands_status_ = status_t::bad_alloc_k;
+                return;
+            }
+            // Visit order from one, zero unvisited; the least order each node reaches on the
+            // stack, unknown once its component closed; the stack; and the walk's path beside
+            // the slot each task on it reads next.
+            node_id_t* const order = island_walk_.data();
+            node_id_t* const lowest = order + islands;
+            node_id_t* const stack = lowest + islands;
+            node_id_t* const path = stack + islands;
+            node_id_t* const cursors = path + islands;
+            std::size_t visits = 0, stacked = 0, depth = 0;
+            auto visit = [&](std::size_t rank) noexcept {
+                order[rank] = lowest[rank] = static_cast<node_id_t>(++visits);
+                stack[stacked++] = path[depth] = static_cast<node_id_t>(rank);
+                cursors[depth++] = 0;
+            };
+            for (std::size_t start = 0; start != islands; ++start) {
+                if (order[start]) continue;
+                visit(start);
+                while (depth) {
+                    std::size_t const rank = path[depth - 1];
+                    if (std::size_t const next = next_island_link_(rank, cursors[depth - 1]); next != islands) {
+                        if (!order[next]) visit(next);
+                        else if (lowest[next] != node_id_unknown_k) lowest[rank] = min_of(lowest[rank], order[next]);
+                        continue;
+                    }
+                    --depth;
+                    if (lowest[rank] == order[rank]) close_component_(stack, stacked, rank, lowest);
+                    if (depth) lowest[path[depth - 1]] = min_of(lowest[path[depth - 1]], lowest[rank]);
+                }
+            }
+        }
+
+        /** Marks the unreached and stranded islands, picks the entry standing for each, and counts
+         *  the weak components, the root's among them, by union-find. */
+        void label_islands_() noexcept {
+            std::size_t const islands = island_nodes_.size();
+            if (failed(islands_status_)) return;
+            components_ = 1;
+            if (!islands) return;
+            if (failed(island_entries_.resize(islands))) {
+                islands_status_ = status_t::bad_alloc_k;
+                return;
+            }
+            constexpr u8_t component_roles_k = unreached_island_k | stranded_island_k;
+            for (std::size_t rank = 0; rank != islands; ++rank)
+                if (island_components_[rank] == rank) island_roles_[rank] |= component_roles_k;
+            for (std::size_t rank = 0; rank != islands; ++rank) {
+                node_id_t const component = island_components_[rank];
+                if (island_parents_[rank] != node_id_unknown_k) {
+                    island_roles_[rank] |= linked_from_component_k;
+                    island_roles_[component] &= static_cast<u8_t>(~unreached_island_k);
+                }
+                if (island_roles_[rank] & links_to_component_k)
+                    island_roles_[component] &= static_cast<u8_t>(~stranded_island_k);
+                for_each_island_link_(rank, [&](std::size_t linked) noexcept {
+                    node_id_t const next = island_components_[linked];
+                    if (next == component) return;
+                    island_roles_[component] &= static_cast<u8_t>(~stranded_island_k);
+                    island_roles_[next] &= static_cast<u8_t>(~unreached_island_k);
+                });
+            }
+            for (std::size_t rank = 0; rank != islands; ++rank) {
+                node_id_t const component = island_components_[rank];
+                u8_t const roles = island_roles_[component] & component_roles_k;
+                if (component != rank) island_roles_[rank] |= roles;
+                else {
+                    unreached_islands_ += (roles & unreached_island_k) != 0;
+                    stranded_islands_ += (roles & stranded_island_k) != 0;
+                }
+            }
+
+            // A member a link crosses through stands first, as the heal links through it; then the
+            // fewest in-links, ties by a keyed draw, so the ID order never decides.
+            auto stands_before = [&](std::size_t rank, std::size_t other) noexcept {
+                auto crosses = [&](std::size_t member) noexcept {
+                    return island_parents_[member] != node_id_unknown_k ||
+                           (island_roles_[member] & links_to_component_k) != 0;
+                };
+                if (crosses(rank) != crosses(other)) return crosses(rank);
+                node_id_t const node = island_nodes_[rank], other_node = island_nodes_[other];
+                if (in_links_[node] != in_links_[other_node]) return in_links_[node] < in_links_[other_node];
+                return mix_bits(node) < mix_bits(other_node);
+            };
+            for (std::size_t rank = 0; rank != islands; ++rank)
+                if (island_components_[rank] == rank) island_entries_[rank] = static_cast<node_id_t>(rank);
+            for (std::size_t rank = 0; rank != islands; ++rank) {
+                node_id_t& entry = island_entries_[island_components_[rank]];
+                if (stands_before(rank, entry)) entry = static_cast<node_id_t>(rank);
+            }
+
+            // The walk's columns again, as union-find parents; the last slot stands for
+            // the root's one.
+            node_id_t* const weak = island_walk_.data();
+            for (std::size_t rank = 0; rank <= islands; ++rank) weak[rank] = static_cast<node_id_t>(rank);
+            auto find = [&](std::size_t rank) noexcept {
+                while (weak[rank] != rank) rank = weak[rank] = weak[weak[rank]];
+                return rank;
+            };
+            auto unite = [&](std::size_t first, std::size_t second) noexcept {
+                first = find(first), second = find(second);
+                if (first != second) weak[max_of(first, second)] = static_cast<node_id_t>(min_of(first, second));
+            };
+            for (std::size_t rank = 0; rank != islands; ++rank) {
+                if (island_roles_[rank] & (links_to_component_k | linked_from_component_k)) unite(rank, islands);
+                for_each_island_link_(rank, [&](std::size_t linked) noexcept { unite(rank, linked); });
+            }
+            components_ = 0;
+            for (std::size_t rank = 0; rank <= islands; ++rank) components_ += weak[rank] == rank;
         }
 
         /** The audited index; null on a moved-from plan. */
@@ -1983,223 +2640,240 @@ struct ram_index {
         /** Every bitset, one bit per published node each, laid out as @ref bitset_t orders them. */
         growing_bitset_t bits_;
 
-        /** Per published node, the level the sweep reached it at. */
-        growing_levels_t levels_;
+        /** Per published node, its depth from the root. */
+        growing_byte_column_t depths_from_root_;
 
-        /** Per published node, the level it reached a landmark back at. */
-        growing_levels_t back_levels_;
+        /** Per published node, one past the depth to root of the entry that marked its way
+         *  to the root. */
+        growing_byte_column_t depths_to_root_;
 
-        /** Per published node, its links from the level before it, saturating. */
-        growing_levels_t parents_;
+        /** Per published node, its links from the depth before it, saturating. */
+        growing_byte_column_t shallower_in_links_;
 
-        /** Nodes the current level expanded so far, summed through @c atomic_ref. */
-        std::size_t expanded_in_level_ = 0;
+        /** Per published node, the reached entries linking to it, saturating. */
+        growing_byte_column_t in_links_;
 
-        /** Nodes the current level found reaching back so far, summed through @c atomic_ref. */
-        std::size_t reached_back_in_level_ = 0;
+        /** Entries each depth reached; the fullest is the depth the deep stratum draws past. */
+        std::array<std::size_t, unknown_depth_k> depth_entries_ {};
 
-        /** Levels since the last @ref restart_sweep that expanded a node. */
-        std::size_t sweeps_ = 0;
+        /** The nodes outside the root's component, ascending. */
+        island_ids_t island_nodes_;
 
-        /** Levels since the last @ref restart_sweep that found a node reaching back. */
-        std::size_t back_sweeps_ = 0;
+        /** Per island node, its strong component: the rank of its first node. */
+        island_ids_t island_components_;
 
-        /** The level the next sweep runs. */
-        std::size_t level_ = 0;
+        /** Per island node, the least entry of the root's component linking to it, or none. */
+        island_ids_t island_parents_;
+
+        /** Per island node naming its strong component, the rank of the member standing for it. */
+        island_ids_t island_entries_;
+
+        /** Per island node, its @ref island_role_t bits. */
+        growing_byte_column_t island_roles_;
+
+        /** Tarjan's walk over the islands, then their union-find. */
+        island_ids_t island_walk_;
+
+        /** The node the sweeps start from, a seeded draw or the first entry of a larger island. */
+        node_id_t root_ = node_id_unknown_k;
+
+        /** The root this audit drew, which may give way once to a larger island; none for a root
+         *  kept from an earlier audit, which never does. */
+        node_id_t drawn_root_ = node_id_unknown_k;
+
+        /** The first entry of the largest island the last gather found, and its entries. */
+        node_id_t largest_island_ = node_id_unknown_k;
+        std::size_t largest_island_entries_ = 0;
+
+        /** Nodes the current depth reached and marked so far, summed through @c atomic_ref. */
+        std::size_t reached_in_depth_ = 0;
+        std::size_t marked_in_depth_ = 0;
+
+        /** Entries the sweeps reached plus entries they marked a way to the root for, so far. */
+        std::size_t swept_entries_ = 0;
+
+        /** Entries no reached entry links to, and entries linked to by fewer than they link to. */
+        std::size_t unlinked_ = 0;
+        std::size_t underlinked_ = 0;
+
+        /** Island components nothing outside links into, and those with no link out. */
+        std::size_t unreached_islands_ = 0;
+        std::size_t stranded_islands_ = 0;
+
+        /** Components when direction is ignored, the root's among them. */
+        std::size_t components_ = 0;
+
+        /** Depths of the kept root's sweep that reached a node. */
+        std::size_t depth_from_root_ = 0;
+
+        /** Rechecks of the kept root's sweep that marked a node. */
+        std::size_t depth_to_root_ = 0;
+
+        /** The depth the next forward sweep expands. */
+        std::size_t depth_ = 0;
+
+        /** The pass the next tasks run. */
+        phase_t phase_ = phase_t::done_k;
+
+        /** Whether the islands' adjacency could be placed. */
+        status_t islands_status_ = status_t::success_k;
     };
 
-    /** Opens a reachability audit over the published nodes both ways, seeded from as many
-     *  stride-spread landmarks as one search draws, so the nodes it reaches both ways are one
-     *  search's reachable world. The caller sweeps every step per level until a level marks
-     *  nothing, then reads @c finish(). The bitsets come from the index's own allocator. */
+    /** Opens a reachability audit over the published nodes both ways from one drawn root, whose
+     *  strong component it measures, and the islands outside it. The caller sweeps every task per
+     *  pass until @c advance_depth() answers zero, then reads @c finish(). Its columns come from
+     *  the index's own allocator. */
     expected<health_plan_t> plan_health() const noexcept {
         return plan_audit_(atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire));
     }
 
     /** Bytes an audit over @p rows nodes takes from the index's allocator, every bitset in one
-     *  slice and the three level bytes per row in one each, padded to the default alignment: what
-     *  a caller sizing that allocator sets aside for @ref plan_health. */
+     *  slice, the four byte columns per row in one each, and room for an island node per bitset
+     *  word, ten times the share of islands measured on billion-entry graphs, in six slices, each
+     *  padded to the default alignment: what a caller sizing that allocator sets aside for
+     *  @ref plan_health. More islands than that grow past it, and a refused growth is the audit's
+     *  status, never a report of none. */
     static std::size_t audit_memory_usage(std::size_t rows) noexcept {
-        return health_plan_t::bitsets_k * health_plan_t::words_for(rows) * sizeof(u1x64_t) + 3 * rows +
-               4 * default_alignment_k;
-    }
-
-    /** Rows the widest storage chunk below @p rows holds: the tile of a pass over them under a zero
-     *  limit. */
-    static std::size_t widest_window_below(std::size_t rows) noexcept {
-        return rows ? min_of(rows, chunk_schedule_t::nodes_in(chunk_schedule_t::locate(rows - 1).chunk)) : 0;
-    }
-
-    /** Bytes a pass over @p rows nodes carries across its tiles past its audit: a changed bit per
-     *  row. */
-    static std::size_t refine_carried_bytes(std::size_t rows) noexcept {
-        return health_plan_t::words_for(rows) * sizeof(u1x64_t) + default_alignment_k;
-    }
-
-    /** Bytes one sweep tile of @p tile_rows rows takes under @p connectivity: its tape of the links
-     *  into it, 8 B per neighbor slot, and an offset per row. */
-    static std::size_t refine_tile_bytes(std::size_t tile_rows, std::size_t connectivity) noexcept {
-        return tile_rows * (connectivity * sizeof(scored_node_t) + sizeof(node_id_t)) + 2 * default_alignment_k;
-    }
-
-    /** Rows one tile of a pass over @p rows nodes re-selecting @p forward_rows of them takes under
-     *  @p connectivity: as many as @p memory_limit holds past the audit and the carried state, or
-     *  at zero the widest storage chunk, and never more than the tape's offsets count; zero when
-     *  the limit holds not one. */
-    static std::size_t refine_tile_rows(std::size_t rows, std::size_t forward_rows, std::size_t connectivity,
-                                        std::size_t memory_limit) noexcept {
-        std::size_t const capped = min_of<std::size_t>(forward_rows,
-                                                       node_id_unknown_k / max_of<std::size_t>(connectivity, 1));
-        if (!memory_limit) return min_of(widest_window_below(forward_rows), capped);
-        std::size_t const carried = audit_memory_usage(rows) + refine_carried_bytes(rows);
-        std::size_t const row_bytes = refine_tile_bytes(health_plan_t::lanes_k, connectivity) / health_plan_t::lanes_k;
-        return memory_limit > carried ? min_of((memory_limit - carried) / row_bytes, capped) : 0;
-    }
-
-    /** Bytes a pass over @p rows nodes re-selecting @p forward_rows of them under @p connectivity
-     *  takes from the index's allocator past its audit, its peak: the carried state and one tile,
-     *  each slice padded to the default alignment. */
-    static std::size_t refine_memory_usage(std::size_t rows, std::size_t forward_rows, std::size_t connectivity,
-                                           std::size_t memory_limit) noexcept {
-        return refine_carried_bytes(rows) +
-               refine_tile_bytes(refine_tile_rows(rows, forward_rows, connectivity, memory_limit), connectivity);
+        std::size_t const words = health_plan_t::words_for(rows);
+        std::size_t const island_bytes = 9 * sizeof(node_id_t) + sizeof(u8_t);
+        return health_plan_t::bitsets_k * words * sizeof(u1x64_t) + 4 * rows + words * island_bytes +
+               11 * default_alignment_k;
     }
 
     /**
-     *  @brief One refinement pass in flight, from the first audit to the verifying one.
+     *  @brief One refinement round in flight, from its opening health check to its closing one.
      *
-     *  An audit records every row's levels both ways, then the planned range walks one tile of
-     *  contiguous rows at a time, each row merging its picks into its live row at once, and a
-     *  sweep collects every link the walked rows hold into one tile of target rows at a time, by
-     *  two scans of their rows, merging each target with the rows linking to it; the levels keep
-     *  every merged row reached. A second audit verifies, and the islands left are re-selected
-     *  and reconnected round by round while their count shrinks.
+     *  A plan from @ref plan_round runs one round: the opening health check, the islands it named
+     *  healed without a distance, a seeded draw of one cache-sized pack of hubs, a gather streaming
+     *  every stored entry past them into the neighborhood of its nearest hub, and again inside
+     *  every neighborhood over its capacity, a restitch of each neighborhood in one core's cache,
+     *  every entry keeping the diverse links among its own and its nearest neighborhood-mates and
+     *  no others, and the closing health check from the same root, which decides the verdict. When
+     *  the heal left islands with no link to or from the root's component, such as a moved part,
+     *  the round heals and re-stitches again from that check, while each heal leaves fewer such
+     *  islands than the one before it. No phase walks the graph.
      *
-     *  An empty range heals.
+     *  Tasks of the current phase are disjoint ranges, so any number of threads may @ref run them
+     *  at once; @ref advance is the single-caller barrier between phases and answers whether
+     *  another phase follows. Planning reserves everything the plan keeps and @ref reserve grows a
+     *  context to what a task touches, so neither @ref run, @ref advance nor @ref finish allocates.
+     *  Every entry the opening health check reached both ways stays reached both ways throughout,
+     *  so searches run throughout and a round stopped between tasks leaves the graph correct, as
+     *  long as no insertion overlaps it.
      *
-     *  With several parts, every planned node first walks across everything absorbed before its
-     *  part, the resident rows and the parts moved in ahead of it, seeded beside the picks of its
-     *  members that walked already, then walks from its own neighbors as a plain pass does. The
-     *  re-selection takes the planned range and the extra nodes.
-     *
-     *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run
-     *  them at once; @ref advance is the single-caller barrier between phases and answers whether
-     *  another phase follows. A live row only ever moves from old to better under its lock, by its
-     *  walk's merge and by the sweep's, never thinner, and every row the first audit reached both
-     *  ways stays reached both ways throughout, so searches run throughout and a pass stopped
-     *  between steps leaves the graph correct. Insertions may not overlap.
-     *
-     *  A split runs it in reverse: the donor's rows partition into one graph-local part per
-     *  receiver, scatter into the receivers with their keys and the links inside each part rebased
-     *  and the links across dropped, every receiver files its keys on one step of its own, and the
-     *  parts publish; then every receiver is refined in turn over its picked nodes, the prefix of
-     *  rows that lost a link, and heals, the tallies summing over the receivers.
+     *  A split moves first: the donor's rows partition into one graph-local part per receiver,
+     *  scatter into the receivers with their keys and the links inside each part rebased and the
+     *  links across dropped, every receiver files its keys on one task of its own, and the parts
+     *  publish; then every receiver runs one round in turn, the counts summing over the receivers.
      */
     struct refine_plan_t {
-        using step_t = typename health_plan_t::step_t;
+        using task_t = typename health_plan_t::task_t;
         using part_bases_allocator_t =
             typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<node_id_t>;
         using part_bases_t = growing_buffer<node_id_t, part_bases_allocator_t>;
-        using picks_allocator_t =
-            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<scored_node_t>;
-        using picks_t = growing_buffer<scored_node_t, picks_allocator_t>;
         using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
         using growing_bitset_t = typename health_plan_t::growing_bitset_t;
+        using bytes_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<byte_t>;
+        using norms_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<vector_norms_t>;
+        using neighborhoods_allocator_t =
+            typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<u16_t>;
 
-        /** The audit the merge reads its levels from and the heal phases sweep. */
-        health_plan_t audit;
+        /** The health check the restitch reads its depths from and the heal sweeps. */
+        health_plan_t health;
 
-        /** An unbound pass over @p audit, its buffers placed by @p allocator - what a refused plan
+        /** An unbound plan over @p health, its buffers placed by @p allocator - what a refused plan
          *  answers with, and what planning fills. */
-        refine_plan_t(health_plan_t&& audit, part_bases_allocator_t const& allocator) noexcept
-            : audit(std::move(audit)), extra_nodes_ {bitset_allocator_t {allocator}},
-              back_links_ {picks_allocator_t {allocator}}, incoming_offsets_(allocator),
-              changed_ {bitset_allocator_t {allocator}}, receiver_claims_(allocator), part_slots_(allocator),
-              part_members_(allocator), part_extents_(allocator) {}
+        refine_plan_t(health_plan_t&& health, part_bases_allocator_t const& allocator) noexcept
+            : health(std::move(health)), changed_ {bitset_allocator_t {allocator}}, receiver_claims_(allocator),
+              part_slots_(allocator), part_members_(allocator), part_extents_(allocator), hub_nodes_(allocator),
+              hub_vectors_ {bytes_allocator_t {allocator}}, hub_norms_ {norms_allocator_t {allocator}},
+              entry_neighborhoods_ {neighborhoods_allocator_t {allocator}}, neighborhood_entries_(allocator),
+              neighborhood_offsets_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
-            : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
-              walked_nodes_(other.walked_nodes_), extra_nodes_(std::move(other.extra_nodes_)),
-              part_bases_(other.part_bases_), back_links_(std::move(other.back_links_)),
-              incoming_offsets_(std::move(other.incoming_offsets_)), tile_(other.tile_), sweep_(other.sweep_),
-              sources_first_(other.sources_first_), tile_rows_(other.tile_rows_), changed_(std::move(other.changed_)),
-              after_tiles_(other.after_tiles_), memory_limit_(other.memory_limit_),
-              split_donor_(std::exchange(other.split_donor_, nullptr)), receivers_(other.receivers_),
-              receiver_claims_(std::move(other.receiver_claims_)), part_slots_(std::move(other.part_slots_)),
-              part_members_(std::move(other.part_members_)), part_extents_(std::move(other.part_extents_)),
-              seed_(other.seed_), refined_receivers_(other.refined_receivers_),
-              receivers_health_(other.receivers_health_), receivers_islands_(other.receivers_islands_),
-              expansion_factor_(other.expansion_factor_), phase_(other.phase_), swept_after_(other.swept_after_),
-              islands_before_(other.islands_before_), audited_rows_(other.audited_rows_), tally_(other.tally_) {}
+            : health(std::move(other.health)), index_(std::exchange(other.index_, nullptr)),
+              changed_(std::move(other.changed_)), split_donor_(std::exchange(other.split_donor_, nullptr)),
+              receivers_(other.receivers_), receiver_claims_(std::move(other.receiver_claims_)),
+              part_slots_(std::move(other.part_slots_)), part_members_(std::move(other.part_members_)),
+              part_extents_(std::move(other.part_extents_)), seed_(other.seed_),
+              refined_receivers_(other.refined_receivers_), receivers_tally_(other.receivers_tally_),
+              phase_(other.phase_), swept_after_(other.swept_after_), islands_waiting_(other.islands_waiting_),
+              waiting_before_(other.waiting_before_), tally_(other.tally_), status_(other.status_),
+              cache_bytes_(other.cache_bytes_), hubs_per_draw_(other.hubs_per_draw_),
+              neighborhood_capacity_(other.neighborhood_capacity_), hub_nodes_(std::move(other.hub_nodes_)),
+              hub_vectors_(std::move(other.hub_vectors_)), hub_norms_(std::move(other.hub_norms_)),
+              entry_neighborhoods_(std::move(other.entry_neighborhoods_)),
+              neighborhood_entries_(std::move(other.neighborhood_entries_)),
+              neighborhood_offsets_(std::move(other.neighborhood_offsets_)), round_seed_(other.round_seed_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        /** Step @p position of the current phase: one row, a sweep's bitset word, a word of rows
-         *  whose links are counted or scattered, a receiver's keys, or the whole partition; an
-         *  empty step past the end. */
-        step_t operator[](std::size_t position) const noexcept {
-            if (phase_ == phase_t::audit_k) return audit[position];
-            step_t step;
-            if (position >= steps().size()) return step;
-            step.position = position;
-            // One step per receiver files the keys its part received.
+        /** Task @p position of the current phase: a health check's bitset word, a donor row
+         *  scattered, a receiver's keys, the whole partition, the islands healed, a
+         *  neighborhood capacity of entries gathered, or a neighborhood; and past the end, a
+         *  task spanning nothing. */
+        task_t operator[](std::size_t position) const noexcept {
+            if (phase_ == phase_t::health_k) return health[position];
+            task_t task;
+            if (position >= tasks().size()) return task;
+            task.position = position;
+            // One task per receiver files the keys its part received.
             if (phase_ == phase_t::keys_k) {
-                step.nodes = {0, part_extents_[position].nodes};
-                return step;
+                task.nodes = {0, part_extents_[position].nodes};
+                return task;
             }
             iota_view<node_id_t> const range = phase_nodes_();
             std::size_t const width = phase_width_();
             std::size_t const first = range.first + (position * width);
             std::size_t const bound = min_of(first + width, static_cast<std::size_t>(range.bound));
-            step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            return step;
+            task.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            return task;
         }
 
-        /** The current phase's steps, positionally; none once the pass is over. */
-        indexed_range<refine_plan_t> steps() const noexcept {
-            if (!index_ || phase_ == phase_t::done_k || phase_ == phase_t::paused_k) return {this, 0u};
+        /** The current phase's tasks, positionally; none once the plan is over. */
+        indexed_range<refine_plan_t> tasks() const noexcept {
+            if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ == phase_t::partition_k) return {this, 1u};
             if (phase_ == phase_t::keys_k) return {this, receivers_.size()};
-            if (phase_ == phase_t::audit_k) return {this, audit.steps().size()};
+            if (phase_ == phase_t::health_k) return {this, health.tasks().size()};
             return {this, divide_round_up<std::size_t>(phase_nodes_().size(), phase_width_())};
         }
 
         /**
-         *  @brief Runs @p step of the current phase on the calling thread - safe for disjoint steps
-         *      of one phase, and never failing on a bound plan, since planning claimed and reserved
-         *      everything a step writes.
+         *  @brief Runs @p task of the current phase on the calling thread - safe for disjoint tasks
+         *      of one phase, and never failing on a bound plan once @ref reserve grew @p context,
+         *      since planning claimed and reserved everything a task writes.
          *
-         *  The one partition step grows a split's parts, a scatter step copies donor nodes and
-         *  their keys into their receivers, and a keys step files one receiver's keys, its map's
-         *  one writer. A re-selection step walks one row and merges its picks into it, a count or
-         *  scatter step reads the links of a word of walked rows into the sweep's tile, and a merge
-         *  step writes one row of the tile.
+         *  The one partition task grows a split's parts, a scatter task copies donor nodes and
+         *  their keys into their receivers, and a keys task files one receiver's keys, its map's
+         *  one writer. A heal task links the round's islands, a gather task files a neighborhood
+         *  capacity of entries under their nearest hubs, and a restitch task re-stitches one
+         *  neighborhood in one core's cache.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
          */
-        status_t run(step_t const& step, traversal_context_t& context) noexcept {
+        status_t run(task_t const& task, traversal_context_t& context) noexcept {
             if (!index_) return status_t::uninitialized_k;
             switch (phase_) {
             case phase_t::partition_k: partition_(); break;
-            case phase_t::scatter_k: scatter_(step); break;
-            case phase_t::keys_k: receivers_[step.position]->keyed_.publish(step.nodes); break;
-            case phase_t::reselect_k:
-            case phase_t::reselect_islands_k: reselect_(step, context); break;
-            case phase_t::audit_k: audit.sweep(step); break;
-            case phase_t::count_back_links_k: count_back_links_(step, context); break;
-            case phase_t::scatter_back_links_k: scatter_back_links_(step, context); break;
-            case phase_t::merge_back_links_k: merge_back_links_(step, context); break;
-            case phase_t::heal_k: reconnect_(step, context); break;
+            case phase_t::scatter_k: scatter_(task); break;
+            case phase_t::keys_k: receivers_[task.position]->keyed_.publish(task.nodes); break;
+            case phase_t::health_k: health.sweep(task); break;
+            case phase_t::heal_k: heal_(task); break;
+            case phase_t::gather_neighborhoods_k: gather_neighborhoods_(task, context); break;
+            case phase_t::restitch_k: restitch_neighborhoods_(task, context); break;
             default: break;
             }
             return status_t::success_k;
         }
 
-        /** The barrier between phases, one caller after every step of the current one ran:
-         *  publishes a split's parts, opens the next walking or sweeping tile, or picks the next
-         *  phase, and answers whether one follows. */
+        /** The barrier between phases, one caller after every task of the current one ran:
+         *  publishes a split's parts, packs the hubs, sorts the entries by neighborhood, or picks
+         *  the next phase, and answers whether one follows. */
         bool advance() noexcept {
-            if (!index_ || phase_ == phase_t::paused_k) return false;
+            if (!index_ || failed(status_)) return false;
             if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) {
                 phase_ = phase_ == phase_t::partition_k ? phase_t::scatter_k : phase_t::keys_k;
                 return true;
@@ -2209,38 +2883,23 @@ struct ram_index {
                 bind_receiver_();
                 return true;
             }
-            if (phase_ == phase_t::audit_k) {
-                if (!audit.advance_level()) converge_();
+            if (phase_ == phase_t::health_k) {
+                if (!health.advance_depth()) converge_();
             }
-            // The walking tiles merge their rows' picks as they go; then the sweep's tiles, over
-            // every row, collect the links the walked rows hold into each and merge them.
-            else if (phase_ == phase_t::reselect_k && tile_.bound < walked_nodes_.bound) open_tile_(tile_.bound);
-            else if (phase_ == phase_t::reselect_k) open_sweep_(0);
-            else if (phase_ == phase_t::count_back_links_k) {
-                offset_back_links_();
-                phase_ = phase_t::scatter_back_links_k;
-            }
-            else if (phase_ == phase_t::scatter_back_links_k) phase_ = phase_t::merge_back_links_k;
-            else if (phase_ == phase_t::merge_back_links_k && sweep_.bound < audit.visible) open_sweep_(sweep_.bound);
-            else if (phase_ == phase_t::merge_back_links_k && after_tiles_ == phase_t::paused_k)
-                phase_ = phase_t::paused_k;
-            else if (phase_ != phase_t::done_k) verify_(phase_);
+            else advance_round_();
+            if (failed(status_)) return false;
             if (phase_ == phase_t::done_k && refined_receivers_ != receivers_.size()) settle_receiver_();
             return phase_ != phase_t::done_k;
         }
 
-        /** Ends the planned range with the open walking tile, so the sweep follows it and the
-         *  pass then verifies, and the receivers of a split still to bind walk nothing; a sweep
-         *  under way finishes. A no-op outside the walking tiles, a split's partition, scatter
-         *  and keys included. */
+        /** Skips what is left of the round's phase in hand, at a barrier: an opening health check,
+         *  or a heal not yet run, ends the round with nothing written; a hubs draw, a gather or a
+         *  restitch sends the round to the closing health check, the heal's links and the
+         *  neighborhoods already re-stitched standing; the closing health check runs on, and the
+         *  verdict reads stopped. A no-op in a split's partition, scatter and keys, and once the
+         *  round is over. */
         void stop() noexcept {
-            after_tiles_ = phase_t::audit_k;
-            if (phase_ == phase_t::paused_k) return verify_(phase_t::merge_back_links_k);
-            if (phase_ != phase_t::reselect_k) return;
-            nodes_.bound = min_of(nodes_.bound, tile_.bound);
-            walked_nodes_.bound = tile_.bound;
-            for (std::size_t receiver = refined_receivers_ + 1; receiver < receivers_.size(); ++receiver)
-                part_extents_[receiver].picked = 0;
+            if (rounding()) stop_round_();
         }
 
         /** Whether the current phase moves a split's rows or keys - the phases no stop skips. */
@@ -2248,71 +2907,117 @@ struct ram_index {
             return phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k || phase_ == phase_t::keys_k;
         }
 
-        /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
-        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+        /** Whether the round's heal ended and its hubs draw next: where a caller wanting the heal
+         *  alone stops it. */
+        bool drawing_hubs() const noexcept { return phase_ == phase_t::draw_hubs_k; }
 
-        /** Nodes the re-selection steps over, the total a caller's progress counts against. */
-        std::size_t planned_nodes() const noexcept { return walked_nodes_.size(); }
-
-        /** The rows the open tile spans - what a re-selection phase steps over. */
-        iota_view<node_id_t> tile() const noexcept { return tile_; }
-
-        /** Pauses the pass once its tiles walked, its audit carried for the rows a later move
-         *  appends, instead of verifying; @ref resume takes them in. */
-        void hold() noexcept { after_tiles_ = phase_t::paused_k; }
-
-        /** Lets the pass verify and heal once its tiles walked, at once if it paused. */
-        void release() noexcept {
-            after_tiles_ = phase_t::audit_k;
-            if (phase_ == phase_t::paused_k) verify_(phase_t::merge_back_links_k);
-        }
-
-        /** Whether the pass paused for rows a later move appends. */
-        bool paused() const noexcept { return phase_ == phase_t::paused_k; }
+        /** The first failure the plan met, which ended it; success otherwise. */
+        status_t status() const noexcept { return status_; }
 
         /**
-         *  @brief Takes the rows appended since the pass paused into it: the audit widens to them
-         *      unreached at no level, they walk tile by tile across the parts below them in
-         *      @p part_bases, and the sweep collects their links alone, in as many tile rows as
-         *      the limit holds.
+         *  @brief Grows @p context to what a gather or restitch task touches, which a driver calls
+         *      before a round's first task and after every @ref next_round.
+         *
+         *  That is a neighborhood capacity of gathered entries and a gather's hubs with the packs
+         *  of either, their norms and thresholds, every gathered entry's nearest
+         *  neighborhood-mates, and the merge of one entry's links with them. An unbound plan needs
+         *  none of it.
          *
          *  @par Statuses:
-         *  - @c bad_alloc_k The audit, the changed bits or a tile cannot grow; the
-         *    pass stays paused.
+         *  - @c bad_alloc_k @p context cannot grow to a round's scratch.
          */
-        status_t resume(std::span<node_id_t const> part_bases) noexcept {
-            node_id_t const from = audit.visible, visible = static_cast<node_id_t>(index_->size());
-            if (phase_ != phase_t::paused_k || visible <= from) return status_t::success_k;
-            node_id_t const first = walked_nodes_.empty() ? from : walked_nodes_.first;
-            std::size_t const forward_rows = visible - first, connectivity = index_->connectivity();
-            std::size_t const tile_rows = max_of(tile_rows_,
-                                                 refine_tile_rows(visible, forward_rows, connectivity, memory_limit_));
-            std::size_t const counted = changed_.size();
-            if (failed(reserve_merge_(visible, tile_rows, connectivity)) || failed(audit.widen(visible)))
+        status_t reserve(traversal_context_t& context) const noexcept {
+            if (!index_ || !neighborhood_capacity_) return status_t::success_k;
+            std::size_t const connectivity = index_->connectivity(), hubs = hubs_for_(health.visible);
+            std::size_t const packed = scan_scorer_t::packs_bytes(max_of(hubs, neighborhood_capacity_),
+                                                                  index_->dimensions());
+            if (failed(context.reserve_scan(max_of(hubs, neighborhood_capacity_), scan_scorer_t::step_rows_k,
+                                            scan_scorer_t::dots_columns_k)) ||
+                failed(context.reserve_neighborhoods(neighborhood_capacity_, connectivity)) ||
+                failed(context.reserve_queries(gathered_packs_offset_() + packed)) ||
+                failed(context.results.reserve(2 * connectivity)))
                 return status_t::bad_alloc_k;
-            incoming_offsets_.extend_uninitialized(tile_rows_);
-            changed_.extend_uninitialized(health_plan_t::words_for(visible));
-            std::memset(changed_.data() + counted, 0, (changed_.size() - counted) * sizeof(u1x64_t));
-            nodes_ = walked_nodes_ = {first, visible};
-            sources_first_ = from;
-            std::size_t parts = 0;
-            while (parts != part_bases.size() && part_bases[parts] < visible) ++parts;
-            part_bases_ = parts > 1 ? part_bases.first(parts) : std::span<node_id_t const> {};
-            open_tile_(from);
-            phase_ = phase_t::reselect_k;
             return status_t::success_k;
         }
 
+        /** Whether the plan is inside a round, whose every barrier a caller's progress hears:
+         *  past a split's moves and short of its end. */
+        bool rounding() const noexcept { return phase_ >= phase_t::health_k && phase_ != phase_t::done_k; }
+
+        /** The phase the plan is in, by the name a progress line prints. */
+        char const* phase_name() const noexcept {
+            switch (phase_) {
+            case phase_t::partition_k: return "partition";
+            case phase_t::gather_neighborhoods_k: return "gather";
+            case phase_t::scatter_k:
+            case phase_t::keys_k: return "scatter";
+            case phase_t::health_k: return "health";
+            case phase_t::draw_hubs_k: return "hubs";
+            case phase_t::restitch_k: return "restitch";
+            case phase_t::heal_k: return "heal";
+            default: return "done";
+            }
+        }
+
+        /** The position of the round's phase in hand among its six, from the opening health
+         *  check to the closing one; zero outside a round's phases. */
+        std::size_t ordinal() const noexcept {
+            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
+            if (phase_ == phase_t::health_k && swept_after_ == phase_t::opening_k) return 1;
+            if (phase_ == phase_t::health_k && swept_after_ == phase_t::restitch_k)
+                return static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
+            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
+        }
+
+        /** Units of the round's phase in hand done so far, at a barrier before it advances:
+         *  entries swept and marked by an audit, and otherwise all of the phase's, since each of
+         *  its passes runs to its end. */
+        std::size_t completed() const noexcept {
+            if (phase_ == phase_t::health_k) return health.swept();
+            return total();
+        }
+
+        /** Units of the round's phase in hand in all, which @ref completed counts toward: islands
+         *  healed, hubs drawn, entries one gather pass files, or entries re-stitched. */
+        std::size_t total() const noexcept {
+            switch (phase_) {
+            case phase_t::health_k: return 2 * std::size_t {health.visible};
+            case phase_t::heal_k: return health.islands();
+            case phase_t::draw_hubs_k: return hubs_for_(health.visible);
+            case phase_t::gather_neighborhoods_k: return gathered_entries_();
+            case phase_t::restitch_k: return health.visible;
+            default: return 0;
+            }
+        }
+
+        /** Opens the next round once one ended, from the root the closing health check kept:
+         *  the count and the changed marks start over, the health check and the round's columns
+         *  grow to the entries published since, and the opening health check sweeps again;
+         *  columns that cannot grow fail the plan. A no-op mid-round. Contexts then need
+         *  @ref reserve again. */
+        void next_round() noexcept {
+            if (phase_ != phase_t::done_k || failed(status_)) return;
+            tally_ = {};
+            // A refused widening re-checks the entries it held, and the round
+            // re-stitches those alone.
+            static_cast<void>(health.widen(static_cast<node_id_t>(index_->size())));
+            if (failed(reserve_round_(cache_bytes_))) return status_ = status_t::bad_alloc_k, void();
+            open_health_(phase_t::opening_k);
+        }
+
         /**
-         *  The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k.
+         *  @brief The round so far: complete once @ref advance answered false, else cancelled.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is bound to no index.
-         *  - @c cancelled_k The pass stopped before @ref advance answered false.
+         *  - @c cancelled_k The round stopped before @ref advance answered false, or was stopped.
+         *  - @c bad_alloc_k A health check could not place its islands' adjacency.
          */
         expected<refine_report_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
-            return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+            if (failed(status_)) return {tally_, status_};
+            bool const done = phase_ == phase_t::done_k && tally_.verdict != refine_verdict_t::stopped_k;
+            return {tally_, done ? status_t::success_k : status_t::cancelled_k};
         }
 
       private:
@@ -2322,64 +3027,50 @@ struct ram_index {
             partition_k,
             scatter_k,
             keys_k,
-            reselect_k,
-            audit_k,
-            count_back_links_k,
-            scatter_back_links_k,
-            merge_back_links_k,
-            reselect_islands_k,
+            health_k,
+            // What a round's opening health check follows, and the round's phases in their order.
+            opening_k,
             heal_k,
-            paused_k,
+            draw_hubs_k,
+            gather_neighborhoods_k,
+            restitch_k,
             done_k
         };
 
-        /** Opens the audit following @p phase: the verifying one after the merge, over every row
-         *  published since, a stopped absorb's unwalked ones too. */
-        void verify_(phase_t phase) noexcept {
-            // A refused widening verifies the rows it held, and the heal re-links those alone.
-            static_cast<void>(audit.widen(static_cast<node_id_t>(index_->size())));
-            audit.restart_sweep();
+        /** What a @ref add_or_swap_link_ found. */
+        enum class taken_t : u8_t { written_k, present_k, refused_k };
+
+        /** Opens the health check following @p phase from the root the last one kept: the opening
+         *  one, or the closing one after the restitch. */
+        void open_health_(phase_t phase) noexcept {
+            health.restart_sweep();
             swept_after_ = phase;
-            phase_ = phase_t::audit_k;
+            phase_ = phase_t::health_k;
         }
 
         static void add_(std::size_t& into, std::size_t value) noexcept {
             atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
         }
 
-        /** The rows the current phase steps over: a split donor's, every audited one in the
-         *  heal, the rows this round walked whose links the sweep reads, its tile's, or the
-         *  open walking tile's. */
+        /** The rows the current phase tasks over: a split donor's, the round's islands, the entries
+         *  it gathers into neighborhoods, or its neighborhoods; none while it draws hubs, since the
+         *  barrier closing that phase draws them. */
         iota_view<node_id_t> phase_nodes_() const noexcept {
             if (phase_ == phase_t::partition_k || phase_ == phase_t::scatter_k) return {0, split_nodes_()};
-            if (phase_ == phase_t::reselect_islands_k || phase_ == phase_t::heal_k) return {0, audit.visible};
-            if (phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k)
-                return {sources_first_, walked_nodes_.bound};
-            if (phase_ == phase_t::merge_back_links_k) return sweep_;
-            return tile_;
+            if (phase_ == phase_t::heal_k) return {0, static_cast<node_id_t>(health.islands())};
+            if (phase_ == phase_t::gather_neighborhoods_k) return {0, health.visible};
+            if (phase_ == phase_t::restitch_k) return {0, static_cast<node_id_t>(neighborhoods_())};
+            return {};
         }
 
-        /** Rows one step of the current phase spans: the whole partition, a word of rows whose
-         *  links are read, or one row walked or written. */
+        /** Rows one task of the current phase spans: the whole partition, every island, a
+         *  neighborhood capacity of entries gathered, or one donor row or neighborhood. */
         std::size_t phase_width_() const noexcept {
             if (phase_ == phase_t::partition_k) return max_of<std::size_t>(split_nodes_(), 1);
-            if (phase_ == phase_t::count_back_links_k || phase_ == phase_t::scatter_back_links_k)
-                return health_plan_t::lanes_k;
+            // One heal task: islands sharing an owner row then link in one order.
+            if (phase_ == phase_t::heal_k) return max_of<std::size_t>(health.islands(), 1);
+            if (phase_ == phase_t::gather_neighborhoods_k) return neighborhood_capacity_;
             return 1;
-        }
-
-        /** Opens the walking tile from @p first: up to @c tile_rows_ rows of the planned range. */
-        void open_tile_(node_id_t first) noexcept {
-            tile_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, walked_nodes_.bound))};
-        }
-
-        /** Opens the sweep's tile of target rows from @p first, up to @c tile_rows_ of them, none
-         *  linked yet. */
-        void open_sweep_(node_id_t first) noexcept {
-            sweep_ = {first, static_cast<node_id_t>(min_of<std::size_t>(first + tile_rows_, audit.visible))};
-            std::memset(incoming_offsets_.data(), 0, sweep_.size() * sizeof(node_id_t));
-            ++tally_.swept_tiles;
-            phase_ = phase_t::count_back_links_k;
         }
 
         /** Rows the split's donor published at planning: one slot each. */
@@ -2390,115 +3081,11 @@ struct ram_index {
             return divide_round_up<std::size_t>(part_slots_.size(), receivers_.size());
         }
 
-        /** Whether the re-selection walks @p node_id: a planned node, or an extra one. */
-        bool picked_(node_id_t node_id) const noexcept {
-            return (node_id >= nodes_.first && node_id < nodes_.bound) ||
-                   bitset_contains(to_span(extra_nodes_), node_id);
-        }
-
-        /** Reserves one tile of @p tile_rows rows under @p connectivity and the changed bits of
-         *  @p rows rows. */
-        status_t reserve_merge_(std::size_t rows, std::size_t tile_rows, std::size_t connectivity) noexcept {
-            if (failed(back_links_.reserve_exactly(tile_rows * connectivity)) ||
-                failed(incoming_offsets_.reserve_exactly(tile_rows)) ||
-                failed(changed_.reserve_exactly(health_plan_t::words_for(rows))))
-                return status_t::bad_alloc_k;
-            tile_rows_ = tile_rows;
-            return status_t::success_k;
-        }
-
-        /** Sizes the tile within what @ref reserve_merge_ placed and leaves
-         *  @p rows rows unchanged. */
-        void open_merge_(std::size_t rows) noexcept {
-            std::size_t const words = health_plan_t::words_for(rows);
-            [[maybe_unused]] status_t const offset = incoming_offsets_.resize(tile_rows_);
-            [[maybe_unused]] status_t const uncounted = changed_.resize(words);
-            if (words) std::memset(changed_.data(), 0, words * sizeof(u1x64_t));
-        }
-
         /** Marks row @p node_id counted as changed, answering whether it was already. */
         bool count_changed_(node_id_t node_id) noexcept {
             return atomic_ref<u1x64_t>(changed_[node_id / health_plan_t::lanes_k])
                 .fetch_test_and_set_bit(static_cast<unsigned>(node_id % health_plan_t::lanes_k),
                                         std::memory_order_relaxed);
-        }
-
-        /** Turns the sweep tile's counts into each row's first link's offset, which the scatter
-         *  advances to its end, and sizes the tape to them: the tile ends before the first row
-         *  whose links pass the tape, and a lone row past it keeps the tape's worth of them. */
-        void offset_back_links_() noexcept {
-            std::size_t const capacity = back_links_.capacity();
-            std::size_t offset = 0, rows = 0;
-            for (; rows != sweep_.size(); ++rows) {
-                std::size_t count = incoming_offsets_[rows];
-                if (offset + count > capacity) {
-                    if (rows) break;
-                    count = capacity;
-                }
-                incoming_offsets_[rows] = static_cast<node_id_t>(offset);
-                offset += count;
-            }
-            sweep_.bound = static_cast<node_id_t>(sweep_.first + max_of<std::size_t>(rows, 1));
-            back_links_.clear();
-            back_links_.extend_uninitialized(offset);
-        }
-
-        /** Counts every live link of the walked rows of @p step into the sweep's tile. No row is
-         *  written meanwhile, so the scatter reads the same links. */
-        void count_back_links_(step_t const& step, traversal_context_t&) noexcept {
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (!picked_(node_id)) continue;
-                index_->for_each_member_(node_id, [&](node_id_t target) noexcept {
-                    if (target >= sweep_.first && target < sweep_.bound)
-                        atomic_ref<node_id_t>(incoming_offsets_[target - sweep_.first])
-                            .fetch_add(1u, std::memory_order_relaxed);
-                });
-            }
-        }
-
-        /** Scatters every live link of the walked rows of @p step into the sweep's tile onto its
-         *  target's run, the linking row unscored; a link the tape has no room for is left out. */
-        void scatter_back_links_(step_t const& step, traversal_context_t&) noexcept {
-            std::size_t scattered = 0;
-            std::size_t const tape = back_links_.size();
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (!picked_(node_id)) continue;
-                index_->for_each_member_(node_id, [&](node_id_t target) noexcept {
-                    if (target < sweep_.first || target >= sweep_.bound) return;
-                    std::size_t const position = atomic_ref<node_id_t>(incoming_offsets_[target - sweep_.first])
-                                                     .fetch_add(1u, std::memory_order_relaxed);
-                    if (position < tape) back_links_[position] = scored_node_t {node_id, distance_t {}}, ++scattered;
-                });
-            }
-            add_(tally_.swept_links, scattered);
-        }
-
-        /** Merges every row of @p step in the sweep's tile with the rows linking to it, scored
-         *  against it first; a row counts as changed once, whichever of its merges first gains
-         *  it a member. */
-        void merge_back_links_(step_t const& step, traversal_context_t& context) noexcept {
-            traversal_stats_t const before = context.telemetry();
-            std::size_t changed = 0;
-            auto nearer = [](scored_node_t const& left, scored_node_t const& right) noexcept {
-                return left.distance < right.distance ||
-                       (left.distance == right.distance && left.node_id < right.node_id);
-            };
-            std::size_t const tape = back_links_.size();
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                std::size_t const row = node_id - sweep_.first;
-                std::size_t const first = row ? min_of<std::size_t>(incoming_offsets_[row - 1], tape) : 0;
-                std::size_t const bound = min_of<std::size_t>(incoming_offsets_[row], tape);
-                std::span<scored_node_t> const incoming {back_links_.data() + first, bound - first};
-                if (incoming.empty()) continue;
-                index_->score_run_(node_id, incoming, context);
-                // The scatter filled each run in arrival order; sorted, its fold is reproducible.
-                partial_sort(incoming, incoming.size(), nearer);
-                bool const gained = index_->merge_back_links_(node_id, audit.visible, {}, incoming, audit, context);
-                // An absorb's links also reach rows it never walked, which the report leaves out.
-                changed += gained && picked_(node_id) && !count_changed_(node_id);
-            }
-            add_(tally_.changed_nodes, changed);
-            add_spent_(context.telemetry() - before);
         }
 
         /** Calls @p callback with every live link of donor row @p row, skipping the self-loop of
@@ -2522,8 +3109,7 @@ struct ram_index {
         /** Expands the oldest unexpanded member of @p part, enlisting its unplaced neighbors while
          *  the part has room; answers whether the part could expand at all. */
         bool expand_(std::size_t part) noexcept {
-            // Until the picked counts replace them, these count each part's expanded members.
-            node_id_t& expanded = part_extents_[part].picked;
+            node_id_t& expanded = part_extents_[part].expanded;
             std::size_t const capacity = part_capacity_();
             if (expanded == part_extents_[part].nodes || part_extents_[part].nodes == capacity) return false;
             node_id_t const node_id = part_members_[part * capacity + expanded++];
@@ -2536,27 +3122,12 @@ struct ram_index {
             return true;
         }
 
-        /** Whether donor node @p node links into a part other than its @p part. */
-        bool links_across_(node_id_t node, std::size_t part) const noexcept {
-            bool across = false;
-            std::size_t const capacity = part_capacity_();
-            node_id_t const split_nodes = split_nodes_();
-            for_each_link_(node, [&](node_id_t target) noexcept {
-                across = across || (target < split_nodes && part_slots_[target] / capacity != part);
-            });
-            return across;
-        }
-
-        /**
-         *  @brief Grows one part per receiver from a root the seed picks, breadth first over the
-         *      source's links and one expansion per part in turn, each capped at the part capacity;
-         *      every node left unplaced then seeds a growth of the smallest part.
-         *
-         *  Each part's picked nodes, those linking into another part, then move ahead of the rest,
-         *  and every node's slot names its part and its ID in the receiver.
-         */
+        /** Grows one part per receiver from a root the seed picks, breadth first over the source's
+         *  links and one expansion per part in turn, each capped at the part capacity; every node
+         *  left unplaced then seeds a growth of the smallest part. Every node's slot names its part
+         *  and its ID in the receiver, in the order the growth enlisted it. */
         void partition_() noexcept {
-            std::size_t const parts = receivers_.size(), capacity = part_capacity_();
+            std::size_t const parts = receivers_.size();
             node_id_t const split_nodes = split_nodes_();
             for (node_id_t& slot : part_slots_) slot = node_id_unknown_k;
             for (std::size_t part = 0; part != parts; ++part) part_extents_[part] = {};
@@ -2574,29 +3145,19 @@ struct ram_index {
                 enlist_(node, smallest);
                 while (expand_(smallest)) {}
             }
-            for (std::size_t part = 0; part != parts; ++part) {
-                node_id_t* const members = part_members_.data() + part * capacity;
-                std::size_t picked = 0, interior = part_extents_[part].nodes;
-                while (picked != interior)
-                    if (links_across_(members[picked], part)) ++picked;
-                    else std::swap(members[picked], members[--interior]);
-                part_extents_[part].picked = static_cast<node_id_t>(picked);
-                for (std::size_t position = 0; position != part_extents_[part].nodes; ++position)
-                    part_slots_[members[position]] = static_cast<node_id_t>(part * capacity + position);
-            }
         }
 
-        /** Copies the donor nodes of @p step into their receivers' claimed rows - keys, vectors,
+        /** Copies the donor nodes of @p task into their receivers' claimed rows - keys, vectors,
          *  norms, and the links inside each part rebased through its slots, the links across
          *  dropped, a row left with none becoming the published-empty self-loop. */
-        void scatter_(step_t const& step) noexcept {
+        void scatter_(task_t const& task) noexcept {
             ram_index const& donor = *split_donor_;
             geometry_t const geometry = donor.geometry();
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
             std::size_t const capacity = part_capacity_();
             node_id_t const split_nodes = split_nodes_();
-            for (node_id_t node = step.nodes.first; node < step.nodes.bound; ++node) {
+            for (node_id_t node = task.nodes.first; node < task.nodes.bound; ++node) {
                 std::size_t const slot = part_slots_[node], part = slot / capacity;
                 node_id_t const placed = static_cast<node_id_t>(slot % capacity);
                 ram_index& into = *receivers_[part];
@@ -2634,129 +3195,52 @@ struct ram_index {
             split_donor_ = nullptr;
         }
 
-        /** Turns the pass to the next receiver: its audit, its picked nodes as the range, and
-         *  the re-selection, or straight the verifying sweep when none are picked or a stop
-         *  cut the pass. */
+        /** Turns the plan to the next receiver: its health check over the rows its part received,
+         *  their changed marks cleared, and its round. */
         void bind_receiver_() noexcept {
             std::size_t const receiver = refined_receivers_;
             index_ = receivers_[receiver];
-            audit.rebind(*index_, part_extents_[receiver].nodes);
-            nodes_ = {0, part_extents_[receiver].picked};
-            walked_nodes_ = nodes_;
-            sources_first_ = 0;
-            open_merge_(part_extents_[receiver].nodes);
-            islands_before_ = 0;
-            // The opening audit steers the merges; a pass walking nothing verifies alone.
-            swept_after_ = !nodes_.empty() ? phase_t::done_k : phase_t::merge_back_links_k;
-            phase_ = phase_t::audit_k;
+            health.rebind(*index_, part_extents_[receiver].nodes);
+            // Within what planning reserved for a full part.
+            [[maybe_unused]] status_t const unchanged = changed_.resize(health_plan_t::words_for(health.visible));
+            swept_after_ = phase_t::opening_k;
+            phase_ = phase_t::health_k;
         }
 
-        /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
-         *  or reports the sums once the last healed. */
+        /** Folds a receiver's round into the split's, then binds the next receiver, or reports the
+         *  sums once the last one's round ended. */
         void settle_receiver_() noexcept {
-            receivers_health_ += tally_.reachability;
-            receivers_islands_ += tally_.islands_found;
-            if (++refined_receivers_ != receivers_.size()) return bind_receiver_();
-            tally_.reachability = receivers_health_;
-            tally_.islands_found = receivers_islands_;
+            if (refined_receivers_) receivers_tally_ += tally_;
+            else receivers_tally_ = tally_;
+            if (++refined_receivers_ == receivers_.size()) return tally_ = receivers_tally_, void();
+            tally_ = {};
+            bind_receiver_();
         }
 
-        /** Picks what follows a converged audit, from the phase the audit followed: the merge
-         *  after the re-selection, whose levels it now holds, and the heal after the merge. */
+        /** Takes in a converged health check: the opening one opens the round; the closing one
+         *  heals again from what it measured while each heal leaves fewer islands waiting than
+         *  the one before it, and otherwise decides the verdict. */
         void converge_() noexcept {
-            audited_rows_ = audit.visible;
-            auto const [health, status] = audit.finish();
-            std::size_t const left = succeeded(status) ? audit.visible - health.reachable_nodes : 0;
-            tally_.reachability = health;
-            // The opening audit, whose levels steer every merge, leads to the first tile.
-            if (swept_after_ == phase_t::done_k) {
-                open_tile_(walked_nodes_.first);
-                phase_ = phase_t::reselect_k;
+            auto const [reachability, status] = health.finish();
+            // An adjacency the audit could not place fails the plan, never reads as no islands.
+            if (failed(status)) {
+                status_ = status;
+                phase_ = phase_t::done_k;
                 return;
             }
-            // A held pass walking nothing yet keeps this audit's levels for the rows still to come.
-            if (swept_after_ == phase_t::merge_back_links_k && after_tiles_ == phase_t::paused_k) {
-                phase_ = phase_t::paused_k;
-                return;
-            }
-            if (swept_after_ == phase_t::merge_back_links_k) {
-                tally_.islands_found = left;
-                phase_ = left ? phase_t::reselect_islands_k : phase_t::done_k;
-            }
-            else if (swept_after_ == phase_t::reselect_islands_k) { phase_ = left ? phase_t::heal_k : phase_t::done_k; }
-            // A round that frees no island frees none on the next either, since the picks it needs are unreached.
-            else { phase_ = left && left < islands_before_ ? phase_t::reselect_islands_k : phase_t::done_k; }
-            if (swept_after_ != phase_t::reselect_islands_k) islands_before_ = left;
+            std::size_t const islands = reachability.audited_nodes - reachability.reachable_nodes;
+            tally_.reachability = reachability;
+            if (swept_after_ == phase_t::opening_k) return open_round_(reachability);
+            // The restitch gave the islands the heal could not link their links, which a heal from
+            // this check follows without a distance, as a moved part nothing links into needs.
+            bool const fewer_waiting = islands_waiting_ && islands_waiting_ < waiting_before_;
+            bool const stopped = tally_.verdict == refine_verdict_t::stopped_k;
+            if (islands && fewer_waiting && !stopped) return heal_from_(reachability);
+            tally_.verdict = concluded_verdict(tally_);
+            phase_ = phase_t::done_k;
         }
 
-        /** Re-selects every planned node of @p step and merges its picks into its row, or, once the
-         *  heal rounds began, only its islands, each written and back-linked as an insertion is. */
-        void reselect_(step_t const& step, traversal_context_t& context) noexcept {
-            traversal_stats_t const before = context.telemetry();
-            std::size_t reselected = 0, changed = 0;
-            // Only the planned pass walks across; the heal rounds re-select as a plain pass does.
-            bool const planned = phase_ == phase_t::reselect_k;
-            bool const across = planned && part_bases_.size() > 1;
-            selection_t const& selected = context.selected_neighbors;
-            auto walk = [&](node_id_t node_id) noexcept {
-                // Everything absorbed before the node's part: the resident rows, and the parts
-                // moved in ahead of its own.
-                iota_view<node_id_t> const other =
-                    across ? iota_view<node_id_t> {part_bases_[0], part_bases_[part_of(part_bases_, node_id)]}
-                           : iota_view<node_id_t> {};
-                std::span<node_id_t const> const across_seeds = other.empty()
-                                                                    ? std::span<node_id_t const> {}
-                                                                    : stage_across_seeds_(node_id, other, context);
-                index_->refine_one_(node_id, audit.visible, other, across_seeds, expansion_factor_, context);
-                ++reselected;
-            };
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (!planned) {
-                    if (audit.reached(node_id) && audit.reaches_back(node_id)) continue;
-                    walk(node_id);
-                    std::span<node_id_t const> const live = to_span(context.staged_ids);
-                    changed += index_->rewrite_row_(node_id, selected, live);
-                    index_->back_link_neighbors(node_id, selected, context);
-                    continue;
-                }
-                if (!picked_(node_id)) continue;
-                walk(node_id);
-                // The merge writes the selection's slots, so the picks compete from a copy.
-                results_array_t& picks = context.refining_candidates;
-                picks.clear();
-                for (std::size_t position = 0; position != selected.size(); ++position)
-                    picks.insert(scored_node_t {selected[position]}, picks.capacity());
-                bool const gained = index_->merge_back_links_(node_id, audit.visible, to_span(picks), {}, audit,
-                                                              context);
-                changed += gained && !count_changed_(node_id);
-            }
-            add_(tally_.reselected_nodes, reselected);
-            add_(tally_.changed_nodes, changed);
-            add_spent_(context.telemetry() - before);
-        }
-
-        /** Stages into @c context.hinted_ids the members of @p node_id 's members inside @p other,
-         *  which a member that walked already merged in: where its stitched neighbors landed, so
-         *  its own walk across starts beside them. One row of seeds, as many as a walk draws
-         *  landmarks, taken member by member. */
-        std::span<node_id_t const> stage_across_seeds_(node_id_t node_id, iota_view<node_id_t> other,
-                                                       traversal_context_t& context) noexcept {
-            neighbors_ref_t const own_neighbors = index_->neighbors_for(chunk_schedule_t::locate(node_id));
-            candidates_count_t const members_count = index_->stage_neighbors_(own_neighbors, node_id, context);
-            std::size_t const connectivity = index_->connectivity();
-            ids_tensor_t& hinted_ids = context.hinted_ids;
-            hinted_ids.clear();
-            if (nk::failed(hinted_ids.resize({connectivity}))) return {};
-            std::size_t staged_count = 0;
-            for (candidates_count_t member = 0; member != members_count && staged_count != connectivity; ++member)
-                index_->for_each_member_(context.staged_ids[member], [&](node_id_t pick) noexcept {
-                    if (pick >= other.first && pick < other.bound && staged_count != connectivity)
-                        hinted_ids[staged_count++] = pick;
-                });
-            return {hinted_ids.data(), staged_count};
-        }
-
-        /** Folds one step's walk and merge spend into the tally. */
+        /** Folds one task's spend into the count. */
         void add_spent_(traversal_stats_t const& spent) noexcept {
             add_(tally_.traversal_stats.computed_distances, spent.computed_distances);
             add_(tally_.traversal_stats.visited_members, spent.visited_members);
@@ -2767,119 +3251,486 @@ struct ram_index {
                  spent.computed_distances_in_reverse_refines);
         }
 
-        /** Reconnects every island in @p step, a node the audit left unreached or not reaching
-         *  back, to its nearest neighbor the audit proved both ways, else the landmark covering it:
-         *  that node's neighbor row links an unreached island, and the island's own row links that
-         *  node when it has no way back. */
-        void reconnect_(step_t const& step, traversal_context_t& context) noexcept {
-            std::size_t reconnected = 0;
-            for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
-                bool const reached = audit.reached(island), reaches_back = audit.reaches_back(island);
-                if (reached && reaches_back) continue;
-                neighbors_ref_t const own_neighbors = index_->neighbors_for(chunk_schedule_t::locate(island));
-                candidates_count_t const staged_count = index_->stage_neighbors_(own_neighbors, island, context);
-                node_id_t target = node_id_unknown_k;
-                for (candidates_count_t staged = 0; staged != staged_count && target == node_id_unknown_k; ++staged) {
-                    node_id_t const pick = context.staged_ids[staged];
-                    if (pick < audit.visible && audit.reached(pick) && audit.reaches_back(pick)) target = pick;
-                }
-                // When a cluster picks only its own, the last resort is the landmark covering this
-                // ID: every sweep starts there both ways, which is what makes it proved.
-                if (target == node_id_unknown_k) target = audit.landmark_covering(island);
-                if (target == node_id_unknown_k || target == island) continue;
-                if (!reached) reconnected += link_island_(target, island);
-                if (!reaches_back) reconnected += link_island_(island, target);
+        /** A round's phase after the barrier closing @c phase_: the hubs pack, the entries sort by
+         *  neighborhood, or the next phase opens. */
+        void advance_round_() noexcept {
+            switch (phase_) {
+            case phase_t::heal_k: phase_ = phase_t::draw_hubs_k; break;
+            case phase_t::draw_hubs_k:
+                draw_hubs_();
+                phase_ = phase_t::gather_neighborhoods_k;
+                break;
+            case phase_t::gather_neighborhoods_k:
+                // Neighborhoods over capacity gather again among their own entries.
+                order_neighborhoods_();
+                if (tally_.widest_neighborhood <= neighborhood_capacity_) phase_ = phase_t::restitch_k;
+                break;
+            case phase_t::restitch_k: open_health_(phase_t::restitch_k); break;
+            default: break;
             }
-            add_(tally_.islands_reconnected, reconnected);
         }
 
-        /** Links @p island from @p owner 's row under its lock: a free slot when there is one,
-         *  otherwise a slot spread across the tail, so islands sharing one row heal in one
-         *  round; answers whether it wrote. */
-        bool link_island_(node_id_t owner, node_id_t island) noexcept {
-            candidates_count_t const connectivity = static_cast<candidates_count_t>(index_->connectivity());
-            candidates_count_t const spread = heal_spread(connectivity);
-            neighbors_ref_t const row = index_->neighbors_for(chunk_schedule_t::locate(owner));
-            node_id_t const displaced = row.lock();
-            if (displaced == owner) { // Published with no neighbors: the island becomes the only one.
-                row.unlock(island);
-                return true;
+        /** Skips what is left of the round's phase in hand, as @ref stop describes. */
+        void stop_round_() noexcept {
+            tally_.verdict = refine_verdict_t::stopped_k;
+            switch (phase_) {
+            case phase_t::health_k:
+                if (swept_after_ == phase_t::opening_k) phase_ = phase_t::done_k;
+                break;
+            case phase_t::heal_k: phase_ = phase_t::done_k; break;
+            case phase_t::draw_hubs_k:
+            case phase_t::gather_neighborhoods_k:
+            case phase_t::restitch_k: open_health_(phase_t::restitch_k); break;
+            default: break;
             }
-            candidates_count_t free_slot = connectivity;
-            bool present = displaced == island;
-            for (candidates_count_t slot = 1; slot != connectivity && !present; ++slot) {
-                node_id_t const resident = row.load_slot(slot);
-                present = resident == island;
-                if (resident == node_id_unknown_k) {
-                    free_slot = slot;
-                    break;
-                }
-            }
-            // Never the owner's last way back, and in a reached row, whose unreached residents are
-            // this round's links, never one of those nor a resident's last in-link from an earlier
-            // level; an unreached row proves no in-link.
-            bool const displacing = !present && free_slot == connectivity && audit.release_out_link(owner);
-            for (candidates_count_t attempt = 0; displacing && free_slot == connectivity && attempt != spread;
-                 ++attempt) {
-                candidates_count_t const slot = connectivity - 1 -
-                                                static_cast<candidates_count_t>((island + attempt) % spread);
-                node_id_t const resident = row.load_slot(slot);
-                if (resident >= audit.visible ||
-                    (audit.reached(owner) && (!audit.reached(resident) || !audit.release_link(resident))))
-                    continue;
-                free_slot = slot;
-            }
-            bool const linked = !present && free_slot != connectivity;
-            if (linked) row.store_slot(free_slot, island);
-            row.unlock(displaced);
-            return linked;
         }
+
+        /** Sizes everything a round keeps across its barriers for the audited entries, under
+         *  @p cache_bytes of cache a core: one pack of hubs, per entry its neighborhood and its
+         *  place in the order by neighborhood, and the starts every split may write. */
+        status_t reserve_round_(std::size_t cache_bytes) noexcept {
+            std::size_t const visible = health.visible;
+            cache_bytes_ = cache_bytes;
+            hubs_per_draw_ = visible ? index_->block_columns_(visible, cache_bytes) : 0;
+            std::size_t const block_rows = index_->block_rows_(hubs_per_draw_, cache_bytes);
+            neighborhood_capacity_ = block_rows ? block_rows : chunk_schedule_t::nodes_in(0);
+            std::size_t const hubs = hubs_for_(visible);
+            if (failed(changed_.resize(health_plan_t::words_for(visible))) ||
+                failed(hub_nodes_.reserve_exactly(hubs)) || failed(hub_vectors_.reserve_exactly(hubs_bytes_(hubs))) ||
+                failed(hub_norms_.reserve_exactly(hubs)) || failed(entry_neighborhoods_.resize(visible)) ||
+                failed(neighborhood_entries_.resize(visible)) ||
+                failed(neighborhood_offsets_.reserve_exactly(split_room(visible, hubs_per_draw_))))
+                return status_t::bad_alloc_k;
+            return status_t::success_k;
+        }
+
+        /** Hubs one gather of @p entries draws: as many as make a neighborhood half its capacity on
+         *  average, at most one pack, and no more than @c entry_neighborhoods_ can number. */
+        std::size_t hubs_for_(std::size_t entries) const noexcept {
+            return round_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
+        }
+
+        /** Bytes the hubs of the first gather take, one padded row each, then their packs on
+         *  a fresh line. */
+        std::size_t hubs_bytes_(std::size_t hubs) const noexcept {
+            return round_up_to_multiple<std::size_t>(hubs * index_->padded_row_bytes_(), default_alignment_k) +
+                   scan_scorer_t::packs_bytes(hubs, index_->dimensions());
+        }
+
+        /** Where a task gathers the hubs of a neighborhood it gathers again, past one
+         *  neighborhood capacity of entries, and where the packs of either start, past the most
+         *  hubs a gather draws. */
+        std::size_t gathered_hubs_offset_() const noexcept {
+            return round_up_to_multiple<std::size_t>(neighborhood_capacity_ * index_->padded_row_bytes_(),
+                                                     default_alignment_k);
+        }
+        std::size_t gathered_packs_offset_() const noexcept {
+            return gathered_hubs_offset_() +
+                   round_up_to_multiple<std::size_t>(hubs_for_(health.visible) * index_->padded_row_bytes_(),
+                                                     default_alignment_k);
+        }
+
+        /** Takes in the opening health check and opens the heal from it. */
+        void open_round_(reachability_t const& opening) noexcept {
+            tally_.opening = opening;
+            tally_.islands_found = opening.audited_nodes - opening.reachable_nodes;
+            islands_waiting_ = (std::numeric_limits<std::size_t>::max)();
+            heal_from_(opening);
+        }
+
+        /** Seeds the draws from the health check @p measured, so a round over a changed graph draws
+         *  anew while the ID order decides nothing, and opens the heal of the islands it named. */
+        void heal_from_(reachability_t const& measured) noexcept {
+            round_seed_ = mix_bits(
+                measured.audited_nodes ^
+                mix_bits(measured.reachable_nodes ^
+                         mix_bits(measured.unlinked ^ mix_bits(measured.underlinked ^ measured.depth_from_root))));
+            waiting_before_ = std::exchange(islands_waiting_, 0);
+            phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
+        }
+
+        /** Neighborhoods the order by neighborhood holds. */
+        std::size_t neighborhoods_() const noexcept {
+            return neighborhood_offsets_.size() ? neighborhood_offsets_.size() - 1 : 0;
+        }
+
+        /** Entries in neighborhood @p neighborhood. */
+        std::size_t neighborhood_width_(std::size_t neighborhood) const noexcept {
+            return neighborhood_offsets_[neighborhood + 1] - neighborhood_offsets_[neighborhood];
+        }
+
+        /** Entries the gather pass in hand files: every audited one, then those of the
+         *  neighborhoods over capacity. */
+        std::size_t gathered_entries_() const noexcept {
+            if (neighborhood_offsets_.empty()) return health.visible;
+            std::size_t entries = 0;
+            for (std::size_t neighborhood = 0; neighborhood != neighborhoods_(); ++neighborhood)
+                if (neighborhood_width_(neighborhood) > neighborhood_capacity_)
+                    entries += neighborhood_width_(neighborhood);
+            return entries;
+        }
+
+        /** @p count gathered padded rows from @p bytes as the scorer reads them, at
+         *  the logical width. */
+        vectors_view_t gathered_view_(byte_t const* bytes, std::size_t count) const noexcept {
+            vectors_view_t const padded {reinterpret_cast<scalar_t const*>(bytes), count,
+                                         index_->vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
+            nk::shape_storage_<2> const logical {{count, index_->dimensions()},
+                                                 {padded.stride_bytes(0), padded.stride_bytes(1)},
+                                                 2};
+            return {padded.byte_data(), logical};
+        }
+
+        /** Copies the stored vector of @p node_id into padded row @p row of @p rows, answering its
+         *  norms. */
+        vector_norms_t gather_(node_id_t node_id, byte_t* rows, std::size_t row) const noexcept {
+            location_t const location = chunk_schedule_t::locate(node_id);
+            std::size_t const row_bytes = index_->padded_row_bytes_();
+            std::memcpy(rows + row * row_bytes, index_->vectors_[location], row_bytes);
+            return index_->norm_for(location);
+        }
+
+        /** @p norms as a scan reads row norms: none when the rows keep none. */
+        std::span<vector_norms_t const> row_norms_(std::span<vector_norms_t const> norms) const noexcept {
+            return index_->stores_norms() ? norms : std::span<vector_norms_t const> {};
+        }
+
+        /** The first @p count of @p context 's thresholds, none of which a distance reaches. */
+        static std::span<distance_t> unreached_thresholds_(traversal_context_t& context, std::size_t count) noexcept {
+            std::span<distance_t> const thresholds {context.thresholds.data(), count};
+            for (distance_t& threshold : thresholds) threshold = farthest_.distance;
+            return thresholds;
+        }
+
+        /** The first @p count of @p context 's neighborhood-mates, each an entry's nearest
+         *  hub so far. */
+        static std::span<scored_node_t> nearest_hubs_(traversal_context_t& context, std::size_t count) noexcept {
+            std::span<scored_node_t> const nearest {context.neighborhood_mates.data(), count};
+            for (scored_node_t& kept : nearest) kept = farthest_;
+            return nearest;
+        }
+
+        /** Keeps hub @p hub in @p nearest when it lies nearer, the first hub among equals, and
+         *  answers a threshold no distance reaches, so every hub's distance is heard. */
+        static distance_t keep_nearer_hub_(scored_node_t& nearest, std::size_t hub, distance_t distance) noexcept {
+            if (distance < nearest.distance) nearest = {static_cast<node_id_t>(hub), distance};
+            return farthest_.distance;
+        }
+
+        /** The neighborhood an entry's @p nearest hub gives it; the first for one
+         *  no distance reached. */
+        static u16_t neighborhood_of_(scored_node_t nearest) noexcept {
+            return static_cast<u16_t>(nearest.node_id == node_id_unknown_k ? 0 : nearest.node_id);
+        }
+
+        /** Draws one pack of neighborhood hubs by seeded bijection over the visible entries,
+         *  and packs them. */
+        void draw_hubs_() noexcept {
+            std::size_t const visible = health.visible, hubs = hubs_for_(visible);
+            hub_nodes_.clear();
+            for (std::size_t rank = 0; rank != hubs; ++rank)
+                hub_nodes_.push_back_reserved(static_cast<node_id_t>(seeded_bijection(rank, visible, round_seed_)));
+            std::span<node_id_t> const nodes {hub_nodes_.data(), hubs};
+            partial_sort(nodes, hubs);
+            hub_vectors_.clear();
+            hub_vectors_.extend_uninitialized(hubs_bytes_(hubs));
+            hub_norms_.clear();
+            hub_norms_.extend_uninitialized(hubs);
+            for (std::size_t rank = 0; rank != hubs; ++rank)
+                hub_norms_[rank] = gather_(nodes[rank], hub_vectors_.data(), rank);
+            index_->pack_queries_(hubs_view_(), hubs_packs_(), cache_bytes_);
+            neighborhood_offsets_.clear();
+        }
+
+        /** The first gather's hubs as the scorer reads them, and where their packs start. */
+        vectors_view_t hubs_view_() const noexcept { return gathered_view_(hub_vectors_.data(), hub_nodes_.size()); }
+        byte_t const* hubs_packs_() const noexcept {
+            return hub_vectors_.data() + hubs_bytes_(hub_nodes_.size()) -
+                   scan_scorer_t::packs_bytes(hub_nodes_.size(), index_->dimensions());
+        }
+        byte_t* hubs_packs_() noexcept {
+            return hub_vectors_.data() + hubs_bytes_(hub_nodes_.size()) -
+                   scan_scorer_t::packs_bytes(hub_nodes_.size(), index_->dimensions());
+        }
+
+        /** Scores the stored entries of @p task against the packed hubs and files each
+         *  under its nearest: the row minimum of the task's distances, ties to the lower
+         *  hub. Once ordered by neighborhood, a task spans positions in that order instead,
+         *  and only the neighborhoods over capacity gather again, each against hubs drawn
+         *  among its own entries. */
+        void gather_neighborhoods_(task_t const& task, traversal_context_t& context) noexcept {
+            traversal_stats_t const before = context.telemetry();
+            if (neighborhood_offsets_.empty()) {
+                std::size_t const hubs = hub_nodes_.size();
+                std::span<distance_t> const thresholds = unreached_thresholds_(context, hubs);
+                std::span<scored_node_t> const nearest = nearest_hubs_(context, task.nodes.size());
+                auto keep = [&](std::size_t hub, scored_node_t entry) noexcept {
+                    return keep_nearer_hub_(nearest[entry.node_id - task.nodes.first], hub, entry.distance);
+                };
+                dummy_predicate_t admits;
+                index_->scan_rows_(task.nodes, hubs_view_(), {hub_norms_.data(), hubs}, hubs_packs_(), thresholds,
+                                   admits, keep, context, cache_bytes_);
+                for (node_id_t node_id = task.nodes.first; node_id < task.nodes.bound; ++node_id)
+                    entry_neighborhoods_[node_id] = neighborhood_of_(nearest[node_id - task.nodes.first]);
+            }
+            else {
+                std::span<node_id_t const> const offsets = to_span(neighborhood_offsets_);
+                std::size_t neighborhood = static_cast<std::size_t>(lower_bound(offsets, task.nodes.first + 1) -
+                                                                    offsets.data());
+                for (--neighborhood; neighborhood + 1 < offsets.size() && offsets[neighborhood] < task.nodes.bound;
+                     ++neighborhood)
+                    if (neighborhood_width_(neighborhood) > neighborhood_capacity_)
+                        gather_run_(neighborhood,
+                                    {max_of(offsets[neighborhood], task.nodes.first),
+                                     min_of(offsets[neighborhood + 1], task.nodes.bound)},
+                                    context);
+            }
+            add_spent_(context.telemetry() - before);
+        }
+
+        /** Files the entries at positions @p run of wide neighborhood @p neighborhood under the
+         *  nearest of the hubs that neighborhood draws among its own entries, the same in every
+         *  task, its entries and those hubs gathered by ID. */
+        void gather_run_(std::size_t neighborhood, iota_view<node_id_t> run, traversal_context_t& context) noexcept {
+            node_id_t const first = neighborhood_offsets_[neighborhood];
+            std::size_t const entries = neighborhood_width_(neighborhood), hubs = hubs_for_(entries);
+            u64_t const seed = mix_bits(round_seed_ ^ first);
+            byte_t* const gathered = context.staged_queries.data();
+            byte_t* const packs = gathered + gathered_packs_offset_();
+            std::span<vector_norms_t> const hub_norms {context.query_norms.data(), hubs};
+            for (std::size_t rank = 0; rank != hubs; ++rank)
+                hub_norms[rank] = gather_(neighborhood_entries_[first + seeded_bijection(rank, entries, seed)],
+                                          gathered + gathered_hubs_offset_(), rank);
+            std::span<vector_norms_t> const run_norms {context.neighborhood_norms.data(), run.size()};
+            for (std::size_t position = 0; position != run.size(); ++position)
+                run_norms[position] = gather_(neighborhood_entries_[run.first + position], gathered, position);
+            vectors_view_t const hubs_view = gathered_view_(gathered + gathered_hubs_offset_(), hubs);
+            index_->pack_queries_(hubs_view, packs, cache_bytes_);
+            std::span<distance_t> const thresholds = unreached_thresholds_(context, hubs);
+            std::span<scored_node_t> const nearest = nearest_hubs_(context, run.size());
+            auto keep = [&](std::size_t hub, scored_node_t entry) noexcept {
+                return keep_nearer_hub_(nearest[entry.node_id], hub, entry.distance);
+            };
+            index_->scan_gathered_(gathered_view_(gathered, run.size()), 0, row_norms_(run_norms), hubs_view, hub_norms,
+                                   packs, thresholds, keep, context, cache_bytes_, 0);
+            for (std::size_t position = 0; position != run.size(); ++position)
+                entry_neighborhoods_[neighborhood_entries_[run.first + position]] = neighborhood_of_(nearest[position]);
+        }
+
+        /** Sorts the entries by neighborhood, as @ref order_by_neighborhood does after a draw
+         *  and @ref split_wide_neighborhoods after a gather over the neighborhoods over
+         *  capacity, in the starts planning reserved; the tally's widest neighborhood tells
+         *  whether the gather runs once more over those alone. */
+        void order_neighborhoods_() noexcept {
+            node_id_t const visible = health.visible;
+            std::span<u16_t const> const tags {entry_neighborhoods_.data(), visible};
+            std::span<node_id_t> const entries {neighborhood_entries_.data(), visible};
+            std::size_t const neighborhoods = neighborhoods_();
+            bool const first = neighborhood_offsets_.empty();
+            neighborhood_offsets_.resize_reserved(first ? hub_nodes_.size() + 2 : split_room(visible, hubs_per_draw_));
+            std::span<node_id_t> const offsets = to_writable_span(neighborhood_offsets_);
+            neighborhood_order_t const order = first ? order_by_neighborhood(tags, hub_nodes_.size(), entries, offsets)
+                                                     : split_wide_neighborhoods(tags, entries, offsets, neighborhoods,
+                                                                                neighborhood_capacity_, hubs_per_draw_);
+            neighborhood_offsets_.resize_reserved(order.neighborhoods + 1);
+            tally_.neighborhoods = order.neighborhoods;
+            tally_.widest_neighborhood = order.widest;
+        }
+
+        /** Re-stitches the neighborhood of @p task: gathers it, scores it against itself, and
+         *  re-selects every entry's links among its own and its nearest neighborhood-mates,
+         *  keeping only the diverse ones and those @ref keep_reach_ needs. One thread owns the
+         *  neighborhood and writes only its entries' rows, each under the row's lock. */
+        void restitch_neighborhoods_(task_t const& task, traversal_context_t& context) noexcept {
+            traversal_stats_t const before = context.telemetry();
+            std::size_t const count = neighborhood_width_(task.position), connectivity = index_->connectivity();
+            std::span<node_id_t const> const entries {
+                neighborhood_entries_.data() + neighborhood_offsets_[task.position], count};
+            byte_t* const gathered = context.staged_queries.data();
+            byte_t* const packs = gathered + gathered_packs_offset_();
+            std::span<vector_norms_t> const norms {context.neighborhood_norms.data(), count};
+            for (std::size_t position = 0; position != count; ++position)
+                norms[position] = gather_(entries[position], gathered, position);
+            vectors_view_t const neighborhood = gathered_view_(gathered, count);
+            index_->pack_queries_(neighborhood, packs, cache_bytes_);
+
+            std::span<scored_node_t> const mates {context.neighborhood_mates.data(), count * connectivity};
+            for (scored_node_t& mate : mates) mate = farthest_;
+            auto mates_of = [&](std::size_t position) noexcept {
+                return mates.subspan(position * connectivity, connectivity);
+            };
+            auto offer = [&](std::size_t position, scored_node_t mate) noexcept {
+                std::span<scored_node_t> const heap = mates_of(position);
+                if (further_(heap[0], mate)) replace_farthest(heap, mate, further_);
+            };
+            // Each pair once, the later entry as the column, so none scores twice or with itself.
+            auto keep = [&](std::size_t column, scored_node_t row) noexcept {
+                if (column > row.node_id) {
+                    offer(row.node_id, scored_node_t {static_cast<node_id_t>(column), row.distance});
+                    offer(column, row);
+                }
+                return farthest_.distance;
+            };
+            std::span<distance_t> const thresholds = unreached_thresholds_(context, count);
+            std::span<vector_norms_t const> const row_norms = row_norms_(norms);
+            for (std::size_t row = 0; row < count; row += scan_scorer_t::step_rows_k) {
+                std::size_t const rows = min_of<std::size_t>(scan_scorer_t::step_rows_k, count - row);
+                index_->scan_gathered_(neighborhood(nk::range(row, row + rows), nk::slice), static_cast<node_id_t>(row),
+                                       row_norms.empty() ? row_norms : row_norms.subspan(row, rows), neighborhood,
+                                       norms, packs, thresholds, keep, context, cache_bytes_, row);
+            }
+
+            results_array_t& results = context.results;
+            selection_t& selected = context.selected_neighbors;
+            selection_t& live = context.refined_neighbors;
+            std::size_t added = 0, dropped = 0, changed = 0, selecting = 0;
+            for (std::size_t position = 0; position != count; ++position) {
+                node_id_t const node_id = entries[position];
+                location_t const location = chunk_schedule_t::locate(node_id);
+                results.clear();
+                candidates_count_t const live_count = index_->stage_neighbors_(index_->neighbors_for(location), node_id,
+                                                                               context);
+                std::span<node_id_t const> const live_ids {context.staged_ids.data(), live_count};
+                context.computed_distances += index_->add_neighbor_candidates_(
+                    index_->vector_for(location), index_->norm_for(location), live_ids, health.visible, context);
+                [[maybe_unused]] nk::status_t const sized = live.resize({results.size()});
+                for (std::size_t rank = 0; rank != results.size(); ++rank) live[rank] = results[rank];
+                for (scored_node_t const mate : mates_of(position)) {
+                    if (mate.node_id == node_id_unknown_k) continue;
+                    scored_node_t const candidate {entries[mate.node_id], mate.distance};
+                    bool listed = false;
+                    for (std::size_t rank = 0; rank != live.size() && !listed; ++rank)
+                        listed = live[rank].node_id == candidate.node_id;
+                    if (!listed) results.insert(scored_node_t {candidate}, results.size() + 1);
+                }
+                selecting += index_->select_diverse_via_quads(results, node_id, connectivity, selected, context);
+                index_->keep_reach_(node_id, live, selected, health);
+                std::size_t kept = 0;
+                for (std::size_t rank = 0; rank != selected.size(); ++rank)
+                    for (node_id_t const link : live_ids) kept += link == selected[rank].node_id;
+                added += selected.size() - kept;
+                dropped += live_ids.size() - kept;
+                if (kept == selected.size() && kept == live_ids.size()) continue;
+                static_cast<void>(index_->rewrite_row_(node_id, selected, live_ids));
+                changed += !count_changed_(node_id);
+            }
+            context.computed_distances += selecting;
+            context.computed_distances_in_refines += selecting;
+            add_(tally_.reselected_nodes, count);
+            add_(tally_.changed_nodes, changed);
+            add_(tally_.added_links, added);
+            add_(tally_.dropped_links, dropped);
+            add_spent_(context.telemetry() - before);
+        }
+
+        /** Links every unreached or stranded island whose first rank falls in @p task through the
+         *  root's component, with no distance: an unreached one's entry from the first of its own
+         *  links inside the component that takes it, a stranded one's entry to the entry of the
+         *  component linking to it. A component with neither waits for a later round, which its
+         *  restitch gives the links to heal through. */
+        void heal_(task_t const& task) noexcept {
+            auto keeps_none = [](node_id_t) noexcept { return false; };
+            std::size_t healed = 0, waiting = 0;
+            for (std::size_t rank = task.nodes.first; rank < task.nodes.bound; ++rank) {
+                if (!health.island_first(rank)) continue;
+                u8_t const roles = health.island_roles(rank);
+                node_id_t const entry = health.island_entry(rank);
+                if (roles & health_plan_t::unreached_island_k) {
+                    // A full owner row may refuse, so the next link inside the component
+                    // offers its own.
+                    node_id_t owner = node_id_unknown_k;
+                    bool linked = false, owned = false;
+                    index_->for_each_member_(entry, [&](node_id_t link) noexcept {
+                        if (linked || link >= health.visible || !health.in_component(link)) return;
+                        owned = true;
+                        linked = add_or_swap_link_(link, entry, keeps_none) == taken_t::written_k;
+                        if (linked) owner = link;
+                    });
+                    if (linked) health.record_heal_link(owner, entry), ++healed;
+                    waiting += !owned;
+                }
+                node_id_t const parent = health.island_entry_parent(rank);
+                if ((roles & health_plan_t::stranded_island_k) && parent != node_id_unknown_k &&
+                    add_or_swap_link_(entry, parent, keeps_none) == taken_t::written_k)
+                    health.record_heal_link(entry, parent), ++healed;
+                waiting += (roles & health_plan_t::stranded_island_k) && parent == node_id_unknown_k;
+            }
+            add_(tally_.islands_reconnected, healed);
+            add_(islands_waiting_, waiting);
+        }
+
+        /**
+         *  @brief Links @p member from @p owner 's row under its lock: a free slot first; else a
+         *      slot of the root's component.
+         *
+         *  That slot's resident is the one linked to by the most entries, taken when it stays
+         *  linked to by more than @p member, @p keeps does not hold it, and the reach rule releases
+         *  it. Adds go first, since an add dead ends no search, while a swap may for a target
+         *  outside the round's sample. The in-link counts follow every write.
+         */
+        template <typename keeps_type_>
+        taken_t add_or_swap_link_(node_id_t owner, node_id_t member, keeps_type_&& keeps) noexcept {
+            if (owner == member || owner >= health.visible || member >= health.visible) return taken_t::refused_k;
+            candidates_count_t const connectivity = static_cast<candidates_count_t>(index_->connectivity());
+            neighbors_ref_t const row = index_->neighbors_for(chunk_schedule_t::locate(owner));
+            node_id_t const first = row.lock();
+            taken_t taken = taken_t::refused_k;
+            candidates_count_t free_slot = connectivity, richest = connectivity;
+            if (first == owner) {
+                row.unlock(member);
+                taken = taken_t::written_k;
+            }
+            else {
+                bool present = first == member;
+                for (candidates_count_t slot = 1; slot != connectivity && !present; ++slot) {
+                    node_id_t const resident = row.load_slot(slot);
+                    present = resident == member;
+                    if (resident == node_id_unknown_k) {
+                        free_slot = slot;
+                        break;
+                    }
+                }
+                unsigned richest_links = health.in_links(member);
+                for (candidates_count_t slot = 0;
+                     !present && free_slot == connectivity && slot != connectivity && health.in_component(owner);
+                     ++slot) {
+                    node_id_t const resident = slot ? row.load_slot(slot) : first;
+                    if (resident >= health.visible || health.in_links(resident) <= richest_links + 1u ||
+                        keeps(resident))
+                        continue;
+                    richest = slot, richest_links = health.in_links(resident);
+                }
+                node_id_t const displaced = richest == connectivity ? node_id_unknown_k
+                                            : richest               ? row.load_slot(richest)
+                                                                    : first;
+                if (present) taken = taken_t::present_k;
+                else if (free_slot != connectivity) row.store_slot(free_slot, member), taken = taken_t::written_k;
+                else if (richest != connectivity && health.take_link_under_lock_if_spare(owner, displaced)) {
+                    if (richest) row.store_slot(richest, member);
+                    static_cast<void>(health.take_in_link_if_spare(displaced));
+                    taken = taken_t::written_k;
+                }
+                row.unlock(taken == taken_t::written_k && richest == 0 ? member : first);
+            }
+            if (taken != taken_t::written_k) return taken;
+            health.count_in_link(member);
+            add_(tally_.changed_nodes, !count_changed_(owner));
+            return taken;
+        }
+
+        /** Whether @p left lies farther than @p right, the larger ID farther among equals. */
+        static constexpr auto further_ = [](scored_node_t const& left, scored_node_t const& right) noexcept {
+            return left.distance > right.distance || (left.distance == right.distance && left.node_id > right.node_id);
+        };
+
+        /** An empty place in a kept heap, farther than any entry. */
+        static constexpr scored_node_t farthest_ {node_id_unknown_k, std::numeric_limits<distance_t>::infinity()};
 
         /** The refined index; null on a moved-from plan. */
         ram_index* index_ = nullptr;
 
-        /** The IDs the first round re-selects, clamped to the audit's watermark. */
-        iota_view<node_id_t> nodes_;
-
-        /** The IDs the re-selection steps over: @c nodes_ widened to the extras. */
-        iota_view<node_id_t> walked_nodes_;
-
-        /** The extras the re-selection walks past @c nodes_. */
-        growing_bitset_t extra_nodes_;
-
-        /** The caller's ascending first rows of the parts the re-selection walks across, below the
-         *  audit's watermark; empty for none. */
-        std::span<node_id_t const> part_bases_;
-
-        /** The sweep tile's tape: every link into its rows from the walked rows, each a linking row
-         *  and, once its merge scored it, their distance, the links of one row back to back. */
-        picks_t back_links_;
-
-        /** Per row of the sweep's tile: the links it drew, then where they start on the tape, and
-         *  once scattered where they end. */
-        part_bases_t incoming_offsets_;
-
-        /** The rows walking now, or the last that walked. */
-        iota_view<node_id_t> tile_;
-
-        /** The target rows the sweep collects links into now. */
-        iota_view<node_id_t> sweep_;
-
-        /** The first row this round walked, whose links on the sweep reads up
-         *  to the walked bound. */
-        node_id_t sources_first_ = 0;
-
-        /** Rows one walking or sweeping tile takes at most. */
-        std::size_t tile_rows_ = 0;
-
-        /** Per row, whether a merge counted it changed already. */
+        /** Per entry, whether the round counted it changed already. */
         growing_bitset_t changed_;
-
-        /** What follows the last tile: the verifying audit, or a pause for rows still to come. */
-        phase_t after_tiles_ = phase_t::audit_k;
-
-        /** The limit the tiles were sized from, which sizes them again as rows come in. */
-        std::size_t memory_limit_ = 0;
 
         /** The index a split empties once its rows publish in the receivers; null otherwise. */
         ram_index* split_donor_ = nullptr;
@@ -2897,10 +3748,10 @@ struct ram_index {
         /** Per part, a run of the part capacity: its source nodes in receiver order. */
         part_bases_t part_members_;
 
-        /** One part's rows, and the picked rows leading them: those that lost a link across. */
+        /** One part's rows, and how many of them its growth expanded. */
         struct part_extent_t {
             node_id_t nodes = 0;
-            node_id_t picked = 0;
+            node_id_t expanded = 0;
         };
 
         /** Per part, its extent. */
@@ -2909,141 +3760,132 @@ struct ram_index {
         /** What picks the parts' roots. */
         u64_t seed_ = 0;
 
-        /** Receivers whose passes healed so far; the bound one is the next. */
+        /** Receivers whose rounds ended so far; the bound one is the next. */
         std::size_t refined_receivers_ = 0;
 
-        /** The audits of the receivers healed so far, summed. */
-        reachability_t receivers_health_ {};
+        /** The reports of the receivers' rounds ended so far, folded. */
+        refine_report_t receivers_tally_ {};
 
-        /** The islands the receivers healed so far found, summed. */
-        std::size_t receivers_islands_ = 0;
-
-        /** Breadth of every re-selection walk. */
-        candidates_count_t expansion_factor_ = 0;
-
-        /** The phase whose steps run now. */
+        /** The phase whose tasks run now. */
         phase_t phase_ = phase_t::done_k;
 
-        /** The phase the current audit follows - what decides the phase after it converges. */
-        phase_t swept_after_ = phase_t::reselect_k;
+        /** The phase the current health check follows - what decides the phase
+         *  after it converges. */
+        phase_t swept_after_ = phase_t::opening_k;
 
-        /** Islands the last round started from - the shrinking the rounds require. */
-        std::size_t islands_before_ = 0;
+        /** Island components the last heal could not link, having no link to or from the root's,
+         *  and those the heal before it could not, which the repeats must shrink. */
+        std::size_t islands_waiting_ = 0;
+        std::size_t waiting_before_ = 0;
 
-        /** Rows the last converged sweep covered; those appended since are neither reached nor
-         *  islands yet. */
-        node_id_t audited_rows_ = 0;
-
-        /** Counts summed through @c atomic_ref by the steps, and set by @ref advance. */
+        /** Counts summed through @c atomic_ref by the tasks, and set by @ref advance. */
         refine_report_t tally_;
+
+        /** The first failure the plan met: an audit whose islands' adjacency could
+         *  not be placed. */
+        status_t status_ = status_t::success_k;
+
+        /** Bytes of cache each core keeps to itself, which sizes the hubs and a
+         *  neighborhood's capacity. */
+        std::size_t cache_bytes_ = 0;
+
+        /** Hubs one gather draws at most: one pack of the scan's queries. */
+        std::size_t hubs_per_draw_ = 0;
+
+        /** The most entries one neighborhood holds: the row block sharing a core's cache with one
+         *  pack, and so the most entries one restitch takes at once. */
+        std::size_t neighborhood_capacity_ = 0;
+
+        /** The round's hubs, ascending, then their stored vectors, norms and packs. */
+        part_bases_t hub_nodes_;
+        growing_buffer<byte_t, bytes_allocator_t> hub_vectors_;
+        growing_buffer<vector_norms_t, norms_allocator_t> hub_norms_;
+
+        /** Per entry, the neighborhood its nearest hub gave it, among the hubs of
+         *  its last gather. */
+        growing_buffer<u16_t, neighborhoods_allocator_t> entry_neighborhoods_;
+
+        /** The entries by neighborhood, each one's ascending, and where each neighborhood's run
+         *  starts, one past the last closing them. */
+        part_bases_t neighborhood_entries_;
+        part_bases_t neighborhood_offsets_;
+
+        /** The seed of the round's draws. */
+        u64_t round_seed_ = 0;
     };
 
     /**
-     *  @brief Opens a refinement pass over @p nodes, clamped to the published IDs, with a fresh
-     *      audit seeded like @ref plan_health; an empty range heals alone. Everything the plan
-     *      keeps comes from the index's own allocator; the steps cannot fail on contexts their
-     *      caller reserved for the plan's expansion factor.
+     *  @brief Opens one refinement round over the published nodes, planning no entry ahead: the
+     *      round gathers every entry into a neighborhood and re-stitches each, as
+     *      @ref refine_plan_t describes.
      *
-     *  Two or more @p part_bases below the published IDs split the rows into parts, the resident
-     *  part from the first base and each appended part from its own: every re-selected node first
-     *  walks across into everything before its part alone, then re-selects as a plain pass does
-     *  from that walk's candidates and its own. A part whose neighbors all stay inside it is then
-     *  visible from the others, which a walk seeded by those neighbors never reaches. The pass
-     *  re-selects @p nodes and @p extra_nodes. The plan borrows the bases, which must outlive it.
+     *  Everything the round keeps across its barriers comes from the index's own allocator, sized
+     *  from the published nodes and the cache @p config names, about ten bytes per entry beside the
+     *  audit's; the tasks fail only where a context cannot grow to a round's scratch, which
+     *  @c refine_plan_t::reserve grows ahead of them.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The audit's bitsets and levels, the extras' run or one tile cannot
-     *    be placed, or the limit holds not even one tile row past the carried state.
+     *  - @c bad_alloc_k The audit or the round's columns cannot be placed.
      */
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, std::span<node_id_t const> extra_nodes,
-                                        std::span<node_id_t const> part_bases = {},
-                                        refine_config_t config = {}) noexcept {
+    expected<refine_plan_t> plan_round(refine_config_t config = {}) noexcept {
         using phase_t = typename refine_plan_t::phase_t;
-        auto [audit, status] = plan_health();
-        refine_plan_t plan {std::move(audit), typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
+        auto [health, status] = plan_health();
+        refine_plan_t plan {std::move(health), typename refine_plan_t::part_bases_allocator_t {vectors_allocator_}};
         if (failed(status)) return {std::move(plan), status};
-        candidates_count_t const expansion_factor = non_zero_expansion_factor(config);
-        node_id_t const bound = min_of(nodes.bound, plan.audit.visible);
-        std::size_t parts = 0;
-        while (parts != part_bases.size() && part_bases[parts] < plan.audit.visible) ++parts;
-        if (parts > 1) plan.part_bases_ = part_bases.first(parts);
-        plan.nodes_ = {min_of(nodes.first, bound), bound};
-        plan.walked_nodes_ = plan.nodes_;
-        std::size_t const words = health_plan_t::words_for(plan.audit.visible);
-        if (!extra_nodes.empty() && failed(plan.extra_nodes_.resize(words)))
-            return {std::move(plan), status_t::bad_alloc_k};
-        for (node_id_t const extra : extra_nodes) {
-            if (extra >= plan.audit.visible) continue;
-            plan.extra_nodes_[extra / health_plan_t::lanes_k] |= u1x64_t {1} << (extra % health_plan_t::lanes_k);
-            if (plan.walked_nodes_.empty()) plan.walked_nodes_ = {extra, extra};
-            plan.walked_nodes_.first = min_of(plan.walked_nodes_.first, extra);
-            plan.walked_nodes_.bound = max_of(plan.walked_nodes_.bound, static_cast<node_id_t>(extra + 1));
-        }
         plan.index_ = this;
-        std::size_t const forward_rows = plan.walked_nodes_.size();
-        std::size_t const tile_rows = refine_tile_rows(plan.audit.visible, forward_rows, connectivity(),
-                                                       config.memory_limit);
-        if ((forward_rows && !tile_rows) || failed(plan.reserve_merge_(plan.audit.visible, tile_rows, connectivity())))
-            return {std::move(plan), status_t::bad_alloc_k};
-        plan.open_merge_(plan.audit.visible);
-        plan.sources_first_ = plan.walked_nodes_.first;
-        plan.memory_limit_ = config.memory_limit;
-        plan.expansion_factor_ = expansion_factor;
-        // The opening audit steers the merges; a pass walking nothing verifies alone.
-        plan.swept_after_ = forward_rows ? phase_t::done_k : phase_t::merge_back_links_k;
-        plan.phase_ = phase_t::audit_k;
+        if (failed(plan.reserve_round_(config.cache_bytes))) return {std::move(plan), status_t::bad_alloc_k};
+        plan.swept_after_ = phase_t::opening_k;
+        plan.phase_ = phase_t::health_k;
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  @brief Re-selects the neighbors of every published node in @p nodes and heals the islands
-     *      that leaves - one @ref refine_plan_t drained on the calling thread. An empty range heals
-     *      alone.
+     *  @brief Runs one refinement round over every published node on the calling thread: one
+     *      @ref plan_round, its tasks drained in order.
      *
-     *  @param[in] nodes The ID range to re-select; IDs at or past the watermark are skipped.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @param[in,out] context The calling thread's scratch & telemetry, reused across passes.
+     *  @param[in,out] context The calling thread's scratch & telemetry, reused across rounds.
      *
      *  @par Statuses:
      *  - @c overflow_k A queue capacity of @p context wraps when rounded.
-     *  - @c bad_alloc_k The plan's levels or tile cannot be placed, or the limit holds not
-     *    even one tile row past the carried state.
+     *  - @c bad_alloc_k The plan's columns cannot be placed, or @p context cannot fit a task.
      */
-    expected<refine_report_t> refine(iota_view<node_id_t> nodes, refine_config_t config,
-                                     traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_refine(nodes, {}, {}, config);
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_round(config);
         if (failed(status)) return {{}, status};
         if (status_t const sized = reserve_traversal(context, insert_config_t {non_zero_expansion_factor(config)});
             failed(sized))
             return {plan.finish().value, sized};
+        if (status_t const sized = plan.reserve(context); failed(sized)) return {plan.finish().value, sized};
         do
-            for (typename refine_plan_t::step_t const step : plan.steps())
-                if (status_t const ran = plan.run(step, context); failed(ran)) return {plan.finish().value, ran};
+            for (typename refine_plan_t::task_t const task : plan.tasks())
+                if (status_t const ran = plan.run(task, context); failed(ran)) return {plan.finish().value, ran};
         while (plan.advance());
         return plan.finish();
     }
 
     /**
      *  @brief Opens a split of this index into @p receivers: its plan's first phases copy every row
-     *      into one graph-local part per receiver, then refine every receiver in turn over the rows
-     *      that lost a link, and heal; the source ends empty.
+     *      into one graph-local part per receiver, then run one round on every receiver in turn;
+     *      the source ends empty.
      *
-     *  The one partition step grows the parts breadth first over the links, one root per part
+     *  The one partition task grows the parts breadth first over the links, one root per part
      *  through @ref seeded_bijection under the config's seed, each part capped at the rows over the
-     *  receivers rounded up; rows no growth reached seed the smallest part. Scatter steps copy each
+     *  receivers rounded up; rows no growth reached seed the smallest part. Scatter tasks copy each
      *  row's key, vector, norms and neighbors into its receiver, the links inside its part rebased
-     *  and the links across dropped, one step per receiver then files its keys, and the phase
+     *  and the links across dropped, one task per receiver then files its keys, and the phase
      *  boundary publishes every receiver's rows, then forgets this index's, so its IDs restart from
-     *  zero. Every receiver then re-selects its picked nodes, the prefix of rows that lost a link,
-     *  sweeps and heals as @ref plan_refine does, and the result sums over the receivers.
+     *  zero. Every receiver then runs one round as @ref plan_round does, which links in what the
+     *  dropped links left apart, and the result sums over the receivers.
      *  A plan dying before the scatter published releases the receivers' claims and leaves this
      *  index as it was.
      *
-     *  Every fallible step happens here: a full part's rows claimed and its audit placed in every
-     *  receiver, everything the plan keeps on this index's own allocator. The steps cannot fail on
-     *  contexts their caller reserved for the plan's expansion factor. Nothing may insert into this
-     *  index or a receiver meanwhile, nor search this one; the sharded index closes the dispensers,
-     *  and a direct caller keeps the others out itself.
+     *  Every fallible step happens here: a full part's rows claimed in every receiver, and one
+     *  audit and one round's columns over a full part, everything the plan keeps on this index's
+     *  own allocator. The tasks cannot fail on contexts @c refine_plan_t::reserve grew past the
+     *  plan's expansion factor. Nothing may insert into this index or a receiver meanwhile, nor
+     *  search this one; the sharded index closes the dispensers, and a direct caller keeps the
+     *  others out itself.
      *
      *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct; the
      *      slots must outlive the plan.
@@ -3071,7 +3913,6 @@ struct ram_index {
             if (!into->settled_()) return {std::move(plan), status_t::contended_k};
         }
         if (!settled_()) return {std::move(plan), status_t::contended_k};
-        candidates_count_t const expansion_factor = non_zero_expansion_factor(config.refine);
 
         node_id_t const rows = static_cast<node_id_t>(size());
         std::size_t const capacity = divide_round_up<std::size_t>(rows, parts);
@@ -3080,14 +3921,10 @@ struct ram_index {
         if (failed(plan.receiver_claims_.reserve_exactly(parts)) || failed(plan.part_extents_.resize(parts)) ||
             failed(plan.part_slots_.resize(rows)) || failed(plan.part_members_.resize(parts * capacity)))
             return {std::move(plan), status_t::bad_alloc_k};
-        // One audit over a full part sweeps every receiver in turn, rebound as its turn comes, and
-        // one shadow over a full part serves every receiver's merge.
-        auto [audit, audit_status] = plan_audit_(static_cast<node_id_t>(capacity));
-        if (failed(audit_status)) return {std::move(plan), audit_status};
-        plan.audit = std::move(audit);
-        std::size_t const tile_rows = refine_tile_rows(capacity, capacity, connectivity(), config.refine.memory_limit);
-        if ((capacity && !tile_rows) || failed(plan.reserve_merge_(capacity, tile_rows, connectivity())))
-            return {std::move(plan), status_t::bad_alloc_k};
+        // One audit over a full part sweeps every receiver in turn, rebound as its turn comes.
+        auto [health, health_status] = plan_audit_(static_cast<node_id_t>(capacity));
+        if (failed(health_status)) return {std::move(plan), health_status};
+        plan.health = std::move(health);
         // A full part's rows in every receiver, claimed from its empty watermark, die with the plan
         // unless the scatter publishes them.
         for (ram_index* into : receivers) {
@@ -3098,11 +3935,12 @@ struct ram_index {
             if (!based) return {std::move(plan), status_t::contended_k};
         }
 
+        // One round's columns over a full part serve every receiver in turn.
         plan.index_ = receivers[0];
+        if (failed(plan.reserve_round_(config.refine.cache_bytes))) return {std::move(plan), status_t::bad_alloc_k};
         plan.split_donor_ = this;
         plan.receivers_ = receivers;
         plan.seed_ = config.seed;
-        plan.expansion_factor_ = expansion_factor;
         plan.phase_ = phase_t::partition_k;
         return {std::move(plan), status_t::success_k};
     }
@@ -3145,7 +3983,7 @@ struct ram_index {
      *  acquire-loads every slot-0 lock before scanning a node's neighbors, retries transiently
      *  locked nodes and never writes. IDs above this query's watermark snapshot are skipped by the
      *  translation-frontier invariant and picked up by any later query with a fresher one. Under
-     *  @c immutable_k - or stronger - the caller certifies no mutators and the traversal runs
+     *  @c immutable_k - or stronger - the caller marks no mutators and the traversal runs
      *  atomics-free. @ref dense_ram_index_concurrency
      *
      *  @param[in] query_vector The query, in the index's own dtype & dimensionality.
@@ -3333,10 +4171,13 @@ struct ram_index {
         return {attended, status_t::success_k};
     }
 
-    /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per
-     *  @p synchronization_ contract, per fold type and per rescoring type, so a certified contract carries
-     *  no atomics and @c dummy_fold_t & @c dummy_rescoring_t inline away. The walk ends against @p bound
-     *  once it fills - @c context.results itself for every walk but a filtered one.
+    /**
+     *  @brief The compile-time form of @c search() & @c search_if(): one whole-traversal
+     *      instantiation per @p synchronization_ contract, per fold type and per rescoring type.
+     *
+     *  A marked contract thus carries no atomics, and @c dummy_fold_t & @c dummy_rescoring_t inline
+     *  away. The walk ends against @p bound once it fills - @c context.results itself for every
+     *  walk but a filtered one.
      *
      *  @par Statuses:
      *  - @c unsupported_k @p config names a traversal other than a walk.
@@ -3363,22 +4204,22 @@ struct ram_index {
 #pragma region Checkpoints
 
     /**
-     *  @brief One save in flight: the watermark it took, the contract it runs under, and the storage
-     *      chunks it hands out to any number of threads. Vectors and sentinel-padded neighbor rows
-     *      are what a snapshot holds, and the norms when the columns carry one for them.
+     *  @brief One save in flight: the watermark it took, the contract it runs under, and the runs
+     *      of the first chunk's rows it hands out to any number of threads.
      *
-     *  A checkpointing reader, not a mutator: concurrent searches keep running on every mode.
-     *  Under @c concurrent_k every row is copied under its slot-zero lock, as writers edit it, and
-     *  @ref finish probes for settlement across the whole plan, since a later insert back-linking
-     *  itself edits an earlier row; the certified modes read plain, and a violated certification
-     *  surfaces as @c contended_k rather than a silently torn snapshot.
+     *  Vectors and sentinel-padded neighbor rows are what a snapshot holds, and the norms when the
+     *  columns carry one for them. A checkpointing reader, not a mutator: concurrent searches keep
+     *  running on every mode. Under @c concurrent_k every row is copied under its slot-zero lock,
+     *  as writers edit it, and @ref finish probes for settlement across the whole plan, since a
+     *  later insert back-linking itself edits an earlier row; the marked modes read plain, and a
+     *  violated certification surfaces as @c contended_k rather than a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {
 
         /** Where the rows go, vetted against the watermark at planning. */
         columns_t columns {};
 
-        /** The contract the caller certified. */
+        /** The contract the caller marked. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
 
         /** Rows under the watermark at planning. */
@@ -3387,7 +4228,7 @@ struct ram_index {
         /** The allocation counter at planning - the growth sensor the probe re-reads. */
         node_id_t allocated = 0;
 
-        /** Rows whose vectors and neighbors arrived, tallied through @c atomic_ref. */
+        /** Rows whose vectors and neighbors arrived, counted through @c atomic_ref. */
         std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
@@ -3400,18 +4241,18 @@ struct ram_index {
             : columns(other.columns), synchronization(other.synchronization), visible(other.visible),
               allocated(other.allocated), covered(other.covered), index_(std::exchange(other.index_, nullptr)) {}
         save_plan_t& operator=(save_plan_t&&) = delete;
-        // The tally is this plan's own: a copy would tally into a twin `finish` never reads.
+        // The count is this plan's own: a copy would count into a twin `finish` never reads.
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
 
-        /** A save owns nothing - no rows claimed, no lock held between steps - so a dying plan
+        /** A save owns nothing - no rows claimed, no lock held between tasks - so a dying plan
          *  leaves the index as it found it. */
         ~save_plan_t() noexcept = default;
 
-        /** One step of the plan: one storage chunk's share of the rows under the watermark. */
-        struct step_t {
+        /** One task of the plan: one run of the rows under the watermark, inside one chunk. */
+        struct task_t {
 
-            /** The step's position in the plan - what a fan-out hands to a thread. */
+            /** The task's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
 
             /** Where the rows sit in the index, in its own ID space. */
@@ -3421,51 +4262,50 @@ struct ram_index {
             iota_view<node_id_t> source_nodes;
         };
 
-        /** Step @p position of the plan; an empty one past the last. */
-        step_t operator[](std::size_t position) const noexcept {
-            step_t step;
-            if (position >= steps().size()) return step;
-            std::size_t const first = chunk_schedule_t::nodes_before(static_cast<candidates_count_t>(position));
-            std::size_t const bound = min_of(
-                chunk_schedule_t::nodes_before(static_cast<candidates_count_t>(position + 1)),
-                static_cast<std::size_t>(visible));
-            step.position = position;
-            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_nodes = step.index_nodes;
-            return step;
+        /** Task @p position of the plan; an empty one past the last. */
+        task_t operator[](std::size_t position) const noexcept {
+            task_t task;
+            if (position >= tasks().size()) return task;
+            // Every chunk holds a whole number of the first chunk's rows, so these runs tile each.
+            std::size_t const run_rows = chunk_schedule_t::nodes_in(0);
+            std::size_t const first = position * run_rows;
+            std::size_t const bound = min_of(first + run_rows, static_cast<std::size_t>(visible));
+            task.position = position;
+            task.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            task.source_nodes = task.index_nodes;
+            return task;
         }
 
-        /** The steps the save spans - one per storage chunk it reaches; none once spent. */
-        indexed_range<save_plan_t> steps() const noexcept {
-            std::size_t const count = index_ && visible
-                                          ? chunk_schedule_t::locate(static_cast<node_id_t>(visible - 1)).chunk + 1u
-                                          : 0u;
+        /** The tasks the save spans - one per run it reaches; none once spent. */
+        indexed_range<save_plan_t> tasks() const noexcept {
+            std::size_t const count = index_ ? divide_round_up<std::size_t>(visible, chunk_schedule_t::nodes_in(0))
+                                             : 0u;
             return {this, count};
         }
 
         /**
-         *  @brief Copies step @p step 's rows into the plan's own columns: the vectors and their
+         *  @brief Copies task @p task 's rows into the plan's own columns: the vectors and their
          *      norms straight from chunk memory, since neither changes once published, and the
          *      neighbors folded on their way into the column.
          *
          *  Every ID past the watermark folds to the sentinel.
          *
-         *  @param[in] step The step to copy, as @ref steps hands them out.
+         *  @param[in] task The task to copy, as @ref tasks hands them out.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k The step holds no rows, or its rows fall outside the columns.
+         *  - @c config_mismatch_k The task holds no rows, or its rows fall outside the columns.
          */
-        status_t save(step_t const& step) noexcept {
+        status_t save(task_t const& task) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const rows = step.index_nodes;
+            iota_view<node_id_t> const rows = task.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
             geometry_t const geometry = index_->geometry();
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const step_slots = rows.size() * connectivity;
-            // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
+            // Chunk rows are padded to whole kit tasks, while checkpoints keep logical rows.
             std::size_t const row_bytes = stored_row_values(geometry) * sizeof(scalar_t);
-            std::size_t const first = step.source_nodes.first;
+            std::size_t const first = task.source_nodes.first;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(),
                                                           connectivity * sizeof(node_id_t));
@@ -3509,11 +4349,11 @@ struct ram_index {
         /**
          *  @brief Pronounces the snapshot complete: every chunk's vectors and neighbors arrived,
          *      and under @c concurrent_k the counters rested across the whole plan. A success
-         *      spends the plan; a refusal leaves it whole, so the missing steps can still run.
+         *      spends the plan; a refusal leaves it whole, so the missing tasks can still run.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k The steps covered other than every row.
+         *  - @c config_mismatch_k The tasks covered other than every row.
          *  - @c contended_k Under @c concurrent_k, a counter moved during the plan.
          */
         status_t finish() noexcept {
@@ -3550,10 +4390,10 @@ struct ram_index {
      *
      *  The settlement probe reads the trailing counter first, since visible ≤ dispensed at every
      *  instant. @c exclusive_k reads like @c immutable_k. Columns too short for the rows under the
-     *  watermark are refused here, so no step ever writes past them.
+     *  watermark are refused here, so no task ever writes past them.
      *
      *  @param[out] columns Where the rows go, sized from @ref saved_shape.
-     *  @param[in] synchronization The contract the caller certifies.
+     *  @param[in] synchronization The contract the caller marks.
      *
      *  @par Statuses:
      *  - @c contended_k A dispensed batch has yet to publish.
@@ -3576,7 +4416,7 @@ struct ram_index {
 
     /**
      *  @brief Serializes every row under the watermark into @p columns on the calling thread, the
-     *      one-shot over @ref plan_save for a caller with no threads to fan the steps out over.
+     *      one-shot over @ref plan_save for a caller with no threads to fan the tasks out over.
      *
      *  @par Statuses:
      *  - @c config_mismatch_k A column is too short for the rows, or norms are given to an index
@@ -3587,25 +4427,25 @@ struct ram_index {
     status_t save(columns_t columns, synchronization_t synchronization) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
-        for (typename save_plan_t::step_t const step : plan.steps())
-            if (status_t const saved = plan.save(step); failed(saved)) return saved;
+        for (typename save_plan_t::task_t const task : plan.tasks())
+            if (status_t const saved = plan.save(task); failed(saved)) return saved;
         return plan.finish();
     }
 
     /**
-     *  @brief One load in flight: the rows claimed after the watermark and the storage chunks they
-     *      span, filled by any number of threads; @ref publish_keys files their keys, and
-     *      @ref finish publishes them.
+     *  @brief One load in flight: the rows claimed after the watermark and the runs they span,
+     *      which any number of threads fill, each run filing its keys for @ref finish to publish.
      *
-     *  Demands sole ownership of the index. A step copies out of the caller's columns or out of
-     *  another index's chunks, and stores its keys before tallying its rows. A source's IDs are
-     *  local to the rows it delivers, so every chunk shifts them onto the appended range and folds
-     *  every other ID onto the sentinel; norms go beside the vectors, or re-derive from them where
-     *  the source carries none. Repeated plans append, and one plan takes several parts when the
-     *  caller slices its steps between them. The plan owns the claim its rows ride in: one that
-     *  dies before @c finish releases them, so the next plan appends at the same base and the rows
-     *  it half-filled are never published. Nothing a step writes is visible before @c finish, so a
-     *  caller holding plans on several indexes publishes all of them or none.
+     *  Demands sole ownership of the index. A task copies out of the caller's columns or out of
+     *  another index's chunks, straight into chunk rows the plan covered unfilled, and files its
+     *  keys before counting its rows. A source's IDs are local to the rows it delivers, so every
+     *  run shifts them onto the appended range and folds every other ID onto the sentinel; norms go
+     *  beside the vectors, or re-derive from them where the source carries none. Repeated plans
+     *  append, and one plan takes several parts when the caller slices its tasks between them. The
+     *  plan owns the claim its rows ride in: one that dies before @c finish refills its rows as a
+     *  growth leaves them, forgets their keys and releases them, so the next plan appends at the
+     *  same base and the rows it half-filled are never published. Nothing a task writes is visible
+     *  before @c finish, so a caller holding plans on several indexes publishes every one or none.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -3615,30 +4455,39 @@ struct ram_index {
         /** Rows the plan appends. */
         std::size_t rows = 0;
 
-        /** Rows whose vectors, neighbors and keys arrived, tallied through @c atomic_ref. */
+        /** Rows per run: a power of two from the first chunk's rows up to a slab's, so runs tile
+         *  every chunk. */
+        std::size_t run_rows = 0;
+
+        /** Rows whose vectors, neighbors and keys arrived, counted through @c atomic_ref. */
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
 
-        /** The index appended to at @p base and the claim its rows ride in - empty for a plan of no
-         *  rows; only @ref plan_load calls it. */
-        load_plan_t(ram_index& index, node_id_t base, capacity_claim_t&& claim) noexcept
-            : base(base), rows(claim.entries()), index_(&index), claim_(std::move(claim)) {}
+        /** The index appended to at @p base in runs of @p run_rows and the claim its rows ride in -
+         *  empty for a plan of no rows; only @ref plan_load calls it. */
+        load_plan_t(ram_index& index, node_id_t base, std::size_t run_rows, capacity_claim_t&& claim) noexcept
+            : base(base), rows(claim.entries()), run_rows(run_rows), index_(&index), claim_(std::move(claim)) {}
         load_plan_t(load_plan_t&& other) noexcept
-            : base(other.base), rows(std::exchange(other.rows, 0)), covered(other.covered),
+            : base(other.base), rows(std::exchange(other.rows, 0)), run_rows(other.run_rows), covered(other.covered),
               index_(std::exchange(other.index_, nullptr)), claim_(std::move(other.claim_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
-        // The tally is this plan's own: a copy would tally into a twin `finish` never reads.
+        // The count is this plan's own: a copy would count into a twin `finish` never reads.
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
 
-        /** The claim's own death releases the rows, unless @c finish consumed them. */
-        ~load_plan_t() noexcept = default;
+        /** An unfinished plan's rows go back to a growth's fill and its keys out of the map before
+         *  the claim's own death releases them. */
+        ~load_plan_t() noexcept {
+            if (!index_ || !rows) return;
+            index_->refill_unpublished_({base, rows_through_chunk_of_(base + rows - 1u)});
+            index_->keyed_.forget_from(base);
+        }
 
-        /** One step of the plan: one storage chunk's share of the appended nodes. */
-        struct step_t {
+        /** One task of the plan: one run of the appended nodes. */
+        struct task_t {
 
-            /** The step's position in the plan - what a fan-out hands to a thread. */
+            /** The task's position in the plan - what a fan-out hands to a thread. */
             std::size_t position = 0;
 
             /** Where the rows go in the index, in its own ID space, from @c base. */
@@ -3648,142 +4497,141 @@ struct ram_index {
             iota_view<node_id_t> source_nodes;
         };
 
-        /** Step @p position of the plan; an empty one past the last. */
-        step_t operator[](std::size_t position) const noexcept {
-            step_t step;
-            if (position >= steps().size()) return step;
-            candidates_count_t const first_chunk = chunk_schedule_t::locate(base).chunk;
-            std::size_t const first = max_of(
-                chunk_schedule_t::nodes_before(static_cast<candidates_count_t>(first_chunk + position)),
-                static_cast<std::size_t>(base));
-            std::size_t const bound = min_of(
-                chunk_schedule_t::nodes_before(static_cast<candidates_count_t>(first_chunk + position + 1)),
-                static_cast<std::size_t>(base) + rows);
-            step.position = position;
-            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
-            return step;
+        /** Task @p position of the plan; an empty one past the last. */
+        task_t operator[](std::size_t position) const noexcept {
+            task_t task;
+            if (position >= tasks().size()) return task;
+            std::size_t const run = run_of_(base, run_rows) + position;
+            u64_t const first = max_of<u64_t>(run_start_(run, run_rows), base);
+            u64_t const bound = min_of<u64_t>(run_start_(run + 1, run_rows), u64_t {base} + rows);
+            task.position = position;
+            task.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            task.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            return task;
         }
 
-        /** The steps the append spans - one per storage chunk it reaches; none once spent. */
-        indexed_range<load_plan_t> steps() const noexcept {
-            std::size_t const count = index_ && rows
-                                          ? chunk_schedule_t::locate(static_cast<node_id_t>(base + rows - 1)).chunk -
-                                                chunk_schedule_t::locate(base).chunk + 1u
-                                          : 0u;
+        /** The tasks the append spans - one per run it reaches; none once spent. */
+        indexed_range<load_plan_t> tasks() const noexcept {
+            std::size_t const count = index_ && rows ? run_of_(base + rows - 1, run_rows) - run_of_(base, run_rows) + 1u
+                                                     : 0u;
             return {this, count};
         }
 
         /**
-         *  @brief Copies step @p step 's rows out of @p columns straight into chunk memory: the
-         *      vectors with their norms, copied or derived as they arrive, then the neighbors and
-         *      the keys.
+         *  @brief Reads task @p task 's rows out of @p columns straight into chunk memory: the
+         *      vectors with their norms, read or derived as they arrive, then the neighbors and the
+         *      keys, which the task files itself.
          *
-         *  Every ID inside @p source_range is folded onto the appended range and every other onto
-         *  the sentinel. A sharded plan drives it one part's slice at a time, its step naming the
-         *  rows in that part's row and ID spaces.
+         *  Rows narrower than the chunk's land at the tail of their run and spread forward. Every
+         *  ID inside @p source_range is folded onto the appended range and every other onto the
+         *  sentinel. A sharded plan drives it one part's slice at a time, its task naming the rows
+         *  in that part's row and ID spaces. The task ending the plan fills the rest of its chunk.
          *
-         *  @param[in] step The step to fill; its source nodes address @p columns.
-         *  @param[in] columns The rows' columns, one part's under a sharded plan.
+         *  @param[in] task The task to fill; its source nodes address @p columns.
+         *  @param[in] columns The rows' columns, one part's under a sharded plan: bytes, or column
+         *      sources that read a part's file past the page cache.
          *  @param[in] source_range The ID space those rows speak.
-         *  @param[in] key_of Row @c r of the step's source nodes takes the key <tt>key_of(r)</tt>.
+         *  @param[in] key_of Row @c r of the task's source nodes takes the key <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k The step holds no rows, its rows fall outside @p columns, or
+         *  - @c config_mismatch_k The task holds no rows, its rows fall outside @p columns, or
          *    they are wider than the index's.
          *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
-        template <typename key_of_type_>
-        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range,
+        template <typename columns_type_, typename key_of_type_>
+        status_t load(task_t const& task, columns_type_ const& columns, iota_view<node_id_t> source_range,
                       key_of_type_&& key_of) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_nodes;
+            iota_view<node_id_t> const range = task.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
             geometry_t const geometry = index_->geometry();
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const column_connectivity = columns.connectivity ? columns.connectivity : connectivity;
-            std::size_t const step_slots = range.size() * connectivity;
-            // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
-            std::size_t const row_bytes = stored_row_values(geometry) * sizeof(scalar_t);
-            std::size_t const column_row_bytes = column_connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_nodes.first;
-            bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), row_bytes);
-            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), column_row_bytes);
-            bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(vector_norms_t));
-            if (column_connectivity > connectivity || vectors_rows.empty() || neighbors_rows.empty() ||
-                norms_rows.empty() != columns.norms.empty())
-                return status_t::config_mismatch_k;
-            // The part's rows go at this step's own index rows, so an ID's shift follows from
-            // the step rather than from the plan's base - the two agree for a one-part plan.
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_nodes.first + source_range.first);
+            if (column_connectivity > connectivity) return status_t::config_mismatch_k;
+            // The part's rows go at this task's own index rows, so an ID's shift follows from
+            // the task rather than from the plan's base - the two agree for a one-part plan.
+            node_id_t const shift = static_cast<node_id_t>(range.first - task.source_nodes.first + source_range.first);
             // A rebased ID past this plan would name whichever row a later insert fills.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
 
+            // Checkpoints keep logical rows, while chunk rows are padded to whole kit tasks.
+            std::size_t const count = range.size(), first = task.source_nodes.first;
+            std::size_t const stored_bytes = stored_row_values(geometry) * sizeof(scalar_t);
+            std::size_t const padded_bytes = padded_row_values(geometry) * sizeof(scalar_t);
             location_t const location = chunk_schedule_t::locate(range.first);
-            for (std::size_t row = 0; row != range.size(); ++row)
-                std::memcpy(index_->vectors_[location_t {location.chunk, location.offset + row}],
-                            vectors_rows.data() + row * row_bytes, row_bytes);
+            bytes_span_t const vectors = bytes_of(index_->vectors_[location], count * padded_row_values(geometry));
+            if (status_t const read = copy_entries(columns.vectors, first, count, stored_bytes,
+                                                   vectors.last(count * stored_bytes));
+                failed(read))
+                return read;
+            expand_entries_forward(vectors, count, stored_bytes, padded_bytes, byte_t {0});
             if (index_->stores_norms()) {
-                if (!norms_rows.empty()) std::memcpy(&index_->norms_[location], norms_rows.data(), norms_rows.size());
+                if (!columns.norms.empty()) {
+                    if (status_t const read = copy_entries(columns.norms, first, count, sizeof(vector_norms_t),
+                                                           bytes_of(&index_->norms_[location], count));
+                        failed(read))
+                        return read;
+                }
                 else
-                    for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
+                    for (std::size_t offset_in_chunk = 0; offset_in_chunk != count; ++offset_in_chunk) {
                         location_t const row {location.chunk, location.offset + offset_in_chunk};
                         index_->norm_ref_for(row) = index_->norms(index_->vector_for(row));
                     }
             }
 
-            node_id_t* const neighbors = index_->neighbors_[location];
-            for (std::size_t row = 0; row != range.size(); ++row) {
-                node_id_t* const slots = neighbors + row * connectivity;
-                std::memcpy(slots, neighbors_rows.data() + row * column_row_bytes, column_row_bytes);
-                for (std::size_t slot = column_connectivity; slot != connectivity; ++slot)
-                    slots[slot] = node_id_unknown_k;
-            }
-            std::span<node_id_t> const copied {neighbors, step_slots};
+            std::span<node_id_t> const copied {index_->neighbors_[location], count * connectivity};
+            bytes_span_t const neighbor_rows = bytes_of(copied.data(), copied.size());
+            std::size_t const column_row_bytes = column_connectivity * sizeof(node_id_t);
+            if (status_t const read = copy_entries(columns.neighbors, first, count, column_row_bytes,
+                                                   neighbor_rows.last(count * column_row_bytes));
+                failed(read))
+                return read;
+            expand_entries_forward(neighbor_rows, count, column_row_bytes, connectivity * sizeof(node_id_t),
+                                   byte_t {0xFF});
             rebase_neighbors(copied, source_range, shift, node_id_unknown_k);
             compact_neighbors(copied, connectivity, range.first, node_id_unknown_k);
             for (node_id_t node = range.first; node != range.bound; ++node)
                 index_->keyed_.assign(node, key_of(static_cast<node_id_t>(first + node - range.first)));
-            atomic_ref<std::size_t>(covered).store_add(range.size(), std::memory_order_release);
+            settle_run_(range);
             return status_t::success_k;
         }
 
         /**
          *  @brief The same copy out of @p source 's own chunks rather than columns, as an absorb
-         *      drives it, one donor shard's slice at a time, its step naming the rows in that
+         *      drives it, one donor shard's slice at a time, its task naming the rows in that
          *      shard's row and ID spaces.
          *
          *  Both indexes keep padded rows of one geometry, so every run moves whole with its norms
          *  and zero tails, and the neighbors rebase in this index's own chunk. The copy reads
-         *  @p source without locks, so nothing may insert into, refine or clear it while the step
+         *  @p source without locks, so nothing may insert into, refine or clear it while the task
          *  runs.
          *
-         *  @param[in] step The step to fill; its source nodes address @p source.
+         *  @param[in] task The task to fill; its source nodes address @p source.
          *  @param[in] source The index the rows come from, of this one's geometry and norms.
          *  @param[in] source_range The ID space the source's rows speak.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k The step is empty or uneven, @p source differs in geometry or
-         *    norms, or the step reads past its published rows.
+         *  - @c config_mismatch_k The task is empty or uneven, @p source differs in geometry or
+         *    norms, or the task reads past its published rows.
          *  - @c config_mismatch_k @p source_range rebases past the plan's rows.
          */
-        status_t load(step_t const& step, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
+        status_t load(task_t const& task, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_nodes;
+            iota_view<node_id_t> const range = task.index_nodes;
             geometry_t const geometry = index_->geometry();
-            if (range.empty() || range.size() != step.source_nodes.size() || source.geometry() != geometry ||
-                source.stores_norms() != index_->stores_norms() || step.source_nodes.bound > source.size())
+            if (range.empty() || range.size() != task.source_nodes.size() || source.geometry() != geometry ||
+                source.stores_norms() != index_->stores_norms() || task.source_nodes.bound > source.size())
                 return status_t::config_mismatch_k;
-            node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
+            node_id_t const shift = range.first - task.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const connectivity = geometry.connectivity;
             std::size_t const row_bytes = padded_row_values(geometry) * sizeof(scalar_t);
 
-            // The step sits in one chunk here, while the source's chunks start elsewhere.
-            for (node_id_t writing = range.first, reading = step.source_nodes.first; writing != range.bound;) {
+            // The task sits in one chunk here, while the source's chunks start elsewhere.
+            for (node_id_t writing = range.first, reading = task.source_nodes.first; writing != range.bound;) {
                 location_t const into = chunk_schedule_t::locate(writing), from = chunk_schedule_t::locate(reading);
                 node_id_t const run = static_cast<node_id_t>(
                     min_of<std::size_t>(range.bound - writing, chunk_schedule_t::nodes_in(from.chunk) - from.offset));
@@ -3801,31 +4649,22 @@ struct ram_index {
                                                range.size() * connectivity};
             rebase_neighbors(copied, source_range, shift, node_id_unknown_k);
             compact_neighbors(copied, connectivity, range.first, node_id_unknown_k);
-            atomic_ref<std::size_t>(covered).store_add(range.size(), std::memory_order_release);
+            settle_run_(range);
             return status_t::success_k;
         }
 
-        /** Files every appended row under the key its step copied, which @ref finish then makes
-         *  visible - the one writer of the index's key map, once every step ran and before the
-         *  finish; with a step missing it files nothing, so a refused finish leaves no key above
-         *  the watermark. */
-        void publish_keys() noexcept {
-            if (!index_ || atomic_ref<std::size_t>(covered).load(std::memory_order_acquire) != rows) return;
-            index_->keyed_.publish({base, static_cast<node_id_t>(base + rows)});
-        }
-
         /**
-         *  @brief Publishes the appended nodes once every chunk's vectors and neighbors arrived:
-         *      the claim consumed first, then identity, then the watermark last with a release,
-         *      which carries the keys @ref publish_keys filed.
+         *  @brief Publishes the appended nodes once every run's vectors, neighbors and keys
+         *      arrived: the claim consumed first, then identity, then the watermark last with a
+         *      release, which carries the keys every run filed.
          *
          *  The identity releases too, and moves only an open dispenser: a closed one stays closed
          *  for its closer to reopen past the rows. A success spends the plan; a refusal leaves it
-         *  whole, so the missing steps can still run.
+         *  whole, so the missing tasks can still run.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or already spent.
-         *  - @c config_mismatch_k The steps covered other than every row.
+         *  - @c config_mismatch_k The tasks covered other than every row.
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -3846,6 +4685,16 @@ struct ram_index {
 
       private:
 
+        /** What every run does once its rows arrived: files their keys, which the map takes from
+         *  any number of runs at once, fills the rest of the chunk when the run ends the plan, and
+         *  counts the rows. */
+        void settle_run_(iota_view<node_id_t> range) noexcept {
+            index_->keyed_.publish(range);
+            if (range.bound == static_cast<std::size_t>(base) + rows)
+                index_->refill_unpublished_({range.bound, rows_through_chunk_of_(range.bound - 1u)});
+            atomic_ref<std::size_t>(covered).store_add(range.size(), std::memory_order_release);
+        }
+
         /** The index appended to; null in the empty plan a refused @ref plan_load hands back,
          *  and once @c finish published. */
         ram_index* index_ = nullptr;
@@ -3855,34 +4704,60 @@ struct ram_index {
     };
 
     /**
-     *  @brief Opens a load of @p rows after the watermark, sourced per step from columns or another
-     *      index: claims them through the ordinary capacity protocol, so a preceding @c reserve is
-     *      consumed rather than duplicated and chunks grow only on a genuine deficit.
+     *  @brief Opens a load of @p rows after the watermark, sourced per task either from
+     *      columns or from another index.
      *
-     *  Refuses an insert mid-flight and rows past the ID space. The sharded index closes the
-     *  dispenser first, so no insert arrives before @c finish; a direct caller keeps insertions out
-     *  itself.
+     *  It covers their chunks unfilled, then claims them through the ordinary capacity protocol, so
+     *  a preceding @c reserve is consumed rather than duplicated and chunks grow only on a genuine
+     *  deficit. Runs hold the power of two nearest the rows a request of @p request_bytes carries
+     *  of the widest row, at least the first chunk's rows and at most a slab's. Refuses an insert
+     *  mid-flight and rows past the ID space. The sharded index closes the dispenser first, so no
+     *  insert arrives before @c finish; a direct caller keeps insertions out itself.
+     *
+     *  @param[in] rows Rows to append.
+     *  @param[in] request_bytes Bytes the drive under the source takes in one request; zero for a
+     *      source in memory, which runs the first chunk's rows at a time.
      *
      *  @par Statuses:
      *  - @c contended_k A dispensed batch has yet to publish, or another claim won first.
      *  - @c overflow_k The rows pass the ID space, the reserved ceiling or the chunk directory.
      *  - @c config_mismatch_k or @c unknown_kind_k A growth meets a malformed geometry or kernel.
      */
-    expected<load_plan_t> plan_load(std::size_t rows) noexcept {
+    expected<load_plan_t> plan_load(std::size_t rows, std::size_t request_bytes = 0) noexcept {
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        if (!rows) return {load_plan_t {*this, visible, {}}, status_t::success_k};
+        std::size_t const widest_row_bytes = max_of(padded_row_values(geometry_) * sizeof(scalar_t),
+                                                    geometry_.connectivity * sizeof(node_id_t));
+        std::size_t const request_rows = widest_row_bytes ? request_bytes / widest_row_bytes : 0;
+        std::size_t const below = std::bit_floor(request_rows);
+        std::size_t const nearest_rows = request_rows - below > 2 * below - request_rows ? 2 * below : below;
+        std::size_t const run_rows = min_of(max_of(nearest_rows, chunk_schedule_t::nodes_in(0)),
+                                            chunk_schedule_t::nodes_in(chunk_schedule_t::doubling_chunks_k));
+        if (!rows) return {load_plan_t {*this, visible, run_rows, {}}, status_t::success_k};
         node_id_t const dispensed = atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
         if (dispensed != visible && dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
-        auto [capacity_claim, status] = claim(rows);
-        if (failed(status)) return {{}, status};
-        if (capacity_claim.base() != visible) return {{}, status_t::contended_k}; // The claim dies and releases.
-        return {load_plan_t {*this, visible, std::move(capacity_claim)}, status_t::success_k};
+        if (status_t const vetted = vet_growth_(); failed(vetted)) return {{}, vetted};
+        std::size_t const loaded_rows = static_cast<std::size_t>(visible) + rows;
+        if (loaded_rows > atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed))
+            return {{}, status_t::overflow_k};
+
+        // The tasks write every byte of their rows and fill the rest of the last chunk, so the
+        // claim's growth finds these chunks published and leaves them unfilled.
+        status_t covered = vectors_.cover_uninitialized(loaded_rows, padded_row_values(geometry_));
+        if (succeeded(covered) && stores_norms()) covered = norms_.cover_uninitialized(loaded_rows);
+        if (succeeded(covered)) covered = neighbors_.cover_uninitialized(loaded_rows, geometry_.connectivity);
+        auto [capacity_claim, status] = succeeded(covered) ? claim(rows) : expected<capacity_claim_t> {{}, covered};
+        if (succeeded(status) && capacity_claim.base() == visible)
+            return {load_plan_t {*this, visible, run_rows, std::move(capacity_claim)}, status_t::success_k};
+        // A refused plan leaves what it covered as a growth would, and a claim that won elsewhere
+        // dies, releasing its rows.
+        refill_unpublished_({visible, rows_through_chunk_of_(loaded_rows - 1u)});
+        return {{}, failed(status) ? status : status_t::contended_k};
     }
 
     /**
      *  @brief Appends the whole source on the calling thread under @p keys, one per row - the
-     *      one-shot over @ref plan_load for a caller with no threads to fan the steps out over;
+     *      one-shot over @ref plan_load for a caller with no threads to fan the tasks out over;
      *      columns shorter than @p rows are refused before a row is claimed.
      *
      *  @par Statuses:
@@ -3902,12 +4777,11 @@ struct ram_index {
             return status_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
-        for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step, columns, source_range,
+        for (typename load_plan_t::task_t const task : plan.tasks())
+            if (status_t const loaded = plan.load(task, columns, source_range,
                                                   [&](node_id_t row) noexcept { return keys[row]; });
                 failed(loaded))
                 return loaded;
-        plan.publish_keys();
         return plan.finish();
     }
 
@@ -4125,14 +4999,7 @@ struct ram_index {
      *  inside it becomes visible, which chains through the same atomics.
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
-        // Constructors allocate nothing, so the first growth is where a geometry or kernel is
-        // refused.
-        if (!kernel_supported<quads_kit_t>(kernel_)) return {0, status_t::unknown_kind_k};
-        // Sub-byte rows fill whole storage values: a ragged tail would be dropped by the kernels'
-        // tail loads.
-        if (!geometry_.dimensions || geometry_.dimensions % nk::dimensions_per_value<scalar_t>() ||
-            !std::has_single_bit(static_cast<u32_t>(geometry_.connectivity)))
-            return {0, status_t::config_mismatch_k};
+        if (status_t const vetted = vet_growth_(); failed(vetted)) return {0, vetted};
 
         std::size_t const ceiling_rows = atomic_ref<std::size_t const>(ceiling_nodes_).load(std::memory_order_relaxed);
         std::size_t added_capacity = 0;
@@ -4160,6 +5027,65 @@ struct ram_index {
             if (chunks_count_ == max_chunks_k) added_capacity -= 1;
         }
         return {added_capacity, status_t::success_k};
+    }
+
+    /** Refuses what every growth refuses, before any chunk is allocated: constructors allocate
+     *  nothing, so the first growth or load is where a kernel the kits cannot finalize, or a
+     *  malformed geometry, surfaces. */
+    status_t vet_growth_() const noexcept {
+        if (!kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        // Sub-byte rows fill whole storage values: a kernel's tail loads would drop a ragged tail.
+        if (!geometry_.dimensions || geometry_.dimensions % nk::dimensions_per_value<scalar_t>() ||
+            !std::has_single_bit(static_cast<u32_t>(geometry_.connectivity)))
+            return status_t::config_mismatch_k;
+        return status_t::success_k;
+    }
+
+    /** Refills the rows of @p nodes each column's published chunks hold as a growth leaves them:
+     *  zero vectors and norms, and sentinel neighbors. */
+    void refill_unpublished_(iota_view<std::size_t> nodes) noexcept {
+        std::size_t const vector_bytes = vectors_.columns() * sizeof(scalar_t);
+        std::size_t const neighbor_bytes = neighbors_.columns() * sizeof(node_id_t);
+        std::size_t const vectors_bound = min_of(nodes.bound, vectors_.capacity());
+        std::size_t const norms_bound = stores_norms() ? min_of(nodes.bound, norms_.capacity()) : 0;
+        std::size_t const neighbors_bound = min_of(nodes.bound, neighbors_.capacity());
+        for (std::size_t node = nodes.first; node < nodes.bound;) {
+            location_t const location = chunk_schedule_t::locate(node);
+            std::size_t const run = min_of(nodes.bound - node,
+                                           chunk_schedule_t::nodes_in(location.chunk) - location.offset);
+            if (node < vectors_bound) std::memset(vectors_[location], 0, run * vector_bytes);
+            if (node < norms_bound) std::memset(&norms_[location], 0, run * sizeof(vector_norms_t));
+            if (node < neighbors_bound) std::memset(neighbors_[location], 0xFF, run * neighbor_bytes);
+            node += run;
+        }
+    }
+
+    /** One past the last row of the chunk holding @p node. */
+    static std::size_t rows_through_chunk_of_(std::size_t node) noexcept {
+        return chunk_schedule_t::nodes_before(chunk_schedule_t::locate(node).chunk + 1u);
+    }
+
+    /** The run holding row @p node when runs hold up to @p run_rows rows: they double from the
+     *  first chunk's rows up to @p run_rows, then stay, so each lies inside one chunk and
+     *  together they tile every chunk. */
+    static std::size_t run_of_(std::size_t node, std::size_t run_rows) noexcept {
+        u64_t const first_rows = chunk_schedule_t::nodes_in(0);
+        u64_t const doubling_rows = 2 * u64_t {run_rows} - first_rows;
+        std::size_t const doubling_runs =
+            static_cast<std::size_t>(std::bit_width(run_rows) - std::bit_width(first_rows)) + 1u;
+        if (node < doubling_rows)
+            return static_cast<std::size_t>(std::bit_width(node + first_rows) - std::bit_width(first_rows));
+        return doubling_runs + static_cast<std::size_t>((node - doubling_rows) / run_rows);
+    }
+
+    /** The first row of run @p run under @ref run_of_ 's schedule, in 64 bits, as the run past
+     *  the last may pass the ID space. */
+    static u64_t run_start_(std::size_t run, std::size_t run_rows) noexcept {
+        u64_t const first_rows = chunk_schedule_t::nodes_in(0);
+        std::size_t const doubling_runs =
+            static_cast<std::size_t>(std::bit_width(run_rows) - std::bit_width(first_rows)) + 1u;
+        if (run <= doubling_runs) return (first_rows << run) - first_rows;
+        return 2 * u64_t {run_rows} - first_rows + u64_t {run - doubling_runs} * run_rows;
     }
 
     /**
@@ -4546,23 +5472,26 @@ struct ram_index {
         vector_norms_t const new_norms = norms(owned_vector);
         if (stores_norms()) norm_ref_for(new_location) = new_norms;
 
-        // The first row of a virgin index finds nothing to walk to and publishes with no neighbors;
-        // a later row walking before any row is wired waits for row zero and walks again.
-        neighbors_ref_t const first_neighbors = neighbors_for(chunk_schedule_t::locate(0));
-        while (true) {
+        // A short walk waits out the entries dispensed ahead: wired at once, each would meet
+        // node zero alone.
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
+        std::size_t const wanted = min_of<std::size_t>(geometry_.connectivity, expansion_factor);
+        for (bool waited = false;; waited = true) {
             node_id_t const first_invisible_id =
                 atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
             node_id_t const first_undispensed_id =
                 atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
             dispensed_admission_t const admission {this, first_invisible_id, first_undispensed_id, new_node_id};
-            if (failed(search_around(vector_view_t(owned_vector), new_norms, admission,
-                                     non_zero_expansion_factor(config), context, context.results, dummy_fold_t {}, {},
-                                     single_zero_rescoring_t {}))) {
+            if (failed(search_around(vector_view_t(owned_vector), new_norms, admission, expansion_factor, context,
+                                     context.results, dummy_fold_t {}, {}, single_zero_rescoring_t {}))) {
                 ++context.saturated_walks;
                 break;
             }
-            if (!new_node_id || first_invisible_id || !context.results.empty()) break;
-            first_neighbors.wait_while_locked();
+            if (waited || first_invisible_id == new_node_id || context.results.size() >= wanted) break;
+            for (node_id_t ahead = first_invisible_id; ahead != new_node_id; ++ahead) {
+                neighbors_ref_t const neighbors = neighbors_for(chunk_schedule_t::locate(ahead));
+                while (neighbors.peek_first() == node_id_unknown_k) neighbors.wait_while_locked();
+            }
         }
 
         // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
@@ -4619,23 +5548,11 @@ struct ram_index {
 
     /** An audit over the IDs below @p visible, its bitsets on the index's own allocator. */
     expected<health_plan_t> plan_audit_(node_id_t visible) const noexcept {
-        using growing_bitset_t = typename health_plan_t::growing_bitset_t;
-        using bitset_allocator_t = typename health_plan_t::bitset_allocator_t;
-        using growing_levels_t = typename health_plan_t::growing_levels_t;
-        using levels_allocator_t = typename health_plan_t::levels_allocator_t;
-        // An empty graph is audited, not refused: no words to sweep, no steps, zero reached.
-        bitset_allocator_t const allocator {vectors_allocator_};
-        std::size_t const words = health_plan_t::words_for(visible);
-        growing_bitset_t bits {allocator};
-        growing_levels_t levels {levels_allocator_t {allocator}}, back_levels {levels_allocator_t {allocator}},
-            parents {levels_allocator_t {allocator}};
-        if (failed(bits.resize(words * health_plan_t::bitsets_k)) || failed(levels.resize(visible)) ||
-            failed(back_levels.resize(visible)) || failed(parents.resize(visible)))
-            return {health_plan_t {allocator}, status_t::bad_alloc_k};
-        std::size_t const seed_count = min_of<std::size_t>(connectivity(), visible);
-        return {health_plan_t {*this, visible, seed_count, std::move(bits), std::move(levels), std::move(back_levels),
-                               std::move(parents)},
-                status_t::success_k};
+        // An empty graph is audited, not refused: no words to sweep, no tasks, zero reached.
+        health_plan_t plan {typename health_plan_t::bitset_allocator_t {vectors_allocator_}};
+        if (failed(plan.widen(visible))) return {std::move(plan), status_t::bad_alloc_k};
+        plan.rebind(*this, visible);
+        return {std::move(plan), status_t::success_k};
     }
 
     /** Whether no insertion is in flight: every dispensed ID is published, or the dispenser is
@@ -4739,56 +5656,6 @@ struct ram_index {
     }
 
     /**
-     *  @brief One node's re-selection: its neighbors seed the walk and the insertion's own
-     *      selection picks the new ones into @c context.selected_neighbors.
-     *
-     *  The members read stay in @c context.staged_ids; the caller keeps the picks in its shadow or
-     *  writes the row. No distance math runs under a lock.
-     *
-     *  A non-empty @p across fills the candidates first with a walk across into those rows alone,
-     *  seeded by @p across_seeds ahead of its random landmarks.
-     */
-    void refine_one_(node_id_t node_id, node_id_t first_invisible_id, iota_view<node_id_t> across,
-                     std::span<node_id_t const> across_seeds, std::size_t expansion_factor,
-                     traversal_context_t& context) noexcept {
-        std::size_t const node_connectivity = connectivity();
-        location_t const location = chunk_schedule_t::locate(node_id);
-        vector_view_t const own_vector = vector_for(location);
-        vector_norms_t const own_norms = norm_for(location);
-        neighbors_ref_t const own_neighbors = neighbors_for(location);
-
-        // The neighbors as read seed the walk, so every one already wired competes; the node
-        // itself is visited before anything stages, so it never enters its own candidates.
-        context.results.clear();
-        context.refining_candidates.clear();
-        context.frontier.clear();
-        context.visited.clear();
-        [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
-        // The heal rounds rewire every part in place meanwhile, so only the admission keeps this
-        // walk inside the others.
-        part_admission_t const other {across.first, min_of(across.bound, first_invisible_id)};
-        if (other.first_id < other.first_invisible_id &&
-            failed(search_around(own_vector, own_norms, other, expansion_factor, context, context.results,
-                                 dummy_fold_t {}, across_seeds, single_zero_rescoring_t {})))
-            ++context.saturated_walks;
-        // What the walk across left in the frontier lies past its radius; the walk over everything
-        // starts afresh, from its own seeds.
-        context.frontier.clear();
-        candidates_count_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
-        std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
-        if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
-                                 context, context.results, dummy_fold_t {}, seeds, single_zero_rescoring_t {})))
-            ++context.saturated_walks;
-        context.computed_distances += add_neighbor_candidates_(own_vector, own_norms, seeds, first_invisible_id,
-                                                               context);
-
-        std::size_t const refine_distances = select_diverse(context.results, node_id, node_connectivity,
-                                                            context.selected_neighbors, context);
-        context.computed_distances += refine_distances;
-        context.computed_distances_in_refines += refine_distances;
-    }
-
-    /**
      *  @brief Writes @p selected into @p node_id 's row under its lock, sentinel terminated and
      *      republished through slot 0.
      *
@@ -4814,28 +5681,6 @@ struct ram_index {
         return changed;
     }
 
-    /** Scores every proposal of @p run against @p node_id in place, a quad at a time. */
-    void score_run_(node_id_t node_id, std::span<scored_node_t> run, traversal_context_t& context) const noexcept {
-        location_t const location = chunk_schedule_t::locate(node_id);
-        vector_view_t const own_vector = vector_for(location);
-        vector_norms_t const own_norms = norm_for(location);
-        quad<vector_view_t> lane_vectors;
-        quad<vector_norms_t> lane_norms;
-        std::size_t const lanes = lane_vectors.size();
-        for (std::size_t first = 0; first < run.size(); first += lanes) {
-            std::size_t const gathered = min_of(lanes, run.size() - first);
-            // The tail lanes repeat the last proposal; their outputs are never read.
-            for (std::size_t lane = 0; lane != lanes; ++lane) {
-                location_t const source = chunk_schedule_t::locate(run[first + min_of(lane, gathered - 1)].node_id);
-                lane_vectors[lane] = vector_for(source);
-                lane_norms[lane] = norm_for(source);
-            }
-            quad<distance_t> const scored = distances(own_vector, own_norms, lane_vectors, lane_norms);
-            for (std::size_t lane = 0; lane != gathered; ++lane) run[first + lane].distance = scored[lane];
-        }
-        context.computed_distances += run.size();
-    }
-
     /** Calls @p callback with every published member of @p node_id 's row, read without its lock,
      *  for the phases no row is written in; a published-empty row has none. */
     template <typename callback_type_>
@@ -4851,100 +5696,32 @@ struct ram_index {
         }
     }
 
-    /** Adds the scored candidates of @p scored the results lack, in order, until the
-     *  results' reservation is full. @return How many of them were consumed, the ones
-     *  listed already included. */
-    static std::size_t add_scored_candidates_(std::span<scored_node_t const> scored,
-                                              results_array_t& results) noexcept {
-        std::size_t consumed = 0;
-        for (; consumed != scored.size() && results.size() != results.capacity(); ++consumed) {
-            scored_node_t const candidate = scored[consumed];
-            bool listed = false;
-            for (std::size_t position = 0; position != results.size() && !listed; ++position)
-                listed = results[position].node_id == candidate.node_id;
-            if (!listed) results.insert(scored_node_t {candidate}, results.size() + 1);
-        }
-        return consumed;
-    }
-
-    /**
-     *  @brief One row's merge: its live members, its walk's @p picks and the @p incoming
-     *      proposals compete, the insertion's selection fills the row, the audit's levels keep
-     *      its reachability, and it is written once.
-     *
-     *  The picks and the proposals carry their distances, so only the live members are scored.
-     *  The sources fold in rounds within the candidates' reservation, each round's selection
-     *  carrying into the next, so no proposal is dropped however many a hub draws.
-     *
-     *  @return Whether the row gained a member.
-     */
-    bool merge_back_links_(node_id_t node_id, node_id_t first_invisible_id, std::span<scored_node_t const> picks,
-                           std::span<scored_node_t const> incoming, health_plan_t& audit,
-                           traversal_context_t& context) noexcept {
-        std::size_t const node_connectivity = connectivity();
-        location_t const location = chunk_schedule_t::locate(node_id);
-        vector_view_t const own_vector = vector_for(location);
-        vector_norms_t const own_norms = norm_for(location);
-        results_array_t& results = context.results;
-        selection_t& selected = context.selected_neighbors;
-        selection_t& live = context.refined_neighbors;
-
-        // The live members scored first and kept apart, with their distances, for the levels.
-        results.clear();
-        candidates_count_t const live_count = stage_neighbors_(neighbors_for(location), node_id, context);
-        std::span<node_id_t const> const live_ids {context.staged_ids.data(), live_count};
-        context.computed_distances += add_neighbor_candidates_(own_vector, own_norms, live_ids, first_invisible_id,
-                                                               context);
-        [[maybe_unused]] nk::status_t const sized = live.resize({results.size()});
-        for (std::size_t position = 0; position != results.size(); ++position) live[position] = results[position];
-        results.clear();
-
-        std::span<scored_node_t const> members = to_span(live);
-        std::size_t refine_distances = 0;
-        for (bool folding = true; folding;) {
-            members = members.subspan(add_scored_candidates_(members, results));
-            picks = picks.subspan(add_scored_candidates_(picks, results));
-            incoming = incoming.subspan(add_scored_candidates_(incoming, results));
-            refine_distances += select_diverse_via_quads(results, node_id, node_connectivity, selected, context);
-            fill_selection(to_span(results), selected, node_connectivity);
-            folding = !members.empty() || !picks.empty() || !incoming.empty();
-            if (!folding) break;
-            results.clear();
-            for (std::size_t position = 0; position != selected.size(); ++position)
-                results.insert(scored_node_t {selected[position]}, results.size() + 1);
-        }
-        context.computed_distances += refine_distances;
-        context.computed_distances_in_reverse_refines += refine_distances;
-        keep_levels_(node_id, live, selected, audit);
-        return rewrite_row_(node_id, selected, live_ids);
-    }
-
     /**
      *  @brief Puts back what @p selected dropped of the @p live members that reachability needs.
      *
-     *  That is a member whose last parent @p node_id is, and, when no pick stands one reverse level
-     *  closer to a landmark, the row's nearest live member that does. A short row grows by each; a
-     *  full one gives up its farthest pick that is kept by neither, a live member only once another
-     *  parent keeps it.
+     *  That is a member whose last shallower in-link @p node_id is, and, when no pick stands one
+     *  depth to root closer to a landmark, the row's nearest live member that does. A short row
+     *  grows by each; a full one gives up its farthest pick that is kept by neither, a live member
+     *  only once another shallower in-link keeps it.
      *
-     *  By induction over the levels every row reached both ways stays so throughout the merge: a
-     *  row at a level keeps one in-link from the level before, and one out-link to a lower reverse
-     *  level, and the landmarks at level zero never move.
+     *  By induction over the depths every row reached both ways stays so throughout the merge: a
+     *  row at a depth keeps one in-link from the depth before, and one out-link to a lower reverse
+     *  depth, and the landmarks at depth zero never move.
      */
-    void keep_levels_(node_id_t node_id, selection_t const& live, selection_t& selected,
-                      health_plan_t& audit) noexcept {
-        constexpr u8_t unknown_level_k = health_plan_t::unknown_level_k;
-        u8_t const level = audit.level(node_id), back_level = audit.back_level(node_id);
-        // The saturated level counts no parents, so its children are never released.
-        u8_t const child_level = level < unknown_level_k - 1 ? static_cast<u8_t>(level + 1) : unknown_level_k;
+    void keep_reach_(node_id_t node_id, selection_t const& live, selection_t& selected,
+                     health_plan_t& health) noexcept {
+        constexpr u8_t unknown_depth_k = health_plan_t::unknown_depth_k;
+        u8_t const depth = health.depth_from_root(node_id), depth_to_root = health.depth_to_root(node_id);
+        // The saturated depth counts no shallower in-links, so its children are never released.
+        u8_t const child_depth = depth < unknown_depth_k - 1 ? static_cast<u8_t>(depth + 1) : unknown_depth_k;
         auto position_in = [&](selection_t const& among, node_id_t member) noexcept {
             std::size_t position = 0;
             while (position != among.size() && among[position].node_id != member) ++position;
             return position;
         };
         auto releasable = [&](node_id_t member) noexcept {
-            return child_level == unknown_level_k || audit.level(member) != child_level ||
-                   position_in(live, member) == live.size() || audit.release_parent(member);
+            return child_depth == unknown_depth_k || health.depth_from_root(member) != child_depth ||
+                   position_in(live, member) == live.size() || health.take_shallower_in_link_if_spare(member);
         };
         // The kept members gather at the tail, ahead of which the farthest releasable
         // pick gives way.
@@ -4967,27 +5744,27 @@ struct ram_index {
             std::swap(selected[position], selected[tail - 1]);
             ++kept;
         };
-        if (child_level != unknown_level_k)
+        if (child_depth != unknown_depth_k)
             for (std::size_t position = 0; position != live.size(); ++position) {
                 scored_node_t const member = live[position];
-                if (audit.level(member.node_id) != child_level ||
+                if (health.depth_from_root(member.node_id) != child_depth ||
                     position_in(selected, member.node_id) != selected.size())
                     continue;
-                if (!audit.release_parent(member.node_id)) keep(member);
+                if (!health.take_shallower_in_link_if_spare(member.node_id)) keep(member);
             }
-        if (back_level != unknown_level_k && back_level != 0) {
+        if (depth_to_root != unknown_depth_k && depth_to_root != 0) {
             std::size_t standing = 0;
-            while (standing != selected.size() && audit.back_level(selected[standing].node_id) >= back_level)
+            while (standing != selected.size() && health.depth_to_root(selected[standing].node_id) >= depth_to_root)
                 ++standing;
-            scored_node_t way_back = standing != selected.size()
-                                         ? selected[standing]
-                                         : scored_node_t {node_id_unknown_k,
-                                                          std::numeric_limits<distance_t>::infinity()};
+            scored_node_t way_to_root = standing != selected.size()
+                                            ? selected[standing]
+                                            : scored_node_t {node_id_unknown_k,
+                                                             std::numeric_limits<distance_t>::infinity()};
             for (std::size_t position = 0; position != live.size() && standing == selected.size(); ++position)
-                if (audit.back_level(live[position].node_id) < back_level &&
-                    live[position].distance < way_back.distance)
-                    way_back = live[position];
-            if (way_back.node_id != node_id_unknown_k) keep(way_back);
+                if (health.depth_to_root(live[position].node_id) < depth_to_root &&
+                    live[position].distance < way_to_root.distance)
+                    way_to_root = live[position];
+            if (way_to_root.node_id != node_id_unknown_k) keep(way_to_root);
         }
     }
 
@@ -5098,7 +5875,12 @@ struct ram_index {
             return context.results.size() == expansion_factor ? context.results.top().distance
                                                               : (std::numeric_limits<distance_t>::max)();
         };
-        if (status_t const scanned = scan_quads_(query_vector, admits, keep, context, first_invisible_id);
+        // The query scores where it lies, so the staged queries hold only its packs.
+        if (failed(context.reserve_queries(scan_scorer_t::packs_bytes(1, geometry_.dimensions))))
+            return {{}, status_t::bad_alloc_k};
+        vectors_view_t const queries {query_vector.data(), 1, query_vector.size()};
+        if (status_t const scanned = scan_queries_(queries, context.staged_queries.data(), admits, keep, context,
+                                                   config.cache_bytes, first_invisible_id);
             failed(scanned))
             return {{}, scanned};
         search_result_t result;
@@ -5117,35 +5899,18 @@ struct ram_index {
                                                                               context.staged_queries.data());
     }
 
-    /** Queries one exact-scan block takes: a whole number of tiles when a matrix engine multiplies
-     *  the scalar and @p queries_count fills one, as many blocks per thread as there are
-     *  @p threads, so a thread the box slows gives its share away, and never narrower than one
-     *  tile; else one query. */
+    /** Queries one exact-scan group takes: an even share of @p queries_count over @p threads, so
+     *  every thread passes over the rows once, in whole tasks of the scorer's columns. */
     static constexpr std::size_t scan_width(std::size_t queries_count, std::size_t threads) noexcept {
-        if constexpr (!has_tiles_k) return 1;
-        else {
-            if (queries_count < tiles_kit_t::tile_columns_k) return 1;
-            std::size_t const lanes = max_of<std::size_t>(threads, 1);
-            std::size_t const share = divide_round_up(queries_count, lanes * lanes);
-            return round_up_to_multiple(max_of<std::size_t>(share, tiles_kit_t::tile_columns_k),
-                                        tiles_kit_t::tile_columns_k);
-        }
+        std::size_t const share = divide_round_up(queries_count, max_of<std::size_t>(threads, 1));
+        return min_of(round_up_to_multiple(share, scan_scorer_t::step_columns_k), queries_count);
     }
 
-    /** Bytes of staged queries one exact-scan block of @p queries imports and packs into, which
+    /** Bytes of staged queries one exact-scan group of @p queries imports and packs into, which
      *  @c scan_ reserves; whatever a caller keeps past them survives the scan. */
     std::size_t scan_staged_bytes(std::size_t queries) const noexcept {
-        std::size_t const dimensions = this->dimensions();
-        if constexpr (has_tiles_k)
-            if (queries > 1) {
-                nk_size_t packed_bytes = 0;
-                if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k)
-                    return 0;
-                return staged_rows_bytes(vector_dtype_k, queries, dimensions) +
-                       divide_round_up(queries, tiles_kit_t::pack_columns_k) *
-                           round_up_to_multiple<std::size_t>(packed_bytes, default_alignment_k);
-            }
-        return staged_rows_bytes(vector_dtype_k, 1, dimensions);
+        return staged_rows_bytes(vector_dtype_k, queries, dimensions()) +
+               scan_scorer_t::packs_bytes(queries, dimensions());
     }
 
     /** The exact dots of @p query against the published @p nodes into @p dots, four nodes a call
@@ -5168,152 +5933,171 @@ struct ram_index {
 
     /**
      *  @brief The exact sibling of @c walk_: scores every row below @p first_invisible_id against
-     *      each query of @p block, keeping each row that beats a query's worst match through
+     *      each query of @p group, keeping each row that beats a query's worst match through
      *      @p keep.
      *
-     *  A block of many queries streams through the matrix engine a pack at a time, a single query
-     *  through the 4-way kits; both finalize through @c quads_kit_t, so the distances match the
-     *  walk's. @p admits sees a row only once it beats some query's worst match, and at most once
-     *  per pack. The block imports into @p context 's staged queries first, as cheap beside a scan
-     *  as its packs, and @p config names the cache its packs share each block of rows through.
+     *  The group imports into @p context 's staged queries, as cheap beside a scan as its packs,
+     *  which go past it, and @p config names the cache each block of rows stays in while every
+     *  block of queries scores it.
      */
     template <typename admits_type_, typename keep_type_>
-    status_t scan_(rows_view_t block, admits_type_&& admits, keep_type_&& keep, traversal_context_t& context,
+    status_t scan_(rows_view_t group, admits_type_&& admits, keep_type_&& keep, traversal_context_t& context,
                    search_config_t config, node_id_t first_invisible_id) noexcept {
         if (!first_invisible_id) return status_t::success_k;
-        // Every kernel takes its width from the geometry, so a narrower block would be over-read.
-        if (block.columns != dimensions()) return status_t::config_mismatch_k;
-        if constexpr (has_tiles_k)
-            if (block.rows > 1)
-                return scan_tiles_(block, admits, keep, context, config.cache_bytes, first_invisible_id);
-        if (failed(context.reserve_queries(staged_rows_bytes(vector_dtype_k, 1, block.columns))))
-            return status_t::bad_alloc_k;
-        return scan_quads_(import_rows_(block, 0, 1, context).row(0).as_vector(), admits, keep, context,
-                           first_invisible_id);
+        // Every kernel takes its width from the geometry, so a narrower group would be over-read.
+        if (group.columns != dimensions()) return status_t::config_mismatch_k;
+        if (failed(context.reserve_queries(scan_staged_bytes(group.rows)))) return status_t::bad_alloc_k;
+        byte_t* const packs = context.staged_queries.data() +
+                              staged_rows_bytes(vector_dtype_k, group.rows, group.columns);
+        return scan_queries_(import_rows_(group, 0, group.rows, context), packs, admits, keep, context,
+                             config.cache_bytes, first_invisible_id);
     }
 
-    /** One query against every row, four rows per kernel call, each kept as it beats the worst
-     *  match; @p admits hears a call's contenders together, and an aggregating one settles them
-     *  before the next call. */
+    /**
+     *  @brief Scores every row below @p first_invisible_id against every one of @p queries, the
+     *      rows outer, so each block of them stays in @p cache_bytes while every block of queries
+     *      meets it, each block of queries packed once into @p packs.
+     *
+     *  @p admits sees a row only once it beats some query's worst match, at most once per block of
+     *  queries. Zero @p cache_bytes stream each chunk whole against one block of every query.
+     */
     template <typename admits_type_, typename keep_type_>
-    status_t scan_quads_(vector_view_t query, admits_type_& admits, keep_type_& keep, traversal_context_t& context,
-                         node_id_t first_invisible_id) noexcept {
-        vector_norms_t const query_norms = norms(query);
-        distance_t threshold = (std::numeric_limits<distance_t>::max)();
-        for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
-             first += chunk_schedule_t::nodes_in(chunk++)) {
-            std::size_t const rows_count = min_of(chunk_schedule_t::nodes_in(chunk), first_invisible_id - first);
-            for (std::size_t row = 0; row < rows_count; row += quad_lanes_k) {
-                std::size_t const lanes = min_of<std::size_t>(quad_lanes_k, rows_count - row);
-                quad<vector_view_t> lane_rows, next_rows;
-                quad<vector_norms_t> lane_norms;
-                for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
-                    location_t const location {chunk, row + min_of(lane, lanes - 1)};
-                    lane_rows[lane] = vector_for(location);
-                    lane_norms[lane] = norm_for(location);
-                    // A chunk's last quad streams its own last row again, already in cache.
-                    next_rows[lane] = vector_for({chunk, min_of(row + lane_rows.size() + lane, rows_count - 1)});
-                }
-                quad<distance_t> const lane_distances =
-                    scores(query, query_norms, lane_rows, lane_norms, next_rows).distances;
-                auto keep_entry = [&](scan_payload_t contender) noexcept {
-                    distance_t const distance = lane_distances[contender - row];
-                    if (distance < threshold)
-                        threshold = keep(0, {static_cast<node_id_t>(first + contender), distance});
-                };
-                quad<node_id_t> nodes;
-                quad<scan_payload_t> payloads;
-                std::size_t filled = 0;
-                for (std::size_t lane = 0; lane != lanes; ++lane) {
-                    if (!(lane_distances[lane] < threshold)) continue;
-                    nodes[filled] = static_cast<node_id_t>(first + row + lane);
-                    payloads[filled++] = static_cast<scan_payload_t>(row + lane);
-                }
-                ask_contenders(admits, nodes, payloads, filled, keep_entry);
-                settle_predicate(admits, keep_entry);
-            }
-        }
-        context.computed_distances += first_invisible_id;
+    status_t scan_queries_(vectors_view_t queries, byte_t* packs, admits_type_& admits, keep_type_& keep,
+                           traversal_context_t& context, std::size_t cache_bytes,
+                           node_id_t first_invisible_id) noexcept {
+        std::size_t const columns = queries.extent(0);
+        if (failed(context.reserve_scan(columns, scan_scorer_t::step_rows_k, scan_scorer_t::dots_columns_k)))
+            return status_t::bad_alloc_k;
+        std::span<vector_norms_t> const query_norms {context.query_norms.data(), columns};
+        std::span<distance_t> const thresholds {context.thresholds.data(), columns};
+        for (std::size_t column = 0; column != columns; ++column)
+            query_norms[column] = norms(queries.row(column).as_vector()),
+            thresholds[column] = (std::numeric_limits<distance_t>::max)();
+        pack_queries_(queries, packs, cache_bytes);
+        scan_rows_({0, first_invisible_id}, queries, query_norms, packs, thresholds, admits, keep, context,
+                   cache_bytes);
         return status_t::success_k;
     }
 
-    /** A block of queries imported once and packed @c tiles_kit_t::pack_columns_k at a time, and
-     *  every chunk streamed through @c scan_tiles in blocks of rows that stay in @p cache_bytes
-     *  beside one pack while every pack scores them; zero bytes stream each chunk whole. */
-    template <typename admits_type_, typename keep_type_>
-    status_t scan_tiles_(rows_view_t block, admits_type_& admits, keep_type_& keep, traversal_context_t& context,
-                         std::size_t cache_bytes, node_id_t first_invisible_id) noexcept
-        requires has_tiles_k
-    {
-        std::size_t const columns = block.rows, dimensions = this->dimensions();
-        std::size_t const packs = divide_round_up(columns, tiles_kit_t::pack_columns_k);
-        // The packs go past the imported rows, so both are sized before either is written.
-        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, columns, dimensions);
-        nk_size_t packed_bytes = 0;
-        if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k)
-            return status_t::bad_alloc_k;
-        std::size_t const pack_stride = round_up_to_multiple<std::size_t>(packed_bytes, default_alignment_k);
-        if (failed(context.reserve_queries(scan_staged_bytes(columns))) ||
-            failed(context.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k, packs)))
-            return status_t::bad_alloc_k;
-        vectors_view_t const queries = import_rows_(block, 0, columns, context);
-        byte_t* const packed = context.staged_queries.data() + staged_bytes;
-        for (std::size_t pack = 0; pack != packs; ++pack) {
-            std::size_t const first_column = pack * tiles_kit_t::pack_columns_k;
-            std::size_t const pack_columns = min_of(tiles_kit_t::pack_columns_k, columns - first_column);
-            vectors_view_t const pack_queries = queries(nk::range(first_column, first_column + pack_columns),
-                                                        nk::slice);
-            [[maybe_unused]] nk_status_t const packing = tiles_kit_t::pack(
-                pack_queries.raw_values_data(), pack_columns, dimensions,
-                static_cast<std::size_t>(pack_queries.stride_bytes(0)), packed + pack * pack_stride, 0, pack_columns,
-                nullptr);
-            assert(packing == nk_success_k && "A matrix engine packs any block");
-            std::span<dot_result_t> const sumsqs = to_span(context.query_sumsqs(pack, nk::slice).as_vector());
-            std::span<distance_t> const thresholds = to_span(context.thresholds(pack, nk::slice).as_vector());
-            for (std::size_t column = 0; column != tiles_kit_t::pack_columns_k; ++column) {
-                sumsqs[column] = column < pack_columns ? norms(pack_queries.row(column).as_vector()).sumsq
-                                                       : dot_result_t {};
-                thresholds[column] = (std::numeric_limits<distance_t>::max)();
-            }
-        }
+    /** Bytes a stored row takes in the chunks, padded to whole kit tasks. */
+    std::size_t padded_row_bytes_() const noexcept { return vectors_.columns() * sizeof(scalar_t); }
 
-        // A block of rows shares the cache with the one pack scoring it, and never drops below a
-        // kit step.
-        std::size_t const row_bytes = vectors_.columns() * sizeof(scalar_t);
-        std::size_t const block_rows = max_of((cache_bytes - min_of(cache_bytes, pack_stride)) / row_bytes,
-                                              tiles_kit_t::stream_rows_k);
-        for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
-             first += chunk_schedule_t::nodes_in(chunk++)) {
-            std::size_t const chunk_rows = min_of(chunk_schedule_t::nodes_in(chunk), first_invisible_id - first);
-            std::size_t const step_rows = cache_bytes ? block_rows : chunk_rows;
-            for (std::size_t block_first = 0; block_first < chunk_rows; block_first += step_rows) {
-                std::size_t const rows = min_of(step_rows, chunk_rows - block_first);
-                // Chunk rows are padded to whole kit steps, while the queries were packed at
+    /** Queries one packed block of @p columns holds under @p cache_bytes. */
+    std::size_t block_columns_(std::size_t columns, std::size_t cache_bytes) const noexcept {
+        return scan_scorer_t::block_columns(columns, cache_bytes, padded_row_bytes_());
+    }
+
+    /** Stored rows one block streams past a packed block of @p columns queries under
+     *  @p cache_bytes, sharing the cache with it and never below a task; zero with no cache named,
+     *  where each chunk streams whole. */
+    std::size_t block_rows_(std::size_t columns, std::size_t cache_bytes) const noexcept {
+        if (!cache_bytes) return 0;
+        std::size_t const row_bytes = padded_row_bytes_();
+        std::size_t const block_bytes = block_columns_(columns, cache_bytes) * row_bytes;
+        return max_of((cache_bytes - min_of(cache_bytes, block_bytes)) / row_bytes, scan_scorer_t::step_rows_k);
+    }
+
+    /** Packs @p queries a block at a time into @p packs, once for every thread that scans against
+     *  them. */
+    void pack_queries_(vectors_view_t queries, byte_t* packs, std::size_t cache_bytes) const noexcept {
+        std::size_t const columns = queries.extent(0);
+        std::size_t const block_columns = block_columns_(columns, cache_bytes);
+        std::size_t const pack_stride = scan_scorer_t::packs_bytes(block_columns, dimensions());
+        for (std::size_t first_column = 0, block = 0; first_column < columns; first_column += block_columns, ++block)
+            scan_scorer_t::pack(
+                queries(nk::range(first_column, min_of(first_column + block_columns, columns)), nk::slice),
+                packs + block * pack_stride);
+    }
+
+    /**
+     *  @brief Scores the stored @p rows against every packed block of @p queries, the rows
+     *      the outer, so each block of them stays in @p cache_bytes while every block of
+     *      queries meets it.
+     *
+     *  The @p query_norms and @p thresholds are the caller's, so threads scanning other rows may
+     *  hand in copies of one set; the context's task buffers must fit one task against a block.
+     */
+    template <typename admits_type_, typename keep_type_>
+    void scan_rows_(iota_view<node_id_t> rows, vectors_view_t queries, std::span<vector_norms_t const> query_norms,
+                    byte_t const* packs, std::span<distance_t> thresholds, admits_type_& admits, keep_type_& keep,
+                    traversal_context_t& context, std::size_t cache_bytes) noexcept {
+        std::size_t const columns = queries.extent(0), dimensions = this->dimensions();
+        std::size_t const block_columns = block_columns_(columns, cache_bytes);
+        std::size_t const blocks = divide_round_up(columns, block_columns);
+        std::size_t const pack_stride = scan_scorer_t::packs_bytes(block_columns, dimensions);
+        std::size_t const block_rows = block_rows_(columns, cache_bytes);
+        for (std::size_t first = rows.first; first < rows.bound;) {
+            location_t const chunk_start = chunk_schedule_t::locate(static_cast<node_id_t>(first));
+            std::size_t const chunk = chunk_start.chunk;
+            std::size_t const chunk_rows = min_of(chunk_schedule_t::nodes_in(chunk) - chunk_start.offset,
+                                                  rows.bound - first);
+            std::size_t const stride_rows = block_rows ? block_rows : chunk_rows;
+            for (std::size_t block_first = 0; block_first < chunk_rows; block_first += stride_rows) {
+                std::size_t const rows_count = min_of(stride_rows, chunk_rows - block_first);
+                location_t const location {chunk, chunk_start.offset + block_first};
+                // Chunk rows are padded to whole kit tasks, while the queries score at
                 // the logical width.
-                vectors_view_t const padded {vectors_[location_t {chunk, block_first}], rows,
+                vectors_view_t const padded {vectors_[location], rows_count,
                                              vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
-                nk::shape_storage_<2> const logical {{rows, dimensions},
+                nk::shape_storage_<2> const logical {{rows_count, dimensions},
                                                      {padded.stride_bytes(0), padded.stride_bytes(1)},
                                                      2};
-                for (std::size_t pack = 0; pack != packs; ++pack) {
-                    std::size_t const first_column = pack * tiles_kit_t::pack_columns_k;
-                    std::size_t const pack_columns = min_of(tiles_kit_t::pack_columns_k, columns - first_column);
+                vectors_view_t const stored {padded.byte_data(), logical};
+                std::span<vector_norms_t const> const row_norms =
+                    stores_norms() ? std::span<vector_norms_t const> {&norms_[location], rows_count}
+                                   : std::span<vector_norms_t const> {};
+                for (std::size_t block = 0; block != blocks; ++block) {
+                    std::size_t const first_column = block * block_columns;
+                    std::size_t const width = min_of(block_columns, columns - first_column);
                     auto keep_column = [&](std::size_t column, scored_node_t candidate) noexcept {
                         return keep(first_column + column, candidate);
                     };
-                    scan_tiles<tiles_kit_t, quads_kit_t>(
-                        kernel_, vectors_view_t {padded.byte_data(), logical},
-                        static_cast<node_id_t>(first + block_first), packed + pack * pack_stride,
-                        to_span(context.query_sumsqs(pack, nk::slice).as_vector()).first(pack_columns),
-                        to_span(context.thresholds(pack, nk::slice).as_vector()).first(pack_columns),
-                        context.step_dots.span(),
-                        [&](std::size_t row) noexcept { return norm_for({chunk, block_first + row}).sumsq; }, admits,
-                        keep_column);
+                    scan_scorer_t const scorer {kernel_,
+                                                queries(nk::range(first_column, first_column + width), nk::slice),
+                                                query_norms.subspan(first_column, width), packs + block * pack_stride,
+                                                context.step_dots.span()};
+                    scan_block(scorer, stored, static_cast<node_id_t>(first + block_first), row_norms,
+                               thresholds.subspan(first_column, width), context.step_distances.span(), admits,
+                               keep_column);
                 }
             }
+            first += chunk_rows;
         }
-        context.computed_distances += first_invisible_id * columns;
-        return status_t::success_k;
+        context.computed_distances += rows.size() * columns;
+    }
+
+    /**
+     *  @brief Scores gathered @p rows, the first being node @p first, against the packed blocks of
+     *      @p queries from column @p first_column on, as @ref scan_rows_ scores stored rows.
+     *
+     *  The rows already sit in one block that shares the cache with a pack, gathered by the caller;
+     *  the context's task buffers must fit one task against a block.
+     */
+    template <typename keep_type_>
+    void scan_gathered_(vectors_view_t rows, node_id_t first, std::span<vector_norms_t const> row_norms,
+                        vectors_view_t queries, std::span<vector_norms_t const> query_norms, byte_t const* packs,
+                        std::span<distance_t> thresholds, keep_type_& keep, traversal_context_t& context,
+                        std::size_t cache_bytes, std::size_t first_column) noexcept {
+        std::size_t const columns = queries.extent(0);
+        std::size_t const block_columns = block_columns_(columns, cache_bytes);
+        std::size_t const pack_stride = scan_scorer_t::packs_bytes(block_columns, dimensions());
+        dummy_predicate_t admits;
+        for (std::size_t block = first_column / block_columns; block * block_columns < columns; ++block) {
+            std::size_t const block_first = block * block_columns;
+            std::size_t const block_bound = min_of(block_first + block_columns, columns);
+            // A quads scorer reads its queries where they lie, so it may start mid-block; a
+            // pack starts whole.
+            std::size_t const start = scan_scorer_t::dots_columns_k ? block_first : max_of(block_first, first_column);
+            auto keep_column = [&](std::size_t column, scored_node_t candidate) noexcept {
+                return keep(start + column, candidate);
+            };
+            scan_scorer_t const scorer {kernel_, queries(nk::range(start, block_bound), nk::slice),
+                                        query_norms.subspan(start, block_bound - start), packs + block * pack_stride,
+                                        context.step_dots.span()};
+            scan_block(scorer, rows, first, row_norms, thresholds.subspan(start, block_bound - start),
+                       context.step_distances.span(), admits, keep_column);
+            context.computed_distances += rows.extent(0) * (block_bound - start);
+        }
     }
 
     /** What a search walks: the IDs below its watermark snapshot, published for every reader. */
@@ -5329,26 +6113,6 @@ struct ram_index {
         node_id_t sampling_first() const noexcept { return 0; }
 
         /** Landmarks come from the IDs below this bound, the snapshot. */
-        node_id_t sampling_bound() const noexcept { return first_invisible_id; }
-    };
-
-    /** What a walk across walks: one part's published IDs alone, whatever the pass rewires
-     *  meanwhile. */
-    struct part_admission_t {
-
-        /** The part's first ID. */
-        node_id_t first_id = 0;
-
-        /** One past the part's last ID, which the walk treats as its watermark snapshot. */
-        node_id_t first_invisible_id = 0;
-
-        /** Whether the walk may locate @p node_id. */
-        bool admits(node_id_t node_id) const noexcept { return node_id >= first_id && node_id < first_invisible_id; }
-
-        /** Landmarks come from the part alone, from its first ID on. */
-        node_id_t sampling_first() const noexcept { return first_id; }
-
-        /** Landmarks come from the part alone, below its bound. */
         node_id_t sampling_bound() const noexcept { return first_invisible_id; }
     };
 
@@ -5712,7 +6476,7 @@ struct ram_index {
 
 #pragma endregion Search
 
-    /** One row per vector, padded to whole kit steps. @ref dense_ram_index_malloc */
+    /** One row per vector, padded to whole kit tasks. @ref dense_ram_index_malloc */
     chunked_matrix<scalar_t, chunk_schedule_t, max_node_count_k, vectors_allocator_type_> vectors_;
 
     /** One entry per vector's pre-computed norms, covered only when @ref stores_norms. */
@@ -5802,7 +6566,7 @@ struct ram_cursor {
     using ids_tensor_t = nk::tensor<node_id_t, ids_allocator_t, 1>;
 
     /** The watermark ordering behind this cursor's snapshots: acquiring while writers may be
-     *  live, plain when the caller certified a mutation-free environment. */
+     *  live, plain when the caller marked a mutation-free environment. */
     inline static constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
                                                                       ? std::memory_order_acquire
                                                                       : std::memory_order_relaxed;
@@ -5904,7 +6668,7 @@ struct ram_cursor {
         current_ = node;
         location_ = location;
         staged_neighbors_[0] = first_value;
-        // Relaxed atomics make a live re-linker's stale-but-valid mix defined; certified
+        // Relaxed atomics make a live re-linker's stale-but-valid mix defined; marked
         // contracts read plain memory.
         if constexpr (synchronization_ == synchronization_t::concurrent_k)
             for (candidates_count_t slot = 1; slot != connectivity_; ++slot)

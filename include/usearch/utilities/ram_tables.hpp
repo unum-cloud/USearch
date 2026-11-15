@@ -240,10 +240,10 @@ class growing_hash_set {
  *      and lookups run while it grows.
  *
  *  Node @c n goes in the chunk the schedule locates it in, whose slots are twice its nodes, so
- *  every probe chain terminates. Each chunk has one writer at a time, the one filing the nodes it
- *  holds, so an insert claims nothing: it finds an empty slot, writes the key and node, then
- *  releases the slot's probe tag. Duplicate keys coexist as separate slots. The chunks are two
- *  @ref chunked_column s - control bytes and slots - that @ref reserve covers.
+ *  every probe chain terminates. Any number of writers file into one chunk at once: an insert
+ *  claims an empty slot by a compare-exchange, writes the key and node, then releases the slot's
+ *  probe tag. Duplicate keys coexist as separate slots. The chunks are two @ref chunked_column s -
+ *  control bytes and slots - that @ref reserve covers.
  *
  *  Slot states live in the control-byte column the probes scan - 64 states per cache line - so a
  *  slot's key & node are touched only on a published slot whose tag matches, and no key or node
@@ -273,10 +273,10 @@ class chunked_multimap {
     /** Slots per chunk, twice its nodes. */
     using slots_schedule_t = chunk_schedule<11, 41>;
 
-    /** A slot never filled, the probe chain terminator and what a fresh chunk starts as; a filled
-     *  slot holds its key's @c probe_tag_of instead, and its key & node are immutable from then
-     *  on. */
-    enum class slot_state_t : u8_t { empty_k = 0 };
+    /** A slot's lifecycle: never filled, the probe chain terminator and what a fresh chunk starts
+     *  as; then claimed by one writer, which readers skip like another key's slot; then filled,
+     *  holding its key's @c probe_tag_of instead, with its key & node immutable from then on. */
+    enum class slot_state_t : u8_t { empty_k = 0, claimed_k = 1 };
 
     chunked_multimap(chunked_multimap const&) noexcept = delete;
     chunked_multimap& operator=(chunked_multimap const&) noexcept = delete;
@@ -302,12 +302,18 @@ class chunked_multimap {
 
     /** Forgets every entry, keeping the chunks - no writer may run alongside, and a reader running
      *  alongside must discard what it found, as one bracketed by an epoch the caller moves does. */
-    void clear() noexcept {
-        for (std::size_t index = 0; index != max_chunks_k; ++index) {
+    void clear() noexcept { clear_from(0); }
+
+    /** Forgets every entry of the chunk holding node @p node and of every chunk after it, as
+     *  @ref clear does, and answers that chunk's first node, as its earlier nodes went with it. */
+    node_id_t clear_from(node_id_t node) noexcept {
+        std::size_t const first_chunk = nodes_schedule_t::locate(node).chunk;
+        for (std::size_t index = first_chunk; index != max_chunks_k; ++index) {
             std::span<slot_state_t> const states = states_.chunk(index);
             if (states.empty()) break;
             std::memset(states.data(), 0, states.size_bytes());
         }
+        return static_cast<node_id_t>(nodes_schedule_t::nodes_before(first_chunk));
     }
 
     /** Frees every chunk - single-threaded, like @ref clear. */
@@ -334,19 +340,24 @@ class chunked_multimap {
         return slots_.cover(nodes * 2);
     }
 
-    /** Files @p node under @p key in the chunk holding @p node, which a @ref reserve covered; the
-     *  caller is that chunk's one writer, so nothing is claimed. */
+    /** Files @p node under @p key in the chunk holding @p node, which a @ref reserve covered,
+     *  beside any number of writers filing others. */
     void insert(key_t const& key, node_id_t node) noexcept {
         std::size_t const index = nodes_schedule_t::locate(node).chunk;
         std::span<slot_t> const slots = slots_.chunk(index);
         std::span<slot_state_t> const states = states_.chunk(index);
         assert(!slots.empty() && "Every insert follows a reserve covering its node");
         u64_t const hash = mixed_hash_of(key);
-        std::size_t position = first_probe_of(hash, states.size());
-        while (atomic_ref<slot_state_t>(states[position]).load(std::memory_order_relaxed) != slot_state_t::empty_k)
-            position = (position + 1) & (states.size() - 1);
-        slots[position] = {key, node};
-        atomic_ref<slot_state_t>(states[position]).store(probe_tag_of(hash), std::memory_order_release);
+        for (std::size_t position = first_probe_of(hash, states.size());;
+             position = (position + 1) & (states.size() - 1)) {
+            slot_state_t empty = slot_state_t::empty_k;
+            if (!atomic_ref<slot_state_t>(states[position])
+                     .compare_exchange_strong(empty, slot_state_t::claimed_k, std::memory_order_relaxed,
+                                              std::memory_order_relaxed))
+                continue;
+            slots[position] = {key, node};
+            return atomic_ref<slot_state_t>(states[position]).store(probe_tag_of(hash), std::memory_order_release);
+        }
     }
 
     /** Invokes @p callback for every node below @p visible filed under @p key - wait-free. */
@@ -477,8 +488,8 @@ class keyed_nodes {
     /** Stores the key of @p node, which only its claimer writes; a cover already reached it. */
     void assign(node_id_t node, key_t const& key) noexcept { keys_[node] = key; }
 
-    /** Files every node of @p nodes under its key - their one writer, before their watermark
-     *  moves. */
+    /** Files every node of @p nodes under its key before their watermark moves, beside any
+     *  number of writers filing other nodes. */
     void publish(iota_view<node_id_t> nodes) noexcept {
         for (node_id_t const node : nodes) nodes_.insert(keys_[node], node);
     }
@@ -498,6 +509,10 @@ class keyed_nodes {
     /** Empties the map, keeping its chunks and the column - only inside the owner's window, once
      *  the dispenser closed, so the next @ref publish starts from node zero. */
     void forget() noexcept { nodes_.clear(); }
+
+    /** Forgets every node from @p node on, under the same window as @ref forget, refiling the
+     *  earlier nodes its chunk of the map held. */
+    void forget_from(node_id_t node) noexcept { publish({nodes_.clear_from(node), node}); }
 
     /** The key of @p node, which a cover already reached. */
     key_t const& operator[](node_id_t node) const noexcept { return keys_[node]; }

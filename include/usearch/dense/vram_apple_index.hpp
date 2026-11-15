@@ -4,12 +4,12 @@
  *  @date October 11, 2026
  *  @brief Vector Search index for the unified memory of one Apple GPU.
  *
- *  The Apple twin of @c vram_nvidia_index: the same flat storage, the same walk, insert and refine
- *  kernels ported to Metal in @c vram_apple_index.metal, and the same verbs. Memory is unified, so
- *  every matrix and column is a shared buffer the host reads and writes in place: checkpoints copy
- *  without a bounce, and the reachability audit and the island reconnection run on the host over
- *  the storage the device just wrote. A matrix grows by allocating a wider buffer, under an
- *  exclusive hold that every walk shares while its command buffer runs.
+ *  The Apple twin of @c vram_nvidia_index: the same flat storage, the same walk, insert, health and
+ *  round kernels ported to Metal in @c vram_apple_index.metal, and the same verbs. Memory is
+ *  unified, so every matrix and column is a shared buffer the host reads and writes in place:
+ *  checkpoints copy without a bounce, and a round's barriers draw hubs and order entries by
+ *  neighborhood over the columns the device just wrote. A matrix grows by allocating a wider
+ *  buffer, under an exclusive hold that every walk shares while its command buffer runs.
  *
  *  Metal promises no forward progress between command buffers, while an insert's admission ramp
  *  waits on rows earlier batches publish, so the claim word admits one batch or load at a time and
@@ -18,6 +18,7 @@
  */
 #pragma once
 
+#include <array>   // `std::array` - a health check's entries per depth
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::snprintf` - the source's prelude
 #include <cstring> // `std::memcpy`, `std::memset`
@@ -41,6 +42,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_device.hpp" // `forkunion_allocator_t` - the key column's placement
+#include "usearch/utilities/ram_sorts.hpp"  // `order_by_neighborhood`, `split_wide_neighborhoods` - a round's barriers
 #include "usearch/utilities/ram_tables.hpp" // `keyed_nodes` - every node's key and every key's nodes
 #include "usearch/utilities/vram_apple_device.hpp"
 #include "usearch/utilities/vram_device.hpp" // `vram_kernel_symbol_t` - a kernel's name
@@ -71,7 +73,7 @@ inline constexpr char metal_metric_source_k[] = {
 #embed "vram_apple_metric.metal" suffix(, 0)
 };
 
-/** The MSL walk, insert, refine and search kernels, compiled after the kits. */
+/** The MSL walk, insert, search, health and round kernels, compiled after the kits. */
 inline constexpr char metal_index_source_k[] = {
 #embed "vram_apple_index.metal" suffix(, 0)
 };
@@ -146,11 +148,6 @@ inline constexpr metal_rung<vram_kernel_t> metal_rungs[] = {
     {vram_kernel_t::insert_k, 8},
     {vram_kernel_t::insert_k, 16},
     {vram_kernel_t::back_link_k, 0},
-    {vram_kernel_t::refine_k, 0},
-    {vram_kernel_t::refine_k, 2},
-    {vram_kernel_t::refine_k, 4},
-    {vram_kernel_t::refine_k, 8},
-    {vram_kernel_t::refine_k, 16},
     {vram_kernel_t::search_k, 0},
     {vram_kernel_t::search_k, 2},
     {vram_kernel_t::search_k, 4},
@@ -160,16 +157,24 @@ inline constexpr metal_rung<vram_kernel_t> metal_rungs[] = {
     {vram_kernel_t::partition_count_k, 0},
     {vram_kernel_t::partition_accept_k, 0},
     {vram_kernel_t::partition_fill_k, 0},
-    {vram_kernel_t::partition_picked_k, 0},
     {vram_kernel_t::gather_vectors_k, 0},
     {vram_kernel_t::sum_counts_k, 0},
+    {vram_kernel_t::gather_neighborhoods_k, 0},
+    {vram_kernel_t::restitch_k, 0},
+    {vram_kernel_t::health_expand_k, 0},
+    {vram_kernel_t::health_recheck_k, 0},
+    {vram_kernel_t::order_islands_k, 0},
+    {vram_kernel_t::health_islands_k, 0},
+    {vram_kernel_t::island_components_k, 0},
+    {vram_kernel_t::health_count_links_k, 0},
+    {vram_kernel_t::label_islands_k, 0},
+    {vram_kernel_t::heal_islands_k, 0},
 };
 
 /** Every dense-only instantiation @c vram_apple_index.metal exports, built beside the shared
  *  ones. */
 inline constexpr metal_rung<vram_dense_kernel_t> metal_dense_rungs[] = {
     {vram_dense_kernel_t::derive_norms_k, 0},
-    {vram_dense_kernel_t::merge_back_links_k, 0},
 };
 
 /** Spells the @c host_name @c vram_apple_index.metal exports @p rung under: the kernel's name, then
@@ -178,16 +183,24 @@ inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_ke
     symbol = {};
     switch (rung.kernel) {
     case vram_kernel_t::insert_k: symbol.append("metal_insert_kernel_"); break;
-    case vram_kernel_t::refine_k: symbol.append("metal_refine_kernel_"); break;
     case vram_kernel_t::search_k: symbol.append("metal_search_kernel_"); break;
     case vram_kernel_t::back_link_k: symbol.append("metal_back_link_kernel"); return;
     case vram_kernel_t::partition_propose_k: symbol.append("metal_partition_propose_kernel"); return;
     case vram_kernel_t::partition_count_k: symbol.append("metal_partition_count_kernel"); return;
     case vram_kernel_t::partition_accept_k: symbol.append("metal_partition_accept_kernel"); return;
     case vram_kernel_t::partition_fill_k: symbol.append("metal_partition_fill_kernel"); return;
-    case vram_kernel_t::partition_picked_k: symbol.append("metal_partition_picked_kernel"); return;
     case vram_kernel_t::gather_vectors_k: symbol.append("metal_gather_vectors_kernel"); return;
     case vram_kernel_t::sum_counts_k: symbol.append("metal_sum_counts_kernel"); return;
+    case vram_kernel_t::gather_neighborhoods_k: symbol.append("metal_gather_neighborhoods_kernel"); return;
+    case vram_kernel_t::restitch_k: symbol.append("metal_restitch_kernel"); return;
+    case vram_kernel_t::health_expand_k: symbol.append("metal_health_expand_kernel"); return;
+    case vram_kernel_t::health_recheck_k: symbol.append("metal_health_recheck_kernel"); return;
+    case vram_kernel_t::order_islands_k: symbol.append("metal_order_islands_kernel"); return;
+    case vram_kernel_t::health_islands_k: symbol.append("metal_health_islands_kernel"); return;
+    case vram_kernel_t::island_components_k: symbol.append("metal_island_components_kernel"); return;
+    case vram_kernel_t::health_count_links_k: symbol.append("metal_health_count_links_kernel"); return;
+    case vram_kernel_t::label_islands_k: symbol.append("metal_label_islands_kernel"); return;
+    case vram_kernel_t::heal_islands_k: symbol.append("metal_heal_islands_kernel"); return;
     default: return;
     }
     symbol.append_value(rung.slots);
@@ -195,7 +208,6 @@ inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_ke
 inline void metal_kernel_symbol(vram_kernel_symbol_t& symbol, metal_rung<vram_dense_kernel_t> rung) noexcept {
     symbol = {};
     if (rung.kernel == vram_dense_kernel_t::derive_norms_k) symbol.append("metal_derive_norms_kernel");
-    if (rung.kernel == vram_dense_kernel_t::merge_back_links_k) symbol.append("metal_merge_back_links_kernel");
 }
 
 /** What a search launch writes: ranked distances, or every scored pair of a product. */
@@ -406,9 +418,9 @@ struct vram_apple_index {
                device_.max_buffer_bytes;
     }
 
-    /** Whether an insert or refine launch fits on this device: every simdgroup the widest
-     *  register rung's grid keeps in flight takes that rung's slice beside its builder scratch,
-     *  within one buffer, since threadgroup memory would bound the row width. */
+    /** Whether an insert launch fits on this device: every simdgroup the widest register rung's
+     *  grid keeps in flight takes that rung's slice beside its builder scratch, within one buffer,
+     *  since threadgroup memory would bound the row width. */
     bool build_scratch_fits() const noexcept {
         std::size_t const simdgroups = std::size_t {device_.multiprocessor_count} *
                                        resident_blocks_(vram_kernel_t::insert_k, vram_widest_candidate_slots_k) *
@@ -753,19 +765,19 @@ struct vram_apple_index {
         u64_t seed = 0;
     };
 
-    /** One receiver's part of a split as the host assigns it: its nodes, the picked ones leading
-     *  them, and the nodes given slots so far. */
+    /** One receiver's part of a split as the host assigns it: its nodes, and those given slots so
+     *  far. */
     struct split_part_t {
-        std::size_t entries = 0, picked_count = 0, assigned_nodes = 0;
+        std::size_t entries = 0, assigned_nodes = 0;
     };
 
-    /** A split's state beside the refinement it turns into, empty for a refine. */
+    /** A split's state beside the rounds it turns into, empty for a refine. */
     struct split_t {
 
         /** The index the split empties, until the scatter finished. */
         vram_apple_index* donor = nullptr;
 
-        /** The receivers, one part each, and the one the refinement is bound to. */
+        /** The receivers, one part each, and the one the round is bound to. */
         growing_buffer<vram_apple_index*> receivers {global_allocator};
         growing_buffer<split_part_t> parts {global_allocator};
         std::size_t bound_receiver = 0;
@@ -778,175 +790,680 @@ struct vram_apple_index {
          *  reads in place between the phases. */
         metal_buffer_t device_bytes;
 
-        /** The growth round the next batch queues from, zero once the growth converged and the
-         *  picked pass queues next. */
+        /** The growth round the next batch queues from, zero once the growth converged. */
         u32_t next_round = 0;
 
-        /** The refinement every receiver runs, and its rounds, none once a stop cut the pass. */
+        /** The round every receiver runs. */
         refine_config_t config {};
-        u32_t rounds = 1;
 
-        /** The audits and islands of the receivers healed so far, summed. */
-        reachability_t reachability {};
-        std::size_t islands = 0;
+        /** The rounds of the receivers settled so far, folded, and how many settled. */
+        refine_report_t report {};
+        std::size_t settled = 0;
+    };
+
+    /** Where a health check and a round keep each column in a context's round buffer, in bytes: the
+     *  counters; the depths both ways, the in-link and shallower in-link counts, and the reached,
+     *  reaching-root, two-ways and changed bits; then the islands' columns, which the round's
+     *  alias, since only a check and the heal read the islands: each entry's neighborhood, the
+     *  entries in neighborhood order, their starts with room for splits, a gather's hubs, its runs
+     *  and the items before each run, and one selection's scratch per simdgroup. */
+    struct round_layout_t {
+        std::size_t counters = 0, depths_from_root = 0, depths_to_root = 0, in_links = 0, shallower_in_links = 0;
+        std::size_t reached = 0, reaches_root = 0, two_ways_to_root = 0, changed = 0;
+        std::size_t island_nodes = 0, island_components = 0, island_labels = 0, island_parents = 0;
+        std::size_t island_entries = 0, island_roles = 0;
+        std::size_t entry_neighborhoods = 0, neighborhood_entries = 0, neighborhood_offsets = 0, hub_nodes = 0;
+        std::size_t runs = 0, run_items = 0, stitch = 0, bytes = 0;
+    };
+
+    /** What a round's columns are sized for, zeros sizing a lone check: the hubs one gather draws
+     *  at most and the most entries a neighborhood holds, as the RAM round names them, the hubs and
+     *  runs a gather may write, and the threadgroups a restitch runs. */
+    struct round_sizing_t {
+        std::size_t hubs_per_draw = 0, capacity = 0, hubs = 0, runs = 0, groups = 0;
     };
 
     /**
-     *  @brief One refinement in flight on this index's device, in the shape of the CUDA and HIP
-     *      plans so one host thread drives every shard: @ref queue a phase, @ref wait for it,
+     *  @brief One health check on the device, the twin of the RAM audit: one root, exact depths
+     *      both ways, in-link counts, and the islands' components, roles, entries and parents.
+     *
+     *  The islands' strong components are labeled in parallel, and the weak components counted by
+     *  union-find. Its columns live in a context's round buffer, which its planner sized, so no
+     *  pass allocates. @ref queue submits the current pass, the caller waits on the context, and
+     *  @ref advance reads the counters over unified memory and picks the next pass, answering
+     *  whether one follows.
+     */
+    struct health_plan_t {
+
+        /** The watermark snapshot the check covers; IDs strictly below it are swept. */
+        node_id_t visible = 0;
+
+        /** Where the check's columns, and the round's beside them, sit in the round buffer. */
+        round_layout_t layout {};
+
+        /** Turns the check onto @p index 's IDs below @p visible, its columns at @p layout in the
+         *  round buffer whose host bytes start at @p columns, so the next sweep draws its root. */
+        void bind(vram_apple_index& index, node_id_t visible, round_layout_t const& layout, byte_t* columns) noexcept {
+            index_ = &index;
+            this->visible = visible;
+            this->layout = layout;
+            columns_ = columns;
+            root_ = node_id_unknown_k;
+        }
+
+        /** Clears every column and starts from the root an earlier sweep kept, or else from a
+         *  seeded draw, marked both ways at depth zero: the next pass expands depth one. */
+        void restart_sweep() noexcept {
+            // Opening and closing checks share their root, so no other draw can read as progress.
+            bool const kept = root_ < visible;
+            node_id_t const root = kept      ? root_
+                                   : visible ? static_cast<node_id_t>(seeded_bijection(0, visible, 0))
+                                             : node_id_unknown_k;
+            drawn_root_ = kept ? node_id_unknown_k : root;
+            start_from_(root);
+        }
+
+        /**
+         *  @brief Submits the current pass on @p context 's stream, none once the check converged.
+         *
+         *  @par Statuses:
+         *  - @c device_error_k The pass could not be encoded.
+         */
+        status_t queue(traversal_context_t& context) noexcept {
+            metal_arguments_t arguments = index_->arguments_();
+            arguments.end_id = visible;
+            arguments.depth = static_cast<u32_t>(depth_);
+            arguments.islands = static_cast<u32_t>(islands_);
+            arguments.pass = pass_;
+            u32_t* const words = counters();
+            vram_apple_index& index = *index_;
+            switch (phase_) {
+            case phase_t::expand_k:
+                words[metal_round_reached_k] = words[metal_round_marked_k] = 0;
+                return index.launch_round_(vram_kernel_t::health_expand_k, arguments, layout, visible, context);
+            case phase_t::recheck_k:
+                words[metal_round_marked_k] = 0;
+                return index.launch_round_(vram_kernel_t::health_recheck_k, arguments, layout, visible, context);
+            case phase_t::order_islands_k:
+                return index.launch_round_(vram_kernel_t::order_islands_k, arguments, layout, 0, context);
+            case phase_t::islands_k:
+                return index.launch_round_(vram_kernel_t::health_islands_k, arguments, layout, islands_, context);
+            case phase_t::components_k:
+                words[metal_round_relabeled_k] = 0;
+                return index.launch_round_(vram_kernel_t::island_components_k, arguments, layout, islands_, context);
+            case phase_t::count_links_k:
+                words[metal_round_unlinked_k] = words[metal_round_underlinked_k] = 0;
+                return index.launch_round_(vram_kernel_t::health_count_links_k, arguments, layout, visible, context);
+            case phase_t::labels_k:
+                words[metal_round_unreached_islands_k] = words[metal_round_stranded_islands_k] = 0;
+                words[metal_round_components_k] = 0;
+                return index.launch_round_(vram_kernel_t::label_islands_k, arguments, layout, islands_ + 1, context);
+            default: return status_t::success_k;
+            }
+        }
+
+        /** The barrier between passes, once the last one finished: files the entries a depth
+         *  reached, turns to the rechecks once a depth reaches nothing, orders and labels the
+         *  islands once a recheck marks nothing, re-roots once to the largest island when it
+         *  outgrows the drawn root's component, then counts the links and labels the islands'
+         *  roles; answers whether another pass follows. */
+        bool advance() noexcept {
+            u32_t const* const words = counters();
+            switch (phase_) {
+            case phase_t::expand_k: {
+                std::size_t const reached = words[metal_round_reached_k];
+                swept_ += reached + words[metal_round_marked_k];
+                if (!reached) {
+                    phase_ = phase_t::recheck_k;
+                    return true;
+                }
+                depth_entries_[min_of<std::size_t>(++depth_, metal_deepest_depth_k)] += reached;
+                ++depth_from_root_;
+                return true;
+            }
+            case phase_t::recheck_k:
+                if (std::size_t const marked = words[metal_round_marked_k]; marked) {
+                    swept_ += marked, ++depth_to_root_;
+                    return true;
+                }
+                component_ = component_entries_();
+                phase_ = component_ == visible ? phase_t::count_links_k : phase_t::order_islands_k;
+                return true;
+            case phase_t::order_islands_k:
+                islands_ = words[metal_round_islands_k];
+                phase_ = phase_t::islands_k;
+                return true;
+            case phase_t::islands_k:
+                unsettled_ = islands_, pass_ = 0;
+                phase_ = phase_t::components_k;
+                return true;
+            case phase_t::components_k:
+                // Labels lower until none moves, then the islands whose labels meet settle.
+                if (pass_ == 0) {
+                    pass_ = words[metal_round_relabeled_k] ? 0 : 1;
+                    return true;
+                }
+                unsettled_ -= words[metal_round_relabeled_k], pass_ = 0;
+                return unsettled_ ? true : choose_root_();
+            case phase_t::count_links_k:
+                unlinked_ = words[metal_round_unlinked_k], underlinked_ = words[metal_round_underlinked_k];
+                if (!islands_) {
+                    components_ = 1;
+                    phase_ = phase_t::done_k;
+                    return false;
+                }
+                pass_ = 0;
+                phase_ = phase_t::labels_k;
+                return true;
+            case phase_t::labels_k:
+                if (pass_ == 2) {
+                    unreached_islands_ = words[metal_round_unreached_islands_k];
+                    stranded_islands_ = words[metal_round_stranded_islands_k];
+                }
+                if (pass_ != 3) {
+                    ++pass_;
+                    return true;
+                }
+                components_ = words[metal_round_components_k];
+                phase_ = phase_t::done_k;
+                return false;
+            default: return false;
+            }
+        }
+
+        /** The report of a converged check: the entries of the root's component, the depths each
+         *  direction took, the in-link counts, and the islands' components. */
+        reachability_t finish() const noexcept {
+            reachability_t result;
+            result.audited_nodes = visible;
+            result.reachable_nodes = component_entries_();
+            result.depth_from_root = depth_from_root_;
+            result.depth_to_root = depth_to_root_;
+            result.unlinked = unlinked_;
+            result.underlinked = underlinked_;
+            std::size_t most_populated = 0;
+            for (std::size_t depth = 1; depth != depth_entries_.size(); ++depth)
+                if (depth_entries_[depth] > depth_entries_[most_populated]) most_populated = depth;
+            for (std::size_t depth = most_populated + 1; depth < depth_entries_.size(); ++depth)
+                result.beyond_most_populated_depth += depth_entries_[depth];
+            result.unreached_islands = unreached_islands_;
+            result.stranded_islands = stranded_islands_;
+            result.components = components_;
+            return result;
+        }
+
+        /** Entries the sweeps reached plus entries they marked a way to the root for, of twice the
+         *  checked ones: what a caller's progress counts. */
+        std::size_t swept() const noexcept { return swept_; }
+
+        /** Entries outside the root's component, the islands' nodes. */
+        std::size_t islands() const noexcept { return islands_; }
+
+        /** The counter words the passes count into, read over unified memory once a pass
+         *  finished. */
+        u32_t* counters() const noexcept { return reinterpret_cast<u32_t*>(columns_ + layout.counters); }
+
+        /** The column at @p offset of the round buffer as @p value_type_ values. */
+        template <typename value_type_>
+        value_type_* column(std::size_t offset) const noexcept {
+            return reinterpret_cast<value_type_*>(columns_ + offset);
+        }
+
+      private:
+        /** The passes, as the RAM audit names its own, plus those labeling the islands on the
+         *  device, which RAM runs on one thread once its rechecks end. */
+        enum class phase_t : u8_t {
+            expand_k,
+            recheck_k,
+            order_islands_k,
+            islands_k,
+            components_k,
+            count_links_k,
+            labels_k,
+            done_k
+        };
+
+        /** Entries reached from the root and reaching it, counted over the bitsets on the host. */
+        std::size_t component_entries_() const noexcept {
+            u32_t const* const reached = column<u32_t>(layout.reached);
+            u32_t const* const reaches_root = column<u32_t>(layout.reaches_root);
+            std::size_t entries = 0;
+            for (std::size_t word = 0; word != divide_round_up<std::size_t>(visible, 32); ++word)
+                entries += static_cast<std::size_t>(std::popcount(reached[word] & reaches_root[word]));
+            return entries;
+        }
+
+        /** Closes one root's sweep once the island components settled: sweeps again from the first
+         *  entry of the largest when it outgrows the drawn root's component, else counts links. */
+        bool choose_root_() noexcept {
+            u32_t const* const components = column<u32_t>(layout.island_components);
+            u32_t const* const members = column<u32_t>(layout.island_entries);
+            std::size_t largest = 0, largest_entries = 0;
+            for (std::size_t rank = 0; rank != islands_; ++rank)
+                if (components[rank] == rank && members[2 * rank] > largest_entries)
+                    largest = rank, largest_entries = members[2 * rank];
+            if (root_ == drawn_root_ && largest_entries > component_) {
+                drawn_root_ = node_id_unknown_k;
+                node_id_t const* const island_nodes = column<node_id_t>(layout.island_nodes);
+                start_from_(island_nodes[largest]);
+                return true;
+            }
+            phase_ = phase_t::count_links_k;
+            return true;
+        }
+
+        /** Clears what one root's sweep fills, the round's changed bits aside, and marks @p root
+         *  both ways at depth zero; with no root the check is over. */
+        void start_from_(node_id_t root) noexcept {
+            std::size_t const words = divide_round_up<std::size_t>(visible, 32) * sizeof(u32_t);
+            std::memset(columns_ + layout.counters, 0, metal_round_counter_words_k * sizeof(u32_t));
+            std::memset(columns_ + layout.depths_from_root, metal_unknown_depth_k, visible);
+            std::memset(columns_ + layout.depths_to_root, metal_unknown_depth_k, visible);
+            std::memset(columns_ + layout.in_links, 0, visible * sizeof(u32_t));
+            std::memset(columns_ + layout.shallower_in_links, 0, visible * sizeof(u32_t));
+            for (std::size_t bitset : {layout.reached, layout.reaches_root, layout.two_ways_to_root})
+                std::memset(columns_ + bitset, 0, words);
+            depth_entries_.fill(0);
+            swept_ = root == node_id_unknown_k ? 0 : 2;
+            component_ = islands_ = unsettled_ = 0;
+            depth_ = depth_from_root_ = depth_to_root_ = 0;
+            unlinked_ = underlinked_ = unreached_islands_ = stranded_islands_ = components_ = 0;
+            pass_ = 0;
+            root_ = root;
+            phase_ = root == node_id_unknown_k ? phase_t::done_k : phase_t::expand_k;
+            if (root == node_id_unknown_k) return;
+            u32_t* const reached = column<u32_t>(layout.reached);
+            u32_t* const reaches_root = column<u32_t>(layout.reaches_root);
+            u8_t* const depths_from_root = column<u8_t>(layout.depths_from_root);
+            u8_t* const depths_to_root = column<u8_t>(layout.depths_to_root);
+            reached[root / 32] |= 1u << (root % 32), reaches_root[root / 32] |= 1u << (root % 32);
+            depths_from_root[root] = depths_to_root[root] = 0;
+            depth_entries_[0] = 1;
+        }
+
+        /** The checked index; null on an unbound plan. */
+        vram_apple_index* index_ = nullptr;
+
+        /** The round buffer's host bytes, which planning sized and no pass moves. */
+        byte_t* columns_ = nullptr;
+
+        /** The node the sweeps start from, a seeded draw or the first entry of a larger island, and
+         *  the root this check drew, which may give way once, or none for a kept root. */
+        node_id_t root_ = node_id_unknown_k;
+        node_id_t drawn_root_ = node_id_unknown_k;
+
+        /** Entries each depth reached; the fullest is the depth the deep stratum draws past. */
+        std::array<std::size_t, metal_unknown_depth_k> depth_entries_ {};
+
+        /** Entries the sweeps reached and marked so far, of the root's component before the islands
+         *  were gathered, outside it, and outside every settled island component. */
+        std::size_t swept_ = 0, component_ = 0, islands_ = 0, unsettled_ = 0;
+
+        /** The depth the next expansion reaches from, and the depths each direction took. */
+        std::size_t depth_ = 0, depth_from_root_ = 0, depth_to_root_ = 0;
+
+        /** The population counts the report carries, as @c reachability_t names them. */
+        std::size_t unlinked_ = 0, underlinked_ = 0, unreached_islands_ = 0, stranded_islands_ = 0, components_ = 0;
+
+        /** The pass within the components or labels the next batch queues. */
+        u32_t pass_ = 0;
+        phase_t phase_ = phase_t::done_k;
+    };
+
+    /**
+     *  @brief One refinement round in flight on this index's device, in the shape of the CUDA and
+     *      HIP plans so one host thread drives every shard: @ref queue a phase, @ref wait for it,
      *      @ref advance past it, and @ref finish once no phase follows.
      *
-     *  A re-selecting phase walks every node of the planned range, once per round of walks across
-     *  while the shard holds several parts, into a shadow matrix, each walk chaining itself onto
-     *  its picks; a merge launch behind it folds every walked row's picks, then every walker
-     *  chained onto a row, into the live rows on the device, as the CUDA pass does, so the host
-     *  reads only the counters. The audit and the reconnection run on the host over unified memory
-     *  in @ref advance, sweeping both ways. @ref plan_refine sized every buffer, so no phase
+     *  The round is the RAM one on Metal: the opening health check, the islands it named healed
+     *  without a distance, a seeded draw of hubs, a gather filing every entry under its nearest
+     *  hub, and again inside every neighborhood over its capacity, a restitch of each neighborhood
+     *  in one core's threadgroup memory, every entry keeping the diverse links among its own and
+     *  its nearest neighborhood-mates and no others, and the closing health check from the same
+     *  root, which decides the verdict. Hubs are drawn and entries ordered by neighborhood on the
+     *  host over unified memory at the barriers. @ref plan_round sized every column, so no phase
      *  allocates. Every phase takes the context the plan was opened on back from its caller. Holds
      *  the index's batch lock from plan to death, so demands an exclusive caller.
+     *
+     *  A split runs it in reverse: the partition grows on the device, the host scatters the parts
+     *  into the receivers and publishes them, and each receiver then runs one round in turn.
      */
     struct refine_plan_t {
         refine_plan_t() noexcept = default;
         refine_plan_t(refine_plan_t&&) noexcept = default;
         refine_plan_t& operator=(refine_plan_t&&) noexcept = default;
 
+        /** The health check the round opens and closes with, whose columns the reach rule reads. */
+        health_plan_t health;
+
         /**
-         *  Submits the current phase's pass on @p context 's stream under @p config; the audit, on
-         *  the host, waits for @ref advance.
+         *  @brief Submits the current phase on @p context 's stream; a hubs draw submits nothing,
+         *      as the barrier closing it draws them on the host.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound, as a refused one answers.
-         *  - @c cancelled_k, @c config_mismatch_k or @c unsupported_layout_k The index keeps it,
-         *    as its @c status says.
+         *  - @c device_error_k A phase could not be encoded.
          */
-        status_t queue(traversal_context_t& context, refine_config_t config) noexcept {
+        status_t queue(traversal_context_t& context, refine_config_t) noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            if (phase_ == phase_t::partition_k)
-                status_ = split_.next_round ? index_->queue_rounds_(split_, context)
-                                            : index_->queue_picked_(split_, context);
-            else if (phase_ == phase_t::reselect_k)
-                status_ = index_->submit_pass_(context, config, walked_(), {}, parts_, round_);
-            else if (phase_ == phase_t::heal_k)
-                status_ = index_->submit_pass_(context, config, walked_(), to_span(audit_.islands));
+            switch (phase_) {
+            case phase_t::partition_k: status_ = index_->queue_rounds_(split_, context); break;
+            case phase_t::health_k: status_ = health.queue(context); break;
+            case phase_t::heal_k: status_ = index_->queue_heal_(health, context); break;
+            case phase_t::gather_neighborhoods_k: status_ = queue_gather_(context); break;
+            case phase_t::restitch_k: status_ = queue_restitch_(context); break;
+            default: break;
+            }
             return status_;
         }
 
         /**
-         *  Waits on @p context for the submitted pass, if one was.
+         *  @brief Waits on @p context for the submitted phase.
          *
          *  @par Statuses:
-         *  - @c cancelled_k, @c config_mismatch_k or @c unsupported_layout_k A
-         *    queued phase found the index keeping it, as its @c status says.
+         *  - @c device_error_k The device failed the phase.
          */
         status_t wait(traversal_context_t& context) noexcept {
-            if (index_ && succeeded(status_) && (phase_ == phase_t::partition_k || !walked_().empty()))
-                status_ = context.wait();
+            if (index_ && succeeded(status_) && phase_ != phase_t::done_k) status_ = context.wait();
             return status_;
         }
 
-        /** Reads the pass from @p context on the host, audits after the rounds and every heal,
-         *  picks the next phase, and answers whether one follows. */
+        /** The barrier after a phase, one caller once it finished, answering whether one follows:
+         *  takes a converged check in, draws the hubs, orders the entries by neighborhood or
+         *  gathers the wide ones again, reads the restitch's counts, or binds the next receiver. */
         bool advance(traversal_context_t& context) noexcept {
-            if (!index_ || failed(status_) || phase_ == phase_t::done_k) return false;
+            if (!index_ || failed(status_)) return false;
+            if (phase_ == phase_t::done_k) return next_receiver_(context);
             if (phase_ == phase_t::partition_k) return advance_partition_(context);
-            metal_audit_t& audit = audit_;
-            if (iota_view<node_id_t> const walked = walked_(); !walked.empty())
-                tally_ += index_->read_pass_(context, walked.size());
-            if (phase_ == phase_t::reselect_k) {
-                if (++round_ < rounds_) return true;
-                phase_ = phase_t::audit_k;
-                return true;
+            if (phase_ == phase_t::health_k) return health.advance() || converge_(context);
+            u32_t const* const words = health.counters();
+            switch (phase_) {
+            case phase_t::heal_k:
+                tally_.islands_reconnected += words[metal_round_healed_k];
+                tally_.changed_nodes = words[metal_round_changed_k];
+                // A receiver after a stop heals and verifies alone.
+                if (tally_.verdict == refine_verdict_t::stopped_k) verify_(phase_t::restitch_k);
+                else phase_ = phase_t::draw_hubs_k;
+                break;
+            case phase_t::draw_hubs_k:
+                draw_hubs_();
+                phase_ = phase_t::gather_neighborhoods_k;
+                break;
+            // Neighborhoods over capacity gather again among their own entries.
+            case phase_t::gather_neighborhoods_k:
+                if (!order_neighborhoods_()) phase_ = phase_t::restitch_k;
+                break;
+            case phase_t::restitch_k:
+                tally_.reselected_nodes += health.visible;
+                tally_.changed_nodes = words[metal_round_changed_k];
+                tally_.added_links += metal_tally(words, metal_round_added_k);
+                tally_.dropped_links += metal_tally(words, metal_round_dropped_k);
+                verify_(phase_t::restitch_k);
+                break;
+            default: break;
             }
-            std::size_t const islands_before = audit.islands.size();
-            if (phase_ == phase_t::heal_k) tally_.islands_reconnected += index_->reconnect_(audit, context);
-            status_t const audited = index_->audit_(audit);
-            std::size_t const rows = index_->size(), left = audit.islands.size();
-            tally_.reachability = {rows, rows - left, audit.sweeps, audit.back_sweeps};
-            // A refused audit judged no row, so nothing heals.
-            if (failed(audited)) {
-                status_ = audited;
-                phase_ = phase_t::done_k;
-                return false;
-            }
-            if (phase_ == phase_t::audit_k) tally_.islands_found = left;
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are islands too.
-            bool const healing = left && (phase_ == phase_t::audit_k || left < islands_before);
-            phase_ = healing ? phase_t::heal_k : phase_t::done_k;
-            if (!healing && split_.receivers.size()) return settle_receiver_(context);
-            return healing;
+            return succeeded(status_);
         }
 
-        /** Stops the re-selection after the round that finished last, so the next phase audits and
-         *  heals, and a split's later receivers skip theirs; a no-op in any other phase, the
-         *  partition of a split included. */
+        /** Skips what is left of the round's phase in hand, as the RAM round's @c stop does: an
+         *  opening health check, or a heal not yet run, ends the round with nothing written; a hubs
+         *  draw, a gather or a restitch sends the round to the closing health check; the closing
+         *  one runs on, and the verdict reads stopped. A split's later receivers heal and verify
+         *  alone; the partition of a split runs on. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) rounds_ = 0, split_.rounds = 0, phase_ = phase_t::audit_k;
+            if (!rounding()) return;
+            tally_.verdict = refine_verdict_t::stopped_k;
+            switch (phase_) {
+            case phase_t::health_k:
+                if (swept_after_ == phase_t::opening_k) phase_ = phase_t::done_k;
+                break;
+            case phase_t::heal_k:
+                tally_.reachability = tally_.opening;
+                phase_ = phase_t::done_k;
+                break;
+            case phase_t::draw_hubs_k:
+            case phase_t::gather_neighborhoods_k:
+            case phase_t::restitch_k: verify_(phase_t::restitch_k); break;
+            default: break;
+            }
         }
 
-        /** Whether the current phase re-selects the planned range - the phase a caller's
-         *  progress counts. */
-        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+        /** Whether the plan runs a round's phase, whose every barrier a caller's progress hears. */
+        bool rounding() const noexcept {
+            if (phase_ == phase_t::health_k)
+                return swept_after_ == phase_t::opening_k || swept_after_ == phase_t::restitch_k;
+            return phase_ >= phase_t::heal_k && phase_ <= phase_t::restitch_k;
+        }
 
-        /** Nodes re-selected so far. */
-        std::size_t visited() const noexcept { return tally_.reselected_nodes; }
+        /** The phase the plan is in, by the name a progress line prints. */
+        char const* phase_name() const noexcept {
+            switch (phase_) {
+            case phase_t::partition_k: return "partition";
+            case phase_t::health_k: return "health";
+            case phase_t::heal_k: return "heal";
+            case phase_t::draw_hubs_k: return "hubs";
+            case phase_t::gather_neighborhoods_k: return "gather";
+            case phase_t::restitch_k: return "restitch";
+            default: return "done";
+            }
+        }
+
+        /** The position of the round's phase in hand among its six, from the opening health check
+         *  to the closing one; zero outside a round's phases. */
+        std::size_t ordinal() const noexcept {
+            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
+            if (phase_ == phase_t::health_k && swept_after_ == phase_t::opening_k) return 1;
+            if (phase_ == phase_t::health_k && swept_after_ == phase_t::restitch_k)
+                return static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
+            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
+        }
+
+        /** Units of the round's phase in hand done so far, at a barrier before it advances: entries
+         *  swept and marked by a check, and otherwise all of the phase's. */
+        std::size_t completed() const noexcept { return phase_ == phase_t::health_k ? health.swept() : total(); }
+
+        /** Units of the round's phase in hand in all: islands healed, hubs drawn, entries one
+         *  gather files, or entries re-stitched. */
+        std::size_t total() const noexcept {
+            switch (phase_) {
+            case phase_t::health_k: return 2 * std::size_t {health.visible};
+            case phase_t::heal_k: return health.islands();
+            case phase_t::draw_hubs_k: return hubs_for_(health.visible);
+            case phase_t::gather_neighborhoods_k: return gathered_;
+            case phase_t::restitch_k: return health.visible;
+            default: return 0;
+            }
+        }
+
+        /** Opens the next round once one ended, from the root the closing check kept: the count and
+         *  the changed marks start over, and the opening check sweeps again. A no-op mid-round. */
+        void next_round() noexcept {
+            if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
+            if (swept_after_ != phase_t::opening_k && swept_after_ != phase_t::restitch_k) return;
+            tally_ = {};
+            verify_(phase_t::opening_k);
+        }
 
         /**
-         *  The pass, complete once @ref advance answered false, otherwise @c cancelled_k; a failure
-         *  a phase kept answers instead.
+         *  @brief The round so far: complete once @ref advance answered false, otherwise
+         *      @c cancelled_k; a failure a phase kept answers instead.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is unbound, as a refused one answers.
-         *  - @c cancelled_k A phase still follows, or a phase found the index keeping it.
-         *  - @c config_mismatch_k or @c unsupported_layout_k A phase found the index keeping it,
-         *    as its @c status says.
+         *  - @c cancelled_k A phase still follows, or the round was stopped.
+         *  - @c device_error_k The device failed a phase.
          */
         expected<refine_report_t> finish() const noexcept {
             if (!index_) return {{}, status_t::uninitialized_k};
             if (failed(status_)) return {tally_, status_};
-            return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+            bool const done = phase_ == phase_t::done_k && tally_.verdict != refine_verdict_t::stopped_k;
+            return {tally_, done ? status_t::success_k : status_t::cancelled_k};
         }
 
       private:
         friend struct vram_apple_index;
-        enum class phase_t : u8_t { partition_k, reselect_k, audit_k, heal_k, done_k };
 
-        /** The barrier after a partition batch: grows on while a round still placed nodes, places
-         *  the nodes no round reached once one placed none and queues the picked pass next, and
-         *  after the picked pass assigns every node its slot, scatters them on the host over
-         *  unified memory, files their keys, publishes every receiver and binds the first. */
+        enum class phase_t : u8_t {
+            partition_k,
+            health_k,
+            // What a round's opening health check follows, and the round's phases in their order.
+            opening_k,
+            heal_k,
+            draw_hubs_k,
+            gather_neighborhoods_k,
+            restitch_k,
+            done_k
+        };
+
+        /** Opens the check following @p phase from the root the last one kept. */
+        void verify_(phase_t phase) noexcept {
+            health.restart_sweep();
+            swept_after_ = phase;
+            phase_ = phase_t::health_k;
+        }
+
+        /** Takes in a converged check: opens the round after the opening one, concludes it after
+         *  the closing one, and binds a split's next receiver once its round ended. */
+        bool converge_(traversal_context_t& context) noexcept {
+            reachability_t const reachability = health.finish();
+            tally_.reachability = reachability;
+            if (swept_after_ == phase_t::opening_k) open_round_(reachability);
+            else phase_ = phase_t::done_k, tally_.verdict = concluded_verdict(tally_);
+            return phase_ != phase_t::done_k || next_receiver_(context);
+        }
+
+        /** Takes in the opening check: seeds the round's draws from what it measured, so a round
+         *  over a changed graph draws anew while the ID order decides nothing, starts the changed
+         *  marks over, and opens the heal. */
+        void open_round_(reachability_t const& opening) noexcept {
+            tally_.opening = opening;
+            tally_.islands_found = opening.audited_nodes - opening.reachable_nodes;
+            round_seed_ = mix_bits(
+                opening.audited_nodes ^
+                mix_bits(opening.reachable_nodes ^
+                         mix_bits(opening.unlinked ^ mix_bits(opening.underlinked ^ opening.depth_from_root))));
+            std::memset(health.template column<byte_t>(health.layout.changed), 0,
+                        divide_round_up<std::size_t>(health.visible, 32) * sizeof(u32_t));
+            phase_ = health.visible ? phase_t::heal_k : phase_t::done_k;
+        }
+
+        /** Hubs one gather over @p entries draws, as every tower draws them. */
+        std::size_t hubs_for_(std::size_t entries) const noexcept {
+            return round_hubs(entries, sizing_.hubs_per_draw, sizing_.capacity);
+        }
+
+        /** Draws one pack of hubs by seeded bijection over the visible entries, ascending, into the
+         *  first gather's one run over every ID. */
+        void draw_hubs_() noexcept {
+            std::size_t const visible = health.visible, hubs = hubs_for_(visible);
+            std::span<node_id_t> const hub_nodes {health.template column<node_id_t>(health.layout.hub_nodes), hubs};
+            for (std::size_t rank = 0; rank != hubs; ++rank)
+                hub_nodes[rank] = static_cast<node_id_t>(seeded_bijection(rank, visible, round_seed_));
+            partial_sort(hub_nodes, hubs);
+            u32_t* const runs = health.template column<u32_t>(health.layout.runs);
+            u32_t* const run_items = health.template column<u32_t>(health.layout.run_items);
+            runs[0] = 0, runs[1] = static_cast<u32_t>(visible), runs[2] = 0, runs[3] = static_cast<u32_t>(hubs);
+            run_items[0] = 0, run_items[1] = static_cast<u32_t>(divide_round_up(visible, hubs));
+            runs_ = 1, neighborhoods_ = 0, gathered_ = visible;
+        }
+
+        /** Sorts the entries by the neighborhood the gather gave each, after the first gather by
+         *  @ref order_by_neighborhood and after a later one by @ref split_wide_neighborhoods, in
+         *  the starts planning reserved; then writes, for every neighborhood still over capacity,
+         *  its run and its hubs, drawn among its own entries as the RAM round's @c gather_run_
+         *  draws them, and answers whether a gather runs once more over those alone. */
+        bool order_neighborhoods_() noexcept {
+            round_layout_t const& layout = health.layout;
+            std::size_t const visible = health.visible;
+            std::span<u16_t const> const tags {health.template column<u16_t>(layout.entry_neighborhoods), visible};
+            std::span<node_id_t> const entries {health.template column<node_id_t>(layout.neighborhood_entries),
+                                                visible};
+            std::span<node_id_t> const offsets {health.template column<node_id_t>(layout.neighborhood_offsets),
+                                                split_room(visible, sizing_.hubs_per_draw)};
+            u32_t const* const runs = health.template column<u32_t>(layout.runs);
+            neighborhood_order_t const order = neighborhoods_
+                                                   ? split_wide_neighborhoods(tags, entries, offsets, neighborhoods_,
+                                                                              sizing_.capacity, sizing_.hubs_per_draw)
+                                                   : order_by_neighborhood(tags, runs[3], entries, offsets);
+            neighborhoods_ = order.neighborhoods;
+            tally_.neighborhoods = order.neighborhoods, tally_.widest_neighborhood = order.widest;
+            if (order.widest <= sizing_.capacity) return false;
+            node_id_t* const hub_nodes = health.template column<node_id_t>(layout.hub_nodes);
+            u32_t* const run_words = health.template column<u32_t>(layout.runs);
+            u32_t* const run_items = health.template column<u32_t>(layout.run_items);
+            std::size_t hubs = 0, items = 0;
+            runs_ = gathered_ = 0;
+            for (std::size_t neighborhood = 0; neighborhood != order.neighborhoods; ++neighborhood) {
+                node_id_t const first = offsets[neighborhood];
+                std::size_t const width = offsets[neighborhood + 1] - first;
+                if (width <= sizing_.capacity) continue;
+                std::size_t const drawn = hubs_for_(width);
+                u64_t const seed = mix_bits(round_seed_ ^ first);
+                for (std::size_t rank = 0; rank != drawn; ++rank)
+                    hub_nodes[hubs + rank] = entries[first + seeded_bijection(rank, width, seed)];
+                u32_t* const run = run_words + 4 * runs_;
+                run[0] = first, run[1] = static_cast<u32_t>(width), run[2] = static_cast<u32_t>(hubs);
+                run[3] = static_cast<u32_t>(drawn);
+                run_items[runs_++] = static_cast<u32_t>(items);
+                items += divide_round_up(width, drawn), hubs += drawn, gathered_ += width;
+            }
+            run_items[runs_] = static_cast<u32_t>(items);
+            return true;
+        }
+
+        /** Commits the gather over the runs in hand, a first one's over IDs. */
+        status_t queue_gather_(traversal_context_t& context) noexcept {
+            metal_arguments_t arguments = index_->arguments_();
+            arguments.end_id = health.visible;
+            arguments.runs_count = static_cast<u32_t>(runs_);
+            arguments.pass = neighborhoods_ ? 1u : 0u;
+            u32_t* const words = health.counters();
+            words[metal_round_claimed_k] = 0;
+            return index_->launch_neighborhoods_(vram_kernel_t::gather_neighborhoods_k, arguments, health.layout,
+                                                 sizing_.groups, context);
+        }
+
+        /** Commits the restitch of every neighborhood the order holds. */
+        status_t queue_restitch_(traversal_context_t& context) noexcept {
+            metal_arguments_t arguments = index_->arguments_();
+            arguments.end_id = health.visible;
+            arguments.neighborhoods = static_cast<u32_t>(neighborhoods_);
+            arguments.slice_bytes = static_cast<u32_t>(index_->stitch_slice_bytes_());
+            u32_t* const words = health.counters();
+            words[metal_round_claimed_k] = 0;
+            for (u32_t const tally : {metal_round_added_k, metal_round_dropped_k}) words[tally] = words[tally + 1] = 0;
+            return index_->launch_neighborhoods_(vram_kernel_t::restitch_k, arguments, health.layout, sizing_.groups,
+                                                 context);
+        }
+
+        /** The barrier after a partition batch: grows on while a round still placed nodes, and once
+         *  one placed none places the nodes no round reached, assigns every node its slot, scatters
+         *  them on the host over unified memory, files their keys, publishes every receiver and
+         *  binds the first. */
         bool advance_partition_(traversal_context_t& context) noexcept {
             vram_apple_index& donor = *index_;
-            if (split_.next_round) {
-                if (!donor.placing_(split_)) donor.place_islands_(split_), split_.next_round = 0;
-                return true;
-            }
+            if (donor.placing_(split_)) return true;
+            donor.place_islands_(split_);
+            split_.next_round = 0;
             assign_slots_();
             donor.scatter_(split_);
             publish_parts_();
+            split_.bound_receiver = 0;
             bind_receiver_(context);
             return phase_ != phase_t::done_k;
         }
 
-        /** Turns every donor node's part into its slot in place, each part's picked nodes first and
-         *  both runs in ID order. */
+        /** Turns every donor node's part into its slot in place, in ID order within each part. */
         void assign_slots_() noexcept {
             split_layout_t const layout = split_layout_(split_.entries, split_.receivers.size());
             u32_t* const slots = reinterpret_cast<u32_t*>(split_.device_bytes.host + layout.node_parts);
-            u32_t const* const picked = reinterpret_cast<u32_t const*>(split_.device_bytes.host + layout.picked);
-            auto const is_picked = [&](std::size_t node) noexcept { return (picked[node / 32] >> (node % 32)) & 1u; };
             for (split_part_t& part : split_.parts) part = {};
             for (std::size_t node = 0; node != split_.entries; ++node) {
-                split_part_t& part = split_.parts[slots[node]];
-                ++part.entries, part.picked_count += is_picked(node);
+                std::size_t const part = slots[node];
+                ++split_.parts[part].entries;
+                slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
             }
-            for (u32_t const picked_pass : {1u, 0u})
-                for (std::size_t node = 0; node != split_.entries; ++node) {
-                    if (is_picked(node) != picked_pass) continue;
-                    std::size_t const part = slots[node];
-                    slots[node] = static_cast<u32_t>(part * split_.part_capacity + split_.parts[part].assigned_nodes++);
-                }
         }
 
         /** Files every donor key under its slot in its receiver, publishes every receiver's nodes
@@ -970,65 +1487,60 @@ struct vram_apple_index {
             donor.forget_();
         }
 
-        /** Binds the pass to the next receiver holding nodes, under its own batch hold and sized as
-         *  its own refinement: its picked nodes as the range, or straight the audit when it has
-         *  none or a stop cut the pass; past the last, reports the sums. */
+        /** Binds the round to the bound receiver or the next one holding nodes, under its own batch
+         *  hold and over the round buffer @ref plan_split sized for a whole part; a receiver after
+         *  a stop heals and verifies alone. Past the last, reports the folded rounds. */
         void bind_receiver_(traversal_context_t& context) noexcept {
             while (split_.bound_receiver != split_.receivers.size() && !split_.parts[split_.bound_receiver].entries)
                 ++split_.bound_receiver;
             if (split_.bound_receiver == split_.receivers.size()) {
-                tally_.reachability = split_.reachability, tally_.islands_found = split_.islands;
+                tally_ = split_.report;
                 phase_ = phase_t::done_k;
                 return;
             }
             vram_apple_index& receiver = *split_.receivers[split_.bound_receiver];
-            node_id_t const picked_count = static_cast<node_id_t>(split_.parts[split_.bound_receiver].picked_count);
-            auto [bound, status] = receiver.plan_refine({0, picked_count}, {}, split_.config, context);
+            auto [bound, status] = receiver.plan_round(split_.config, context);
             if (failed(status)) {
                 status_ = status, phase_ = phase_t::done_k;
                 return;
             }
+            bool const stopped = split_.settled && split_.report.verdict == refine_verdict_t::stopped_k;
             batch_ = std::move(bound.batch_);
-            audit_ = std::move(bound.audit_);
+            health = std::move(bound.health);
             index_ = &receiver;
-            nodes_ = bound.nodes_;
-            parts_ = 0, round_ = 0, rounds_ = split_.rounds;
-            phase_ = !split_.rounds || nodes_.empty() ? phase_t::audit_k : phase_t::reselect_k;
+            sizing_ = bound.sizing_;
+            swept_after_ = bound.swept_after_;
+            phase_ = bound.phase_;
+            tally_ = {};
+            if (stopped) tally_.verdict = refine_verdict_t::stopped_k;
         }
 
-        /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
-         *  answering whether a phase follows. */
-        bool settle_receiver_(traversal_context_t& context) noexcept {
-            split_.reachability += tally_.reachability;
-            split_.islands += tally_.islands_found;
+        /** Once a split's bound receiver ended its round, folds its report into the split's and
+         *  binds the next one, answering whether a phase follows, which no refine has. */
+        bool next_receiver_(traversal_context_t& context) noexcept {
+            if (split_.bound_receiver >= split_.receivers.size()) return false;
+            if (split_.settled++) split_.report += tally_;
+            else split_.report = tally_;
             ++split_.bound_receiver;
             bind_receiver_(context);
             return phase_ != phase_t::done_k;
         }
 
-        /** The rows the current phase's pass walks: the round's nodes while re-selecting, every
-         *  island while healing, and none while auditing. */
-        iota_view<node_id_t> walked_() const noexcept {
-            if (phase_ == phase_t::reselect_k) return round_ ? iota_view<node_id_t> {0, nodes_.bound} : nodes_;
-            if (phase_ == phase_t::heal_k) return {0, static_cast<node_id_t>(audit_.islands.size())};
-            return {};
-        }
-
         batch_lock_t batch_;
         vram_apple_index* index_ = nullptr;
 
-        /** The audit whose reached rows and islands the heal walks and reconnects, from one
-         *  @ref advance to the next. */
-        metal_audit_t audit_ {};
+        /** What the round's columns are sized for, which the gather and the restitch read. */
+        round_sizing_t sizing_ {};
 
-        /** The IDs the first round re-selects. */
-        iota_view<node_id_t> nodes_;
+        /** Neighborhoods the order by neighborhood holds, none before the first gather was ordered;
+         *  the runs the next gather files; and the entries those runs span. */
+        std::size_t neighborhoods_ = 0, runs_ = 0, gathered_ = 0;
 
-        /** Parts the rounds merge, the rounds, and the round queued or, once they
-         *  ended, finished. */
-        u32_t parts_ = 0;
-        u32_t rounds_ = 1;
-        u32_t round_ = 0;
+        /** What seeds every draw of the round. */
+        u64_t round_seed_ = 0;
+
+        /** The phase the current check follows, which decides the phase after it converges. */
+        phase_t swept_after_ = phase_t::opening_k;
         phase_t phase_ = phase_t::done_k;
         status_t status_ = status_t::success_k;
         refine_report_t tally_;
@@ -1036,78 +1548,45 @@ struct vram_apple_index {
     };
 
     /**
-     *  @brief Opens a refinement of the nodes in @p nodes, clamped to the published IDs: takes the
-     *      batch lock, sizes the staging, the arena and the host audit for the widest phase, and
-     *      copies @p part_bases into the staging, so no phase allocates. An empty range heals.
+     *  @brief Opens one refinement round over the published nodes on @p context 's stream, as the
+     *      RAM @c plan_round does, so no phase allocates.
      *
-     *  Two or more @p part_bases below the published IDs split the rows into parts, as a shard
-     *  that absorbed others' rows holds them: each node then first walks across the neighboring
-     *  group of parts alone, round after round, from empty candidates and landmarks drawn there,
-     *  before its own neighbors and the whole graph, and re-selects from the union. The live graph
-     *  stays as it was through a round's walks, so a walk across never leaves its group, and the
-     *  heal's passes walk no part first.
+     *  Takes the batch lock, grows the context's round buffer to the check's columns and the
+     *  round's, and sizes the hubs and the neighborhood capacity from the threadgroup memory one
+     *  GPU core keeps, never more than the device grants.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c uninitialized_k The index never grew.
+     *  - @c config_mismatch_k The @p context rides another device or cannot submit.
+     *  - @c bad_alloc_k The round buffer cannot grow.
      */
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
-                                        refine_config_t config, traversal_context_t& context) noexcept {
+    expected<refine_plan_t> plan_round(refine_config_t config, traversal_context_t& context) noexcept {
+        using phase_t = typename refine_plan_t::phase_t;
         refine_plan_t plan;
         plan.batch_ = batch_lock_t {batch_};
         std::size_t const rows = size();
-        std::size_t parts = 0;
-        while (parts != part_bases.size() && part_bases[parts] < rows) ++parts;
-        if (parts < 2) parts = 0;
         if (rows) {
             if (!counters_) return {std::move(plan), status_t::uninitialized_k};
             if (context.device() != device_.ordinal || !context) return {std::move(plan), status_t::config_mismatch_k};
-            bool fresh = false;
-            refine_layout_t const staging = refine_layout_();
-            if (status_t const staged = context.ensure_(context.staging_, staging.bases + parts * sizeof(u32_t), fresh);
-                failed(staged))
-                return {std::move(plan), staged};
-            std::memcpy(context.staging_.host + staging.bases, part_bases.data(), parts * sizeof(u32_t));
-            // Every chain starts empty, and each merge empties the ones it folds.
-            std::memset(context.staging_.host + staging.heads, 0xFF, rows * sizeof(u32_t));
-            // The widest walk's arena now, so no pass grows it.
-            u32_t const expansion = non_zero_expansion_factor(config);
-            u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
-            u32_t const walks = parts ? 2 : 1;
-            metal_arguments_t arguments = arguments_();
-            if (status_t const sized = shape_arena_(
-                    context, arguments, build_arena_shape_(expansion, candidate_slots, walks),
-                    device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, candidate_slots), rows);
-                failed(sized))
-                return {std::move(plan), sized};
-            metal_audit_t& audit = plan.audit_;
-            for (growing_buffer<u8_t>* marks :
-                 {&audit.reached, &audit.frontier, &audit.next_frontier, &audit.reaches_back, &audit.back_settled})
-                if (failed(marks->reserve_exactly(rows))) return {std::move(plan), status_t::bad_alloc_k};
-            if (failed(audit.islands.reserve_exactly(rows)) || failed(audit.in_links.reserve_exactly(rows)))
-                return {std::move(plan), status_t::bad_alloc_k};
+            plan.sizing_ = round_sizing_(rows, config.cache_bytes);
+            if (status_t const carved = carve_round_(plan.health, rows, plan.sizing_, context); failed(carved))
+                return {std::move(plan), carved};
+            plan.health.restart_sweep();
         }
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         plan.index_ = this;
-        plan.nodes_ = {min_of(nodes.first, bound), bound};
-        plan.parts_ = static_cast<u32_t>(parts);
-        plan.rounds_ = parts ? static_cast<u32_t>(std::bit_width(parts - 1)) : 1u;
-        plan.phase_ = plan.nodes_.empty() && plan.rounds_ == 1 ? refine_plan_t::phase_t::audit_k
-                                                               : refine_plan_t::phase_t::reselect_k;
-        if (!rows) plan.phase_ = refine_plan_t::phase_t::done_k;
+        plan.swept_after_ = phase_t::opening_k;
+        plan.phase_ = rows ? phase_t::health_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  One @ref refine_plan_t driven to its end on the calling thread, waiting once per phase.
+     *  @brief One @ref plan_round driven to its end on the calling thread, waiting once per pass.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or @c status
-     *    keeps it.
-     *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as @c status says.
+     *  - Those of @ref plan_round and of the plan's phases.
      */
-    expected<refine_report_t> refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
-                                     refine_config_t config, traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_refine(nodes, part_bases, config, context);
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        auto [plan, status] = plan_round(config, context);
         if (failed(status)) return {{}, status};
         do
             if (status_t const queued = plan.queue(context, config); failed(queued) || failed(plan.wait(context)))
@@ -1118,18 +1597,17 @@ struct vram_apple_index {
 
     /**
      *  @brief Opens a split of this index's nodes into @p receivers, the CUDA and HIP plan's twin:
-     *      the partition grows on the device, and the rest runs on the host over unified memory.
+     *      the partition grows on the device, and the moves run on the host over unified memory.
      *
      *  One root per part through @ref seeded_bijection under @p config.seed, then rounds of growth
      *  over the links on the device, each part capped at the nodes over the receivers rounded up,
      *  and each node a round reaches kept by its lowest-ID proposer, so equal seeds over equal
      *  graphs split alike, as on NVIDIA and AMD. The nodes no round reached enter the smallest
-     *  parts in ID order on the host, the picked nodes are found on the device, and the host then
-     *  assigns the slots, each part's picked nodes first, moves every node's vector, norms and
-     *  neighbors into its receiver, the links inside its part rebased and those across dropped,
-     *  files the keys, publishes every receiver at once and empties this index. Each receiver then
-     *  re-selects its picked nodes, audits and heals as @ref plan_refine does, and the tallies sum
-     *  over the receivers.
+     *  parts in ID order on the host, which then assigns the slots in ID order within each part,
+     *  moves every node's vector, norms and neighbors into its receiver, the links inside its part
+     *  rebased and those across dropped, files the keys, publishes every receiver at once and
+     *  empties this index. Each receiver then runs one round, as @ref plan_round does, the moved
+     *  part's islands healed and its neighborhoods re-stitched, and the reports fold.
      *
      *  The caller keeps this index's and every receiver's claim word closed for the plan's life,
      *  and nothing searches this index meanwhile. Receivers must be empty, distinct, and share this
@@ -1139,9 +1617,10 @@ struct vram_apple_index {
      *  - @c uninitialized_k The index never grew.
      *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
      *    index itself, one of another device, metric or geometry, or a @p context of another
-     *    device or one that cannot walk.
+     *    device or one that cannot submit.
      *  - @c contended_k This index's or a receiver's claim word is open.
      *  - @c overflow_k Part slots past the 32-bit IDs.
+     *  - @c bad_alloc_k The partition's buffer or the round buffer cannot grow.
      */
     expected<refine_plan_t> plan_split(std::span<vram_apple_index*> receivers, split_config_t config,
                                        traversal_context_t& context) noexcept {
@@ -1184,29 +1663,51 @@ struct vram_apple_index {
             split_layout_t const layout = split_layout_(rows, parts);
             split.device_bytes = context.buffers_allocator_.allocate(layout.device_bytes);
             if (!split.device_bytes) return {std::move(plan), status_t::bad_alloc_k};
+            // The round buffer takes a whole part's round now, so no receiver grows it later.
+            round_layout_t const part_layout = round_layout_(
+                split.part_capacity, round_sizing_(split.part_capacity, split.config.cache_bytes));
+            bool fresh = false;
+            if (status_t const grown = context.ensure_(context.round_, part_layout.bytes, fresh); failed(grown))
+                return {std::move(plan), grown};
             seed_partition_(split, config.seed);
         }
+        else split.bound_receiver = parts;
         plan.index_ = this;
         plan.phase_ = rows ? phase_t::partition_k : phase_t::done_k;
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Measures reachability both ways from as many stride-spread landmarks as one search draws, on
-     *  the host, sweeping each way until no row expands. */
+    /**
+     *  @brief Measures how much of the graph a search reaches from one seeded root, on the device:
+     *      depths both ways, in-link counts, and the islands' components, as the RAM audit
+     *      reports them. Grows the context's round buffer to the check's columns once.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The index never grew.
+     *  - @c config_mismatch_k The @p context rides another device or cannot submit.
+     *  - @c bad_alloc_k The round buffer cannot grow.
+     *  - @c device_error_k The device failed a pass.
+     */
     expected<reachability_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
-        metal_audit_t& audit = context.audit_;
-        shared_lock_t storage {storage_};
-        if (status_t const audited = audit_(audit); failed(audited)) return {{}, audited};
-        return {{rows, rows - audit.islands.size(), audit.sweeps, audit.back_sweeps}, status_t::success_k};
+        if (!counters_) return {{}, status_t::uninitialized_k};
+        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
+        health_plan_t check;
+        if (status_t const carved = carve_round_(check, rows, {}, context); failed(carved)) return {{}, carved};
+        check.restart_sweep();
+        do {
+            if (status_t const queued = check.queue(context); failed(queued)) return {{}, queued};
+            if (status_t const waited = context.wait(); failed(waited)) return {{}, waited};
+        } while (check.advance());
+        return {check.finish(), status_t::success_k};
     }
 
 #pragma endregion Refinement
 
 #pragma region Checkpoints
 
-    /** One save in flight: the watermark it took and its steps, each copying rows straight out of
+    /** One save in flight: the watermark it took and its tasks, each copying rows straight out of
      *  the storage. */
     struct [[nodiscard]] save_plan_t {
         columns_t columns {};
@@ -1224,23 +1725,23 @@ struct vram_apple_index {
         save_plan_t& operator=(save_plan_t const&) = delete;
         ~save_plan_t() noexcept = default;
 
-        struct step_t {
+        struct task_t {
             std::size_t position = 0;
             iota_view<node_id_t> index_nodes;
             iota_view<node_id_t> source_nodes;
         };
 
-        step_t operator[](std::size_t position) const noexcept {
-            step_t step;
-            if (position >= steps().size()) return step;
+        task_t operator[](std::size_t position) const noexcept {
+            task_t task;
+            if (position >= tasks().size()) return task;
             std::size_t const first = position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(visible));
-            step.position = position;
-            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_nodes = step.index_nodes;
-            return step;
+            task.position = position;
+            task.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            task.source_nodes = task.index_nodes;
+            return task;
         }
-        indexed_range<save_plan_t> steps() const noexcept {
+        indexed_range<save_plan_t> tasks() const noexcept {
             return {this, index_ && visible ? divide_round_up<std::size_t>(visible, batch_rows()) : 0};
         }
         std::size_t batch_rows() const noexcept {
@@ -1248,21 +1749,21 @@ struct vram_apple_index {
         }
 
         /**
-         *  Copies the step's rows out of the storage: vectors unpadded, neighbors with every ID
-         *  past the watermark folded to the sentinel, and norms where the columns take them.
+         *  @brief Copies the task's rows out of the storage: vectors unpadded, neighbors with every
+         *      ID past the watermark folded to the sentinel, and norms where the columns take them.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The step is empty, or the columns cannot hold its rows.
+         *  - @c config_mismatch_k The task is empty, or the columns cannot hold its rows.
          */
-        status_t save(step_t const& step) noexcept {
+        status_t save(task_t const& task) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const rows = step.index_nodes;
+            iota_view<node_id_t> const rows = task.index_nodes;
             if (rows.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_nodes.first;
+            std::size_t const first = task.source_nodes.first;
             bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
             bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
             bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
@@ -1284,12 +1785,12 @@ struct vram_apple_index {
         }
 
         /**
-         *  @brief Pronounces the snapshot complete once every step's rows were copied to the
+         *  @brief Pronounces the snapshot complete once every task's rows were copied to the
          *      columns, spending the plan.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k Some step's rows were never copied.
+         *  - @c config_mismatch_k Some task's rows were never copied.
          */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
@@ -1334,14 +1835,14 @@ struct vram_apple_index {
     status_t save(columns_t columns, synchronization_t synchronization) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
-        for (typename save_plan_t::step_t const step : plan.steps())
-            if (status_t const saved = plan.save(step); failed(saved)) return saved;
+        for (typename save_plan_t::task_t const task : plan.tasks())
+            if (status_t const saved = plan.save(task); failed(saved)) return saved;
         return plan.finish();
     }
 
     /** One load in flight: the rows it appends at the watermark, under its own claim or a claim
      *  word its caller closed, holding the growth hold for its whole life, since growth would
-     *  relocate the storage its steps write; @ref finish derives the norms no step carried and
+     *  relocate the storage its tasks write; @ref finish derives the norms no task carried and
      *  publishes. */
     struct [[nodiscard]] load_plan_t {
         node_id_t base = 0;
@@ -1369,53 +1870,53 @@ struct vram_apple_index {
             index_->unclaim_(base, rows);
         }
 
-        struct step_t {
+        struct task_t {
             std::size_t position = 0;
             iota_view<node_id_t> index_nodes;
             iota_view<node_id_t> source_nodes;
         };
 
-        step_t operator[](std::size_t position) const noexcept {
-            step_t step;
-            if (position >= steps().size()) return step;
+        task_t operator[](std::size_t position) const noexcept {
+            task_t task;
+            if (position >= tasks().size()) return task;
             std::size_t const first = static_cast<std::size_t>(base) + position * batch_rows();
             std::size_t const bound = min_of(first + batch_rows(), static_cast<std::size_t>(base) + rows);
-            step.position = position;
-            step.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
-            step.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
-            return step;
+            task.position = position;
+            task.index_nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            task.source_nodes = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
+            return task;
         }
-        indexed_range<load_plan_t> steps() const noexcept {
+        indexed_range<load_plan_t> tasks() const noexcept {
             return {this, index_ && rows ? divide_round_up(rows, batch_rows()) : 0};
         }
         std::size_t batch_rows() const noexcept { return min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k)); }
 
         /**
-         *  Copies the step's rows out of @p columns into the storage: vectors padded, norms where
-         *  carried, neighbors rebased from @p source_range onto the appended range and compacted,
-         *  and row @c r of the step's source nodes keyed <tt>key_of(r)</tt>.
+         *  @brief Copies the task's rows out of @p columns into the storage: vectors padded, norms
+         *      where carried, neighbors rebased from @p source_range onto the appended range and
+         *      compacted, and row @c r of the task's source nodes keyed <tt>key_of(r)</tt>.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The step is empty, @p columns cannot hold its rows, or the
+         *  - @c config_mismatch_k The task is empty, @p columns cannot hold its rows, or the
          *    rebased IDs pass the plan.
          */
         template <typename key_of_type_>
-        status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range,
+        status_t load(task_t const& task, columns_view_t columns, iota_view<node_id_t> source_range,
                       key_of_type_&& key_of) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_nodes;
+            iota_view<node_id_t> const range = task.index_nodes;
             if (range.empty()) return status_t::config_mismatch_k;
             std::size_t const scalar_row_bytes = index_->packed_row_bytes();
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
-            std::size_t const first = step.source_nodes.first;
+            std::size_t const first = task.source_nodes.first;
             bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
             bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
             bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            node_id_t const shift = static_cast<node_id_t>(range.first - step.source_nodes.first + source_range.first);
+            node_id_t const shift = static_cast<node_id_t>(range.first - task.source_nodes.first + source_range.first);
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
@@ -1440,34 +1941,37 @@ struct vram_apple_index {
             return status_t::success_k;
         }
 
-        /** Files every appended row under the key its step copied, which @ref finish then makes
-         *  visible - the one writer of the key map, once every step was copied and before the
-         *  finish; with a step missing it files nothing. */
+        /** Files every appended row under the key its task copied, which @ref finish then makes
+         *  visible - the one writer of the key map, once every task was copied and before the
+         *  finish; with a task missing it files nothing. */
         void publish_keys() noexcept {
             if (!index_ || fu::standard_atomic_ref<std::size_t> {covered}.load(std::memory_order_acquire) != rows)
                 return;
             index_->publish_keys_({base, static_cast<node_id_t>(base + rows)});
         }
 
-        /** Copies the step's rows out of @p source 's own storage rather than columns, as an absorb
-         *  drives it: both keep padded rows of one geometry in shared buffers, so every column
-         *  moves whole on the host with its keys, and the neighbors rebase from @p source_range
-         *  onto the appended range and compact. The source takes no rows until the copy returns.
+        /**
+         *  @brief Copies the task's rows out of @p source 's own storage rather than columns, as an
+         *      absorb drives it.
+         *
+         *  Both keep padded rows of one geometry in shared buffers, so every column moves whole on
+         *  the host with its keys, and the neighbors rebase from @p source_range onto the appended
+         *  range and compact. The source takes no rows until the copy returns.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k Another geometry, or rows outside the plan or the source.
          */
-        status_t load(step_t const& step, vram_apple_index& source, iota_view<node_id_t> source_range) noexcept {
+        status_t load(task_t const& task, vram_apple_index& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
-            iota_view<node_id_t> const range = step.index_nodes;
-            if (range.empty() || range.size() != step.source_nodes.size() || step.source_nodes.bound > source.size() ||
+            iota_view<node_id_t> const range = task.index_nodes;
+            if (range.empty() || range.size() != task.source_nodes.size() || task.source_nodes.bound > source.size() ||
                 !same_geometry(source, *index_))
                 return status_t::config_mismatch_k;
-            node_id_t const shift = range.first - step.source_nodes.first + source_range.first;
+            node_id_t const shift = range.first - task.source_nodes.first + source_range.first;
             if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes(), connectivity = index_->connectivity();
-            std::size_t const into = range.first, from = step.source_nodes.first, count = range.size();
+            std::size_t const into = range.first, from = task.source_nodes.first, count = range.size();
             shared_lock_t storage {source.storage_};
             std::memcpy(index_->vectors_matrix_.host + into * row_bytes, source.vectors_matrix_.host + from * row_bytes,
                         count * row_bytes);
@@ -1489,12 +1993,12 @@ struct vram_apple_index {
         }
 
         /**
-         *  @brief Derives the norms no step carried on the device, lifts the hold, and publishes
+         *  @brief Derives the norms no task carried on the device, lifts the hold, and publishes
          *      the appended nodes with the keys @ref publish_keys filed.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k Some step's rows were never copied, or the index keeps it, as its
+         *  - @c config_mismatch_k Some task's rows were never copied, or the index keeps it, as its
          *    @c status says.
          *  - @c cancelled_k or @c unsupported_layout_k The index keeps it, as its @c status says.
          */
@@ -1521,7 +2025,7 @@ struct vram_apple_index {
     };
 
     /**
-     *  @brief Opens a load of @p rows at the watermark, sourced per step, as the sharded index
+     *  @brief Opens a load of @p rows at the watermark, sourced per task, as the sharded index
      *      drives its parts: claims them, or places them under the claim word its caller closed; a
      *      batch or load in flight refuses it.
      *
@@ -1575,8 +2079,8 @@ struct vram_apple_index {
             return status_t::config_mismatch_k;
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return status;
-        for (typename load_plan_t::step_t const step : plan.steps())
-            if (status_t const loaded = plan.load(step, columns, source_range,
+        for (typename load_plan_t::task_t const task : plan.tasks())
+            if (status_t const loaded = plan.load(task, columns, source_range,
                                                   [&](node_id_t row) noexcept { return keys[row]; });
                 failed(loaded))
                 return loaded;
@@ -1599,7 +2103,7 @@ struct vram_apple_index {
 
     /** The device half of @c insert: writes @p keys, stages and runs @p new_rows at @p first_id,
      *  and returns with their IDs, the rows invisible until the caller publishes them - which the
-     *  sharded twin does for every step at once. The caller holds the claim over them; a refusal
+     *  sharded twin does for every task at once. The caller holds the claim over them; a refusal
      *  before the launch keeps no failure, one after it keeps the failure. */
     expected<insert_result_t> submit_insert_(keys_view_t keys, rows_view_t new_rows, node_id_t first_id,
                                              node_ids_span_t assigned_ids, traversal_context_t& context,
@@ -2256,264 +2760,178 @@ struct vram_apple_index {
 
 #pragma endregion Walks
 
-#pragma region Refinement Passes
+#pragma region Round Launches
 
-    /** Where a refine's staging keeps each array over the rows published now: past room for every
-     *  row's ID, which the heal's passes list, the walked rows' shadow neighbors, the walkers'
-     *  chain heads and links, a walked mark per row, the merge's counter words, and the parts'
-     *  bases closing the layout. */
-    struct refine_layout_t {
-        std::size_t shadow = 0, heads = 0, links = 0, walked = 0, counters = 0, bases = 0;
-    };
-    refine_layout_t refine_layout_() const noexcept {
-        std::size_t const rows = size(), row_bytes = connectivity() * sizeof(u32_t);
-        refine_layout_t staging;
-        staging.shadow = round_up_to_multiple<std::size_t>(rows * sizeof(u32_t), default_alignment_k);
-        staging.heads = staging.shadow + rows * row_bytes;
-        staging.links = staging.heads + rows * sizeof(u32_t);
-        staging.walked = staging.links + rows * row_bytes;
-        staging.counters = round_up_to_multiple<std::size_t>(staging.walked + rows, default_alignment_k);
-        staging.bases = staging.counters + counters_bytes_k;
-        return staging;
+    /** What a round over @p rows rows keeps under @p cache_bytes of threadgroup memory a core, the
+     *  device's own figure for zero and never more: half of it in hub rows, never below a quad, the
+     *  rest in one neighborhood's rows, never below a row of mates and the entry itself, which a
+     *  restitch needs to fill a row from mates alone; past what threadgroup memory holds, the rows
+     *  are read in place. Then the most hubs and runs the gathers of a round write, and one
+     *  restitch threadgroup per GPU core, which its staged rows fill. */
+    round_sizing_t round_sizing_(std::size_t rows, std::size_t cache_bytes) const noexcept {
+        std::size_t const device_bytes = device_.cache_bytes_per_core();
+        std::size_t const budget = cache_bytes ? min_of(cache_bytes, device_bytes) : device_bytes;
+        round_sizing_t sizing;
+        sizing.hubs_per_draw = max_of<std::size_t>(budget / (2 * row_bytes()), quad_lanes_k);
+        std::size_t const rest = budget - min_of(budget, sizing.hubs_per_draw * row_bytes());
+        sizing.capacity = max_of(rest / row_bytes(), connectivity() + 1);
+        // A later gather draws at most two hubs per capacity of a wide neighborhood, plus one each.
+        sizing.hubs = max_of(round_hubs(rows, sizing.hubs_per_draw, sizing.capacity), 3 * rows / sizing.capacity + 1);
+        sizing.runs = rows / sizing.capacity + 1;
+        sizing.groups = device_.multiprocessor_count;
+        return sizing;
     }
 
-    /** Submits the re-selection of @p nodes, or of the IDs @p node_ids lists with @p nodes spanning
-     *  its offsets, into the shadow matrix of the staging @ref plan_refine sized, each node first
-     *  walking across the neighboring group in round @p round when @p parts parts are given, then
-     *  the merge of every walked row and chain into the live rows, riding the walk's threadgroups
-     *  and arena. Nothing waits; @c read_pass_ reads the pass once it finished. */
-    status_t submit_pass_(traversal_context_t& context, refine_config_t config, iota_view<node_id_t> nodes,
-                          std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
-        std::size_t const rows = size();
-        if (!rows || nodes.first >= nodes.bound) return status_t::success_k;
-        if (status_t const kept = status(); failed(kept)) return kept;
-        std::size_t const walk_count = nodes.size();
-        if (!node_ids.empty()) std::memcpy(context.staging_.host, node_ids.data(), node_ids.size_bytes());
-        u32_t const expansion = non_zero_expansion_factor(config);
-        u32_t const candidate_slots = candidate_slots_for_(expansion, 4);
-        // Walking across makes two walks into one visited set, so the slice is shaped for both.
-        u32_t const walks = parts > 1 ? 2 : 1;
-        u32_t const blocks = device_.multiprocessor_count * resident_blocks_(vram_kernel_t::refine_k, candidate_slots);
-        metal_arguments_t arguments = arguments_();
-        if (status_t const sized = shape_arena_(
-                context, arguments, build_arena_shape_(expansion, candidate_slots, walks), blocks, walk_count);
-            failed(sized))
-            return sized;
-        arguments.first_id = nodes.first;
-        arguments.selection_nodes = walk_selection_nodes_(expansion, candidate_slots);
-        arguments.expansion = expansion;
-        arguments.end_id = nodes.bound;
-        arguments.sampling_bound = static_cast<u32_t>(rows);
-        arguments.use_node_ids = node_ids.empty() ? 0 : 1;
-        arguments.parts = parts > 1 ? parts : 0;
-        arguments.round = round;
-        reset_counters_(counters_);
-        refine_layout_t const staging = refine_layout_();
-        std::memset(context.staging_.host + staging.walked, 0, rows);
-        std::memset(context.staging_.host + staging.counters, 0, counters_bytes_k);
-        auto const bind_chains = [&](metal_launch_t& launch) noexcept {
-            launch.bind(context.staging_, metal_shadow_buffer_k, staging.shadow);
-            launch.bind(context.staging_, metal_chain_heads_buffer_k, staging.heads);
-            launch.bind(context.staging_, metal_chain_links_buffer_k, staging.links);
-            launch.bind(context.staging_, metal_walked_buffer_k, staging.walked);
+    /** Bytes of one restitch simdgroup's scratch, as @c metal_restitch_kernel carves it: two rows
+     *  of candidates as scored nodes, a row of mates, two rows of candidate IDs and distances, and
+     *  a row of kept positions. */
+    std::size_t stitch_slice_bytes_() const noexcept {
+        std::size_t const row_ids = connectivity();
+        std::size_t const link_bytes = 3 * sizeof(u64_t) + 2 * (sizeof(u32_t) + sizeof(f32_t)) + sizeof(u32_t);
+        return round_up_to_multiple<std::size_t>(row_ids * link_bytes, metal_fragment_bytes_k);
+    }
+
+    /** The round buffer's layout over @p rows rows for a round sized as @p sizing, or for a lone
+     *  check's zeros, every column starting on a fragment. */
+    round_layout_t round_layout_(std::size_t rows, round_sizing_t const& sizing) const noexcept {
+        std::size_t offset = 0;
+        auto carve = [&](std::size_t bytes) noexcept {
+            std::size_t const at = offset;
+            offset = round_up_to_multiple<std::size_t>(offset + bytes, metal_fragment_bytes_k);
+            return at;
         };
-
-        shared_lock_t storage {storage_};
-        metal_launch_t launch {context.api(), context.stream(),
-                               pipeline_(vram_kernel_t::refine_k, candidate_slots).pipeline};
-        if (!launch) return status_t::device_error_k;
-        bind_storage_(launch, arguments);
-        launch.bind(context.staging_, metal_staging_buffer_k);
-        launch.bind(context.arena_, metal_arena_buffer_k);
-        launch.bind(counters_, metal_counters_buffer_k);
-        launch.bind(context.staging_, metal_part_bases_buffer_k, staging.bases);
-        bind_chains(launch);
-        if (status_t const submitted = context.submit_(launch, blocks, threadgroup_threads_()); failed(submitted))
-            return submitted;
-        metal_launch_t merge {context.api(), context.stream(),
-                              pipeline_(vram_dense_kernel_t::merge_back_links_k, 0).pipeline};
-        if (!merge) return status_t::device_error_k;
-        arguments.first_id = 0;
-        arguments.end_id = static_cast<u32_t>(rows);
-        arguments.use_node_ids = 0;
-        arguments.selection_nodes = reselection_nodes_();
-        bind_storage_(merge, arguments);
-        merge.bind(context.arena_, metal_arena_buffer_k);
-        merge.bind(context.staging_, metal_counters_buffer_k, staging.counters);
-        bind_chains(merge);
-        return context.submit_(merge, blocks, threadgroup_threads_());
+        std::size_t const ids = rows * sizeof(u32_t), words = divide_round_up<std::size_t>(rows, 32) * sizeof(u32_t);
+        round_layout_t layout;
+        layout.counters = carve(metal_round_counter_words_k * sizeof(u32_t));
+        layout.depths_from_root = carve(rows);
+        layout.depths_to_root = carve(rows);
+        layout.in_links = carve(ids);
+        layout.shallower_in_links = carve(ids);
+        layout.reached = carve(words);
+        layout.reaches_root = carve(words);
+        layout.two_ways_to_root = carve(words);
+        layout.changed = carve(words);
+        std::size_t const aliased = offset;
+        layout.island_nodes = carve(ids);
+        layout.island_components = carve(ids);
+        // Two labels per island, whose slots serve the weak components' union-find, root's last.
+        layout.island_labels = carve(2 * ids);
+        layout.island_parents = carve(ids);
+        layout.island_entries = carve(2 * ids);
+        layout.island_roles = carve(ids);
+        std::size_t const islands_bytes = offset;
+        offset = aliased;
+        layout.entry_neighborhoods = carve(rows * sizeof(u16_t));
+        layout.neighborhood_entries = carve(ids);
+        layout.neighborhood_offsets = carve(split_room(rows, sizing.hubs_per_draw) * sizeof(u32_t));
+        layout.hub_nodes = carve(sizing.hubs * sizeof(u32_t));
+        layout.runs = carve(sizing.runs * 4 * sizeof(u32_t));
+        layout.run_items = carve((sizing.runs + 1) * sizeof(u32_t));
+        layout.stitch = carve(sizing.groups * metal_simdgroups_k * stitch_slice_bytes_());
+        layout.bytes = max_of(offset, islands_bytes);
+        return layout;
     }
 
-    /** Reads the pass @c submit_pass_ submitted over @p walked rows, once it finished: the rows the
-     *  merge counted changed, and the walk's and the merge's telemetry. */
-    refine_report_t read_pass_(traversal_context_t& context, std::size_t walked) const noexcept {
-        u32_t const* const walk = metal_words(counters_);
-        u32_t const* const merge = reinterpret_cast<u32_t const*>(context.staging_.host + refine_layout_().counters);
-        refine_report_t result;
-        result.reselected_nodes = walked;
-        result.changed_nodes = merge[metal_changed_k];
-        result.traversal_stats.visited_members = metal_tally(walk, metal_hops_k);
-        result.traversal_stats.computed_distances = metal_tally(walk, metal_scored_k) +
-                                                    metal_tally(merge, metal_scored_k);
-        result.traversal_stats.restarts = metal_tally(walk, metal_restarts_k);
-        return result;
-    }
-
-    /** Sweeps reachability on the host from as many stride-spread landmarks as one search draws,
-     *  forward and then back toward them, collecting the rows not reached both ways into
-     *  @c islands; @p audit grows to the rows published now and keeps its capacity for later
-     *  rounds and calls. */
-    status_t audit_(metal_audit_t& audit) const noexcept {
-        std::size_t const rows = size(), connectivity = this->connectivity();
-        std::size_t const seed_count = min_of(connectivity, rows);
-        for (growing_buffer<u8_t>* marks :
-             {&audit.reached, &audit.frontier, &audit.next_frontier, &audit.reaches_back, &audit.back_settled}) {
-            if (failed(marks->reserve_exactly(rows))) return status_t::bad_alloc_k;
-            marks->clear();
-            marks->extend_uninitialized(rows);
-        }
-        if (failed(audit.islands.reserve_exactly(rows))) return status_t::bad_alloc_k;
-        u32_t const* const neighbors = neighbor_rows_();
-        std::memset(audit.reached.data(), 0, rows);
-        std::memset(audit.frontier.data(), 0, rows);
-        std::memset(audit.reaches_back.data(), 0, rows);
-        for (std::size_t seed = 0; seed != seed_count; ++seed) {
-            std::size_t const row = seed * rows / seed_count;
-            audit.reached[row] = audit.frontier[row] = audit.reaches_back[row] = 1;
-        }
-        // Each sweep's frontier holds only rows the one before reached first, so the sweeps end
-        // once every reachable row was a frontier.
-        for (audit.sweeps = 1;; ++audit.sweeps) {
-            std::memset(audit.next_frontier.data(), 0, rows);
-            bool expanded = false;
-            for (std::size_t row = 0; row != rows; ++row) {
-                if (!audit.frontier[row]) continue;
-                expanded = true;
-                for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                    u32_t const target = neighbors[row * connectivity + slot];
-                    if (target == node_id_unknown_k || target == row || target >= rows || audit.reached[target])
-                        continue;
-                    audit.reached[target] = audit.next_frontier[target] = 1;
-                }
-            }
-            if (!expanded) break;
-            std::swap(audit.frontier, audit.next_frontier);
-        }
-        // Each level back marks the rows linking into one that reached back a level before, so no
-        // reverse adjacency is built.
-        for (audit.back_sweeps = 0;; ++audit.back_sweeps) {
-            std::memcpy(audit.back_settled.data(), audit.reaches_back.data(), rows);
-            bool reached_any_back = false;
-            for (std::size_t row = 0; row != rows; ++row) {
-                if (audit.reaches_back[row]) continue;
-                for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                    u32_t const target = neighbors[row * connectivity + slot];
-                    if (target == node_id_unknown_k || target == row || target >= rows || !audit.back_settled[target])
-                        continue;
-                    audit.reaches_back[row] = 1, reached_any_back = true;
-                    break;
-                }
-            }
-            if (!reached_any_back) break;
-        }
-        audit.islands.clear();
-        for (std::size_t row = 0; row != rows; ++row)
-            if (!audit.reached[row] || !audit.reaches_back[row])
-                audit.islands.push_back_reserved(static_cast<u32_t>(row));
+    /** Grows @p context 's round buffer to a round over @p rows rows sized as @p sizing, a lone
+     *  check's for zeros, and binds @p health onto it. */
+    status_t carve_round_(health_plan_t& health, std::size_t rows, round_sizing_t const& sizing,
+                          traversal_context_t& context) noexcept {
+        round_layout_t const layout = round_layout_(rows, sizing);
+        bool fresh = false;
+        if (status_t const grown = context.ensure_(context.round_, layout.bytes, fresh); failed(grown)) return grown;
+        health.bind(*this, static_cast<node_id_t>(rows), layout, context.round_.host);
         return status_t::success_k;
     }
 
-    /** Reconnects each island as @c vram_reconnect_island does: an unreached one into the first of
-     *  its reached picks with room for it, or into the landmark covering its ID, and one reaching
-     *  no landmark back, unless a live pick does, takes an out-link to the first of the heal's
-     *  walked picks in @p context 's staging that does, or to that landmark. A link takes a free
-     *  slot when one is left, otherwise a slot spread across the tail by the linked ID that never
-     *  evicts a sibling island nor a reached resident left with no other reached in-link. Answers
-     *  the links written. */
-    std::size_t reconnect_(metal_audit_t& audit, traversal_context_t const& context) noexcept {
-        std::size_t const rows = size(), connectivity = this->connectivity();
-        std::size_t const seed_count = min_of(connectivity, rows);
-        std::size_t const spread = heal_spread(connectivity);
-        u32_t* const neighbors = neighbor_rows_();
-        growing_buffer<u32_t>& in_links = audit.in_links;
-        if (failed(in_links.reserve_exactly(rows))) return 0;
-        in_links.clear();
-        in_links.extend_uninitialized(rows);
-        std::memset(in_links.data(), 0, rows * sizeof(u32_t));
-        for (std::size_t row = 0; row != rows; ++row) {
-            if (!audit.reached[row]) continue;
-            for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                u32_t const target = neighbors[row * connectivity + slot];
-                if (target != node_id_unknown_k && target != row && target < rows) ++in_links[target];
-            }
-        }
-        u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + refine_layout_().shadow);
-        std::size_t reconnected = 0;
-        // Whether `linked` now sits in the owner's row, placing it there when a slot allows.
-        auto const attach = [&](u32_t owner, u32_t linked) noexcept {
-            u32_t* const owner_row = neighbors + static_cast<std::size_t>(owner) * connectivity;
-            for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                if (owner_row[slot] == linked) return true;
-                if (owner_row[slot] != node_id_unknown_k && owner_row[slot] != owner) continue;
-                owner_row[slot] = linked, ++reconnected;
-                return true;
-            }
-            for (std::size_t attempt = 0; attempt != spread; ++attempt) {
-                std::size_t const target_slot = connectivity - 1 - (linked + attempt) % spread;
-                u32_t const resident = owner_row[target_slot];
-                if (resident == linked) return true;
-                // An unreached row proves no in-link, and only its own island writes it.
-                if (audit.reached[owner]) {
-                    if (resident != node_id_unknown_k && (resident >= rows || !audit.reached[resident])) continue;
-                    bool const evicting = resident != node_id_unknown_k && resident != owner;
-                    if (evicting && in_links[resident] <= 1) continue;
-                    if (evicting) --in_links[resident];
-                }
-                owner_row[target_slot] = linked, ++reconnected;
-                return true;
-            }
-            return false;
+    /** Threadgroups a round pass of @p kernel over @p items spreads over, a simdgroup an item up to
+     *  the grid the device runs at once, never none. */
+    u32_t spread_(vram_kernel_t kernel, std::size_t items) const noexcept {
+        return max_of(walk_blocks_(items, max_of(resident_blocks_(kernel, 0), 1u)), 1u);
+    }
+
+    /** One column of the round buffer and the slot it binds at. */
+    struct round_column_t {
+        metal_buffer_index_t slot;
+        std::size_t offset;
+    };
+
+    /** Binds the storage, the round's counters and the check's columns of @p layout. */
+    void bind_health_(metal_launch_t& launch, metal_arguments_t const& arguments, round_layout_t const& layout,
+                      traversal_context_t const& context) const noexcept {
+        bind_storage_(launch, arguments);
+        round_column_t const columns[] = {
+            {metal_round_counters_buffer_k, layout.counters},
+            {metal_depths_from_root_buffer_k, layout.depths_from_root},
+            {metal_depths_to_root_buffer_k, layout.depths_to_root},
+            {metal_in_links_buffer_k, layout.in_links},
+            {metal_shallower_in_links_buffer_k, layout.shallower_in_links},
+            {metal_reached_buffer_k, layout.reached},
+            {metal_reaches_root_buffer_k, layout.reaches_root},
+            {metal_two_ways_to_root_buffer_k, layout.two_ways_to_root},
+            {metal_changed_buffer_k, layout.changed},
         };
-        // The first of `picks` in `marks`, or the sentinel.
-        auto const first_pick_in = [&](u32_t const* picks, u32_t island, growing_buffer<u8_t> const& marks) noexcept {
-            for (std::size_t slot = 0; slot != connectivity; ++slot)
-                if (picks[slot] != node_id_unknown_k && picks[slot] != island && picks[slot] < rows &&
-                    marks[picks[slot]])
-                    return picks[slot];
-            return node_id_unknown_k;
+        for (auto const& [slot, offset] : columns) launch.bind(context.round_, slot, offset);
+    }
+
+    /** Commits one pass of a health check's or the heal's @p kernel over @p items on @p context 's
+     *  stream, the check's columns and the islands' bound. */
+    status_t launch_round_(vram_kernel_t kernel, metal_arguments_t const& arguments, round_layout_t const& layout,
+                           std::size_t items, traversal_context_t& context) noexcept {
+        shared_lock_t storage {storage_};
+        metal_launch_t launch {context.api(), context.stream(), pipeline_(kernel, 0).pipeline};
+        if (!launch) return status_t::device_error_k;
+        bind_health_(launch, arguments, layout, context);
+        round_column_t const columns[] = {
+            {metal_island_nodes_buffer_k, layout.island_nodes},
+            {metal_island_components_buffer_k, layout.island_components},
+            {metal_island_labels_buffer_k, layout.island_labels},
+            {metal_island_parents_buffer_k, layout.island_parents},
+            {metal_island_entries_buffer_k, layout.island_entries},
+            {metal_island_roles_buffer_k, layout.island_roles},
         };
-        for (u32_t const island : audit.islands) {
-            // A walk starts at the landmark covering this ID, which is what makes it reached, and
-            // reaching back too.
-            u32_t landmark = island;
-            if (seed_count) landmark = static_cast<u32_t>(std::size_t {island} * seed_count / rows * rows / seed_count);
-            u32_t const* const island_row = neighbors + static_cast<std::size_t>(island) * connectivity;
-            if (!audit.reached[island]) {
-                bool attached = false;
-                for (std::size_t slot = 0; slot != connectivity && !attached; ++slot) {
-                    u32_t const pick = island_row[slot];
-                    if (pick != node_id_unknown_k && pick != island && pick < rows && audit.reached[pick])
-                        attached = attach(pick, island);
-                }
-                if (!attached && landmark != island) attach(landmark, island);
-            }
-            if (audit.reaches_back[island] ||
-                first_pick_in(island_row, island, audit.reaches_back) != node_id_unknown_k)
-                continue;
-            u32_t const nearest = first_pick_in(shadow + std::size_t {island} * connectivity, island,
-                                                audit.reaches_back);
-            if (nearest != node_id_unknown_k) attach(island, nearest);
-            else if (landmark != island) attach(island, landmark);
-        }
-        return reconnected;
+        for (auto const& [slot, offset] : columns) launch.bind(context.round_, slot, offset);
+        // The islands' order is one threadgroup's walk over the words, and the heal one lane's.
+        bool const alone = kernel == vram_kernel_t::order_islands_k || kernel == vram_kernel_t::heal_islands_k;
+        return context.submit_(launch, alone ? 1u : spread_(kernel, items), threadgroup_threads_());
+    }
+
+    /** Commits a gather's or a restitch's @p kernel over @p groups threadgroups on @p context 's
+     *  stream, the check's columns and the round's bound. */
+    status_t launch_neighborhoods_(vram_kernel_t kernel, metal_arguments_t const& arguments,
+                                   round_layout_t const& layout, std::size_t groups,
+                                   traversal_context_t& context) noexcept {
+        shared_lock_t storage {storage_};
+        metal_launch_t launch {context.api(), context.stream(), pipeline_(kernel, 0).pipeline};
+        if (!launch) return status_t::device_error_k;
+        bind_health_(launch, arguments, layout, context);
+        round_column_t const columns[] = {
+            {metal_entry_neighborhoods_buffer_k, layout.entry_neighborhoods},
+            {metal_neighborhood_entries_buffer_k, layout.neighborhood_entries},
+            {metal_neighborhood_offsets_buffer_k, layout.neighborhood_offsets},
+            {metal_hub_nodes_buffer_k, layout.hub_nodes},
+            {metal_runs_buffer_k, layout.runs},
+            {metal_run_items_buffer_k, layout.run_items},
+            {metal_stitch_buffer_k, layout.stitch},
+        };
+        for (auto const& [slot, offset] : columns) launch.bind(context.round_, slot, offset);
+        return context.submit_(launch, groups, threadgroup_threads_());
+    }
+
+    /** Commits the heal of the islands @p health named, none when it named none. */
+    status_t queue_heal_(health_plan_t& health, traversal_context_t& context) noexcept {
+        if (!health.islands()) return status_t::success_k;
+        metal_arguments_t arguments = arguments_();
+        arguments.end_id = health.visible;
+        arguments.islands = static_cast<u32_t>(health.islands());
+        return launch_round_(vram_kernel_t::heal_islands_k, arguments, health.layout, 1, context);
     }
 
     /** Where a split's shared buffer keeps each array of @p nodes nodes into @p parts parts, in
      *  bytes: each node's part, which the host turns into its slot, the round's proposals, the two
-     *  frontiers and the picked bitset, one bit per node each, then per part its size and its round
-     *  count, and the nodes the last two rounds placed, by the round number's parity. */
+     *  frontiers, one bit per node each, then per part its size and its round count, and the nodes
+     *  the last two rounds placed, by the round number's parity. */
     struct split_layout_t {
-        std::size_t node_parts = 0, proposals = 0, frontier = 0, next_frontier = 0, picked = 0;
+        std::size_t node_parts = 0, proposals = 0, frontier = 0, next_frontier = 0;
         std::size_t part_sizes = 0, round_counts = 0, placed = 0, device_bytes = 0;
     };
     static split_layout_t split_layout_(std::size_t nodes, std::size_t parts) noexcept {
@@ -2522,8 +2940,7 @@ struct vram_apple_index {
         layout.proposals = nodes * sizeof(u32_t);
         layout.frontier = layout.proposals + nodes * sizeof(u32_t);
         layout.next_frontier = layout.frontier + words * sizeof(u32_t);
-        layout.picked = layout.next_frontier + words * sizeof(u32_t);
-        layout.part_sizes = layout.picked + words * sizeof(u32_t);
+        layout.part_sizes = layout.next_frontier + words * sizeof(u32_t);
         layout.round_counts = layout.part_sizes + parts * sizeof(u32_t);
         layout.placed = layout.round_counts + parts * sizeof(u32_t);
         layout.device_bytes = layout.placed + 2 * sizeof(u32_t);
@@ -2566,7 +2983,6 @@ struct vram_apple_index {
         launch.bind(split.device_bytes, metal_part_sizes_buffer_k, layout.part_sizes);
         launch.bind(split.device_bytes, metal_round_counts_buffer_k, layout.round_counts);
         launch.bind(split.device_bytes, metal_placed_buffer_k, layout.placed);
-        launch.bind(split.device_bytes, metal_picked_buffer_k, layout.picked);
     }
 
     /** Commits @p split 's growth rounds from its next one up to twice it on @p context 's stream,
@@ -2620,21 +3036,6 @@ struct vram_apple_index {
             node_parts[node] = static_cast<u32_t>(smallest);
             ++part_sizes[smallest];
         }
-    }
-
-    /** Commits the pass picking @p split 's nodes that link into another part, on
-     *  @p context 's stream, once every node holds its part. */
-    status_t queue_picked_(split_t& split, traversal_context_t& context) noexcept {
-        metal_arguments_t arguments = arguments_();
-        arguments.end_id = static_cast<u32_t>(split.entries);
-        shared_lock_t storage {storage_};
-        metal_launch_t launch {context.api(), context.stream(),
-                               pipeline_(vram_kernel_t::partition_picked_k, 0).pipeline};
-        if (!launch) return status_t::device_error_k;
-        bind_partition_(launch, arguments, split);
-        return context.submit_(
-            launch, walk_blocks_(split.entries, max_of(resident_blocks_(vram_kernel_t::partition_picked_k, 0), 1u)),
-            threadgroup_threads_());
     }
 
     /** Moves every node of @p split into its receiver at the slot it was assigned, on the host over
@@ -2733,7 +3134,7 @@ struct vram_apple_index {
         return context.submit_(launch, 1, threadgroup_threads_());
     }
 
-#pragma endregion Refinement Passes
+#pragma endregion Round Launches
 
 #pragma region State
 

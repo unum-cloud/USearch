@@ -16,7 +16,7 @@
 #include <type_traits> // `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`
 
-#include "usearch/utilities/types.hpp" // `u32_t`
+#include "usearch/utilities/types.hpp" // `u32_t`, `round_hubs`
 
 namespace unum::usearch::utilities {
 
@@ -96,6 +96,130 @@ void partial_sort(std::span<value_type_> values, std::size_t count, comparator_t
         std::swap(values[0], values[--size]);
         sift_down(0, size);
     }
+}
+
+/** Replaces the farthest of the max-heap @p heap under @p further with @p entry. */
+template <typename entry_type_, typename further_type_>
+void replace_farthest(std::span<entry_type_> heap, entry_type_ entry, further_type_ const& further) noexcept {
+    std::size_t parent = 0;
+    for (std::size_t child = 1; child < heap.size(); parent = child, child = 2 * parent + 1) {
+        if (child + 1 < heap.size() && further(heap[child + 1], heap[child])) ++child;
+        if (!further(heap[child], entry)) break;
+        heap[parent] = heap[child];
+    }
+    heap[parent] = entry;
+}
+
+/** Slots @ref split_wide_neighborhoods may write over @p entries entries drawing at most
+ *  @p hubs_per_draw hubs a gather: one start per entry and one closing them, past one split's
+ *  starts and cursors. */
+constexpr std::size_t split_room(std::size_t entries, std::size_t hubs_per_draw) noexcept {
+    return entries + 2 * hubs_per_draw + 3;
+}
+
+/** What an order by neighborhood leaves: the neighborhoods, whose starts lead the offsets, and the
+ *  widest one's entries. */
+struct neighborhood_order_t {
+    std::size_t neighborhoods = 0;
+    std::size_t widest = 0;
+};
+
+/** Merges the repeated starts of the ascending @p offsets in place, which hubs no entry chose
+ *  leave. */
+template <typename node_id_type_>
+neighborhood_order_t merge_repeated_starts(std::span<node_id_type_> offsets) noexcept {
+    std::size_t kept = 1, widest = 0;
+    for (std::size_t boundary = 1; boundary != offsets.size(); ++boundary) {
+        if (offsets[boundary] == offsets[kept - 1]) continue;
+        widest = max_of<std::size_t>(widest, offsets[boundary] - offsets[kept - 1]);
+        offsets[kept++] = offsets[boundary];
+    }
+    return {kept - 1, widest};
+}
+
+/**
+ *  @brief Sorts the entries by the neighborhood @p entry_neighborhoods gives each, among @p hubs,
+ *      into @p entries, and writes where each neighborhood starts into @p offsets.
+ *
+ *  Each neighborhood's entries ascend, and one start past the last closes them. @p offsets holds
+ *  at least @p hubs + 2 slots: the counts land two ahead, so after the prefix sums the placement
+ *  advances each neighborhood's start to its end, which is the next one's start.
+ */
+template <typename node_id_type_>
+neighborhood_order_t order_by_neighborhood(std::span<u16_t const> entry_neighborhoods, std::size_t hubs,
+                                           std::span<node_id_type_> entries,
+                                           std::span<node_id_type_> offsets) noexcept {
+    std::size_t const visible = entry_neighborhoods.size();
+    for (std::size_t slot = 0; slot != hubs + 2; ++slot) offsets[slot] = 0;
+    for (std::size_t entry = 0; entry != visible; ++entry) ++offsets[entry_neighborhoods[entry] + 2u];
+    for (std::size_t hub = 2; hub < hubs + 2; ++hub) offsets[hub] += offsets[hub - 1];
+    for (std::size_t entry = 0; entry != visible; ++entry)
+        entries[offsets[entry_neighborhoods[entry] + 1u]++] = static_cast<node_id_type_>(entry);
+    return merge_repeated_starts(offsets.first(hubs + 1));
+}
+
+/**
+ *  @brief Splits every one of the @p count neighborhoods of @p offsets wider than @p capacity in
+ *      place, so no neighborhood stays over capacity.
+ *
+ *  A wide neighborhood's entries sort by the neighborhood their last gather gave each, the new
+ *  ones ascending by ID; one that gather left whole, its every entry nearest to one hub as
+ *  duplicates are, is cut into pieces by ID instead. New starts go into @p offsets past its
+ *  @p count + 1, which must hold as many slots as @ref split_room counts; then the starts sort and
+ *  their repeats merge.
+ */
+template <typename node_id_type_>
+neighborhood_order_t split_wide_neighborhoods(std::span<u16_t const> entry_neighborhoods,
+                                              std::span<node_id_type_> entries, std::span<node_id_type_> offsets,
+                                              std::size_t count, std::size_t capacity,
+                                              std::size_t hubs_per_draw) noexcept {
+    std::size_t starts_count = count + 1;
+    for (std::size_t neighborhood = 0; neighborhood != count; ++neighborhood) {
+        std::size_t const width = offsets[neighborhood + 1] - offsets[neighborhood];
+        std::size_t const hubs = round_hubs(width, hubs_per_draw, capacity);
+        if (width <= capacity) continue;
+        node_id_type_ const first = offsets[neighborhood];
+        std::span<node_id_type_> const members = entries.subspan(first, width);
+        // Past the starts sit each new neighborhood's start, then its cursor, both from zero.
+        std::size_t const appended = starts_count;
+        node_id_type_* const starts = offsets.data() + appended;
+        node_id_type_* const cursors = starts + hubs + 1;
+        for (std::size_t slot = 0; slot != 2 * hubs + 1; ++slot) starts[slot] = 0;
+        for (node_id_type_ const member : members) ++starts[entry_neighborhoods[member] + 1u];
+        node_id_type_ largest = 0;
+        for (std::size_t hub = 1; hub <= hubs; ++hub) largest = max_of(largest, starts[hub]);
+        if (largest == width) {
+            std::size_t const pieces = divide_round_up(width, capacity);
+            std::size_t const piece = divide_round_up(width, pieces);
+            starts_count = appended;
+            for (std::size_t cut = piece; cut < width; cut += piece)
+                offsets[starts_count++] = static_cast<node_id_type_>(first + cut);
+            continue;
+        }
+        for (std::size_t hub = 1; hub <= hubs; ++hub) starts[hub] += starts[hub - 1];
+        for (std::size_t hub = 0; hub != hubs; ++hub) cursors[hub] = starts[hub];
+        // Each swap moves one entry into its new neighborhood for good.
+        for (std::size_t hub = 0; hub != hubs; ++hub)
+            while (cursors[hub] < starts[hub + 1]) {
+                std::size_t const into = entry_neighborhoods[members[cursors[hub]]];
+                if (into == hub) ++cursors[hub];
+                else std::swap(members[cursors[hub]], members[cursors[into]++]);
+            }
+        for (std::size_t hub = 0; hub != hubs; ++hub)
+            partial_sort(members.subspan(starts[hub], starts[hub + 1] - starts[hub]), starts[hub + 1] - starts[hub]);
+        // Each start moves down past the empty neighborhoods onto its own slot or an earlier one.
+        std::size_t written = appended;
+        for (std::size_t hub = 1, last = 0; hub != hubs; ++hub) {
+            node_id_type_ const start = starts[hub];
+            if (start == last || start == width) continue;
+            offsets[written++] = static_cast<node_id_type_>(first + start);
+            last = start;
+        }
+        starts_count = written;
+    }
+    std::span<node_id_type_> const kept = offsets.first(starts_count);
+    partial_sort(kept, kept.size());
+    return merge_repeated_starts(kept);
 }
 
 } // namespace unum::usearch::utilities

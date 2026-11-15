@@ -250,6 +250,40 @@ enum class vram_kernel_t : u32_t {
     /** Moves nodes' neighbor IDs between ID spaces, packing the survivors. */
     rebase_links_k,
 
+    // Rounds
+
+    /** Files every entry of a gather's runs under its nearest hub. */
+    gather_neighborhoods_k,
+
+    /** Re-stitches each neighborhood: all against all, then each entry's diverse links. */
+    restitch_k,
+
+    // Health Check
+
+    /** Expands one depth of a health check from its root, marking ways to the root. */
+    health_expand_k,
+
+    /** Marks the reached entries that now link to an entry reaching the root. */
+    health_recheck_k,
+
+    /** Writes the entries outside the root's component in ascending order. */
+    order_islands_k,
+
+    /** Marks the islands linking into the root's component and their ways to the root. */
+    health_islands_k,
+
+    /** Propagates the least rank along the islands' links, both ways, naming their components. */
+    island_components_k,
+
+    /** Counts unlinked and underlinked entries and files each island's parent. */
+    health_count_links_k,
+
+    /** Labels the islands' roles and entries and counts the weak components. */
+    label_islands_k,
+
+    /** Links every island component through the root's component, with no distance. */
+    heal_islands_k,
+
     // Reachability Audit
     /** Marks the reachability audit's landmark nodes reached and in the first frontier. */
     mark_landmarks_k,

@@ -27,6 +27,7 @@
 
 #include <cerrno>  // `errno`, `EINTR`, `ENOENT`, `ENOSPC`
 #include <cstddef> // `std::byte`
+#include <cstdint> // `std::uintptr_t` - where a run sits within a page
 #include <cstdio>  // `std::rename`, `std::remove` - a durable replacement's move and its cleanup
 #include <cstring> // `std::memcpy`, `std::memset`
 
@@ -36,6 +37,8 @@
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::errc`
 #include <utility>      // `std::exchange`
+
+#include <forkunion/topology.hpp> // `fu::ram_page_size` - the alignment of a direct transfer
 
 #include "usearch/utilities/types.hpp"
 
@@ -52,8 +55,9 @@
 #include <unistd.h>   // `pread`, `pwrite`, `read`, `write`, `ftruncate`, `fsync`, `fdatasync`, `close`
 #endif
 #if USEARCH_OS_LINUX_
-#include <sys/ioctl.h> // `ioctl`
-#include <sys/mount.h> // `BLKGETSIZE64`
+#include <sys/ioctl.h>     // `ioctl`
+#include <sys/mount.h>     // `BLKGETSIZE64`
+#include <sys/sysmacros.h> // `gnu_dev_major`, `gnu_dev_minor` - a device's queue in sysfs
 #endif
 #if !USEARCH_OS_WINDOWS_ && !USEARCH_OS_WASI_
 #include <dlfcn.h>    // `dlopen`, `dlsym` - GPU runtimes opened at first use
@@ -384,6 +388,40 @@ inline bool names_regular_file_or_nothing_(char const* path) noexcept {
 }
 
 #endif // USEARCH_OS_WINDOWS_
+
+#if USEARCH_OS_LINUX_
+
+/** The most bytes one request to the block device under @p descriptor carries, its queue's
+ *  @c max_sectors_kb; zero where sysfs does not say. */
+inline std::size_t device_request_bytes_(int descriptor) noexcept {
+    struct stat description;
+    if (::fstat(descriptor, &description) != 0) return 0;
+    dev_t const device = S_ISBLK(description.st_mode) ? description.st_rdev : description.st_dev;
+    // A partition's queue is its disk's, one directory up.
+    constexpr std::string_view queues[] = {"/queue/max_sectors_kb", "/../queue/max_sectors_kb"};
+    for (std::string_view const queue : queues) {
+        char path[96] = "/sys/dev/block/";
+        char* end = std::to_chars(path + 15, path + 40, gnu_dev_major(device)).ptr;
+        *end++ = ':';
+        end = std::to_chars(end, path + 64, gnu_dev_minor(device)).ptr;
+        std::memcpy(end, queue.data(), queue.size());
+        end[queue.size()] = '\0';
+        native_file_t const file = open_native_file(path, file_access_t::read_only_k, file_buffering_t::buffered_k);
+        if (file == invalid_native_file_k) continue;
+        char text[24] = {};
+        i64_t const moved = read_native_file(file, native_file_event_t {}, bytes_of(text, sizeof(text) - 1), 0);
+        [[maybe_unused]] status_t const closed = close_native_file(file);
+        std::size_t kibibytes = 0;
+        if (moved > 0 && std::from_chars(text, text + moved, kibibytes).ec == std::errc {}) return kibibytes << 10;
+    }
+    return 0;
+}
+
+#elif !USEARCH_OS_WINDOWS_
+
+inline std::size_t device_request_bytes_(int) noexcept { return 0; }
+
+#endif
 
 #pragma endregion Native Files
 
@@ -818,10 +856,14 @@ class mapped_file_t {
     /** Bytes the mapping spans. */
     std::size_t size() const noexcept { return bytes_; }
 
-    /** The mapped file opened again, read-only and unbuffered, beside the mapping; empty for a
-     *  mapping short of its whole file, a filesystem refusing it, or a platform without
-     *  @c /dev/fd, where the descriptor alone names the file. */
+    /** The mapped file opened again, read-only and unbuffered, beside the mapping, so threads
+     *  read it positionally past the page cache; empty for a mapping short of its whole file, a
+     *  filesystem refusing it, or WASI, whose mapping already is a heap copy of the bytes. */
     seekable_file_t open_direct() const noexcept;
+
+    /** The most bytes one request to the drive under the mapped file carries; zero where the
+     *  platform does not say. */
+    std::size_t request_bytes() const noexcept;
 
     /**
      *  Maps the whole of @p path read-only.
@@ -931,6 +973,20 @@ inline void mapped_file_t::unmap_() noexcept {
     file_handle_ = INVALID_HANDLE_VALUE;
 }
 
+inline seekable_file_t mapped_file_t::open_direct() const noexcept {
+    seekable_file_t file;
+    // A handle of its own, overlapped like every other, so threads read it at their own offsets.
+    file.descriptor_ = ::ReOpenFile(file_handle_, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING);
+    if (!file) return file;
+    // A mapping shorter than its file starts past byte zero, which offsets into it would miss.
+    auto const [bytes, capacity_status] = native_file_capacity(file.descriptor_);
+    if (failed(capacity_status) || bytes != bytes_) return seekable_file_t {};
+    return file;
+}
+
+inline std::size_t mapped_file_t::request_bytes() const noexcept { return 0; }
+
 #elif USEARCH_OS_WASI_
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
@@ -981,6 +1037,10 @@ inline void mapped_file_t::unmap_() noexcept {
     [[maybe_unused]] status_t const closed = file_.close();
     data_ = nullptr, bytes_ = 0, access_ = file_access_t::read_only_k;
 }
+
+inline seekable_file_t mapped_file_t::open_direct() const noexcept { return seekable_file_t {}; }
+
+inline std::size_t mapped_file_t::request_bytes() const noexcept { return 0; }
 
 #else
 
@@ -1055,6 +1115,8 @@ inline seekable_file_t mapped_file_t::open_direct() const noexcept {
     return file;
 }
 
+inline std::size_t mapped_file_t::request_bytes() const noexcept { return device_request_bytes_(descriptor_); }
+
 inline void mapped_file_t::unmap_() noexcept {
     if (data_) ::munmap(data_, staged_bytes_ ? staged_bytes_ : bytes_);
     if (descriptor_ != invalid_native_file_k) [[maybe_unused]]
@@ -1064,6 +1126,52 @@ inline void mapped_file_t::unmap_() noexcept {
 }
 
 #endif
+
+/** One regular column of a part as a load reads it, a run at a time: its bytes as a mapping or the
+ *  caller's buffer holds them, beside the same bytes in the part's file opened past the page cache,
+ *  where one could be opened. */
+struct column_source_t {
+
+    /** The column's bytes, mapped or lent. */
+    bytes_view_t mapped;
+
+    /** The same bytes in the part's unbuffered file; empty where none opened. */
+    file_view_t direct;
+
+    /** Whether the column holds no bytes - a part that carries none of it. */
+    bool empty() const noexcept { return mapped.empty(); }
+};
+
+/**
+ *  @brief Copies entries @p first to @p first + @p count of @p source, @p entry_bytes wide, into
+ *      @p destination: the whole pages they span straight from the drive into place, the rest out
+ *      of the mapped bytes.
+ *
+ *  A destination whose place within a page differs from its bytes', a column with no file, and a
+ *  read the drive refuses all copy every byte out of the mapped bytes, which the page cache serves.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The column holds fewer entries, or @p destination another byte count.
+ */
+inline status_t copy_entries(column_source_t const& source, std::size_t first, std::size_t count,
+                             std::size_t entry_bytes, bytes_span_t destination) noexcept {
+    bytes_view_t const entries = flat_rows(source.mapped, first, count, entry_bytes);
+    if (entries.size() != count * entry_bytes || destination.size() != entries.size())
+        return status_t::config_mismatch_k;
+    std::size_t const page = fu::ram_page_size();
+    std::size_t const offset = source.direct.begin + first * entry_bytes;
+    std::size_t const leading = round_up_to_multiple(offset, page) - offset;
+    std::size_t const paged = leading < entries.size() ? (entries.size() - leading) / page * page : 0;
+    file_view_t const pages = source.direct.subspan(first * entry_bytes + leading, paged);
+    bool const in_place = paged && !pages.empty() &&
+                          reinterpret_cast<std::uintptr_t>(destination.data() + leading) % page == 0;
+    if (!in_place || failed(copy_bytes(destination.subspan(leading, paged), pages)))
+        return copy_bytes(destination, entries);
+    std::memcpy(destination.data(), entries.data(), leading);
+    std::memcpy(destination.data() + leading + paged, entries.data() + leading + paged,
+                entries.size() - leading - paged);
+    return status_t::success_k;
+}
 
 #pragma endregion Slices and Mappings
 

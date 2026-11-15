@@ -314,9 +314,9 @@ struct vram_nvidia_indexes {
      *
      *  The executor and every shard's claim over the rows it takes are held for the plan's whole
      *  life, one context per shard opened for the whole batch, and every shard's storage and keys
-     *  grown to the rows it takes, so a step fails only on its devices.
+     *  grown to the rows it takes, so a task fails only on its devices.
      *
-     *  Row @c t of the batch goes to shard @c (rotation+t) mod S. Steps run one after another on
+     *  Row @c t of the batch goes to shard @c (rotation+t) mod S. Tasks run one after another on
      *  one host thread, each writing its rows' keys and launching the rows as deferred inserts;
      *  @ref finish settles them, files every shard's keys into its map, and turns every shard's
      *  watermark inside one commit, so a reader spanning the shards sees the batch whole or not at
@@ -346,14 +346,15 @@ struct vram_nvidia_indexes {
         }
 
         /**
-         *  Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
-         *  the rows and the keys stay live until @ref finish. Mismatched arguments launch nothing,
-         *  any later refusal fails the plan.
+         *  @brief Launches @p rows from row @p first_row of the plan under @p keys on their shards;
+         *      the rows and the keys stay live until @ref finish.
+         *
+         *  Mismatched arguments launch nothing, any later refusal fails the plan.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent, or @ref status keeps it.
          *  - @c config_mismatch_k The @p keys are not one per row, the rows pass the batch or are
-         *    not as wide as the index, a step overlaps rows already launched, or @ref status keeps
+         *    not as wide as the index, a task overlaps rows already launched, or @ref status keeps
          *    it.
          *  - @c unsupported_k The rows' scalar has no device cast into the stored one, or
          *    @ref status keeps it.
@@ -400,17 +401,17 @@ struct vram_nvidia_indexes {
 
         /**
          *  @brief Settles every launch, publishes every row at once, and reports the batch's
-         *      telemetry. A plan short of rows refuses and stays whole, so the missing steps can
+         *      telemetry. A plan short of rows refuses and stays whole, so the missing tasks can
          *      still be copied.
          *
          *  Any other call spends the plan, and a failed launch or drain publishes nothing and
          *  keeps its failure on every shard holding launched rows.
          *
          *  @par Statuses:
-         *  - @c uninitialized_k The plan is empty or spent, or a step or @ref status keeps it.
-         *  - @c config_mismatch_k The steps launched fewer rows than the batch holds, or a step or
+         *  - @c uninitialized_k The plan is empty or spent, or a task or @ref status keeps it.
+         *  - @c config_mismatch_k The tasks launched fewer rows than the batch holds, or a task or
          *    @ref status keeps it.
-         *  - @c unsupported_k, @c unsupported_layout_k or @c overflow_k A step or @ref status keeps
+         *  - @c unsupported_k, @c unsupported_layout_k or @c overflow_k A task or @ref status keeps
          *    it.
          *  - @c cancelled_k The index keeps it, as @ref status says.
          */
@@ -466,14 +467,14 @@ struct vram_nvidia_indexes {
             std::size_t launched = 0;
         };
 
-        /** Launches the step's rows the plan's shard @p shard takes, from @p first on in strides of
+        /** Launches the task's rows the plan's shard @p shard takes, from @p first on in strides of
          *  the shard generation's width, under their keys. */
         status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const width = batch_split_.open_shard_generation.width, count = rows.rows;
             std::size_t const taking = shards_t::entries_from(count, first, width);
             share_t& share = shares_[shard];
             if (!taking) return status_t::success_k;
-            // Overlapping steps would write keys past the cover the plan grew.
+            // Overlapping tasks would write keys past the cover the plan grew.
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             std::size_t const placed = batch_split_.open_shard_generation.first + shard;
             shard_t& slot = owner_->shards_[placed];
@@ -545,7 +546,7 @@ struct vram_nvidia_indexes {
         /** The telemetry the launches reported as they returned, summed. */
         insert_result_t result_ {};
 
-        /** The first refusal past a step's arguments, which leaves the whole batch unpublished. */
+        /** The first refusal past a task's arguments, which leaves the whole batch unpublished. */
         status_t status_ = status_t::success_k;
 
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
@@ -569,7 +570,7 @@ struct vram_nvidia_indexes {
      *  one's claim refused with @c overflow_k. A shard with a batch, load, refine, absorb or save
      *  in flight refuses its claim, and the whole plan with @c contended_k.
      *
-     *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
+     *  @param[in] rows Rows in the batch; the plan's tasks launch each exactly once, in any order.
      *  @param[in,out] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      *
@@ -650,7 +651,7 @@ struct vram_nvidia_indexes {
     /**
      *  @brief Inserts a batch under @p keys, splitting rows across the shards round-robin from a
      *      rotating start, so they fill evenly and each sees the whole distribution:
-     *      @ref plan_insert, one step over every row, and its @c finish.
+     *      @ref plan_insert, one task over every row, and its @c finish.
      *
      *  Node IDs never cross this boundary: they are shard-local, and which shard a row went to is
      *  the index's business. The keys are what the caller gets its rows back by.
@@ -685,7 +686,7 @@ struct vram_nvidia_indexes {
         if (keys.size() != new_rows.rows) return {{size()}, status_t::config_mismatch_k};
         auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {{size()}, status};
-        // A refused step leaves rows short, and `finish` reports the refusal it kept or the
+        // A refused task leaves rows short, and `finish` reports the refusal it kept or the
         // shortfall.
         [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_rows);
         return plan.finish();
@@ -722,13 +723,13 @@ struct vram_nvidia_indexes {
      *  @brief One refine in flight over every device shard, holding every claim word closed
      *      meanwhile.
      *
-     *  It owns its walk contexts, their runs and its part starts, so nothing about it lives in the
-     *  index; @ref run continues it after a cancel, and @ref finish heals what a stopped pass
-     *  leaves and reopens. Every shard's @c refine_plan_t is driven phase by phase from this
-     *  thread: each phase queues on every shard's device first, then waits once per shard, so the
-     *  devices work side by side. An absorb's plan first appends its donors, one after another, and
-     *  only then opens the shards' passes over the parts they appended; a split's opens every
-     *  shard's split into the receivers' shards at planning and keeps the receivers closed too. The
+     *  It owns its contexts and their runs, so nothing about it lives in the index; @ref run
+     *  continues it after a cancel, and @ref finish closes what a stopped round leaves and reopens.
+     *  Every shard's @c refine_plan_t is driven phase by phase from this thread: each phase queues
+     *  on every shard's device first, then waits once per shard, so the devices work side by side.
+     *  An absorb's plan first appends its donors, one after another, and only then opens the
+     *  shards' rounds, the parts they appended standing as islands; a split's opens every shard's
+     *  split into the receivers' shards at planning and keeps the receivers closed too. The
      *  executor's streams must outlive the plan.
      */
     struct [[nodiscard]] refine_plan_t {
@@ -736,14 +737,12 @@ struct vram_nvidia_indexes {
 
         /** An empty plan over @p allocator; only @ref plan_absorb ever fills it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
-            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator), part_bases_(allocator),
-              part_offsets_(allocator), moves_(allocator) {}
+            : arenas_(allocator), traversals_(allocator), shard_plans_(allocator), moves_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : arenas_(std::move(other.arenas_)), traversals_(std::move(other.traversals_)),
-              shard_plans_(std::move(other.shard_plans_)), part_bases_(std::move(other.part_bases_)),
-              part_offsets_(std::move(other.part_offsets_)), moves_(std::move(other.moves_)),
+              shard_plans_(std::move(other.shard_plans_)), moves_(std::move(other.moves_)),
               donors_(std::exchange(other.donors_, {})), receivers_(std::exchange(other.receivers_, {})),
-              absorbed_donors_(other.absorbed_donors_), config_(other.config_), population_(other.population_),
+              absorbed_donors_(other.absorbed_donors_), config_(other.config_),
               owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
@@ -766,8 +765,8 @@ struct vram_nvidia_indexes {
          *  stays empty, closed and sealed. The executor is held only for the call.
          *
          *  @param[in,out] executor The executor the plan was opened over.
-         *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
-         *      population; a @c cancel_k answer stops before the next phase.
+         *  @param[in] on_visited Fires at every barrier of a round with the units its phase did so
+         *      far and in all, summed over the shards; @c cancel_k stops before the next phase.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished, or @ref status keeps it.
@@ -797,8 +796,8 @@ struct vram_nvidia_indexes {
         }
 
         /**
-         *  @brief Stops any re-selection, audits and heals, reopens the claim words, and reports. A
-         *      plan whose donors have not all been appended heals nothing and reports nothing.
+         *  @brief Stops every round, running its closing health check, reopens the claim words, and
+         *      reports; a plan whose donors are not all appended closes and reports nothing.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished, or a pass found @ref status keeping
@@ -806,8 +805,8 @@ struct vram_nvidia_indexes {
          *  - @c config_mismatch_k The @p executor drives no stream on some shard's device, or a
          *    pass found @ref status keeping it.
          *  - @c contended_k Another call holds the @p executor.
-         *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k
-         *    A pass found the index keeping it, as @ref status says.
+         *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k A pass
+         *    found the index keeping it, as @ref status says.
          */
         expected<refine_report_t> finish(executor_t& executor) noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
@@ -837,8 +836,44 @@ struct vram_nvidia_indexes {
         refine_report_t running() const noexcept {
             refine_report_t result;
             for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
-                result += shard_plans_[shard].finish(traversals_[shard]).value;
+                if (shard) result += shard_plans_[shard].finish(traversals_[shard]).value;
+                else result = shard_plans_[shard].finish(traversals_[shard]).value;
             return result;
+        }
+
+        /** The phase the shards' rounds are in, by the name a progress line prints: the first shard
+         *  still rounding names it. */
+        char const* phase_name() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.phase_name();
+            return shard_plans_.empty() ? "health" : shard_plans_[0].phase_name();
+        }
+
+        /** Where that phase sits among a round's six; zero once every shard's round ended. */
+        std::size_t ordinal() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.ordinal();
+            return 0;
+        }
+
+        /** Units of that phase done and in all, summed over the shards as the drive sums them. */
+        std::size_t completed() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.completed();
+            return sum;
+        }
+        std::size_t total() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.total();
+            return sum;
+        }
+
+        /** Opens every shard's next round once each one's ended, from the roots their closing
+         *  checks kept; a no-op while any shard is mid-round. The claim words stay closed. */
+        void next_round() noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return;
+            for (typename index_t::refine_plan_t& plan : shard_plans_) plan.next_round();
         }
 
       private:
@@ -869,53 +904,45 @@ struct vram_nvidia_indexes {
             return to_span(moves_).subspan(moves_.size() - later - count, count);
         }
 
-        /** Opens every shard's pass over its parts on its own context, once no donor is pending. */
+        /** Opens every shard's round on its own context, once no donor is pending: an absorb's
+         *  appended parts are islands its heal links and its gather mixes, so none walks across. */
         status_t open_shards_() noexcept {
             for (std::size_t shard = 0; shard != traversals_.size(); ++shard) {
-                std::span<node_id_t const> parts;
-                // A refine re-selects every row; an absorb only the rows appended after the
-                // resident part.
-                iota_view<node_id_t> nodes {0, node_id_unknown_k};
-                if (!part_offsets_.empty()) {
-                    parts = {part_bases_.data() + part_offsets_[shard],
-                             part_offsets_[shard + 1] - part_offsets_[shard]};
-                    nodes.first = parts.size() > 1 ? parts[1] : node_id_unknown_k;
-                }
                 if (status_t const entered = fanout_t::enter(owner_->shards_, shard); failed(entered))
                     return shard_plans_.clear(), entered;
-                auto [plan, status] = owner_->shards_[shard].index->plan_refine(nodes, parts, config_,
-                                                                                traversals_[shard]);
+                auto [plan, status] = owner_->shards_[shard].index->plan_round(config_, traversals_[shard]);
                 if (failed(status)) return shard_plans_.clear(), status;
                 shard_plans_.push_back_reserved(std::move(plan));
             }
-            population_ = owner_->size();
             return status_t::success_k;
         }
 
-        /** Drives every shard's pending phases until none follows or @p on_visited cancels; a
-         *  failed phase keeps its status in its plan, and the first one answers. */
+        /** Drives every shard's pending phases until none follows or @p on_visited cancels, every
+         *  phase queued on every shard's device before any waits; a failed phase keeps its status
+         *  in its plan, and the first one answers. Shards whose rounds end early sit idle, since a
+         *  finished plan queues nothing. */
         template <typename progress_type_>
         status_t drive_(progress_type_& on_visited) noexcept {
             status_t outcome = status_t::success_k;
             std::size_t advancing = 0;
             do {
-                bool reselected = false;
-                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                    reselected |= shard_plans_[shard].reselecting();
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
                     if (succeeded(fanout_t::enter(owner_->shards_, shard))) [[maybe_unused]]
                         status_t const queued = shard_plans_[shard].queue(traversals_[shard], config_);
-                }
                 for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
                     if (status_t const waited = shard_plans_[shard].wait(traversals_[shard]);
                         failed(waited) && succeeded(outcome))
                         outcome = waited;
+                // A round's every barrier is heard in its phase's own units, as the RAM drain does.
+                std::size_t completed = 0, total = 0;
+                bool rounding = false;
                 advancing = 0;
-                std::size_t visited = 0;
                 for (typename index_t::refine_plan_t& plan : shard_plans_) {
+                    rounding |= plan.rounding();
+                    completed += plan.completed(), total += plan.total();
                     advancing += plan.advance();
-                    visited += plan.visited();
                 }
-                if (advancing && reselected && on_visited(visited, population_) == continuation_t::cancel_k)
+                if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
                     return status_t::cancelled_k;
             } while (advancing);
             return outcome;
@@ -929,14 +956,6 @@ struct vram_nvidia_indexes {
 
         /** Every shard's own pass in placement order; none until the donors were appended. */
         growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
-
-        /** The parts the moves appended, ascending per shard, @c node_id_unknown_k past the
-         *  last. */
-        growing_buffer<node_id_t, forkunion_allocator_t> part_bases_;
-
-        /** Where each shard's run of @c part_bases_ starts, and one past the last; empty with no
-         *  donors. */
-        growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
 
         /** One move per donor shard, in move order, as @ref plan_absorb packed them; empty
          *  with no donors. */
@@ -953,9 +972,6 @@ struct vram_nvidia_indexes {
 
         /** The passes' knobs. */
         refine_config_t config_ {};
-
-        /** The population @c on_visited reports: the rows published once donors were appended. */
-        std::size_t population_ = 0;
 
         /** The index refined, closed while the plan lives; null in an empty plan and once
          *  finished. */
@@ -981,18 +997,18 @@ struct vram_nvidia_indexes {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every stored node and heals the islands that leaves:
-     *      @ref plan_refine, then @c run and @c finish.
+     *  @brief Runs one refinement round over every shard, each healing its islands and re-stitching
+     *      its neighborhoods: @ref plan_refine, then @c run and @c finish.
      *
-     *  A stopped pass leaves the graph correct and merely less improved. Every shard's claim word
+     *  A stopped round leaves the graph correct and merely less improved. Every shard's claim word
      *  stays closed for the pass, so a batch, load or save in flight refuses it with
      *  @c contended_k, and one arriving meanwhile is refused.
      *
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in,out] executor The streams and their scratch.
-     *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
-     *      population; a @c cancel_k answer skips the rounds left, still heals, and reports
-     *      @c cancelled_k.
+     *  @param[in] on_visited Fires at every barrier of a round with the units its phase did so far
+     *      and in all, summed over the shards; a @c cancel_k answer stops the round at the next
+     *      barrier, still runs its closing health check, and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
@@ -1031,14 +1047,15 @@ struct vram_nvidia_indexes {
      *  shards go among the receiving shards' parts in the plan, so at most one donor's nodes are
      *  ever held twice.
      *
-     *  Once the last donor was appended, the plan's re-selection walks every shard across the parts
-     *  the moves appended, round by round; a cancel pauses only that walk. This index and every
+     *  Once the last donor was appended, every shard runs one round: the appended parts are islands
+     *  its heal links without a distance, and its gather and restitch mix them with the rest, so
+     *  nothing walks across; a cancel stops the rounds at their next barrier. This index and every
      *  donor close here, each under its own gate, so the packing never goes stale: this index stays
      *  closed while the plan lives and each donor until it is appended, a batch, load or save in
      *  flight on any of them refuses the plan with @c contended_k, and an insertion into any of
      *  them arriving meanwhile is refused. Searches of this index may not overlap the plan's
-     *  re-selection, whose merge rewrites neighbors in place; searches of a donor run throughout,
-     *  retrying once around the window that empties it.
+     *  rounds, whose heal and restitch rewrite neighbors in place; searches of a donor run
+     *  throughout, retrying once around the window that empties it.
      *
      *  @param[in,out] donors The indexes giving their rows up, each nulled once consumed; the slots
      *      must outlive the moves.
@@ -1083,6 +1100,8 @@ struct vram_nvidia_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.config_ = config;
+        // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != donors.size(); ++closing)
             if (status_t const closed = donors[closing]->close_gated_(); failed(closed)) {
                 while (closing) donors[--closing]->shards_.reopen();
@@ -1115,16 +1134,11 @@ struct vram_nvidia_indexes {
                                                      source_shard, device_of, rank_fewest_entries, open);
                 failed(packed))
                 return {{}, packed};
-            if (status_t const sized = shards_t::size_parts(to_span(plan.moves_), shards_.size(), plan.part_offsets_,
-                                                            plan.part_bases_);
-                failed(sized))
-                return {{}, sized};
         }
         // The moves may have opened a shard generation, whose shards take part like the others.
-        std::size_t const planned_shards = donors.empty() ? shards : plan.part_offsets_.size() - 1;
+        std::size_t const planned_shards = shards_.size();
         if (failed(plan.shard_plans_.reserve_exactly(planned_shards))) return {{}, status_t::bad_alloc_k};
-        if (status_t const opened = open_walks_(plan, executor, *shaped, planned_shards, donors.empty() ? 1u : 2u, 0);
-            failed(opened))
+        if (status_t const opened = open_walks_(plan, executor, *shaped, planned_shards, 0); failed(opened))
             return {{}, opened};
         if (donors.empty())
             if (status_t const opened = plan.open_shards_(); failed(opened)) return {{}, opened};
@@ -1133,8 +1147,8 @@ struct vram_nvidia_indexes {
 
     /**
      *  @brief Moves every row of each of @p donors into this index and links them in:
-     *      @ref plan_absorb, then @c run and @c finish. @p on_visited answers as in @ref refine,
-     *      for the re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *      @ref plan_absorb, then @c run and @c finish. @p on_visited answers as in @ref refine; a
+     *      cancel still closes the rounds and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k This index has no shards, or it or a donor keeps it, as its
@@ -1193,23 +1207,23 @@ struct vram_nvidia_indexes {
      *
      *  Every shard's split opens at planning, queuing its partition, as the shard's @c plan_split
      *  describes; the plan's phases then scatter every shard's nodes, keys included, publish the
-     *  receivers' shards, and re-select, audit and heal each of them over its picked nodes. This
-     *  index and every receiver close here, each under its own gate, and stay closed while the plan
-     *  lives; nothing may search this index meanwhile, and once the scatter finished it is empty,
-     *  keeping its shards and their storage.
+     *  receivers' shards, and run one round in each of them, its heal linking what the cut left
+     *  apart. This index and every receiver close here, each under its own gate, and stay closed
+     *  while the plan lives; nothing may search this index meanwhile, and once the scatter finished
+     *  it is empty, keeping its shards and their storage.
      *
-     *  @param[in,out] receivers The empty indexes taking the parts, at least two, each with as
-     *      many shards as this one, shard by shard on the same devices.
+     *  @param[in,out] receivers The empty indexes taking the parts, at least two, each with as many
+     *      shards as this one, shard by shard on the same devices.
      *  @param[in] config The refinement knobs, zeros meaning "derive from connectivity", and the
      *      seed picking the parts' roots, so equal seeds over equal graphs split alike.
      *  @param[in,out] executor The streams every @c run and @c finish names.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k This index has no shards, or it or a receiver keeps it, as its
-     *    @ref status says.
+     *  - @c uninitialized_k This index has no shards, or it or a receiver keeps it, as its @ref
+     *    status says.
      *  - @c config_mismatch_k Fewer than two receivers, a null, repeated or non-empty one, this
-     *    index itself, another metric, geometry or shard count, a shard on another device, a
-     *    device the @p executor does not drive, or a walk context a shard refuses.
+     *    index itself, another metric, geometry or shard count, a shard on another device, a device
+     *    the @p executor does not drive, or a walk context a shard refuses.
      *  - @c contended_k A call, batch, load or save in flight on this index or a receiver, or
      *    another refine or absorb holding either.
      *  - @c overflow_k A shard's part slots pass the 32-bit IDs.
@@ -1237,6 +1251,7 @@ struct vram_nvidia_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.config_ = config.refine;
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != receivers.size(); ++closing)
             if (status_t const closed = receivers[closing]->close_gated_(); failed(closed)) {
                 while (closing) receivers[--closing]->shards_.reopen();
@@ -1246,25 +1261,24 @@ struct vram_nvidia_indexes {
         growing_buffer<index_t*, forkunion_allocator_t> parts {shards_.allocator()};
         if (failed(parts.resize(receivers.size())) || failed(plan.shard_plans_.reserve_exactly(shards)))
             return {{}, status_t::bad_alloc_k};
-        if (status_t const opened = open_walks_(plan, executor, *this, shards, 1, receivers.size()); failed(opened))
+        if (status_t const opened = open_walks_(plan, executor, *this, shards, receivers.size()); failed(opened))
             return {{}, opened};
         for (std::size_t shard = 0; shard != shards; ++shard) {
             for (std::size_t receiver = 0; receiver != receivers.size(); ++receiver)
                 parts[receiver] = receivers[receiver]->shards_[shard].index.get();
             if (status_t const entered = fanout_t::enter(shards_, shard); failed(entered)) return {{}, entered};
-            auto [shard_plan, status] = shards_[shard].index->plan_split(to_writable_span(parts), config,
-                                                                         plan.traversals_[shard]);
+            auto [shard_plan, status] = shards_[shard].index->plan_split(
+                to_writable_span(parts), {plan.config_, config.seed}, plan.traversals_[shard]);
             if (failed(status)) return {{}, status};
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
-        plan.population_ = size();
         return {std::move(plan), status_t::success_k};
     }
 
     /**
      *  @brief Moves every row of this index into one graph-local part per receiver and links
      *      each in: @ref plan_split, then @c run and @c finish. @p on_visited answers as in @ref
-     *      refine, for the re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *      refine; a cancel still closes the rounds and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k, @c config_mismatch_k, @c contended_k or @c overflow_k As
@@ -1845,7 +1859,7 @@ struct vram_nvidia_indexes {
         }
 
         /**
-         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, whose steps
+         *  @brief Opens shard @p shard 's load of @p rows on the stream of its device, whose tasks
          *      copy the parts' columns from memory, or read their registered files through cuFile.
          *
          *  @par Statuses:
@@ -1892,7 +1906,7 @@ struct vram_nvidia_indexes {
     using save_plan_t = shard_save_plan<shards_t, checkpoint_residency_t>;
 
     /** One load in flight across every shard: the mapped parts, one shard plan each, and the flat
-     *  steps their rows arrive in - one per part's share of one batch. */
+     *  tasks their rows arrive in - one per part's share of one batch. */
     using load_plan_t = shard_load_plan<shards_t, checkpoint_residency_t>;
 
     /** Bytes a buffer @ref save under @p config writes: a lone live shard's monolith, or the
@@ -2045,7 +2059,7 @@ struct vram_nvidia_indexes {
     }
 
     /**
-     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its steps
+     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its tasks
      *      walked from this one host thread.
      *
      *  @param[in] path The monolith's path, or the manifest's.
@@ -2057,7 +2071,7 @@ struct vram_nvidia_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
      *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
-     *    rows, a shard's steps never copied all its rows, a header does not fit before its data,
+     *    rows, a shard's tasks never copied all its rows, a header does not fit before its data,
      *    or @ref status keeps it.
      *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
      *    it.
@@ -2074,7 +2088,7 @@ struct vram_nvidia_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(path, config, executor);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
@@ -2086,7 +2100,7 @@ struct vram_nvidia_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
      *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
-     *    rows, a shard's steps never copied all its rows, a header does not fit before its data,
+     *    rows, a shard's tasks never copied all its rows, a header does not fit before its data,
      *    or @ref status keeps it.
      *  - @c uninitialized_k The index has no shards or was never reserved, or @ref status keeps
      *    it.
@@ -2102,13 +2116,13 @@ struct vram_nvidia_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(buffer, config, executor);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
     /**
      *  @brief Restores the checkpoint at @p path into the placed shards - the one-shot over
-     *      @ref plan_load, its steps walked from this one host thread.
+     *      @ref plan_load, its tasks walked from this one host thread.
      *
      *  The index must be empty, and a batch in flight refuses the load as @c contended_k, as the
      *  load refuses a batch. A cancelled or failed load clears it and reports why, so nothing is
@@ -2120,7 +2134,7 @@ struct vram_nvidia_indexes {
      *    never pinned, or @ref status keeps it.
      *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
      *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
-     *    step cannot write its rows, a shard's steps never copied them, or @ref status keeps it.
+     *    task cannot write its rows, a shard's tasks never copied them, or @ref status keeps it.
      *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
      *    a shard's claims.
      *  - @c invalid_argument_k The checkpoint or a part path does not parse.
@@ -2139,7 +2153,7 @@ struct vram_nvidia_indexes {
         {
             auto [plan, status] = plan_load(path, config, executor);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan);
+            settled = drain_tasks_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         // Nothing is published by a failed or cancelled load: the shards go back to empty, once
@@ -2159,7 +2173,7 @@ struct vram_nvidia_indexes {
      *    never pinned, or @ref status keeps it.
      *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
      *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
-     *    step cannot write its rows, a shard's steps never copied them, or @ref status keeps it.
+     *    task cannot write its rows, a shard's tasks never copied them, or @ref status keeps it.
      *  - @c contended_k Another call holds the @p executor or the gate, or a batch or plan holds
      *    a shard's claims.
      *  - @c malformed_k The manifest lists no part, a part, its header or its key column does not
@@ -2184,7 +2198,7 @@ struct vram_nvidia_indexes {
         {
             auto [plan, status] = plan_load(source, config, executor);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan);
+            settled = drain_tasks_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         if (failed(settled)) [[maybe_unused]]
@@ -2452,12 +2466,12 @@ struct vram_nvidia_indexes {
      *  walks into one visited set, and a split's partition into @p receivers parts when two or
      *  more; appended rows grow them. */
     status_t open_walks_(refine_plan_t& plan, executor_t& executor, vram_nvidia_indexes const& shaped,
-                         std::size_t shards, unsigned walks, std::size_t receivers) noexcept {
+                         std::size_t shards, std::size_t receivers) noexcept {
         if (failed(plan.arenas_.reserve_exactly(shards)) || failed(plan.traversals_.reserve_exactly(shards)))
             return status_t::bad_alloc_k;
         std::size_t walk_bytes = 0;
         for (shard_t const& shard : shaped.shards_)
-            walk_bytes = max_of(walk_bytes, shard.index->traversal_memory_usage(plan.config_, walks, receivers));
+            walk_bytes = max_of(walk_bytes, shard.index->traversal_memory_usage(plan.config_, receivers));
         for (std::size_t shard = 0; shard != shards; ++shard) {
             typename executor_t::stream_t& stream = executor.stream(fanout_t::stream_of(shards_, executor, shard));
             plan.arenas_.push_back_reserved(typename executor_t::arena_t {stream.arena.upstream()});
@@ -2508,10 +2522,10 @@ struct vram_nvidia_indexes {
                 shard_t const& donor_slot = donor.shards_[from];
                 node_id_t const part_rows = static_cast<node_id_t>(donor_slot.index->size());
                 if (!part_rows) continue;
-                typename index_t::load_plan_t::step_t step;
-                step.index_nodes = {base, base + part_rows};
-                step.source_nodes = {0, part_rows};
-                queued = plan.load(step, *donor_slot.index, step.source_nodes);
+                typename index_t::load_plan_t::task_t task;
+                task.index_nodes = {base, base + part_rows};
+                task.source_nodes = {0, part_rows};
+                queued = plan.load(task, *donor_slot.index, task.source_nodes);
                 base += part_rows;
             }
         }
@@ -2522,8 +2536,6 @@ struct vram_nvidia_indexes {
             if (status_t const published = plan.finish(); failed(published)) return published;
         }
 
-        // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
-        shards_.record_parts(donor.shards_, moves, plans, refining.part_bases_.data(), to_span(refining.part_offsets_));
         donor.shards_.begin_window();
         donor.clear_();
         donor.shards_.end_window();
@@ -2555,25 +2567,25 @@ struct vram_nvidia_indexes {
         return {checkpoint_residency_t {this, &executor, std::move(claim)}, status_t::success_k};
     }
 
-    /** Walks @p plan 's steps from this one host thread, taking step @c s of every shard before
-     *  step @c s+1, so a device copies one step while the host stages another's, and the first
-     *  failing step ends it. A save writes each step, a load reads it straight out of its part. */
+    /** Walks @p plan 's tasks from this one host thread, taking task @c s of every shard before
+     *  task @c s+1, so a device copies one task while the host stages another's, and the first
+     *  failing task ends it. A save writes each task, a load reads it straight out of its part. */
     template <typename plan_type_>
-    status_t drain_steps_(plan_type_& plan) noexcept {
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
-            planned.save(step);
+    status_t drain_tasks_(plan_type_& plan) noexcept {
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::task_t const& task) {
+            planned.save(task);
         };
         std::size_t const shards = shards_.size();
-        auto const steps = plan.steps();
+        auto const tasks = plan.tasks();
         std::size_t deepest = 0;
-        for (std::size_t shard = 0; shard != shards; ++shard) deepest = max_of(deepest, plan.steps_of(shard).size());
+        for (std::size_t shard = 0; shard != shards; ++shard) deepest = max_of(deepest, plan.tasks_of(shard).size());
         for (std::size_t position = 0; position != deepest; ++position)
             for (std::size_t shard = 0; shard != shards; ++shard) {
-                iota_view<std::size_t> const own = plan.steps_of(shard);
+                iota_view<std::size_t> const own = plan.tasks_of(shard);
                 if (position >= own.size()) continue;
                 status_t stepped = status_t::success_k;
-                if constexpr (saving_k) stepped = plan.save(steps[own.first + position]);
-                else stepped = plan.load(steps[own.first + position]);
+                if constexpr (saving_k) stepped = plan.save(tasks[own.first + position]);
+                else stepped = plan.load(tasks[own.first + position]);
                 if (failed(stepped)) return stepped;
             }
         return status_t::success_k;
@@ -2700,7 +2712,7 @@ struct vram_nvidia_indexes {
 
     /** One window of @c maxsim over @p queries, whose @p row_offsets are relative: the walks and
      *  the nominees, the nominees' keys up to the host and their entries down, then the rescoring,
-     *  the fold and the selection into @p matches, each step one await, the last copying each
+     *  the fold and the selection into @p matches, each task one await, the last copying each
      *  query's scored count to the host's @p scored. Only the walks' telemetry counts, since the
      *  later awaits copy the same counters again. */
     expected<search_result_t> maxsim_window_(

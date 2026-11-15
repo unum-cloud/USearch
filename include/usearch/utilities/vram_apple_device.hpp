@@ -355,6 +355,10 @@ struct metal_device_specs_t {
      *  storage budget. */
     std::size_t working_set_bytes = 0;
 
+    /** Bytes one threadgroup keeps to itself on one GPU core, the twin of
+     *  @c cuda_device_specs_t::cache_bytes_per_core; Metal names no wider per-core figure. */
+    std::size_t cache_bytes_per_core() const noexcept { return shared_memory_per_block_bytes; }
+
     /**
      *  Queries Metal and the I/O Registry for the specification of @p context, the device at
      *  @p ordinal, once a pipeline built for it reported its simdgroup width; meaningful only on
@@ -654,6 +658,7 @@ struct metal_executor_t {
     void swap(metal_executor_t& other) noexcept {
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
+        std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
     }
 
     /**
@@ -676,9 +681,23 @@ struct metal_executor_t {
     static expected<metal_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         metal_executor_t executor;
+        // Queried once here, from each device itself, as its specs wait for a pipeline's lanes.
+        for (stream_t const& opened : streams) {
+            metal_context_t const* const context = opened.handle.context();
+            if (!context) return {{}, status_t::device_error_k};
+            std::size_t const bytes = metal_send<std::size_t>(*context->api, context->device,
+                                                              "maxThreadgroupMemoryLength");
+            executor.cache_bytes_per_core_ = executor.cache_bytes_per_core_
+                                                 ? min_of(executor.cache_bytes_per_core_, bytes)
+                                                 : bytes;
+        }
         executor.streams_ = std::move(streams);
         return {std::move(executor), status_t::success_k};
     }
+
+    /** Bytes of threadgroup memory one GPU core keeps to itself on the smallest of this executor's
+     *  devices, what a round's hubs and neighborhoods are sized by, as a CPU executor's cache. */
+    std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
      *  Opens one stream per entry of @p devices among @p contexts, whose scratch never grows past
@@ -775,32 +794,9 @@ struct metal_executor_t {
 
     /** The ceiling on every stream's scratch bytes; zero lets scratch grow as geometry asks. */
     std::size_t scratch_limit_ = 0;
-};
 
-/** One context's reachability audit on the host, grown to the widest index it audited and kept, so
- *  a heal's rounds and later calls allocate nothing. */
-struct metal_audit_t {
-
-    /** The reached set and the two frontiers, a byte per node each. */
-    growing_buffer<u8_t> reached {global_allocator};
-    growing_buffer<u8_t> frontier {global_allocator};
-    growing_buffer<u8_t> next_frontier {global_allocator};
-
-    /** The nodes reaching a landmark back, and those that did before the current level, a byte per
-     *  node each. */
-    growing_buffer<u8_t> reaches_back {global_allocator};
-    growing_buffer<u8_t> back_settled {global_allocator};
-
-    /** The nodes the last audit did not reach both ways. */
-    growing_buffer<u32_t> islands {global_allocator};
-
-    /** The reached nodes pointing at each node, counted before a reconnection takes any. */
-    growing_buffer<u32_t> in_links {global_allocator};
-
-    /** Levels the last audit swept forward to convergence, and the levels back that reached a
-     *  node. */
-    std::size_t sweeps = 0;
-    std::size_t back_sweeps = 0;
+    /** What @ref cache_bytes_per_core answers, set once by @ref acquire. */
+    std::size_t cache_bytes_per_core_ = 0;
 };
 
 /** The tally at @p counter in @p words: its low word joined with the high word it carries into. */
@@ -909,8 +905,8 @@ struct metal_traversal_context {
     metal_buffer_t staging_;
     walk_output_offsets_t walk_output_offsets_;
 
-    /** The host-side audit a refine heals by and a health check reports, grown like the staging. */
-    metal_audit_t audit_;
+    /** The columns a health check and a round keep on the device, grown like the staging. */
+    metal_buffer_t round_;
 
     /** The last command buffer submitted through this context; its stream runs them in commit
      *  order, so this one finishing means every earlier one did. */

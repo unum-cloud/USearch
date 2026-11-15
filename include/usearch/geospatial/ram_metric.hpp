@@ -289,17 +289,17 @@ class chord_metric {
     /** Opens a round for a geodetic query, converting it once. */
     void reset(geodetic_t const& query) noexcept { reset(to_earth_fixed(query)); }
 
-    /** Opens rounds scoring every query of @p queries at once, each converted once, so each
-     *  @ref drain writes @b [queries,candidates]; a refused growth leaves no query, and every
-     *  drain reports the largest distance. */
+    /** Opens rounds scoring every query @p queries holds or borrows at once, each converted once,
+     *  so each @ref drain writes @b [queries,candidates]; a refused growth leaves no query, and
+     *  every drain reports the largest distance. */
     template <typename query_type_>
-        requires requires(query_type_ const& query) { fixed_of_(query); }
+        requires requires(query_type_ const& query) { fixed_of_(basic::borrowed_query(query)); }
     void reset(std::span<query_type_ const> queries) noexcept {
         query_coordinates_.clear();
         staged_count_ = 0;
         if (failed(query_coordinates_.reserve(queries.size() * 3))) return;
-        for (query_type_ const& query : queries) append_query_(fixed_of_(query));
-        if (!queries.empty()) query_ = fixed_of_(queries.front());
+        for (query_type_ const& query : queries) append_query_(fixed_of_(basic::borrowed_query(query)));
+        if (!queries.empty()) query_ = fixed_of_(basic::borrowed_query(queries.front()));
     }
 
     /** Stages one candidate's position, or refuses once the round is full. */

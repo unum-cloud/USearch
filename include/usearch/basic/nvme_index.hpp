@@ -316,7 +316,9 @@ class nvme_parts_catalog {
                     thread_predicate(relation, thread)(queries[query], std::span<value_view_t const, 1>(&view, 1),
                                                        std::span<admission_t, 1>(&related, 1));
                     if (related == admission_t::admit_k)
-                        keep_ranked_(share, query, wanted, round.locator_of(entry), distance);
+                        keep_ranked(share.kept_locators_of(query, wanted), share.kept_distances_of(query, wanted),
+                                    share.kept_counts[query], share.thresholds[query], round.locator_of(entry),
+                                    distance);
                 }
             };
             quad<scan_payload_t> contenders;
@@ -352,15 +354,11 @@ class nvme_parts_catalog {
                 score_type_* const query_distances = distances.data() + query * wanted;
                 std::size_t written = 0;
                 for (scan_share_t const& share : shares)
-                    for (std::size_t slot = query * wanted; slot != query * wanted + share.kept_counts[query]; ++slot) {
-                        score_type_ const distance = static_cast<score_type_>(share.kept_distances[slot]);
-                        if (written == wanted && !(distance < query_distances[wanted - 1])) continue;
-                        std::size_t position = written == wanted ? wanted - 1 : written++;
-                        for (; position && distance < query_distances[position - 1]; --position)
-                            query_locators[position] = query_locators[position - 1],
-                            query_distances[position] = query_distances[position - 1];
-                        query_locators[position] = share.kept_locators[slot], query_distances[position] = distance;
-                    }
+                    for (std::size_t slot = query * wanted; slot != query * wanted + share.kept_counts[query]; ++slot)
+                        written = merge_ranked(std::span<shard_node_t>(query_locators, wanted),
+                                               std::span<score_type_>(query_distances, wanted), written,
+                                               share.kept_locators[slot],
+                                               static_cast<score_type_>(share.kept_distances[slot]));
                 counts[query] = written;
                 found += written;
             }
@@ -755,15 +753,13 @@ class nvme_parts_catalog {
     using reachability_t = utilities::reachability_t;
 
     /**
-     *  @brief Reachability of every part from as many stride-spread landmarks as one search
-     *      draws, each part swept forward level by level over its neighbors column in turn.
+     *  @brief Reachability of every part from one drawn root each, the root's strong component
+     *      and the islands outside it, as @c nvme_audit_reachability audits a part.
      *
-     *  A part of N rows holds two bitsets of N bits from the first thread's arena, the widest
-     *  part's pair reused by every part. A level reads its rows' neighbors in ID order, rows whose
-     *  blocks touch merged into one read of at most a staging buffer, as many in flight as the
-     *  engines hold, each row located through the neighbors directory, so every reachable row is
-     *  read once, by the level expanding it. The sweep runs forward only, so it reports no
-     *  @c back_sweeps at all.
+     *  A part of N rows holds four byte columns and three bitsets of N bits from the first thread's
+     *  arena, the widest part's reused by every part. A level reads its rows' neighbors in ID
+     *  order, rows whose blocks touch merged into one read of at most a staging buffer, as many in
+     *  flight as the engines hold, each row located through the neighbors directory.
      *
      *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *
@@ -781,12 +777,8 @@ class nvme_parts_catalog {
         for (part_t const& part : parts_) widest = max_of(widest, part.nodes);
         auto [call, call_status] = begin_located_reads_(executor);
         if (failed(call_status)) return {{}, call_status};
-        std::size_t const words = max_of<std::size_t>(
-            divide_round_up<std::size_t>(widest, reachability_levels<atomic_ref>::lanes_k), 1);
-        scratch_allocator_t const scratch {executor.arena(0)};
-        growing_buffer<u1x64_t, scratch_allocator_t> this_level {scratch}, next_level {scratch};
-        if (failed(this_level.resize_uninitialized(words)) || failed(next_level.resize_uninitialized(words)))
-            return {{}, status_t::bad_alloc_k};
+        audit_columns_t const columns = audit_columns_t::carve(executor.arena(0), widest);
+        if (!columns.bitset_words) return {{}, status_t::bad_alloc_k};
         reachability_t result;
         for (u32_t shard = 0; shard != parts_.size(); ++shard) {
             part_t const& part = parts_[shard];
@@ -797,8 +789,8 @@ class nvme_parts_catalog {
                 return row_extent_({shard, static_cast<node_id_t>(node)}, nvme_purpose_t::expand_k);
             };
             auto const [audited, status] = nvme_audit_reachability<node_id_t, atomic_ref>(
-                executor, media_, staging_bytes_(media_, parts_), to_writable_span(this_level),
-                to_writable_span(next_level), part.nodes, part.connectivity, run_nodes, neighbors_extent);
+                executor, media_, staging_bytes_(media_, parts_), columns, part.nodes, part.connectivity, run_nodes,
+                neighbors_extent);
             if (failed(status)) return {{}, status};
             result += audited;
         }
@@ -896,34 +888,15 @@ class nvme_parts_catalog {
             for (distance_t& threshold : thresholds) threshold = unbounded_radius<distance_t>();
             return status_t::success_k;
         }
-    };
 
-    /** Keeps @p locator at @p distance, under its query's threshold, in query @p query 's ranking
-     *  on @p share, replacing the farthest once @p wanted are held and moving the threshold to the
-     *  new farthest. */
-    static void keep_ranked_(scan_share_t& share, std::size_t query, std::size_t wanted, shard_node_t locator,
-                             distance_t distance) noexcept {
-        shard_node_t* const locators = share.kept_locators.data() + query * wanted;
-        distance_t* const ranked = share.kept_distances.data() + query * wanted;
-        u32_t& kept = share.kept_counts[query];
-        std::size_t slot = 0;
-        if (kept != wanted)
-            for (slot = kept++; slot;) {
-                std::size_t const parent = (slot - 1) / 2;
-                if (!(ranked[parent] < distance)) break;
-                locators[slot] = locators[parent], ranked[slot] = ranked[parent];
-                slot = parent;
-            }
-        else
-            for (std::size_t child = 1; child < wanted; child = slot * 2 + 1) {
-                if (child + 1 < wanted && ranked[child + 1] > ranked[child]) ++child;
-                if (!(ranked[child] > distance)) break;
-                locators[slot] = locators[child], ranked[slot] = ranked[child];
-                slot = child;
-            }
-        locators[slot] = locator, ranked[slot] = distance;
-        if (kept == wanted) share.thresholds[query] = ranked[0];
-    }
+        /** Query @p query 's ranking of @p wanted, as @ref keep_ranked keeps it. */
+        std::span<shard_node_t> kept_locators_of(std::size_t query, std::size_t wanted) noexcept {
+            return {kept_locators.data() + query * wanted, wanted};
+        }
+        std::span<distance_t> kept_distances_of(std::size_t query, std::size_t wanted) noexcept {
+            return {kept_distances.data() + query * wanted, wanted};
+        }
+    };
 
     using candidates_allocator_t = arena_allocator<scored_node_t, forkunion_allocator_t>;
     using results_array_t = sorted_buffer<scored_node_t, typename scored_node_t::closer_t, candidates_allocator_t>;
@@ -1518,10 +1491,11 @@ class nvme_parts_catalog {
 
         // The queries build once and every thread reads them; a metric and a share belong to each
         // thread, on its own arena.
-        arena_t& home = executor.arena(0);
-        query_t* const queries = arena_allocator<query_t, forkunion_allocator_t> {home}.allocate(count);
-        metric_t* const metrics = arena_allocator<metric_t, forkunion_allocator_t> {home}.allocate(threads);
-        scan_share_t* const shares = arena_allocator<scan_share_t, forkunion_allocator_t> {home}.allocate(threads);
+        arena_t& first_arena = executor.arena(0);
+        query_t* const queries = arena_allocator<query_t, forkunion_allocator_t> {first_arena}.allocate(count);
+        metric_t* const metrics = arena_allocator<metric_t, forkunion_allocator_t> {first_arena}.allocate(threads);
+        scan_share_t* const shares = arena_allocator<scan_share_t, forkunion_allocator_t> {first_arena}.allocate(
+            threads);
         if (!queries || !metrics || !shares) return status_t::bad_alloc_k;
         std::span<query_t const> const batch {queries, count};
         std::size_t built_queries = 0, built_metrics = 0, built_shares = 0;
@@ -1532,7 +1506,7 @@ class nvme_parts_catalog {
         };
         status_t built = status_t::success_k;
         for (; succeeded(built) && built_queries != count; ++built_queries) {
-            auto [query, query_status] = query_of(built_queries, scratch_allocator_t {home});
+            auto [query, query_status] = query_of(built_queries, scratch_allocator_t {first_arena});
             new (queries + built_queries) query_t(std::move(query));
             built = query_status;
         }
@@ -2164,7 +2138,7 @@ class nvme_index {
 
     /**
      *  @ref nvme_parts_catalog::health over the part: a forward sweep from as many landmarks as
-     *  one search draws, so @c back_sweeps stays zero.
+     *  one search draws, so @c depth_to_root stays zero.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is opened, or @p executor holds no threads or pool workers.

@@ -41,9 +41,10 @@ namespace unum::usearch::dense {
 /** Blocks of @p kernel on its @p slots rung resident per compute unit under @p capability_ over
  *  @p dtype_ - the register budget its launch bounds set, the load window its body sizes, and its
  *  grid's share of every compute unit: three for the builders and the back-links riding their grid
- *  and arena, as many as saturate the path at its registers; a walk's by its rung; eight for the
- *  sweeps and split passes striding the graph, oversubscribed so enough rows stay in flight; and
- *  one for the rest, whose grids follow their work. */
+ *  and arena, as many as saturate the path at its registers; a walk's by its rung; one for a
+ *  round's gather and restitch, each block taking the compute unit's tile budget; eight for the
+ *  health check, the sweeps and split passes striding the graph, oversubscribed so enough rows
+ *  stay in flight; and one for the rest, whose grids follow their work. */
 template <nk_capability_t capability_, nk_dtype_t dtype_>
 constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept {
     switch (kernel) {
@@ -51,6 +52,15 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
     case vram_kernel_t::back_link_k:
     case vram_kernel_t::refine_k: return 3;
     case vram_kernel_t::search_k: return slots <= 8 ? 4 : 3;
+    // A gather's or restitch's block takes the compute unit's tile budget, so one is resident.
+    case vram_kernel_t::gather_neighborhoods_k:
+    case vram_kernel_t::restitch_k: return 1;
+    case vram_kernel_t::health_expand_k:
+    case vram_kernel_t::health_recheck_k:
+    case vram_kernel_t::health_islands_k:
+    case vram_kernel_t::island_components_k:
+    case vram_kernel_t::health_count_links_k:
+    case vram_kernel_t::label_islands_k:
     case vram_kernel_t::rebase_links_k:
     case vram_kernel_t::reachability_sweep_k:
     case vram_kernel_t::reachability_back_sweep_k:
@@ -70,8 +80,7 @@ constexpr u32_t hip_resident_blocks(vram_kernel_t kernel, u32_t slots) noexcept 
 template <nk_capability_t capability_, nk_dtype_t dtype_>
 constexpr u32_t hip_resident_blocks(vram_dense_kernel_t kernel, u32_t slots) noexcept {
     switch (kernel) {
-    case vram_dense_kernel_t::fold_k:
-    case vram_dense_kernel_t::merge_back_links_k: return 3;
+    case vram_dense_kernel_t::fold_k: return 3;
     case vram_dense_kernel_t::search_indexer_k:
     case vram_dense_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
     // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
@@ -107,33 +116,28 @@ inline constexpr amd_rung<vram_kernel_t> amd_rungs[] = {
     {vram_kernel_t::insert_k, 8},
     {vram_kernel_t::insert_k, 16},
     {vram_kernel_t::back_link_k, 0},
-    {vram_kernel_t::refine_k, 0},
-    {vram_kernel_t::refine_k, 2},
-    {vram_kernel_t::refine_k, 4},
-    {vram_kernel_t::refine_k, 8},
-    {vram_kernel_t::refine_k, 16},
     {vram_kernel_t::search_k, 0},
     {vram_kernel_t::search_k, 2},
     {vram_kernel_t::search_k, 4},
     {vram_kernel_t::search_k, 8},
     {vram_kernel_t::search_k, 16},
     {vram_kernel_t::rebase_links_k, 0},
-    {vram_kernel_t::mark_landmarks_k, 0},
-    {vram_kernel_t::reachability_sweep_k, 0},
-    {vram_kernel_t::reachability_back_sweep_k, 0},
-    {vram_kernel_t::reachability_islands_k, 0},
-    {vram_kernel_t::reached_in_links_k, 0},
-    {vram_kernel_t::reconnect_island_k, 0},
-    {vram_kernel_t::count_back_links_k, 0},
-    {vram_kernel_t::offset_back_links_k, 0},
-    {vram_kernel_t::scatter_back_links_k, 0},
+    {vram_kernel_t::gather_neighborhoods_k, 0},
+    {vram_kernel_t::restitch_k, 0},
+    {vram_kernel_t::health_expand_k, 0},
+    {vram_kernel_t::health_recheck_k, 0},
+    {vram_kernel_t::order_islands_k, 0},
+    {vram_kernel_t::health_islands_k, 0},
+    {vram_kernel_t::island_components_k, 0},
+    {vram_kernel_t::health_count_links_k, 0},
+    {vram_kernel_t::label_islands_k, 0},
+    {vram_kernel_t::heal_islands_k, 0},
     {vram_kernel_t::partition_roots_k, 0},
     {vram_kernel_t::partition_propose_k, 0},
     {vram_kernel_t::partition_count_k, 0},
     {vram_kernel_t::partition_accept_k, 0},
     {vram_kernel_t::partition_fill_k, 0},
     {vram_kernel_t::partition_islands_k, 0},
-    {vram_kernel_t::partition_picked_k, 0},
     {vram_kernel_t::split_links_k, 0},
     {vram_kernel_t::split_nodes_k, 0},
     {vram_kernel_t::gather_vectors_k, 0},
@@ -159,7 +163,6 @@ inline constexpr amd_rung<vram_dense_kernel_t> amd_dense_rungs[] = {
     {vram_dense_kernel_t::multiply_k, 4},
     {vram_dense_kernel_t::multiply_k, 8},
     {vram_dense_kernel_t::multiply_k, 16},
-    {vram_dense_kernel_t::merge_back_links_k, 0},
     {vram_dense_kernel_t::fold_k, 0},
     {vram_dense_kernel_t::derive_norms_k, 0},
     {vram_dense_kernel_t::merge_attention_k, 0},
@@ -249,13 +252,11 @@ struct vram_amd_kernels {
     using dot_t = typename dot_result_t::raw_t;
     using norms_t = vector_norms<dot_t>;
     using traversal_context_t = hip_vendor_t::traversal_context<traversals_allocator_type_>;
-    using refine_scratch_t = vram_refine_scratch<traversal_context_t>;
     using frontier_kind_t = vram_frontier_kind_t;
     using search_config_t = vram_search_config_t;
     using search_result_t = vram_search_result_t;
     using refine_config_t = dense::refine_config_t;
     using attend_heads_t = vram_attend_heads_t;
-    using audit_counters_t = vram_audit_counters_t;
 
     /** The kernels every shard of this dtype launches on one device, which its executor stream
      *  loads at the first ask and keeps. */
@@ -305,6 +306,19 @@ struct vram_amd_kernels {
      *  resident; when it cannot, the warp's arena slice keeps it, as Apple's always does. Defined
      *  in @c vram_amd_index.hip. */
     bool build_scratch_fits(core_t const& core, u32_t scratch_bytes_per_warp) const noexcept;
+
+    /** Whether a round's gather or restitch launch fits @p dynamic_bytes of local data share beside
+     *  the restitch's batch buffers and schedule state, on the one block a compute unit keeps
+     *  resident. Defined in @c vram_amd_index.hip. */
+    bool round_scratch_fits(core_t const& core, std::size_t dynamic_bytes) const noexcept;
+
+    /** Shared memory a gather's block stages its run's hubs in, @p hub_rows_bytes of rows and
+     *  norms, which its SIMT dots read. */
+    static constexpr std::size_t gather_shared_bytes_(std::size_t hub_rows_bytes) noexcept { return hub_rows_bytes; }
+
+    /** Shared memory a restitch's block scores its mates in: a neighborhood's @p rows_bytes of rows
+     *  and norms, which its SIMT dots read. */
+    static constexpr std::size_t mates_shared_bytes_(std::size_t rows_bytes) noexcept { return rows_bytes; }
 
     /** The bytes an executor's run must hold before a context carved over it can search or multiply
      *  @p rows rows under @p config, writing @c config.count columns per row, one aligned term per
@@ -610,200 +624,6 @@ struct vram_amd_kernels {
 
 #pragma endregion Search
 
-#pragma region Refinement
-
-    /** Queues one walk of the refinement behind @c refine_plan_t into its carved @p scratch through
-     *  @p kernel: the pass covers @p nodes, or under a device-resident @p node_ids the listed IDs
-     *  with @p nodes spanning the array's offsets, each node first walking across the neighboring
-     *  group in round @p round when @p parts parts are given, then merging its picks into its live
-     *  row. Nothing waits: the staging queued after it checks its claims. */
-    status_t refine_pass_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          refine_config_t config, vram_kernel_t kernel, iota_view<node_id_t> nodes,
-                          std::span<u32_t const> node_ids, u32_t parts = 0, u32_t round = 0) noexcept {
-        if (status_t const kept = core.status(); failed(kept)) return kept;
-        auto const [kernels, kernels_status] = kernels_(context);
-        if (failed(kernels_status)) return kernels_status;
-        std::size_t const nodes_count = core.size();
-        std::size_t const walk_count = nodes.size();
-        hip_stream_handle_t const stream = context.stream();
-        if (core.api().fill_async(scratch.claims, 0, sizeof(u32_t), stream) != hip_success_k)
-            return status_t::device_error_k;
-        // A split's receivers count their own rows from the first round of each.
-        if (!round && node_ids.empty() &&
-            core.api().fill_async(scratch.changed.words, 0, scratch.words * sizeof(u32_t), stream) != hip_success_k)
-            return status_t::device_error_k;
-
-        // Twice the connectivity by default, like every CPU walk, rounded up to the candidate sizes
-        // the kernel carries, or walked exactly past them.
-        u32_t const expansion = core.non_zero_expansion_factor(config);
-        u32_t const candidate_slots = core.candidate_slots_for_(expansion, 4);
-        // Walking across makes two walks into one visited set, so the slice is shaped for both.
-        u32_t const walks = parts > 1 ? 2 : 1;
-        gpu_arena_shape_t const arena_shape = core.build_arena_shape_(expansion, candidate_slots, walks);
-        std::size_t const arena_warps = core.device_.multiprocessor_count *
-                                        resident_blocks_(vram_kernel_t::refine_k, candidate_slots) *
-                                        vram_warps_per_block_k;
-        std::size_t const arena_bytes_before = context.arena_bytes_;
-        byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes<node_id_t>());
-        if (!arena) return status_t::bad_alloc_k;
-        auto const [epoch_base, epochs_status] = context.take_epochs(walk_count, arena_bytes_before);
-        if (failed(epochs_status)) return epochs_status;
-
-        // A warp caches a walk's candidates or a merge round's, whichever are more.
-        u32_t const reselection_nodes = core.reselection_nodes_();
-        u32_t const selection_nodes = max_of(core.walk_selection_nodes_(expansion, candidate_slots), reselection_nodes);
-        vram_refine_t view {core.storage(), //
-                            nodes.bound,
-                            arena_shape.scratch_bytes ? 0u : core.build_scratch_bytes_per_warp(selection_nodes),
-                            selection_nodes,
-                            nodes.first,
-                            arena,
-                            arena_shape,
-                            expansion,
-                            epoch_base,
-                            context.telemetry_.get(),
-                            scratch.claims,
-                            node_ids.data(),
-                            static_cast<u32_t>(nodes_count),
-                            parts > 1 ? scratch.part_bases : nullptr,
-                            parts > 1 ? parts : 0,
-                            round,
-                            reselection_nodes,
-                            scratch.changed};
-        return launch_refine_(core, *kernels, kernel, view, candidate_slots, stream);
-    }
-
-    /** Queues a reachability audit from as many stride-spread landmarks as one search draws - the
-     *  connectivity - and its first sweep, through @ref queue_sweeps_. Nothing waits; the caller
-     *  reads @p counters once its event fired, and queues further sweeps from sweep 2 while the
-     *  last one still expanded. */
-    status_t queue_audit_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                          audit_counters_t* counters) noexcept {
-        std::size_t const rows = core.size();
-        hip_stream_handle_t const stream = context.stream();
-        auto const [kernels, kernels_status] = kernels_(context);
-        if (failed(kernels_status)) return kernels_status;
-        std::size_t const seed_count = min_of<std::size_t>(core.connectivity(), rows);
-        // The bitsets, the levels, the sweeps' expanded counters, the levels back and the unreached
-        // and island counters lie back to back.
-        if (core.api().fill_async(scratch.reached.words, 0, (scratch.words * 5 + 6) * sizeof(u32_t), stream) !=
-            hip_success_k)
-            return status_t::device_error_k;
-        vram_arguments_t seeds {};
-        seeds.graph.neighbors = core.neighbor_rows_();
-        seeds.graph.rows_count = static_cast<u32_t>(rows);
-        seeds.graph.connectivity = static_cast<u32_t>(core.connectivity());
-        seeds.graph.seed_count = static_cast<u32_t>(seed_count);
-        seeds.graph.reached = scratch.reached;
-        seeds.graph.frontier = scratch.frontier;
-        if (status_t const launched = launch_(*kernels, vram_kernel_t::mark_landmarks_k, 0,
-                                              divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads()),
-                                              0, stream, seeds);
-            failed(launched))
-            return launched;
-        // The landmarks reach themselves back.
-        if (core.api().copy_async(scratch.reaches_back.words, scratch.reached.words, scratch.words * sizeof(u32_t),
-                                  hip_copy_default_k, stream) != hip_success_k)
-            return status_t::device_error_k;
-        return queue_sweeps_(core, context, scratch, counters, 1);
-    }
-
-    /** Queues the audit's sweeps from @p first_sweep up to twice it, each forward then back, so
-     *  the batches double until one ends past convergence, then a count of the rows no sweep
-     *  reached both ways so far, collecting their IDs when @p scratch has room for them, then the
-     *  copy of every counter, the last sweep's expanded count among them. */
-    status_t queue_sweeps_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                           audit_counters_t* counters, u32_t first_sweep) noexcept {
-        std::size_t const rows = core.size();
-        hip_stream_handle_t const stream = context.stream();
-        auto const [kernels, kernels_status] = kernels_(context);
-        if (failed(kernels_status)) return kernels_status;
-        vram_arguments_t sweep {};
-        sweep.graph.neighbors = core.neighbor_rows_();
-        sweep.graph.rows_count = static_cast<u32_t>(rows);
-        sweep.graph.connectivity = static_cast<u32_t>(core.connectivity());
-        sweep.graph.reached = scratch.reached;
-        sweep.graph.reaches_back = scratch.reaches_back;
-        sweep.graph.back_settled = scratch.back_settled;
-        sweep.graph.island_ids = scratch.island_ids;
-        // A sweep queued past convergence finds the one before it expanded nothing and leaves at
-        // entry; odd sweeps grow the first frontier, even ones the second.
-        u32_t const grid = core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reachability_sweep_k, 0);
-        for (u32_t sweep_number = first_sweep; sweep_number != 2 * first_sweep; ++sweep_number) {
-            bool const odd = sweep_number & 1u;
-            sweep.graph.frontier = odd ? scratch.frontier : scratch.next_frontier;
-            sweep.graph.next_frontier = odd ? scratch.next_frontier : scratch.frontier;
-            sweep.graph.counter = scratch.expanded + odd;
-            sweep.graph.previous_counter = sweep_number == 1 ? nullptr : scratch.expanded + !odd;
-            if (core.api().fill_async(sweep.graph.next_frontier.words, 0, scratch.words * sizeof(u32_t), stream) !=
-                    hip_success_k ||
-                core.api().fill_async(sweep.graph.counter, 0, sizeof(u32_t), stream) != hip_success_k)
-                return status_t::device_error_k;
-            sweep.graph.levels = scratch.levels;
-            if (status_t const launched = launch_(*kernels, vram_kernel_t::reachability_sweep_k, 0, grid, 0, stream,
-                                                  sweep);
-                failed(launched))
-                return launched;
-            // The back sweep reads the rows reaching back before its level.
-            if (core.api().copy_async(scratch.back_settled.words, scratch.reaches_back.words,
-                                      scratch.words * sizeof(u32_t), hip_copy_default_k, stream) != hip_success_k)
-                return status_t::device_error_k;
-            sweep.graph.levels = scratch.back_levels;
-            sweep.graph.sweep_number = sweep_number;
-            if (status_t const launched = launch_(*kernels, vram_kernel_t::reachability_back_sweep_k, 0, grid, 0,
-                                                  stream, sweep);
-                failed(launched))
-                return launched;
-        }
-        // The unreached and island counters lie back to back.
-        sweep.graph.counter = scratch.unreached;
-        if (core.api().fill_async(scratch.unreached, 0, 2 * sizeof(u32_t), stream) != hip_success_k)
-            return status_t::device_error_k;
-        if (status_t const launched = launch_(*kernels, vram_kernel_t::reachability_islands_k, 0,
-                                              divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads()), 0,
-                                              stream, sweep);
-            failed(launched))
-            return launched;
-        return core.copy_counters_(scratch, counters, 2 * first_sweep - 1, stream);
-    }
-
-    /** Queues the reconnection of the @p islands islands the last audit in @p scratch collected on
-     *  @p context 's stream: the reached in-links first, so no reconnection takes the last link a
-     *  reached node is found through, then each unreached island into a reached pick or its
-     *  landmark, and each island reaching no landmark back to its landmark, unless a live pick
-     *  already reaches one. */
-    status_t queue_reconnect_(core_t& core, traversal_context_t& context, refine_scratch_t const& scratch,
-                              u32_t islands) noexcept {
-        std::size_t const rows = core.size();
-        hip_stream_handle_t const stream = context.stream();
-        auto const [kernels, kernels_status] = kernels_(context);
-        if (failed(kernels_status)) return kernels_status;
-        u32_t* const in_links = scratch.in_links;
-        if (core.api().fill_async(in_links, 0, rows * sizeof(u32_t), stream) != hip_success_k)
-            return status_t::device_error_k;
-        vram_arguments_t heal {};
-        heal.graph.neighbors = core.neighbor_rows_();
-        heal.graph.rows_count = static_cast<u32_t>(rows);
-        heal.graph.connectivity = static_cast<u32_t>(core.connectivity());
-        heal.graph.reached = scratch.reached;
-        heal.graph.reaches_back = scratch.reaches_back;
-        heal.graph.in_links = in_links;
-        heal.graph.island_ids = scratch.island_ids;
-        heal.graph.islands_count = islands;
-        heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(core.connectivity(), rows));
-        heal.graph.reconnected = scratch.reconnected;
-        if (status_t const counted = launch_(
-                *kernels, vram_kernel_t::reached_in_links_k, 0,
-                core.device_.multiprocessor_count * resident_blocks_(vram_kernel_t::reached_in_links_k, 0), 0, stream,
-                heal);
-            failed(counted))
-            return counted;
-        return launch_(*kernels, vram_kernel_t::reconnect_island_k, 0, divide_round_up<u32_t>(islands, block_threads()),
-                       0, stream, heal);
-    }
-
-#pragma endregion Refinement
-
 #pragma region Launches
 
     /** Blocks of @p kernel on its @p slots rung resident per compute unit, as its launch bounds
@@ -878,16 +698,6 @@ struct vram_amd_kernels {
         }
         return status_t::success_k;
     }
-    template <typename kernel_enum_type_>
-    status_t launch_refine_(core_t& core, kernel_table_t const& kernels, kernel_enum_type_ kernel,
-                            vram_refine_t const& view, u32_t candidate_slots, hip_stream_handle_t stream) noexcept {
-        vram_arguments_t arguments {};
-        arguments.refine = view;
-        return launch_(kernels, kernel, candidate_slots,
-                       core.device_.multiprocessor_count * resident_blocks_(kernel, candidate_slots),
-                       vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
-    }
-
     /** Queues one phase of @p fold over the rows of its launching shard on @p context 's stream,
      *  each warp's re-selection scratch in shared memory when it fits there and in the context's
      *  arena otherwise; the caller fills everything but the scratch, the counters and the
@@ -1199,9 +1009,8 @@ struct vram_amd_index {
         return core_.traversal_memory_usage(rows, config, head_count, shards);
     }
 
-    std::size_t traversal_memory_usage(refine_config_t config, u32_t walks = 1,
-                                       std::size_t receivers = 0) const noexcept {
-        return core_.traversal_memory_usage(config, walks, receivers);
+    std::size_t traversal_memory_usage(refine_config_t config, std::size_t receivers = 0) const noexcept {
+        return core_.traversal_memory_usage(config, receivers);
     }
 
     /**
@@ -1342,31 +1151,29 @@ struct vram_amd_index {
     }
 
     /**
-     *  Opens a refinement of the nodes in @p nodes on @p context 's stream, as the core's
-     *  @c plan_refine does.
+     *  @brief Opens one refinement round over the published nodes on @p context 's stream, as the
+     *      core's @c plan_round does.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index never grew.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
+     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
      */
-    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
-                                        refine_config_t config, traversal_context_t& context) noexcept {
-        return core_.plan_refine(nodes, part_bases, config, context);
+    expected<refine_plan_t> plan_round(refine_config_t config, traversal_context_t& context) noexcept {
+        return core_.plan_round(config, context);
     }
 
     /**
-     *  One refinement of the nodes in @p nodes driven to its end on the calling thread.
+     *  @brief One refinement round driven to its end on the calling thread.
      *
      *  @par Statuses:
-     *  - @c uninitialized_k The index never grew, or @c status keeps it.
-     *  - @c config_mismatch_k The @p context rides another device or cannot walk, or @c status
-     *    keeps it.
-     *  - @c cancelled_k, @c unsupported_k, @c unsupported_layout_k or @c overflow_k The index
-     *    keeps it, as @c status says.
+     *  - @c uninitialized_k The index never grew.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
+     *  - @c bad_alloc_k A column, a mirror, the arena or the counters cannot be placed.
+     *  - @c device_error_k A launch or a copy failed.
      */
-    expected<refine_report_t> refine(iota_view<node_id_t> nodes, std::span<node_id_t const> part_bases,
-                                     refine_config_t config, traversal_context_t& context) noexcept {
-        return core_.refine(nodes, part_bases, config, context);
+    expected<refine_report_t> refine(refine_config_t config, traversal_context_t& context) noexcept {
+        return core_.refine(config, context);
     }
 
     /**
@@ -1387,18 +1194,22 @@ struct vram_amd_index {
     }
 
     /**
-     *  Opens a reachability audit of the rows published now on @p context 's stream.
+     *  @brief Opens a health check of the rows published now on @p context 's stream.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p context rides another device.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
+     *  - @c bad_alloc_k A column or the counters cannot be placed.
      */
     expected<health_plan_t> plan_health(traversal_context_t& context) noexcept { return core_.plan_health(context); }
 
     /**
-     *  Measures forward reachability from the landmarks one search draws, on the calling thread.
+     *  @brief Measures reachability both ways from one seeded root on the calling thread, as the
+     *      RAM health check does.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k The @p context rides another device.
+     *  - @c config_mismatch_k The @p context rides another device or cannot launch.
+     *  - @c bad_alloc_k A column or the counters cannot be placed.
+     *  - @c device_error_k A launch or a copy failed.
      */
     expected<reachability_t> health(traversal_context_t& context) noexcept { return core_.health(context); }
 

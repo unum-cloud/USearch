@@ -1705,106 +1705,136 @@ status_t nvme_list_entries(std::span<key_type_ const> keys, std::span<std::size_
 
 #pragma region Reachability
 
-/**
- *  @brief The two bitsets a reachability audit sweeps one part's nodes through, a bit per node in
- *      each, so a node's two bits are its state: 00 unreached, 10 in this level, 01 in the next
- *      one, and 11 once expanded.
- *
- *  Within a level only @c next_level changes, through relaxed atomics, as threads expand their
- *  nodes and reach others; @ref advance_level moves the next level in once every thread is done.
- */
-template <template <typename> class atomic_ref_template_>
-struct reachability_levels {
+/** One part's audit state, carved from the caller's workspace: four byte columns and three bits an
+ *  entry, sized for the widest part and reused by every narrower one. */
+struct audit_columns_t {
 
-    static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
+    /** Lanes one word of a bitset carries. */
+    inline static constexpr std::size_t lanes_k = std::numeric_limits<u64_t>::digits;
 
-    /** The nodes of this level and of every earlier one, a bit per node. */
-    std::span<u64_t> this_level;
+    /** The bitsets in @c bitset_words, one run of words each: reached from the root, reaching it
+     *  back, and linking to two entries of the lowest depth to root its row meets. */
+    inline static constexpr std::size_t bitsets_k = 3;
 
-    /** The nodes reached for the next level and those expanded so far, a bit per node. */
-    std::span<u64_t> next_level;
+    /** Per entry, its depth from the root, 255 for none. */
+    u8_t* depths_from_root = nullptr;
 
-    /** Clears both levels and puts @p landmarks nodes spread by stride over @p nodes in this one,
-     *  at most one per node, answering how many it put. */
-    std::size_t seed(std::size_t landmarks, std::size_t nodes) noexcept {
-        std::memset(this_level.data(), 0, this_level.size_bytes());
-        std::memset(next_level.data(), 0, next_level.size_bytes());
-        std::size_t const seeds = min_of(landmarks, nodes);
-        for (std::size_t seed = 0; seed != seeds; ++seed) {
-            std::size_t const node = seed * nodes / seeds;
-            this_level[node / lanes_k] |= u64_t {1} << (node % lanes_k);
-        }
-        return seeds;
+    /** Per entry, one past the depth to root of the entry that marked its way to the root,
+     *  255 for none. */
+    u8_t* depths_to_root = nullptr;
+
+    /** Per entry, its links from the depth before it, saturating. */
+    u8_t* shallower_in_links = nullptr;
+
+    /** Per entry, the reached entries linking to it, saturating. */
+    u8_t* in_links = nullptr;
+
+    /** The @ref bitsets_k bitsets over the audited part, laid out at that part's own width. */
+    u64_t* bitset_words = nullptr;
+
+    /** Words one bitset over @p nodes entries takes. */
+    static constexpr std::size_t words_for(std::size_t nodes) noexcept {
+        return divide_round_up<std::size_t>(nodes, lanes_k);
     }
 
-    /** Word @p word of the next level, which other threads may be setting. */
-    u64_t later(std::size_t word) const noexcept {
-        return atomic_ref_template_<u64_t>(next_level[word]).load(std::memory_order_relaxed);
-    }
-
-    /** The first node from @p from below @p bound this level holds unexpanded, else @p bound. */
-    std::size_t first_in_level(std::size_t from, std::size_t bound) const noexcept {
-        while (from < bound) {
-            std::size_t const word = from / lanes_k;
-            u64_t const lanes = (this_level[word] & ~later(word)) >> (from % lanes_k);
-            if (lanes) return min_of<std::size_t>(from + std::countr_zero(lanes), bound);
-            from = (word + 1) * lanes_k;
-        }
-        return bound;
-    }
-
-    /** Marks @p node expanded when this level holds it unexpanded, answering whether it was due. */
-    bool expand(std::size_t node) const noexcept {
-        std::size_t const word = node / lanes_k;
-        u64_t const lane = u64_t {1} << (node % lanes_k);
-        if (!(this_level[word] & ~later(word) & lane)) return false;
-        atomic_ref_template_<u64_t>(next_level[word]).set_bits(lane, std::memory_order_relaxed);
-        return true;
-    }
-
-    /** Puts @p neighbor in the next level unless some level already holds it. */
-    void reach(std::size_t neighbor) const noexcept {
-        std::size_t const word = neighbor / lanes_k;
-        u64_t const lane = u64_t {1} << (neighbor % lanes_k);
-        // The plain check spares the read-modify-write for the many neighbors already reached.
-        if ((this_level[word] | later(word)) & lane) return;
-        atomic_ref_template_<u64_t>(next_level[word]).set_bits(lane, std::memory_order_relaxed);
-    }
-
-    /** Moves the next level's newly reached nodes into this one, answering how many. */
-    std::size_t advance_level() noexcept {
-        std::size_t level_nodes = 0;
-        for (std::size_t word = 0; word != this_level.size(); ++word) {
-            u64_t const was = this_level[word], reached = next_level[word];
-            level_nodes += static_cast<std::size_t>(std::popcount(reached & ~was));
-            this_level[word] = was | reached;
-            next_level[word] = was & reached;
-        }
-        return level_nodes;
-    }
-
-    /** The nodes any level reached. */
-    std::size_t reachable() const noexcept {
-        std::size_t reached = 0;
-        for (u64_t const word : this_level) reached += static_cast<std::size_t>(std::popcount(word));
-        return reached;
+    /** Carves columns for parts of up to @p nodes entries from @p arena; all null when
+     *  it is full. */
+    template <typename arena_type_>
+    static audit_columns_t carve(arena_type_& arena, std::size_t nodes) noexcept {
+        std::size_t const words = max_of<std::size_t>(words_for(nodes), 1);
+        auto* const bytes = reinterpret_cast<u8_t*>(
+            arena.allocate(max_of<std::size_t>(4 * nodes, 1), default_alignment_k));
+        auto* const bits = reinterpret_cast<u64_t*>(
+            arena.allocate(bitsets_k * words * sizeof(u64_t), default_alignment_k));
+        if (!bytes || !bits) return {};
+        return {bytes, bytes + nodes, bytes + 2 * nodes, bytes + 3 * nodes, bits};
     }
 };
 
+/** The islands one audit of a part found, in thread zero's arena for the call that audited it:
+ *  their nodes, strong components and roles, the member standing for each component, and the
+ *  entry of the root's component linking to each node, as the RAM audit labels them. */
+template <typename node_id_type_>
+struct audit_islands {
+    using scratch_allocator_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using island_ids_t = growing_buffer<node_id_type_, scratch_allocator_t>;
+
+    /** An island node's roles, the bits of its byte in @c roles; the first two are its strong
+     *  component's. */
+    enum role_t : u8_t {
+
+        /** No entry outside its component links into it. */
+        unreached_island_k = 1,
+
+        /** No link leaves its component. */
+        stranded_island_k = 2,
+
+        /** It links into the root's component. */
+        links_to_component_k = 4,
+
+        /** An entry of the root's component links to it. */
+        linked_from_component_k = 8,
+    };
+
+    /** The nodes outside the root's component, ascending. */
+    island_ids_t nodes;
+
+    /** Per island node, its strong component: the rank of its first node. */
+    island_ids_t components;
+
+    /** Per island node, the least entry of the root's component linking to it, or none. */
+    island_ids_t parents;
+
+    /** Per island node naming its strong component, the rank of the member standing for it. */
+    island_ids_t entries;
+
+    /** Per island node, its @ref role_t bits. */
+    growing_buffer<u8_t, scratch_allocator_t> roles;
+
+    explicit audit_islands(scratch_allocator_t const& allocator) noexcept
+        : nodes(allocator), components(allocator), parents(allocator), entries(allocator), roles(allocator) {}
+
+    /** Entries outside the root's component, the islands' nodes, ranked by ID. */
+    std::size_t islands() const noexcept { return nodes.size(); }
+
+    /** Whether island node @p rank names its strong component, being its first. */
+    bool island_first(std::size_t rank) const noexcept { return components[rank] == rank; }
+
+    /** Island node @p rank 's @ref role_t bits, its component's two first among them. */
+    u8_t island_roles(std::size_t rank) const noexcept { return roles[rank]; }
+
+    /** The entry standing for island node @p rank 's component. */
+    node_id_type_ island_entry(std::size_t rank) const noexcept { return nodes[entries[components[rank]]]; }
+
+    /** The entry of the root's component linking to the entry standing for island node @p rank 's
+     *  component, or none. */
+    node_id_type_ island_entry_parent(std::size_t rank) const noexcept { return parents[entries[components[rank]]]; }
+};
+
 /**
- *  @brief Sweeps one part of @p nodes nodes forward from @p landmarks stride-spread ones, level by
- *      level over @p this_level and @p next_level, each a bit per node at least, and answers how
- *      many nodes the sweep reached and in how many levels.
+ *  @brief Audits one part of @p nodes entries from one drawn root, as the RAM audit does: the
+ *      root's strong component with exact depths, every entry's in-links and shallower in-links,
+ *      and the islands outside the component with their strong and weak components.
  *
- *  A level scans tasks of @p run_nodes nodes each through @c nvme_scan_reads, every engine's queue
- *  kept full: a task reads its nodes' neighbors in ID order, nodes whose blocks touch merged into
- *  one read that fits a staging buffer of @p buffer_bytes, so a full level reads near-sequentially
- *  and every reachable node is read once, by the level expanding it.
- *  @p neighbors_extent answers the @c nvme_extent_t on @p media holding a node's neighbor IDs.
- *  Runs inside a call @c nvme_begin_scans began. The sweep runs forward only, so it reports no
- *  @c back_sweeps at all.
+ *  Every pass scans tasks of @p run_nodes entries through @c nvme_scan_reads, reading only the
+ *  neighbor lists it is due for, in ID order, lists whose blocks touch merged into one read that
+ *  fits a staging buffer of @p buffer_bytes. A forward depth reads the entries the depth before
+ *  reached: each link counts an in-link and a shallower in-link and reaches its target one depth
+ *  deeper, and the same read marks the entry's way to the root when a link leads to an entry
+ *  already reaching the root. Rechecks then re-read only the entries reached and not yet marked.
+ *  One more pass reads the islands and every entry with fewer links than a neighbor list holds,
+ *  counting unlinked and underlinked entries and keeping the islands' links among themselves, which
+ *  Tarjan's walk and a union-find label on the calling thread. A drawn root whose component is
+ *  smaller than the largest island gives way once to that island's first entry.
+ *
+ *  @p neighbors_extent answers the @c nvme_extent_t on @p media holding an entry's links, at most
+ *  @p connectivity of them. @p columns spans @p nodes entries, and @p islands_found, on thread
+ *  zero's arena, keeps the islands with their parents and entries for the rest of the call; while
+ *  islands stand, the last pass reads every entry's links for those leading into them. Runs inside
+ *  a call @c nvme_begin_scans began.
  *
  *  @par Statuses:
+ *  - @c bad_alloc_k Thread zero's arena could not hold the islands.
  *  - @c overflow_k A read finds its engine's queue full.
  *  - @c io_k A neighbors read came back short.
  */
@@ -1812,61 +1842,432 @@ template <typename node_id_type_, template <typename> class atomic_ref_template_
           typename neighbors_extent_type_>
 expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
                                                  std::span<typename executor_type_::medium_t const> media,
-                                                 std::size_t buffer_bytes, std::span<u64_t> this_level,
-                                                 std::span<u64_t> next_level, std::size_t nodes, std::size_t landmarks,
-                                                 std::size_t run_nodes,
+                                                 std::size_t buffer_bytes, audit_columns_t const& columns,
+                                                 audit_islands<node_id_type_>& islands_found, std::size_t nodes,
+                                                 std::size_t connectivity, std::size_t run_nodes,
                                                  neighbors_extent_type_ const& neighbors_extent) noexcept {
-    using levels_t = reachability_levels<atomic_ref_template_>;
-    std::size_t const words = divide_round_up(nodes, levels_t::lanes_k);
-    levels_t levels {this_level.first(words), next_level.first(words)};
-    auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
-        // A task's progress counts its nodes the reads issued so far cover.
-        std::size_t const task_first = task * run_nodes, bound = min_of(task_first + run_nodes, nodes);
-        for (std::size_t first = levels.first_in_level(task_first + progress, bound); first != bound;) {
-            nvme_extent_t read = neighbors_extent(first);
-            std::size_t last = first;
-            for (std::size_t node = levels.first_in_level(first + 1, bound); node != bound;
-                 node = levels.first_in_level(node + 1, bound)) {
-                nvme_extent_t const extent = neighbors_extent(node);
-                if (!nvme_extends_read(media[read.medium], read, extent, buffer_bytes)) break;
-                last = node, read.length = static_cast<u32_t>(extent.begin + extent.length - read.begin);
-            }
-            progress = last + 1 - task_first;
-            if (read.length) return {read};
-            // Nodes without neighbors expand here, as no read carries them.
-            for (std::size_t node = first; node <= last; ++node) levels.expand(node);
-            first = levels.first_in_level(last + 1, bound);
+    using bits_ref_t = atomic_ref_template_<u64_t>;
+    using byte_ref_t = atomic_ref_template_<u8_t>;
+    using size_ref_t = atomic_ref_template_<std::size_t>;
+    using node_ref_t = atomic_ref_template_<node_id_type_>;
+    using islands_t = audit_islands<node_id_type_>;
+    using scratch_allocator_t = typename islands_t::scratch_allocator_t;
+    using island_ids_t = typename islands_t::island_ids_t;
+    constexpr u8_t unknown_depth_k = (std::numeric_limits<u8_t>::max)();
+    constexpr std::size_t lanes_k = audit_columns_t::lanes_k;
+    constexpr node_id_type_ sentinel_k = (std::numeric_limits<node_id_type_>::max)();
+    enum bitset_t : std::size_t { reached_k, reaches_root_k, two_ways_to_root_k };
+    constexpr u8_t unreached_island_k = islands_t::unreached_island_k, stranded_island_k = islands_t::stranded_island_k;
+    constexpr u8_t links_to_component_k = islands_t::links_to_component_k;
+    constexpr u8_t linked_from_component_k = islands_t::linked_from_component_k;
+
+    /** The lowest depth to root among the links one read met, and how many links met it. */
+    struct way_to_root_t {
+        u8_t lowest = (std::numeric_limits<u8_t>::max)();
+        std::size_t at_lowest = 0;
+
+        void note(u8_t depth_to_root) noexcept {
+            if (depth_to_root < lowest) lowest = depth_to_root, at_lowest = 1;
+            else at_lowest += depth_to_root == lowest && depth_to_root != (std::numeric_limits<u8_t>::max)();
         }
-        return {};
     };
-    auto consume = [&](std::size_t, std::size_t task, u64_t progress, std::array<nvme_extent_t, 1> const& reads,
-                       std::array<byte_t const*, 1> const& fetched) noexcept {
-        // A read holds the due nodes from its describe's start up to the first that ends past it.
-        std::size_t const task_first = task * run_nodes, bound = min_of(task_first + run_nodes, nodes);
-        for (std::size_t node = levels.first_in_level(task_first + progress, bound); node != bound;
-             node = levels.first_in_level(node + 1, bound)) {
-            nvme_extent_t const extent = neighbors_extent(node);
-            if (extent.begin + extent.length > reads[0].begin + reads[0].length) break;
-            levels.expand(node);
-            std::span<node_id_type_ const> const neighbors {
-                reinterpret_cast<node_id_type_ const*>(fetched[0] + (extent.begin - reads[0].begin)),
-                extent.length / sizeof(node_id_type_)};
-            for (node_id_type_ const neighbor : neighbors)
-                if (neighbor < nodes) levels.reach(neighbor);
-        }
+
+    /** What one pass's visits found, summed over its reads. */
+    struct counts_t {
+        std::size_t reached = 0;
+        std::size_t marked = 0;
+        std::size_t unlinked = 0;
+        std::size_t underlinked = 0;
     };
 
     reachability_t audited;
     audited.audited_nodes = nodes;
-    std::size_t const tasks = divide_round_up(nodes, run_nodes);
-    for (std::size_t level_nodes = levels.seed(landmarks, nodes); level_nodes; level_nodes = levels.advance_level()) {
+    if (!nodes) return {audited, status_t::success_k};
+    std::size_t const words = audit_columns_t::words_for(nodes), tasks = divide_round_up(nodes, run_nodes);
+
+    auto word_of = [&](bitset_t bitset, std::size_t word) noexcept {
+        return bits_ref_t(columns.bitset_words[bitset * words + word]).load(std::memory_order_relaxed);
+    };
+    auto insert = [&](bitset_t bitset, std::size_t node) noexcept {
+        return bits_ref_t(columns.bitset_words[bitset * words + node / lanes_k])
+            .fetch_test_and_set_bit(static_cast<unsigned>(node % lanes_k), std::memory_order_relaxed);
+    };
+    auto component_lanes = [&](std::size_t word) noexcept {
+        return word_of(reached_k, word) & word_of(reaches_root_k, word);
+    };
+    auto in_component = [&](std::size_t node) noexcept {
+        return ((component_lanes(node / lanes_k) >> (node % lanes_k)) & 1u) != 0;
+    };
+    auto visible_lanes = [&](std::size_t word) noexcept {
+        std::size_t const lanes = min_of<std::size_t>(nodes - word * lanes_k, lanes_k);
+        return lanes == lanes_k ? ~u64_t {0} : (u64_t {1} << lanes) - 1;
+    };
+    auto depth_of = [](u8_t* column, std::size_t node) noexcept {
+        return byte_ref_t(column[node]).load(std::memory_order_relaxed);
+    };
+    auto count_parent = [&](std::size_t node) noexcept {
+        byte_ref_t const shallower_in_links {columns.shallower_in_links[node]};
+        u8_t observed = shallower_in_links.load(std::memory_order_relaxed);
+        while (observed != unknown_depth_k &&
+               !shallower_in_links.compare_exchange_weak(observed, static_cast<u8_t>(observed + 1),
+                                                         std::memory_order_relaxed, std::memory_order_relaxed)) {}
+    };
+    auto count_in_link = [&](std::size_t node) noexcept {
+        return fu::atomic_fetch_add_if_at_most(byte_ref_t(columns.in_links[node]), u8_t {1}, unknown_depth_k,
+                                               std::memory_order_relaxed);
+    };
+    auto mark_reaches_root = [&](std::size_t node, way_to_root_t const& way_to_root) noexcept {
+        if (way_to_root.lowest == unknown_depth_k) return false;
+        u8_t const depth_to_root = static_cast<u8_t>(min_of<unsigned>(way_to_root.lowest + 1u, unknown_depth_k - 1u));
+        byte_ref_t(columns.depths_to_root[node]).store(depth_to_root, std::memory_order_relaxed);
+        insert(reaches_root_k, node);
+        if (way_to_root.at_lowest > 1 && way_to_root.lowest < depth_to_root) insert(two_ways_to_root_k, node);
+        return true;
+    };
+    auto for_each_link = [&](std::size_t node, bytes_view_t neighbor_list, auto&& visit) noexcept {
+        std::span<node_id_type_ const> const links {reinterpret_cast<node_id_type_ const*>(neighbor_list.data()),
+                                                    neighbor_list.size() / sizeof(node_id_type_)};
+        // A list led by its own entry is a forgotten one, which the RAM audit reads as empty.
+        if (links.empty() || links[0] == node) return;
+        for (node_id_type_ const target : links) {
+            if (target == sentinel_k) break;
+            if (target < nodes && target != node) visit(static_cast<std::size_t>(target));
+        }
+    };
+
+    auto sweep = [&](auto const& due_lanes, auto const& due, auto const& visit) noexcept -> expected<counts_t> {
+        // One pass: the links of every entry `due` names among the lanes `due_lanes` offers, read
+        // once, in ID order.
+        counts_t total;
+        auto next_due = [&](std::size_t from, std::size_t bound) noexcept {
+            while (from < bound) {
+                std::size_t const word = from / lanes_k;
+                for (u64_t lanes = due_lanes(word) & (~u64_t {0} << (from % lanes_k)); lanes; lanes &= lanes - 1) {
+                    std::size_t const node = word * lanes_k + static_cast<std::size_t>(std::countr_zero(lanes));
+                    if (node >= bound) return bound;
+                    if (due(node)) return node;
+                }
+                from = (word + 1) * lanes_k;
+            }
+            return bound;
+        };
+        auto fold = [&](counts_t const& counts) noexcept {
+            for (std::size_t counts_t::* field :
+                 {&counts_t::reached, &counts_t::marked, &counts_t::unlinked, &counts_t::underlinked})
+                if (counts.*field) size_ref_t(total.*field).store_add(counts.*field, std::memory_order_relaxed);
+        };
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
+            std::size_t const task_first = task * run_nodes, bound = min_of(task_first + run_nodes, nodes);
+            counts_t counts;
+            nvme_extent_t read {};
+            for (std::size_t node = next_due(task_first + progress, bound); node != bound;
+                 node = next_due(node + 1, bound)) {
+                nvme_extent_t const extent = neighbors_extent(node);
+                if (read.length && extent.length && !nvme_extends_read(media[read.medium], read, extent, buffer_bytes))
+                    break;
+                progress = node + 1 - task_first;
+                // No read carries an empty row, so the describe passing it visits it, and
+                // consume skips it.
+                if (!extent.length) visit(node, bytes_view_t {}, counts);
+                else if (!read.length) read = extent;
+                else read.length = static_cast<u32_t>(extent.begin + extent.length - read.begin);
+            }
+            fold(counts);
+            if (!read.length) return {};
+            return {read};
+        };
+        auto consume = [&](std::size_t, std::size_t task, u64_t progress, std::array<nvme_extent_t, 1> const& reads,
+                           std::array<byte_t const*, 1> const& fetched) noexcept {
+            std::size_t const task_first = task * run_nodes, bound = min_of(task_first + run_nodes, nodes);
+            u64_t const read_end = reads[0].begin + reads[0].length;
+            counts_t counts;
+            for (std::size_t node = next_due(task_first + progress, bound); node != bound;
+                 node = next_due(node + 1, bound)) {
+                nvme_extent_t const extent = neighbors_extent(node);
+                if (!extent.length) continue;
+                if (extent.begin + extent.length > read_end) break;
+                visit(node, bytes_view_t {fetched[0] + (extent.begin - reads[0].begin), extent.length}, counts);
+            }
+            fold(counts);
+        };
         auto const [reads, status] = nvme_scan_reads<1, atomic_ref_template_>(executor, media, tasks, describe,
                                                                               consume);
-        if (failed(status)) return {{}, status};
-        ++audited.sweeps;
+        return {total, status};
+    };
+
+    std::size_t root = static_cast<std::size_t>(seeded_bijection(0, nodes, 0));
+    std::array<std::size_t, unknown_depth_k> depth_entries {};
+    for (bool drawn = true;; drawn = false) {
+        std::memset(columns.bitset_words, 0, audit_columns_t::bitsets_k * words * sizeof(u64_t));
+        std::memset(columns.depths_from_root, unknown_depth_k, nodes);
+        std::memset(columns.depths_to_root, unknown_depth_k, nodes);
+        std::memset(columns.shallower_in_links, 0, nodes);
+        std::memset(columns.in_links, 0, nodes);
+        depth_entries.fill(0);
+        insert(reached_k, root);
+        insert(reaches_root_k, root);
+        columns.depths_from_root[root] = columns.depths_to_root[root] = 0;
+        depth_entries[0] = 1;
+        audited.depth_from_root = audited.depth_to_root = 0;
+
+        for (std::size_t depth = 0;;) {
+            bool const saturated = depth >= unknown_depth_k - 1u;
+            u8_t const own_depth = static_cast<u8_t>(min_of<std::size_t>(depth, unknown_depth_k - 1u));
+            u8_t const child_depth = static_cast<u8_t>(min_of<std::size_t>(depth + 1, unknown_depth_k - 1u));
+            auto expand = [&](std::size_t node, bytes_view_t neighbor_list, counts_t& counts) noexcept {
+                // Past the deepest recorded level an entry marks its expansion in its parents byte,
+                // which no link counts into there.
+                if (saturated && std::exchange(columns.shallower_in_links[node], u8_t {1})) return;
+                way_to_root_t way_to_root;
+                for_each_link(node, neighbor_list, [&](std::size_t target) noexcept {
+                    if (!count_in_link(target) && !insert(reached_k, target)) {
+                        byte_ref_t(columns.depths_from_root[target]).store(child_depth, std::memory_order_relaxed);
+                        ++counts.reached;
+                    }
+                    // A depth still unknown is one another task reached this depth and is storing.
+                    u8_t const target_depth = depth_of(columns.depths_from_root, target);
+                    if (child_depth != unknown_depth_k - 1 &&
+                        (target_depth == child_depth || target_depth == unknown_depth_k))
+                        count_parent(target);
+                    way_to_root.note(depth_of(columns.depths_to_root, target));
+                });
+                if (depth_of(columns.depths_to_root, node) == unknown_depth_k) mark_reaches_root(node, way_to_root);
+            };
+            auto const [swept, status] = sweep(
+                [&](std::size_t word) noexcept { return word_of(reached_k, word); },
+                [&](std::size_t node) noexcept { return depth_of(columns.depths_from_root, node) == own_depth; },
+                expand);
+            if (failed(status)) return {{}, status};
+            if (!swept.reached) break;
+            depth_entries[min_of<std::size_t>(++depth, unknown_depth_k - 1u)] += swept.reached;
+            ++audited.depth_from_root;
+        }
+
+        auto recheck_reaches_root = [&](std::size_t node, bytes_view_t neighbor_list, counts_t& counts) noexcept {
+            way_to_root_t way_to_root;
+            for_each_link(node, neighbor_list, [&](std::size_t target) noexcept {
+                way_to_root.note(depth_of(columns.depths_to_root, target));
+            });
+            counts.marked += mark_reaches_root(node, way_to_root);
+        };
+        for (;;) {
+            auto const [swept, status] = sweep(
+                [&](std::size_t word) noexcept { return word_of(reached_k, word) & ~word_of(reaches_root_k, word); },
+                [](std::size_t) noexcept { return true; }, recheck_reaches_root);
+            if (failed(status)) return {{}, status};
+            if (!swept.marked) break;
+            ++audited.depth_to_root;
+        }
+
+        std::size_t component = 0;
+        for (std::size_t word = 0; word != words; ++word)
+            component += static_cast<std::size_t>(std::popcount(component_lanes(word)));
+        std::size_t const islands = nodes - component;
+        scratch_allocator_t const scratch {executor.arena(0)};
+        island_ids_t island_links {scratch}, island_walk {scratch};
+        island_ids_t& island_nodes = islands_found.nodes;
+        island_ids_t& island_components = islands_found.components;
+        island_ids_t& island_parents = islands_found.parents;
+        growing_buffer<u8_t, scratch_allocator_t>& island_roles = islands_found.roles;
+        island_nodes.clear();
+        if (failed(island_nodes.reserve_exactly(islands)) ||
+            failed(island_links.resize_uninitialized(islands * connectivity)) ||
+            failed(island_components.resize_uninitialized(islands)) || failed(island_walk.resize(5 * islands)) ||
+            failed(island_parents.resize_uninitialized(islands)) || failed(islands_found.entries.resize(islands)) ||
+            failed(island_roles.resize(islands)))
+            return {{}, status_t::bad_alloc_k};
+        if (islands) std::memset(island_roles.data(), 0, islands);
+        for (node_id_type_& parent : island_parents) parent = sentinel_k;
+        for (std::size_t word = 0; word != words; ++word)
+            for (u64_t lanes = ~component_lanes(word) & visible_lanes(word); lanes; lanes &= lanes - 1)
+                island_nodes.push_back_reserved(
+                    static_cast<node_id_type_>(word * lanes_k + static_cast<std::size_t>(std::countr_zero(lanes))));
+        std::span<node_id_type_ const> const island_ids = to_span(island_nodes);
+        node_id_type_ const islands_end = static_cast<node_id_type_>(islands);
+        auto island_rank = [&](std::size_t node) noexcept {
+            return static_cast<std::size_t>(lower_bound(island_ids, static_cast<node_id_type_>(node)) -
+                                            island_ids.data());
+        };
+
+        auto gather = [&](std::size_t node, bytes_view_t neighbor_list, counts_t& counts) noexcept {
+            std::size_t out_links = 0;
+            if (in_component(node))
+                for_each_link(node, neighbor_list, [&](std::size_t target) noexcept {
+                    ++out_links;
+                    if (!in_component(target))
+                        fu::atomic_min(node_ref_t(island_parents[island_rank(target)]),
+                                       static_cast<node_id_type_>(node), std::memory_order_relaxed);
+                });
+            else {
+                std::size_t const rank = island_rank(node);
+                node_id_type_* const links = island_links.data() + rank * connectivity;
+                std::size_t kept = 0;
+                for_each_link(node, neighbor_list, [&](std::size_t target) noexcept {
+                    ++out_links;
+                    if (in_component(target)) island_roles[rank] |= links_to_component_k;
+                    else if (kept != connectivity) links[kept++] = static_cast<node_id_type_>(island_rank(target));
+                });
+                if (kept != connectivity) links[kept] = islands_end;
+            }
+            u8_t const in_links = columns.in_links[node];
+            counts.unlinked += in_links == 0;
+            counts.underlinked += in_links < out_links;
+        };
+        // An entry linked to at least as often as it links is never underlinked, but while islands
+        // stand every entry of the component is read for the links leading into them.
+        auto const [gathered, gather_status] = sweep(
+            visible_lanes,
+            [&](std::size_t node) noexcept {
+                return islands || !in_component(node) || columns.in_links[node] < connectivity;
+            },
+            gather);
+        if (failed(gather_status)) return {{}, gather_status};
+
+        // Tarjan's walk over the islands without recursion: visit order from one, the least order
+        // each node reaches on the stack, the stack, and the path beside the slot each step reads.
+        node_id_type_* const order = island_walk.data();
+        node_id_type_* const lowest = order + islands;
+        node_id_type_* const stack = lowest + islands;
+        node_id_type_* const path = stack + islands;
+        node_id_type_* const cursors = path + islands;
+        std::size_t visits = 0, stacked = 0, depth = 0, largest_entries = 0, largest = root;
+        auto next_island_link = [&](std::size_t rank, node_id_type_& cursor) noexcept -> std::size_t {
+            node_id_type_ const* const links = island_links.data() + rank * connectivity;
+            if (cursor != connectivity && links[cursor] != islands_end) return links[cursor++];
+            cursor = static_cast<node_id_type_>(connectivity);
+            return islands;
+        };
+        auto for_each_island_link = [&](std::size_t rank, auto&& visit) noexcept {
+            node_id_type_ const* const links = island_links.data() + rank * connectivity;
+            for (std::size_t slot = 0; slot != connectivity && links[slot] != islands_end; ++slot)
+                visit(static_cast<std::size_t>(links[slot]));
+        };
+        auto enter = [&](std::size_t rank) noexcept {
+            order[rank] = lowest[rank] = static_cast<node_id_type_>(++visits);
+            stack[stacked++] = path[depth] = static_cast<node_id_type_>(rank);
+            cursors[depth++] = 0;
+        };
+        auto close_component = [&](std::size_t rank) noexcept {
+            std::size_t from = stacked;
+            while (stack[--from] != rank) {}
+            std::span<node_id_type_ const> const members {stack + from, stacked - from};
+            stacked = from;
+            node_id_type_ first = members[0];
+            for (node_id_type_ const member : members) first = min_of(first, member);
+            if (members.size() > largest_entries) largest_entries = members.size(), largest = island_ids[first];
+            for (node_id_type_ const member : members) island_components[member] = first, lowest[member] = sentinel_k;
+        };
+        for (std::size_t start = 0; start != islands; ++start) {
+            if (order[start]) continue;
+            enter(start);
+            while (depth) {
+                std::size_t const rank = path[depth - 1];
+                if (std::size_t const next = next_island_link(rank, cursors[depth - 1]); next != islands) {
+                    if (!order[next]) enter(next);
+                    else if (lowest[next] != sentinel_k) lowest[rank] = min_of(lowest[rank], order[next]);
+                    continue;
+                }
+                --depth;
+                if (lowest[rank] == order[rank]) close_component(rank);
+                if (depth) lowest[path[depth - 1]] = min_of(lowest[path[depth - 1]], lowest[rank]);
+            }
+        }
+        if (drawn && largest_entries > component) {
+            root = largest;
+            continue;
+        }
+
+        constexpr u8_t component_roles_k = unreached_island_k | stranded_island_k;
+        for (std::size_t rank = 0; rank != islands; ++rank)
+            if (island_components[rank] == rank) island_roles[rank] |= component_roles_k;
+        for (std::size_t rank = 0; rank != islands; ++rank) {
+            std::size_t const component_rank = island_components[rank];
+            if (island_parents[rank] != sentinel_k) {
+                island_roles[rank] |= linked_from_component_k;
+                island_roles[component_rank] &= static_cast<u8_t>(~unreached_island_k);
+            }
+            if (island_roles[rank] & links_to_component_k)
+                island_roles[component_rank] &= static_cast<u8_t>(~stranded_island_k);
+            for_each_island_link(rank, [&](std::size_t linked) noexcept {
+                std::size_t const next = island_components[linked];
+                if (next == component_rank) return;
+                island_roles[component_rank] &= static_cast<u8_t>(~stranded_island_k);
+                island_roles[next] &= static_cast<u8_t>(~unreached_island_k);
+            });
+        }
+        for (std::size_t rank = 0; rank != islands; ++rank) {
+            std::size_t const component_rank = island_components[rank];
+            u8_t const roles = island_roles[component_rank] & component_roles_k;
+            if (component_rank != rank) island_roles[rank] |= roles;
+            else {
+                audited.unreached_islands += (roles & unreached_island_k) != 0;
+                audited.stranded_islands += (roles & stranded_island_k) != 0;
+            }
+        }
+
+        // A member a link crosses through stands first, as the heal links through it; then the
+        // fewest in-links, ties by a keyed draw, so the ID order never decides.
+        node_id_type_* const island_entries = islands_found.entries.data();
+        auto stands_before = [&](std::size_t rank, std::size_t other) noexcept {
+            auto crosses = [&](std::size_t member) noexcept {
+                return (island_roles[member] & (links_to_component_k | linked_from_component_k)) != 0;
+            };
+            if (crosses(rank) != crosses(other)) return crosses(rank);
+            std::size_t const node = island_ids[rank], other_node = island_ids[other];
+            if (columns.in_links[node] != columns.in_links[other_node])
+                return columns.in_links[node] < columns.in_links[other_node];
+            return mix_bits(node) < mix_bits(other_node);
+        };
+        for (std::size_t rank = 0; rank != islands; ++rank)
+            if (island_components[rank] == rank) island_entries[rank] = static_cast<node_id_type_>(rank);
+        for (std::size_t rank = 0; rank != islands; ++rank) {
+            node_id_type_& entry = island_entries[island_components[rank]];
+            if (stands_before(rank, entry)) entry = static_cast<node_id_type_>(rank);
+        }
+
+        // The walk's columns again, as union-find parents; the slot past the islands is the root's.
+        node_id_type_* const weak = island_walk.data();
+        for (std::size_t rank = 0; rank != islands; ++rank) weak[rank] = static_cast<node_id_type_>(rank);
+        if (islands) weak[islands] = islands_end;
+        auto find = [&](std::size_t rank) noexcept {
+            while (weak[rank] != rank) rank = weak[rank] = weak[weak[rank]];
+            return rank;
+        };
+        auto unite = [&](std::size_t first, std::size_t second) noexcept {
+            first = find(first), second = find(second);
+            if (first != second) weak[max_of(first, second)] = static_cast<node_id_type_>(min_of(first, second));
+        };
+        for (std::size_t rank = 0; rank != islands; ++rank) {
+            if (island_roles[rank] & (links_to_component_k | linked_from_component_k)) unite(rank, islands);
+            for_each_island_link(rank, [&](std::size_t linked) noexcept { unite(rank, linked); });
+        }
+        audited.components = islands ? 0 : 1;
+        for (std::size_t rank = 0; rank != islands + (islands != 0); ++rank) audited.components += weak[rank] == rank;
+
+        std::size_t most_populated = 0;
+        for (std::size_t depth = 1; depth != depth_entries.size(); ++depth)
+            if (depth_entries[depth] > depth_entries[most_populated]) most_populated = depth;
+        for (std::size_t depth = most_populated + 1; depth < depth_entries.size(); ++depth)
+            audited.beyond_most_populated_depth += depth_entries[depth];
+        audited.reachable_nodes = component;
+        audited.unlinked = gathered.unlinked;
+        audited.underlinked = gathered.underlinked;
+        return {audited, status_t::success_k};
     }
-    audited.reachable_nodes = levels.reachable();
-    return {audited, status_t::success_k};
+}
+
+/** The @c nvme_audit_reachability of a caller that keeps none of the islands. */
+template <typename node_id_type_, template <typename> class atomic_ref_template_, typename executor_type_,
+          typename neighbors_extent_type_>
+expected<reachability_t> nvme_audit_reachability(executor_type_& executor,
+                                                 std::span<typename executor_type_::medium_t const> media,
+                                                 std::size_t buffer_bytes, audit_columns_t const& columns,
+                                                 std::size_t nodes, std::size_t connectivity, std::size_t run_nodes,
+                                                 neighbors_extent_type_ const& neighbors_extent) noexcept {
+    audit_islands<node_id_type_> islands {
+        typename audit_islands<node_id_type_>::scratch_allocator_t {executor.arena(0)}};
+    return nvme_audit_reachability<node_id_type_, atomic_ref_template_>(
+        executor, media, buffer_bytes, columns, islands, nodes, connectivity, run_nodes, neighbors_extent);
 }
 
 #pragma endregion Reachability

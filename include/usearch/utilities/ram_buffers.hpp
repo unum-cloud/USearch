@@ -15,9 +15,10 @@
  */
 #pragma once
 
-#include <cstddef> // `std::size_t`
+#include <cassert> // `assert` - a run expanded within its own entries
+#include <cstddef> // `std::size_t`, `std::to_integer` - a padding fill
 #include <cstdint> // `SIZE_MAX`, `std::uint8_t`
-#include <cstring> // `std::memcpy`, `std::memset` - a fresh chunk starts zeroed
+#include <cstring> // `std::memcpy`, `std::memset`, `std::memmove` - a fresh chunk starts zeroed
 
 #include <array>       // `std::array` - batch-of-four overloads, the chunk directories, the arena's runs
 #include <bit>         // `std::bit_width`, `std::bit_floor` - the closed-form chunk location
@@ -1141,26 +1142,23 @@ class chunked_column {
      *  - @c overflow_k @p nodes passes the directory's @c max_nodes_.
      */
     status_t cover(std::size_t nodes) noexcept {
-        if (nodes > max_nodes_) return status_t::overflow_k;
-        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
-            atomic_ref<value_t*> slot {chunks_[chunk]};
-            if (slot.load(std::memory_order_acquire)) continue;
-            value_t* const fresh = allocator_.allocate(schedule_t::nodes_in(chunk));
-            if (!fresh) return status_t::bad_alloc_k;
+        return cover_(nodes, [&](std::span<value_t> fresh) noexcept {
             if constexpr (std::is_trivially_copyable_v<value_t>)
-                std::memset(static_cast<void*>(fresh), 0, schedule_t::nodes_in(chunk) * sizeof(value_t));
+                std::memset(static_cast<void*>(fresh.data()), 0, fresh.size_bytes());
             else {
                 allocator_type_ const values_allocator(allocator_);
-                for (std::size_t offset = 0; offset != schedule_t::nodes_in(chunk); ++offset)
-                    new (fresh + offset) value_t(values_allocator);
+                for (std::size_t offset = 0; offset != fresh.size(); ++offset)
+                    new (fresh.data() + offset) value_t(values_allocator);
             }
-            value_t* expected_empty = nullptr;
-            // A peer covering the same chunk first keeps its own; this one goes back.
-            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
-                                              std::memory_order_acquire))
-                release_(fresh, schedule_t::nodes_in(chunk));
-        }
-        return status_t::success_k;
+        });
+    }
+
+    /** Like @ref cover, but leaves fresh chunks unfilled, so the caller owns the first touch of
+     *  each of their values. */
+    status_t cover_uninitialized(std::size_t nodes) noexcept
+        requires std::is_trivially_copyable_v<value_type_>
+    {
+        return cover_(nodes, [](std::span<value_t>) noexcept {});
     }
 
     /** The value at @p location, which a @ref cover already reached - for callers that located it
@@ -1229,6 +1227,25 @@ class chunked_column {
 
   private:
 
+    /** Allocates, readies through @p prepare, and publishes every chunk the first @p nodes nodes
+     *  need and is missing; a chunk a peer published first goes back. */
+    template <typename prepare_type_>
+    status_t cover_(std::size_t nodes, prepare_type_&& prepare) noexcept {
+        if (nodes > max_nodes_) return status_t::overflow_k;
+        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
+            atomic_ref<value_t*> slot {chunks_[chunk]};
+            if (slot.load(std::memory_order_acquire)) continue;
+            value_t* const fresh = allocator_.allocate(schedule_t::nodes_in(chunk));
+            if (!fresh) return status_t::bad_alloc_k;
+            prepare(std::span<value_t> {fresh, schedule_t::nodes_in(chunk)});
+            value_t* expected_empty = nullptr;
+            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
+                                              std::memory_order_acquire))
+                release_(fresh, schedule_t::nodes_in(chunk));
+        }
+        return status_t::success_k;
+    }
+
     /** Destroys the @p count values a cover built, if it built any, and returns their chunk. */
     void release_(value_t* values, std::size_t count) noexcept {
         if constexpr (!std::is_trivially_copyable_v<value_t>) std::destroy_n(values, count);
@@ -1277,27 +1294,28 @@ class chunked_matrix {
      *  @par Statuses:
      *  - @c overflow_k @p rows passes the directory's @c max_nodes_.
      */
-    status_t cover(std::size_t rows, std::size_t columns, std::uint8_t fill = 0) noexcept {
-        if (rows > max_nodes_) return status_t::overflow_k;
-        if (columns_ != columns) columns_ = columns;
-        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
-            atomic_ref<value_t*> slot {chunks_[chunk]};
-            if (slot.load(std::memory_order_acquire)) continue;
-            std::size_t const values = schedule_t::nodes_in(chunk) * columns;
-            value_t* const fresh = allocator_.allocate(values);
-            if (!fresh) return status_t::bad_alloc_k;
-            std::memset(static_cast<void*>(fresh), fill, values * sizeof(value_t));
-            value_t* expected_empty = nullptr;
-            // A peer covering the same chunk first keeps its own; this one goes back.
-            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
-                                              std::memory_order_acquire))
-                allocator_.deallocate(fresh, values);
-        }
-        return status_t::success_k;
+    status_t cover(std::size_t nodes, std::size_t columns, std::uint8_t fill = 0) noexcept {
+        return cover_(nodes, columns, [fill](std::span<value_t> fresh) noexcept {
+            std::memset(static_cast<void*>(fresh.data()), fill, fresh.size_bytes());
+        });
+    }
+
+    /** Like @ref cover, but leaves fresh chunks unfilled, so the caller owns the first touch of
+     *  each of their values. */
+    status_t cover_uninitialized(std::size_t nodes, std::size_t columns) noexcept {
+        return cover_(nodes, columns, [](std::span<value_t>) noexcept {});
     }
 
     /** Values per row, fixed by the first @ref cover; zero before it. */
     std::size_t columns() const noexcept { return columns_; }
+
+    /** Rows the published chunks hold. */
+    std::size_t capacity() const noexcept {
+        std::size_t chunks = 0;
+        while (chunks != max_chunks_k && atomic_ref<value_t* const>(chunks_[chunks]).load(std::memory_order_acquire))
+            ++chunks;
+        return schedule_t::nodes_before(chunks);
+    }
 
     /** The first of the @ref columns values of the row at @p location, which a @ref cover already
      *  reached. */
@@ -1320,6 +1338,27 @@ class chunked_matrix {
 
   private:
 
+    /** Allocates, readies through @p prepare, and publishes every chunk the first @p nodes nodes
+     *  of @p columns values need and is missing; a chunk a peer published first goes back. */
+    template <typename prepare_type_>
+    status_t cover_(std::size_t nodes, std::size_t columns, prepare_type_&& prepare) noexcept {
+        if (nodes > max_nodes_) return status_t::overflow_k;
+        if (columns_ != columns) columns_ = columns;
+        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(nodes); chunk != chunks; ++chunk) {
+            atomic_ref<value_t*> slot {chunks_[chunk]};
+            if (slot.load(std::memory_order_acquire)) continue;
+            std::size_t const values = schedule_t::nodes_in(chunk) * columns;
+            value_t* const fresh = allocator_.allocate(values);
+            if (!fresh) return status_t::bad_alloc_k;
+            prepare(std::span<value_t> {fresh, values});
+            value_t* expected_empty = nullptr;
+            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
+                                              std::memory_order_acquire))
+                allocator_.deallocate(fresh, values);
+        }
+        return status_t::success_k;
+    }
+
     /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover
      *  reached yet. */
     std::array<value_t*, max_chunks_k> chunks_ {};
@@ -1329,6 +1368,36 @@ class chunked_matrix {
 
     [[no_unique_address]] allocator_t allocator_;
 };
+
+/**
+ *  @brief Copies entries @p first to @p first + @p count of the flat @p matrix, each
+ *      @p entry_bytes wide, into @p destination.
+ *
+ *  @par Statuses:
+ *  - @c config_mismatch_k The matrix holds fewer entries, or @p destination another byte count.
+ */
+inline status_t copy_entries(bytes_view_t matrix, std::size_t first, std::size_t count, std::size_t entry_bytes,
+                             bytes_span_t destination) noexcept {
+    bytes_view_t const entries = flat_rows(matrix, first, count, entry_bytes);
+    if (entries.size() != count * entry_bytes) return status_t::config_mismatch_k;
+    return copy_bytes(destination, entries);
+}
+
+/** Spreads the @p count entries of @p stored_bytes packed at the end of @p entries forward, one per
+ *  @p padded_bytes, setting each one's padding to @p fill - how a run read into the end of padded
+ *  storage lands in place. */
+inline void expand_entries_forward(bytes_span_t entries, std::size_t count, std::size_t stored_bytes,
+                                   std::size_t padded_bytes, byte_t fill) noexcept {
+    assert(entries.size() == count * padded_bytes && stored_bytes <= padded_bytes);
+    if (stored_bytes == padded_bytes) return;
+    byte_t const* const packed = entries.data() + count * (padded_bytes - stored_bytes);
+    // An entry lands at or before its packed place, and its padding ends before the next one's.
+    for (std::size_t entry = 0; entry != count; ++entry) {
+        std::memmove(entries.data() + entry * padded_bytes, packed + entry * stored_bytes, stored_bytes);
+        std::memset(entries.data() + entry * padded_bytes + stored_bytes, std::to_integer<int>(fill),
+                    padded_bytes - stored_bytes);
+    }
+}
 
 /** Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot
  *  fit them stays alive under its slices while a chunk at least twice as wide opens - so

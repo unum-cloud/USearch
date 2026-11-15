@@ -57,9 +57,6 @@ enum class vram_dense_kernel_t : u32_t {
     /** A walk folding the values of the rows it attends to, per head. */
     attend_k,
 
-    /** Folds each walked node's forward picks and the walkers chained onto it into its row. */
-    merge_back_links_k,
-
     /** Re-selects each row of a fold bin's shard from its members and its cross results, or merges
      *  the picks other shards of the bin made of it into its row. */
     fold_k,
@@ -186,6 +183,10 @@ struct compact_config_t {
 
     /** Bytes a closing refine may hold beyond the index, as @c refine_config_t takes them. */
     std::size_t memory_limit = 0;
+
+    /** Bytes of cache each core keeps to itself, which size a round's hubs and its neighborhood
+     *  capacity; zero takes the executor's cache per core. */
+    std::size_t cache_bytes = 0;
 };
 
 /** Outcome of a compaction, whatever its residencies. */
@@ -224,6 +225,13 @@ struct refine_config_t {
      *  fit, or on VRAM at 4 B per slot past the walks' arena too. Zero walks one storage chunk per
      *  tile, or on VRAM every walked row in one tile. */
     std::size_t memory_limit = 0;
+
+    /** Bytes of cache each core keeps to itself: a round sizes its hubs and its neighborhood
+     *  capacity from it, a core's cache on RAM and a block's shared memory per multiprocessor on a
+     *  GPU. A sharded index takes zero as its executor's cache per core; a RAM mono-index takes it
+     *  as one storage chunk, a VRAM mono-index as its device's figure. A GPU never takes more than
+     *  its device grants. */
+    std::size_t cache_bytes = 0;
 };
 
 /** Optional tuning knobs for every ranking walk; zeros mean "derive from connectivity". */
@@ -241,9 +249,9 @@ struct search_config_t {
      *  breadth's nearest. */
     traversal_t traversal = traversal_t::walk_k;
 
-    /** Bytes of cache each executor thread keeps to itself: a RAM scan streams its rows in blocks
-     *  that stay there while every pack of its queries scores them, and zero streams every chunk
-     *  whole; ignored elsewhere. */
+    /** Bytes of cache each core keeps to itself: a RAM scan streams its rows in blocks that stay
+     *  there while every pack of its queries scores them. A sharded index takes zero as its
+     *  executor's cache per core, a mono-index streams every chunk whole; ignored elsewhere. */
     std::size_t cache_bytes = 0;
 };
 

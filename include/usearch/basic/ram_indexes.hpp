@@ -530,7 +530,7 @@ struct ram_indexes {
      *  Entries are split across the open shard generation's shards round-robin from the starting
      *  shard on, and entries past what fits under the bound fill fresh shard generations in turn,
      *  split the same way. Every entry must be placed before @ref finish, since each shard plan
-     *  holds its shard's later turns until then. Each step and @ref finish hold the gate's shared
+     *  holds its shard's later turns until then. Each task and @ref finish hold the gate's shared
      *  side for their own call.
      */
     struct [[nodiscard]] insert_plan_t {
@@ -548,7 +548,7 @@ struct ram_indexes {
 
         /**
          *  @brief Places entries @p first onward, one per value of @p values under its key in
-         *      @p keys, each in the shard its position falls to, as the shard plan's own step does.
+         *      @p keys, each in the shard its position falls to, as the shard plan's own task does.
          *
          *  Any number of threads step one plan at once over disjoint entries, each with its own
          *  @p metric and a @p context that @c index_t::reserve_traversal sized. Entries outside the
@@ -892,11 +892,11 @@ struct ram_indexes {
 #pragma region Refinement
 
     /**
-     *  @brief One absorb or split in flight: every donor shard moves into a shard of this index
-     *      through that shard's own plan, or every shard of this index splits into the same shard
-     *      of every receiver, and each shard plan then re-selects across what moved in and heals.
+     *  @brief One refine, absorb or split in flight: every shard runs one round through its own
+     *      plan, after every donor shard moved into a shard of this index, or after every shard of
+     *      this index split into the same shard of every receiver.
      *
-     *  Steps of a phase are (shard, position) pairs over the shard plans' own steps, so any number
+     *  Tasks of a phase are (shard, position) pairs over the shard plans' own tasks, so any number
      *  of threads may @ref run them at once; @ref advance is the single-caller barrier, advancing
      *  every shard plan together. While any shard plan copies, nodes move out of the donors, or out
      *  of this index in a split, so their readers wait out a window spanning the copy phases, and
@@ -907,35 +907,32 @@ struct ram_indexes {
      */
     struct [[nodiscard]] refine_plan_t {
 
-        /** One step: the shard whose plan runs it, and its position among that plan's steps.
+        /** One task: the shard whose plan runs it, and its position among that plan's tasks.
          *  Two words. */
-        struct step_t {
+        struct task_t {
             std::size_t shard = 0;
             std::size_t position = 0;
         };
-        static_assert(sizeof(step_t) == 2 * sizeof(std::size_t));
+        static_assert(sizeof(task_t) == 2 * sizeof(std::size_t));
 
         /** What the shard plans' audits judge, summed: the published nodes. */
-        struct audit_t {
+        struct health_t {
             std::size_t visible = 0;
         };
 
-        /** Steps of the current phase a driver already ran, so a cancelled call resumes at the next
+        /** Tasks of the current phase a driver already ran, so a cancelled call resumes at the next
          *  one. */
         std::size_t taken = 0;
 
-        /** Nodes the planned phases re-selected so far, which a driver's progress reports. */
-        std::size_t ticked = 0;
-
         refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
 
-        /** An unbound plan over @p allocator; only @ref plan_absorb and @ref plan_split fill
-         *  it. */
+        /** An unbound plan over @p allocator; only @ref plan_round, @ref plan_absorb and
+         *  @ref plan_split fill it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
             : shard_plans_(allocator), donor_slots_(allocator), donor_holds_(allocator), receiver_shards_(allocator),
               receiver_holds_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
-            : taken(other.taken), ticked(other.ticked), shard_plans_(std::move(other.shard_plans_)),
+            : taken(other.taken), shard_plans_(std::move(other.shard_plans_)),
               donor_slots_(std::move(other.donor_slots_)), donor_holds_(std::move(other.donor_holds_)),
               donors_(other.donors_), receiver_shards_(std::move(other.receiver_shards_)),
               receiver_holds_(std::move(other.receiver_holds_)), receivers_(other.receivers_),
@@ -945,45 +942,39 @@ struct ram_indexes {
         refine_plan_t& operator=(refine_plan_t const&) = delete;
         ~refine_plan_t() noexcept { release_(); }
 
-        /** Step @p position of the current phase; past the last shard beyond the end. */
-        step_t operator[](std::size_t position) const noexcept {
+        /** Task @p position of the current phase; past the last shard beyond the end. */
+        task_t operator[](std::size_t position) const noexcept {
             for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                std::size_t const steps = shard_plans_[shard].steps().size();
-                if (position < steps) return {shard, position};
-                position -= steps;
+                std::size_t const tasks = shard_plans_[shard].tasks().size();
+                if (position < tasks) return {shard, position};
+                position -= tasks;
             }
             return {shard_plans_.size(), 0};
         }
 
-        /** The current phase's steps over every shard plan, positionally. */
-        indexed_range<refine_plan_t> steps() const noexcept {
+        /** The current phase's tasks over every shard plan, positionally. */
+        indexed_range<refine_plan_t> tasks() const noexcept {
             std::size_t total = 0;
-            for (shard_refine_plan_t const& shard_plan : shard_plans_) total += shard_plan.steps().size();
+            for (shard_refine_plan_t const& shard_plan : shard_plans_) total += shard_plan.tasks().size();
             return {this, total};
         }
 
         /**
-         *  Runs @p step on the calling thread through its shard's plan, as that plan's own
-         *  @c run does; a step past the end runs nothing.
+         *  @brief Runs @p task on the calling thread through its shard's plan, as that plan's own
+         *      @c run does; a task past the end runs nothing.
          *
          *  @par Statuses:
-         *  - @c uninitialized_k The step's shard plan is bound to no index.
+         *  - @c uninitialized_k The task's shard plan is bound to no index.
          */
         template <typename metric_type_, typename context_allocator_type_, typename selector_type_ = keep_diverse_t>
-        status_t run(step_t const& step, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
+        status_t run(task_t const& task, metric_type_& metric, traversal_context_over<context_allocator_type_>& context,
                      selector_type_ const& selector = {}) noexcept {
-            if (step.shard >= shard_plans_.size()) return status_t::success_k;
-            shard_refine_plan_t& shard_plan = shard_plans_[step.shard];
-            return shard_plan.run(shard_plan[step.position], metric, context, selector);
+            if (task.shard >= shard_plans_.size()) return status_t::success_k;
+            shard_refine_plan_t& shard_plan = shard_plans_[task.shard];
+            return shard_plan.run(shard_plan[task.position], metric, context, selector);
         }
 
-        /** The nodes @p step re-selects or sweeps, which a driver's progress counts. */
-        std::size_t nodes_in(step_t const& step) const noexcept {
-            if (step.shard >= shard_plans_.size()) return 0;
-            return shard_plans_[step.shard][step.position].nodes.size();
-        }
-
-        /** The barrier between phases, one caller after every step of the current one ran: advances
+        /** The barrier between phases, one caller after every task of the current one ran: advances
          *  every shard plan, publishing what moved inside one commit of every receiving index, and
          *  answers whether any has another phase. */
         bool advance() noexcept {
@@ -994,36 +985,25 @@ struct ram_indexes {
             for (shard_refine_plan_t& shard_plan : shard_plans_) follows += shard_plan.advance();
             if (moving_before) for_each_receiving_([](shards_t& shards) noexcept { shards.end_commit(); });
             if (moving_before && !moving_()) {
-                if (!receivers_.empty()) owner_->shards_.end_window();
+                if (emptying_owner_()) owner_->shards_.end_window();
                 release_consumed_donors_();
             }
             return follows != 0;
         }
 
-        /** Ends every shard plan's re-selection with its open tile, so once those merge the plans
-         *  verify and heal: a plan about to walk its next tile skips it, and every other phase runs
-         *  whole, since a driver stops only between phases; a no-op for a plan still moving. */
+        /** Stops every shard plan's round at the barrier it stands at, its closing health check
+         *  running on. A round after moves runs to its end, since only its restitch links in a
+         *  moved part nothing links into. */
         void stop() noexcept {
-            for (shard_refine_plan_t& shard_plan : shard_plans_) {
-                bool const reselecting = shard_plan.reselecting();
-                shard_plan.stop();
-                if (reselecting) static_cast<void>(shard_plan.advance());
-            }
+            if (!donor_slots_.empty() || !receivers_.empty()) return;
+            for (shard_refine_plan_t& shard_plan : shard_plans_) shard_plan.stop();
             taken = 0;
         }
 
         /** The published nodes every shard plan's audit judges. */
-        audit_t audit() const noexcept {
-            audit_t total;
-            for (shard_refine_plan_t const& shard_plan : shard_plans_) total.visible += shard_plan.audit.visible;
-            return total;
-        }
-
-        /** Nodes every shard plan's re-selection rounds step over, summed: the total a driver's
-         *  progress counts against. */
-        std::size_t planned_nodes() const noexcept {
-            std::size_t total = 0;
-            for (shard_refine_plan_t const& shard_plan : shard_plans_) total += shard_plan.planned_nodes();
+        health_t health() const noexcept {
+            health_t total;
+            for (shard_refine_plan_t const& shard_plan : shard_plans_) total.visible += shard_plan.health.visible;
             return total;
         }
 
@@ -1035,46 +1015,43 @@ struct ram_indexes {
             return widest;
         }
 
-        /** The walks' knobs every shard plan shares: the widest breadth any of them walks. */
-        insert_config_t walk() const noexcept {
-            insert_config_t widest {};
-            for (shard_refine_plan_t const& shard_plan : shard_plans_)
-                widest.expansion_factor = max_of(widest.expansion_factor, shard_plan.walk().expansion_factor);
-            return widest;
+        /** Units of the phase every shard plan's round is in, done and in all, summed over the
+         *  shards: what a driver's progress hears at every barrier. */
+        std::size_t completed() const noexcept {
+            std::size_t sum = 0;
+            for (shard_refine_plan_t const& shard_plan : shard_plans_) sum += shard_plan.completed();
+            return sum;
+        }
+        std::size_t total() const noexcept {
+            std::size_t sum = 0;
+            for (shard_refine_plan_t const& shard_plan : shard_plans_) sum += shard_plan.total();
+            return sum;
         }
 
-        /** Nodes the open tiles of the shard plans re-selecting now span: what a phase of them
-         *  walks, once per tile in a caller's progress. */
-        std::size_t tile_nodes() const noexcept {
-            std::size_t total = 0;
+        /**
+         *  @brief Grows @p context to what any shard plan's gather or restitch task touches, which
+         *      a driver calls before the plan's first task.
+         *
+         *  @par Statuses:
+         *  - @c bad_alloc_k @p context cannot grow to a round's scratch.
+         */
+        template <typename context_allocator_type_>
+        status_t reserve(traversal_context_over<context_allocator_type_>& context) const noexcept {
             for (shard_refine_plan_t const& shard_plan : shard_plans_)
-                total += shard_plan.reselecting() ? shard_plan.tile().size() : 0;
-            return total;
-        }
-
-        /** Whether any shard plan re-selects its planned range, which a caller's progress
-         *  counts. */
-        bool reselecting() const noexcept {
-            for (shard_refine_plan_t const& shard_plan : shard_plans_)
-                if (shard_plan.reselecting()) return true;
-            return false;
+                if (status_t const sized = shard_plan.reserve(context); failed(sized)) return sized;
+            return status_t::success_k;
         }
 
         /** Whether any shard plan still copies a donor, which no stop skips. */
         bool moving() const noexcept { return moving_() != 0; }
 
-        /** Whether every live shard of the donor at @p donor moved in, consuming it: once the copy
-         *  phases end, the plan drops its hold and nulls its slot, so its owner may free it at
-         *  once; it stays closed and sealed for good. */
-        bool consumed(std::size_t donor) const noexcept { return donor < donors_.size() && !donors_[donor]; }
-
         /**
          *  @brief Invokes @p visit as <tt>visit(shard, nodes)</tt> for every node range the plan
-         *      rewrote: every node of every shard a shard plan refined, or every node of every
-         *      receiver shard that a split filled.
+         *      rewrote: every node of every shard a shard plan ran a round over, or every node of
+         *      every receiver shard that a split filled.
          *
          *  Called once the plan finished and before it dies, while the index stays sealed, so a
-         *  rule the re-selection skips, like a modality's long links, is drawn again over them.
+         *  rule the round skips, like a modality's long links, is drawn again over them.
          */
         template <typename visit_type_>
         void for_each_shard_range(visit_type_&& visit) const noexcept {
@@ -1089,6 +1066,11 @@ struct ram_indexes {
                 visit(one, iota_view<node_id_t> {0, static_cast<node_id_t>(one.size())});
             }
         }
+
+        /** Whether every live shard of the donor at @p donor moved in, consuming it: once the copy
+         *  phases end, the plan drops its hold and nulls its slot, so its owner may free it at
+         *  once; it stays closed and sealed for good. */
+        bool consumed(std::size_t donor) const noexcept { return donor < donors_.size() && !donors_[donor]; }
 
         /**
          *  The pass so far, summed over the shard plans: complete once @ref advance answered false,
@@ -1121,8 +1103,14 @@ struct ram_indexes {
             return moving;
         }
 
+        /** Whether the moves empty shards of this index: a split's, or a reshard's, whose donor
+         *  shards are this index's own. */
+        bool emptying_owner_() const noexcept {
+            return !receivers_.empty() || (donors_.empty() && !donor_slots_.empty());
+        }
+
         /** Calls @p visit with the shard set of every index the moves publish into: this one
-         *  in an absorb, every receiver in a split. */
+         *  in an absorb or a reshard, every receiver in a split. */
         template <typename visit_type_>
         void for_each_receiving_(visit_type_&& visit) noexcept {
             if (receivers_.empty()) visit(owner_->shards_);
@@ -1130,10 +1118,10 @@ struct ram_indexes {
         }
 
         /** Opens the windows of every index the moves empty: the donors, or this one in a
-         *  split. */
+         *  split or a reshard. */
         void begin_windows_() noexcept {
             for (std::size_t donor = 0; donor != donor_holds_.size(); ++donor) donors_[donor]->shards_.begin_window();
-            if (!receivers_.empty()) owner_->shards_.begin_window();
+            if (emptying_owner_()) owner_->shards_.begin_window();
         }
 
         /** Closes the window of every donor still held and a split's own, drops the shard plans,
@@ -1143,7 +1131,7 @@ struct ram_indexes {
         void release_() noexcept {
             for (std::size_t held = 0; held != donor_holds_.size(); ++held)
                 if (donors_[held]) donors_[held]->shards_.end_window();
-            if (!receivers_.empty() && moving_()) owner_->shards_.end_window();
+            if (emptying_owner_() && moving_()) owner_->shards_.end_window();
             shard_plans_.clear();
             for (std::size_t held = 0; held != donor_holds_.size(); ++held)
                 if (donors_[held] && !consumed_(*donors_[held])) donors_[held]->shards_.reopen();
@@ -1220,8 +1208,9 @@ struct ram_indexes {
      *  @c contended_k.
      *
      *  @param[in,out] donors The indexes giving their nodes up; the slots must outlive the plan.
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
+     *  @param[in] config The cache a core keeps, which sizes every shard's round.
      *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
      *      plans.
      *
@@ -1230,9 +1219,10 @@ struct ram_indexes {
      *  - @c contended_k A call or batch in flight on this index or a donor, or a repeated donor.
      *  - @c unsupported_k A donor shard past the bound, which would have to be cut first.
      */
-    template <typename selector_type_>
+    template <typename selector_type_, typename codec_type_>
     expected<refine_plan_t> plan_absorb(std::span<ram_indexes*> donors, refine_config_t config,
-                                        selector_type_ const& selector, traversal_context_t& context) noexcept {
+                                        selector_type_ const& selector, codec_type_ const& codec,
+                                        traversal_context_t& context) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         for (ram_indexes const* donor : donors)
             if (!donor || donor == this) return {{}, status_t::config_mismatch_k};
@@ -1286,7 +1276,7 @@ struct ram_indexes {
             one.reopen_();
             auto [shard_plan, status] = one.plan_absorb(
                 std::span<index_t*>(plan.donor_slots_.data() + first, plan.donor_slots_.size() - first), config,
-                selector, context);
+                selector, codec, context);
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
             // Dropped, the shard plans move nothing, so a refused plan closes no window it opened.
             if (failed(status)) return plan.shard_plans_.clear(), expected<refine_plan_t> {{}, status};
@@ -1296,23 +1286,24 @@ struct ram_indexes {
     }
 
     /**
-     *  @brief Opens a refinement of every live shard in place, each through its own plan over all
-     *      its nodes, which re-selects, sweeps and heals as one pass.
+     *  @brief Opens one refinement round of every live shard in place, each through its own
+     *      @c index_t::plan_round.
      *
      *  Closes this index under its unique side and keeps it sealed for the plan's life, as an
      *  absorb does, while searches run throughout.
      *
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from the selector's budget".
+     *  @param[in] config The cache a core keeps, which sizes every shard's round.
      *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch, whose allocator places the shard
      *      plans.
      *
      *  @par Statuses:
      *  - @c contended_k A call or batch in flight on this index.
      */
-    template <typename selector_type_>
-    expected<refine_plan_t> plan_refine(refine_config_t config, selector_type_ const& selector,
-                                        traversal_context_t& context) noexcept {
+    template <typename selector_type_, typename codec_type_>
+    expected<refine_plan_t> plan_round(refine_config_t config, selector_type_ const& selector, codec_type_ const& codec,
+                                       traversal_context_t& context) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         refine_plan_t plan {shards_.allocator()};
         unique_lock_t const held {gate_, std::try_to_lock};
@@ -1329,8 +1320,7 @@ struct ram_indexes {
             }
             // The set closed every shard, and the shard's own plan closes it again for its life.
             one.reopen_();
-            auto [shard_plan, status] = one.plan_refine(iota_view<node_id_t> {0, static_cast<node_id_t>(one.size())},
-                                                        config, selector, context);
+            auto [shard_plan, status] = one.plan_round(config, selector, codec, context);
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
             if (failed(status)) return {{}, status};
         }
@@ -1348,13 +1338,14 @@ struct ram_indexes {
      *  then every receiver's, all held until the plan dies, and every shard's split planned. The
      *  copy phases open this index's window, so its readers wait them out, and the barrier
      *  publishing the parts shows a search of each receiver every shard's nodes or none. Every
-     *  receiver shard then re-selects its picked nodes and heals; a stop pauses only that walk.
+     *  receiver shard then runs one round.
      *
      *  @param[in] receivers The empty indexes taking the parts, at least two, all distinct, each
      *      with as many live shards as this index; the slots must outlive the plan.
-     *  @param[in] config Optional tuning knobs, zeros meaning "derive from the selector's budget",
-     *      and the seed picking every shard's part roots: equal seeds split equal graphs alike.
+     *  @param[in] config The cache a core keeps, which sizes every round, and the seed picking
+     *      every shard's part roots: equal seeds split equal graphs alike.
      *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] codec Measures the stored values.
      *  @param[in,out] context The planning thread's scratch; its allocator places the shard plans.
      *
      *  @par Statuses:
@@ -1365,9 +1356,10 @@ struct ram_indexes {
      *    absorb or split holding either.
      *  - @c overflow_k A part past a receiver shard's ceiling.
      */
-    template <typename selector_type_>
+    template <typename selector_type_, typename codec_type_>
     expected<refine_plan_t> plan_split(std::span<ram_indexes*> receivers, split_config_t config,
-                                       selector_type_ const& selector, traversal_context_t& context) noexcept {
+                                       selector_type_ const& selector, codec_type_ const& codec,
+                                       traversal_context_t& context) noexcept {
         std::size_t const parts = receivers.size();
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (parts < 2) return {{}, status_t::config_mismatch_k};
@@ -1405,11 +1397,77 @@ struct ram_indexes {
             // The sets closed every receiver shard; its own plan now closes it again for its life.
             for (index_t* receiver_shard : into) receiver_shard->reopen_();
             auto [shard_plan, status] = shards_[retired + shard].index->plan_split(
-                into, {config.refine, config.seed + shard}, selector, context);
+                into, {config.refine, config.seed + shard}, selector, codec, context);
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
             if (failed(status)) return plan.shard_plans_.clear(), expected<refine_plan_t> {{}, status};
         }
         plan.begin_windows_();
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /**
+     *  @brief Opens a reshard of this index: packs its live shards under @p capacity entries each,
+     *      largest first, every moving shard absorbed by the sibling the packing names, which then
+     *      runs one round; a shard packed into itself stays and runs none.
+     *
+     *  Closes this index under its unique side and keeps it sealed for the plan's life; the moves
+     *  open its window, so its readers wait them out, and the barrier publishing them shows a
+     *  search every moved entry once. A shard every entry of which moved out stays, empty.
+     *
+     *  @param[in] capacity The most entries a shard may hold once packed.
+     *  @param[in] config The cache a core keeps, which sizes every round.
+     *  @param[in] selector Carries the budget every neighbor list is reserved for.
+     *  @param[in] codec Measures the stored values.
+     *  @param[in,out] context The planning thread's scratch, whose allocator places
+     *      the shard plans.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k No shard is placed.
+     *  - @c contended_k A call or batch in flight on this index.
+     *  - @c unsupported_k A shard past @p capacity, which would have to be cut first.
+     */
+    template <typename selector_type_, typename codec_type_>
+    expected<refine_plan_t> plan_reshard(std::size_t capacity, refine_config_t config, selector_type_ const& selector,
+                                         codec_type_ const& codec, traversal_context_t& context) noexcept {
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        refine_plan_t plan {shards_.allocator()};
+        unique_lock_t hold {gate_, std::try_to_lock};
+        if (!hold) return {{}, status_t::contended_k};
+        if (status_t const closed = shards_.close(); failed(closed)) return {{}, closed};
+        plan.owner_hold_ = std::move(hold);
+        plan.owner_ = this;
+        std::size_t const shards = shards_.size();
+        growing_buffer<shard_move_t, forkunion_allocator_t> moves {shards_.allocator()};
+        if (failed(moves.resize(shards)) || failed(plan.donor_slots_.reserve_exactly(shards)) ||
+            failed(plan.shard_plans_.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        auto const own_shard = [&](std::size_t from) noexcept -> shard_t const& { return shards_[from]; };
+        auto const placement_of = [](shard_t const& one) noexcept { return one.index->get_allocator(); };
+        // In place every shard has a home, its own, so no shard generation opens.
+        auto const open = []() noexcept { return status_t::success_k; };
+        if (status_t const packed = shards_.pack(to_writable_span(moves), shards, capacity, own_shard, placement_of,
+                                                 rank_fewest_entries, open);
+            failed(packed))
+            return {{}, packed};
+        for (std::size_t into = 0; into != shards; ++into) {
+            std::size_t const first = plan.donor_slots_.size();
+            for (std::size_t from = 0; from != shards; ++from)
+                if (from != into && moves[from].into == into && shards_[from].index->size())
+                    plan.donor_slots_.push_back_reserved(shards_[from].index.get());
+            index_t& one = *shards_[into].index;
+            if (plan.donor_slots_.size() == first) {
+                plan.shard_plans_.push_back_reserved(shard_refine_plan_t {one.get_allocator()});
+                continue;
+            }
+            // The set closed every shard, and the shard's own plan closes it again for its life.
+            one.reopen_();
+            auto [shard_plan, status] = one.plan_absorb(
+                std::span<index_t*>(plan.donor_slots_.data() + first, plan.donor_slots_.size() - first), config,
+                selector, codec, context);
+            plan.shard_plans_.push_back_reserved(std::move(shard_plan));
+            if (failed(status)) return plan.shard_plans_.clear(), expected<refine_plan_t> {{}, status};
+        }
+        if (plan.moving_()) plan.begin_windows_();
         return {std::move(plan), status_t::success_k};
     }
 
@@ -1424,15 +1482,16 @@ struct ram_indexes {
      *  - @c contended_k A call or plan holds this index or a receiver.
      *  - @c overflow_k A part past a receiver shard's ceiling.
      */
-    template <typename metric_type_, typename selector_type_>
+    template <typename metric_type_, typename selector_type_, typename codec_type_>
     expected<refine_report_t> split(std::span<ram_indexes*> receivers, split_config_t config,
-                                    selector_type_ const& selector, metric_type_& metric,
+                                    selector_type_ const& selector, codec_type_ const& codec, metric_type_& metric,
                                     traversal_context_t& context) noexcept {
-        auto [plan, status] = plan_split(receivers, config, selector, context);
+        auto [plan, status] = plan_split(receivers, config, selector, codec, context);
         if (failed(status)) return {{}, status};
+        if (status_t const sized = plan.reserve(context); failed(sized)) return {plan.finish().value, sized};
         do
-            for (typename refine_plan_t::step_t const step : plan.steps()) [[maybe_unused]]
-                status_t const ran = plan.run(step, metric, context, selector);
+            for (typename refine_plan_t::task_t const task : plan.tasks()) [[maybe_unused]]
+                status_t const ran = plan.run(task, metric, context, selector);
         while (plan.advance());
         return plan.finish();
     }
@@ -1452,18 +1511,18 @@ struct ram_indexes {
      */
     template <typename context_allocator_type_>
     expected<reachability_t> health(traversal_context_over<context_allocator_type_>& context) noexcept {
-        using audit_t = typename index_t::template health_plan<context_allocator_type_>;
+        using health_plan_t = typename index_t::template health_plan<context_allocator_type_>;
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         return shards_.read_retrying_once([&]() noexcept -> expected<reachability_t> {
             reachability_t total;
             for (index_t& one : shards_.live_indexes()) {
-                auto [audit, audit_status] = one.plan_health(context);
-                if (failed(audit_status)) return {total, audit_status};
+                auto [plan, plan_status] = one.plan_health(context);
+                if (failed(plan_status)) return {total, plan_status};
                 do
-                    for (typename audit_t::step_t const step : audit.steps()) [[maybe_unused]]
-                        std::size_t const expanded = audit.sweep(step);
-                while (audit.advance_level());
-                auto const [shard_health, finish_status] = audit.finish();
+                    for (typename health_plan_t::task_t const task : plan.tasks()) [[maybe_unused]]
+                        std::size_t const expanded = plan.sweep(task);
+                while (plan.advance_depth());
+                auto const [shard_health, finish_status] = plan.finish();
                 if (failed(finish_status)) return {total, finish_status};
                 total += shard_health;
             }

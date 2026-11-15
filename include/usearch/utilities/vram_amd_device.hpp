@@ -309,6 +309,12 @@ struct hip_device_specs_t {
     /** Lanes of one wavefront, as the runtime reports them. */
     u32_t warp_lanes = 0;
 
+    /** Bytes one block keeps to itself while it holds a whole compute unit, the twin of
+     *  @c cuda_device_specs_t::cache_bytes_per_core; HIP reports no per-block reserve. */
+    std::size_t cache_bytes_per_core() const noexcept {
+        return min_of(shared_memory_per_block_bytes, shared_memory_per_multiprocessor_bytes);
+    }
+
     /**
      *  Queries the runtime for @p ordinal's specification; meaningful only on @c success_k.
      *
@@ -1559,6 +1565,7 @@ struct hip_executor_t {
         std::swap(api_, other.api_);
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
+        std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
     }
 
     /**
@@ -1582,9 +1589,22 @@ struct hip_executor_t {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         hip_executor_t executor;
         executor.api_ = streams[0].api;
+        // Queried once here; every round reads it from the executor afterwards.
+        for (stream_t const& opened : streams) {
+            auto const [specs, status] = hip_device_specs_t::query(*opened.api, opened.device);
+            if (failed(status)) return {{}, status};
+            std::size_t const bytes = specs.cache_bytes_per_core();
+            executor.cache_bytes_per_core_ = executor.cache_bytes_per_core_
+                                                 ? min_of(executor.cache_bytes_per_core_, bytes)
+                                                 : bytes;
+        }
         executor.streams_ = std::move(streams);
         return {std::move(executor), status_t::success_k};
     }
+
+    /** Bytes of local data share a block keeps to itself on the smallest of this executor's
+     *  devices, the twin of @c forkunion_executor_t::cache_bytes_per_core. */
+    std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
      *  @brief Opens one stream per entry of @p devices, binding each first, since a stream is born
@@ -1691,6 +1711,9 @@ struct hip_executor_t {
     /** The ceiling on each stream's run, which every call's scratch and outputs carve from; zero
      *  lets it grow as geometry asks. */
     std::size_t scratch_limit_ = 0;
+
+    /** What @ref cache_bytes_per_core answers, set once by @ref acquire. */
+    std::size_t cache_bytes_per_core_ = 0;
 };
 
 /** The AMD types and HIP calls a vendor-neutral VRAM index declares itself with and queues

@@ -3916,6 +3916,49 @@ inline scores_result<typename kit_::scalar_t::dot_result_t> scores(             
                                                                   candidates_norms, next_candidates, prefetcher);
 }
 
+/**
+ *  @brief Scores a @p step of stored rows against a block of @p queries resident in cache into
+ *      @p step_distances, @b [rows,queries], each row in the query's seat against four queries a
+ *      call, as @c fold_quads seats them.
+ *
+ *  Run by @c invoke_under_target_ under the kit's target, so one body per kit serves every
+ *  residency and sink. Every metric is symmetric, so a row in the query's seat scores as a walk
+ *  scores it. Empty @p row_norms stand for rows that keep none, which only an unbiased dot reads.
+ */
+struct score_step_loop {
+    template <quads_kit kit_>
+    [[gnu::always_inline]] static void invoke(
+        nk_kernel_kind_t kernel, nk::matrix_view<typename kit_::scalar_t> step,
+        std::span<vector_norms<typename kit_::scalar_t::dot_result_t> const> row_norms,
+        nk::matrix_view<typename kit_::scalar_t> queries,
+        std::span<vector_norms<typename kit_::scalar_t::dot_result_t> const> query_norms,
+        nk::matrix_span<f32_t> step_distances) noexcept {
+        using vector_view_t = nk::vector_view<typename kit_::scalar_t>;
+        using norms_t = vector_norms<typename kit_::scalar_t::dot_result_t>;
+        std::size_t const rows = step.extent(0), columns = queries.extent(0);
+        for (std::size_t row = 0; row != rows; ++row) {
+            vector_view_t const row_vector = step.row(row).as_vector();
+            norms_t const own_norms = row_norms.empty() ? norms_t {} : row_norms[row];
+            f32_t* const distances = &step_distances(row, 0);
+            for (std::size_t first = 0; first < columns; first += quad_lanes_k) {
+                std::size_t const lanes = min_of(quad_lanes_k, columns - first);
+                quad<vector_view_t> lane_queries;
+                quad<norms_t> lane_norms;
+                for (std::size_t lane = 0; lane != quad_lanes_k; ++lane) {
+                    std::size_t const source = first + min_of(lane, lanes - 1);
+                    lane_queries[lane] = queries.row(source).as_vector();
+                    lane_norms[lane] = query_norms[source];
+                }
+                quad<f32_t> const lane_distances = invoke_scores_<quad_lanes_k, kit_>(
+                                                       kernel, row_vector, own_norms, lane_queries, lane_norms,
+                                                       lane_queries, object_prefetcher<dummy_cache_hints_t> {})
+                                                       .distances;
+                std::memcpy(distances + first, lane_distances.data(), lanes * sizeof(f32_t));
+            }
+        }
+    }
+};
+
 /** The walks' default rescoring: none, so every node keeps the score the kit gave it. */
 struct dummy_rescoring_t {
     template <typename ids_type_, typename keys_type_, typename norms_type_, typename scores_type_>

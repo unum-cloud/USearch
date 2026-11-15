@@ -176,8 +176,8 @@ struct [[nodiscard]] vram_amd_compact_plan {
         if (status_t const folded = fold_(on_visited); failed(folded)) return folded;
         if (status_t const copied = copy_pending_(*target, device_executor, host_executor); failed(copied))
             return copied;
-        // The fold linked every bin, so each target shard's pass only heals, which `finish` runs.
-        if (refining_.shard_plans_.empty()) return refining_.open_shards_(host_executor.size());
+        // The fold linked every bin, so each target shard's round runs in `finish`.
+        if (refining_.shard_plans_.empty()) return refining_.open_shards_();
         return status_t::success_k;
     }
 
@@ -332,6 +332,7 @@ struct [[nodiscard]] vram_amd_compact_plan {
         if (status_t const closed = target.close_gated_(); failed(closed)) return {{}, closed};
         refining.owner_ = &target;
         refining.config_.expansion_factor = config.expansion_factor;
+        refining.config_.cache_bytes = config.cache_bytes ? config.cache_bytes : host_executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != sources.size(); ++closing)
             if (status_t const closed = sources[closing]->close_gated_(); failed(closed)) {
                 while (closing) sources[--closing]->shards_.reopen();
@@ -358,13 +359,8 @@ struct [[nodiscard]] vram_amd_compact_plan {
                                                         placement_of_t {}, rank_first_fit, open);
             failed(packed))
             return {{}, packed};
-        if (status_t const sized = ram_indexes_t::shards_t::size_parts(to_span(refining.moves_), target.shards_.size(),
-                                                                       refining.part_offsets_, refining.part_bases_);
-            failed(sized))
-            return {{}, sized};
-        std::size_t const shards = refining.part_offsets_.size() - 1;
-        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)) ||
-            failed(refining.stitched_parts_.resize(shards)))
+        std::size_t const shards = target.shards_.size();
+        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)))
             return {{}, status_t::bad_alloc_k};
         if (status_t const binned = plan.cut_bins_(shards); failed(binned)) return {{}, binned};
         if (status_t const opened = plan.open_folds_(device_executor, *shaped); failed(opened)) return {{}, opened};
@@ -629,7 +625,7 @@ struct [[nodiscard]] vram_amd_compact_plan {
      *  all the rows it takes up front, so a failure before publication releases them. Each bin then
      *  crosses to the host columns side by side: every member's save plan stages its vectors and
      *  neighbors on its device's stream, a folding bin's fold rows replace the neighbors, already
-     *  in the bin's dense ID space, and the target shard's load steps covering the bin copy out of
+     *  in the bin's dense ID space, and the target shard's load tasks covering the bin copy out of
      *  the columns on the host threads, the keys beside them. Once every bin was copied, the target
      *  files the keys and publishes them with the rows, and the source forgets its rows in place
      *  inside its window.
@@ -687,8 +683,8 @@ struct [[nodiscard]] vram_amd_compact_plan {
                 auto [saving, save_status] = donor_slot.index->plan_save(staged, synchronization_t::immutable_k,
                                                                          stream);
                 if (failed(save_status)) return save_status;
-                for (typename vram_index_t::save_plan_t::step_t const step : saving.steps())
-                    if (status_t const saved = saving.save(step); failed(saved)) return saved;
+                for (typename vram_index_t::save_plan_t::task_t const task : saving.tasks())
+                    if (status_t const saved = saving.save(task); failed(saved)) return saved;
                 if (status_t const saved = saving.finish(); failed(saved)) return saved;
                 // A folding bin's own rows replace the live ones the save staged.
                 std::size_t const state = bin.state + member - bin.first;
@@ -700,27 +696,27 @@ struct [[nodiscard]] vram_amd_compact_plan {
                 offset += part_rows;
             }
 
-            // A target step is one storage chunk, which may straddle this bin and its neighbors.
+            // A target task is one storage chunk, which may straddle this bin and its neighbors.
             typename ram_index_t::columns_view_t const view {
                 bytes_of(static_cast<byte_t const*>(vectors), rows * vectors_row_bytes),
                 bytes_of(static_cast<byte_t const*>(neighbors), rows * neighbors_row_bytes),
                 {}};
-            auto copy_step = [&](std::size_t shard, typename ram_load_plan_t::step_t const& chunk,
+            auto copy_task = [&](std::size_t shard, typename ram_load_plan_t::task_t const& chunk,
                                  std::size_t) noexcept -> status_t {
                 if (shard != into) return status_t::success_k;
-                typename ram_load_plan_t::step_t step = chunk;
-                step.index_nodes = {max_of(chunk.index_nodes.first, target_nodes.first),
+                typename ram_load_plan_t::task_t task = chunk;
+                task.index_nodes = {max_of(chunk.index_nodes.first, target_nodes.first),
                                     min_of(chunk.index_nodes.bound, target_nodes.bound)};
-                if (step.index_nodes.first >= step.index_nodes.bound) return status_t::success_k;
-                step.source_nodes = {static_cast<node_id_t>(step.index_nodes.first - target_nodes.first),
-                                     static_cast<node_id_t>(step.index_nodes.bound - target_nodes.first)};
+                if (task.index_nodes.first >= task.index_nodes.bound) return status_t::success_k;
+                task.source_nodes = {static_cast<node_id_t>(task.index_nodes.first - target_nodes.first),
+                                     static_cast<node_id_t>(task.index_nodes.bound - target_nodes.first)};
                 auto part_of = [&](std::size_t member) noexcept -> vram_shard_t const& {
                     return source.shards_[members_[member] - first];
                 };
                 // The bin's rows ascend, so the member holding each only moves forward.
                 std::size_t member = bin.first;
                 node_id_t member_first = 0;
-                return plans[into].load(step, view, {0, rows}, [&](node_id_t row) noexcept {
+                return plans[into].load(task, view, {0, rows}, [&](node_id_t row) noexcept {
                     while (row - member_first >= part_of(member).index->size())
                         member_first += static_cast<node_id_t>(part_of(member++).index->size());
                     typename vram_index_t::keyed_t const& member_keys = part_of(member).index->keys();
@@ -728,7 +724,7 @@ struct [[nodiscard]] vram_amd_compact_plan {
                 });
             };
             std::memset(cursors.data(), 0, shards * sizeof(std::size_t));
-            if (status_t const loaded = target.drain_steps_(plans, to_writable_span(cursors), host_executor, copy_step);
+            if (status_t const loaded = target.drain_tasks_(plans, to_writable_span(cursors), host_executor, copy_task);
                 failed(loaded))
                 return loaded;
         }
@@ -739,8 +735,6 @@ struct [[nodiscard]] vram_amd_compact_plan {
         auto publish = [&]() noexcept {
             for (ram_load_plan_t& plan : plans)
                 if (status_t const finished = plan.finish(); failed(finished)) return finished;
-            target.shards_.record_parts(source.shards_, moves, plans, refining_.part_bases_.data(),
-                                        to_span(refining_.part_offsets_));
             return status_t::success_k;
         };
         target.shards_.begin_commit();
@@ -773,7 +767,7 @@ struct [[nodiscard]] vram_amd_compact_plan {
         return {result, failed(finish_status) ? finish_status : ran};
     }
 
-    /** The absorb plan over the target: its moves, part runs and per-shard heals. */
+    /** The absorb plan over the target: its moves and per-shard rounds. */
     refine_plan_t refining_;
 
     /** One bin's packed vectors, then its neighbors, sized at planning for the widest, which every

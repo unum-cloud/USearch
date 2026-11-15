@@ -1352,7 +1352,7 @@ struct vram_ragged_graph {
                 status_ = index_->queue_merge_back_links_(context, scratch_, config_, nodes_, sweep_, tile_rows_,
                                                           swept_links_);
                 break;
-            case phase_t::audit_k: status_ = queue_sweeps_(*graph_kernels, stream); break;
+            case phase_t::health_k: status_ = queue_sweeps_(*graph_kernels, stream); break;
             case phase_t::heal_k:
                 // Only island nodes gain links, and no reached node points at one, so the audit
                 // before stands.
@@ -1412,7 +1412,7 @@ struct vram_ragged_graph {
             }
             if (phase_ == phase_t::merge_back_links_k) {
                 if (sweep_.bound < index_->size()) open_sweep_(sweep_.bound);
-                else phase_ = phase_t::audit_k;
+                else phase_ = phase_t::health_k;
                 return true;
             }
             // A last sweep that still expanded leaves nodes unjudged, so the phase sweeps on.
@@ -1421,10 +1421,10 @@ struct vram_ragged_graph {
             tally_.reachability = audited_(counters, index_->size());
             tally_.islands_reconnected = counters.reconnected;
             u32_t const left = counters.unreached;
-            if (phase_ == phase_t::audit_k) tally_.islands_found = left;
+            if (phase_ == phase_t::health_k) tally_.islands_found = left;
             // A round that frees no island frees none on the next either, since the picks it needs
             // are unreached.
-            bool const healing = left && (phase_ == phase_t::audit_k || left < islands_);
+            bool const healing = left && (phase_ == phase_t::health_k || left < islands_);
             islands_ = left;
             phase_ = healing ? phase_t::heal_k : phase_t::done_k;
             if (!healing && !split_.receivers.empty()) return settle_receiver_();
@@ -1435,7 +1435,7 @@ struct vram_ragged_graph {
          *  heals, and a split's later receivers skip theirs too; a sweep under way finishes, and it
          *  is a no-op in any other phase, a split's partition and scatter included. */
         void stop() noexcept {
-            if (phase_ == phase_t::reselect_k) phase_ = phase_t::audit_k, split_.rounds = 0;
+            if (phase_ == phase_t::reselect_k) phase_ = phase_t::health_k, split_.rounds = 0;
             else if (sweeping_()) split_.rounds = 0;
         }
 
@@ -1493,7 +1493,7 @@ struct vram_ragged_graph {
             picking_k,
             scatter_k,
             reselect_k,
-            audit_k,
+            health_k,
             count_back_links_k,
             scatter_back_links_k,
             merge_back_links_k,
@@ -1594,7 +1594,7 @@ struct vram_ragged_graph {
             index_ = split_.receivers[split_.bound_receiver];
             nodes_ = {0, static_cast<node_id_t>(part.picked_count)};
             islands_ = 0, next_sweep_ = 0;
-            phase_ = !split_.rounds || nodes_.empty() ? phase_t::audit_k : phase_t::reselect_k;
+            phase_ = !split_.rounds || nodes_.empty() ? phase_t::health_k : phase_t::reselect_k;
         }
 
         /** Folds a healed receiver's audit and islands into the split's, then binds the next one,
@@ -3164,7 +3164,7 @@ struct vram_ragged_graph {
         if (!plan.counters_) return status_t::bad_alloc_k;
         plan.config_ = config;
         plan.nodes_ = nodes;
-        plan.phase_ = !entries ? phase_t::done_k : nodes.empty() ? phase_t::audit_k : phase_t::reselect_k;
+        plan.phase_ = !entries ? phase_t::done_k : nodes.empty() ? phase_t::health_k : phase_t::reselect_k;
         return status_t::success_k;
     }
 

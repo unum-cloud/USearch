@@ -18,18 +18,20 @@
  */
 #pragma once
 
+#include <cstdio> // `std::remove` - a superseded part, once released
 #include <cstring> // `std::memcmp`, `std::memset`
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_ceil`
 #include <chrono>      // `std::chrono::steady_clock`, for a scan's latencies
 #include <limits>      // `std::numeric_limits`
-#include <memory>      // `std::uninitialized_value_construct_n`
+#include <memory>      // `std::uninitialized_value_construct_n`, `std::unique_ptr` - the writer a load owns
 #include <mutex>       // `std::unique_lock`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
-#include <type_traits> // `std::is_same_v`, `std::remove_reference_t`
+#include <type_traits> // `std::is_same_v`, `std::remove_reference_t`, `std::invoke_result_t`
+#include <utility>     // `std::swap` - a replaced part's medium
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the default reference
 
@@ -51,9 +53,11 @@ namespace unum::usearch::dense {
  *      @c ram_indexes over the parts a RAM or VRAM index saved.
  *
  *  A row's walks, one per part, share one row state on one executor thread, so the verbs reuse the
- *  in-memory index's folds and rescorings unchanged and need no lock. No mutating verb exists:
- *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view. The metric is the
- *  one the parts' headers name, so one instantiation views parts of any kernel its kits finalize.
+ *  in-memory index's folds and rescorings unchanged and need no lock. A view mutates nothing:
+ *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view. An index @ref load
+ *  opened owns a writer instead, through which a refine replaces whole parts, and a view is simply
+ *  an index holding none. The metric is the one the parts' headers name, so one instantiation views
+ *  parts of any kernel its kits finalize.
  */
 template <                                                                    //
     typename key_type_ = uuid128_t,                                           //
@@ -123,9 +127,6 @@ struct nvme_indexes {
     using rmscast_kit_t = rmscast_kit_type_;
     using visits_kit_t = visits_kit_type_;
 
-    /** Whether a matrix engine multiplies the scalar, so many queries scan through it at once. */
-    inline static constexpr bool has_tiles_k = !std::is_same_v<tiles_kit_t, no_tiles_kit_t>;
-
     /** Every index names the host allocator its catalog of parts sits on. */
     nvme_indexes() = delete;
     explicit nvme_indexes(forkunion_allocator_t allocator) noexcept
@@ -178,6 +179,7 @@ struct nvme_indexes {
         parts_.clear();
         resident_keys_.reset();
         kernel_ = nk_kernel_unknown_k;
+        release_writer_();
     }
 
     /**
@@ -201,16 +203,308 @@ struct nvme_indexes {
         if (parts_.empty()) return status_t::uninitialized_k;
         if (memory_limit && resident_keys_t::memory_usage_for(to_span(parts_)) > memory_limit)
             return status_t::bad_alloc_k;
-        if (status_t const reserved = resident_keys_.reserve(to_span(parts_)); failed(reserved)) return reserved;
-        auto [call, call_status] = begin_scans_(executor, 1);
-        status_t const scanned = failed(call_status) ? call_status
-                                                     : scan_key_rows_(executor, [&](std::size_t, key_t const& key,
-                                                                                    shard_node_t locator) noexcept {
-                                                           resident_keys_.insert(locator.shard, key, locator.node);
-                                                       });
-        if (failed(scanned)) resident_keys_.reset();
-        return scanned;
+        return file_keys_(executor);
     }
+
+#pragma region Writer
+
+    /** What a refine of a loaded index may spend, as every refine takes it. */
+    using refine_config_t = dense::refine_config_t;
+    using paths_t = growing_buffer<char, forkunion_allocator_t>;
+
+    /**
+     *  @brief Opens a manifest as @ref view does, then owns it: an advisory lock on the manifest,
+     *      every part open for writing, and the epoch readers check across a part swap, so a refine
+     *      can replace its parts. A failed load leaves the index empty.
+     *
+     *  Holding the lock, it removes the part files earlier refines of the manifest wrote or
+     *  superseded and the manifest does not name, as a crash leaves them.
+     *
+     *  @par Statuses:
+     *  - @c unsupported_k @p manifest is a lone monolith or a transport ID, which no manifest
+     *    names and so no refine can replace.
+     *  - @c contended_k Another writer holds the manifest's lock.
+     *  - @c io_k The manifest or a part cannot be opened for writing.
+     *  - Any status @ref view answers.
+     */
+    status_t load(std::string_view manifest) noexcept {
+        release();
+        status_t const loaded = load_(manifest);
+        if (failed(loaded)) release();
+        return loaded;
+    }
+
+    /** Why a write is refused: @c read_only_k on a view, and @c unsupported_k on a loaded index,
+     *  whose parts change only by a refine replacing them. */
+    status_t refuses_writes() const noexcept { return writer_ ? status_t::unsupported_k : status_t::read_only_k; }
+
+    /** The manifest a loaded index replaces; empty on a view. */
+    std::string_view manifest_path() const noexcept {
+        return writer_ ? to_string_view(writer_->manifest) : std::string_view {};
+    }
+
+    /** The path part @p shard of a loaded index is served from, its manifest entry resolved beside
+     *  the manifest, into @p buffer. */
+    expected<std::string_view> part_path(std::size_t shard, paths_t& buffer) const noexcept {
+        if (!writer_) return {{}, status_t::read_only_k};
+        if (shard >= parts_.size()) return {{}, status_t::config_mismatch_k};
+        return safegraphs_sibling_path(buffer, to_string_view(writer_->manifest),
+                                       to_string_view(writer_->parts[shard].relative));
+    }
+
+    /** Where generation @p generation of part @p shard sits, beside the part a loaded index
+     *  serves, into @p buffer: zero names the part a save wrote, and each refine writes the
+     *  lowest generation no file holds. */
+    expected<std::string_view> generation_path(std::size_t shard, std::size_t generation,
+                                               paths_t& buffer) const noexcept {
+        paths_t current_buffer {allocator_}, stem_buffer {allocator_};
+        auto const [current, current_status] = part_path(shard, current_buffer);
+        if (failed(current_status)) return {{}, current_status};
+        std::string_view const directory = current.substr(0, current.size() - safegraphs_basename(current).size());
+        std::string_view const stem = safegraphs_basename(safegraphs_stem(manifest_path()));
+        auto print = [&](char* sink, std::size_t capacity) noexcept {
+            int const directory_length = static_cast<int>(directory.size()),
+                      stem_length = static_cast<int>(stem.size());
+            return generation ? std::snprintf(sink, capacity, "%.*s%.*s.%zu", directory_length, directory.data(),
+                                              stem_length, stem.data(), generation)
+                              : std::snprintf(sink, capacity, "%.*s%.*s", directory_length, directory.data(),
+                                              stem_length, stem.data());
+        };
+        int const length = print(nullptr, 0);
+        if (length < 0) return {{}, status_t::io_k};
+        if (failed(stem_buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1)))
+            return {{}, status_t::bad_alloc_k};
+        print(stem_buffer.data(), stem_buffer.size());
+        return safegraphs_part_path(buffer, std::string_view {stem_buffer.data(), static_cast<std::size_t>(length)},
+                                    shard, parts_.size());
+    }
+
+    /**
+     *  @brief Claims a loaded index's writer for one refine, which @ref end_refine gives back.
+     *
+     *  @par Statuses:
+     *  - @c read_only_k The index is a view.
+     *  - @c contended_k Another refine holds the writer, or a replacement found another writer and
+     *    the writer gave up its lock.
+     */
+    status_t begin_refine() noexcept {
+        if (!writer_) return status_t::read_only_k;
+        u64_t idle = 0;
+        if (!atomic_ref<u64_t>(writer_->refining)
+                 .compare_exchange_strong(idle, 1, std::memory_order_acquire, std::memory_order_relaxed))
+            return status_t::contended_k;
+        if (writer_->lock.file) return status_t::success_k;
+        end_refine();
+        return status_t::contended_k;
+    }
+    void end_refine() noexcept { atomic_ref<u64_t>(writer_->refining).store(0, std::memory_order_release); }
+
+    /**
+     *  @brief Commits the durable part at @p path, @p bytes long, as part @p shard of a loaded
+     *      index: replaces the manifest to name it, then swaps it in inside an epoch window.
+     *
+     *  The superseded part is removed once the index is released, since a reader that started
+     *  before the swap may still read it.
+     *
+     *  Everything that may fail runs before the manifest is replaced, so a refusal leaves the old
+     *  manifest naming the old part. The new manifest is locked before it moves into place, so the
+     *  writer's lock never lapses; a staged manifest another process locked means a second writer,
+     *  so this one gives up its lock and refuses every later change.
+     *
+     *  @par Statuses:
+     *  - @c read_only_k The index is a view.
+     *  - @c contended_k Another writer locked the staged manifest, now or at an
+     *    earlier replacement.
+     *  - @c config_mismatch_k @p shard names no part, or the new part differs from it in rows,
+     *    geometry or key width.
+     *  - @c io_k The new part or the manifest cannot be written, flushed or moved into place.
+     *  - Any status @ref view answers for opening a part.
+     */
+    status_t replace_part(std::size_t shard, std::string_view path, std::size_t bytes) noexcept {
+        if (!writer_) return status_t::read_only_k;
+        if (!writer_->lock.file) return status_t::contended_k;
+        if (shard >= parts_.size()) return status_t::config_mismatch_k;
+        writer_t& writer = *writer_;
+        medium_t medium;
+        nvme_part_t opened;
+        nk_kernel_kind_t kernel = kernel_;
+        if (status_t const vetted = index_t::open_part_(path, safegraphs_key_dtype<key_t>(), kernel, allocator_, medium,
+                                                        opened);
+            failed(vetted))
+            return vetted;
+        nvme_part_t const& replaced = parts_[shard];
+        if (opened.nodes != replaced.nodes || opened.dimensions != replaced.dimensions ||
+            opened.connectivity != replaced.connectivity || opened.value_row_bytes != replaced.value_row_bytes ||
+            opened.key_dtype != replaced.key_dtype)
+            return release_medium<wait_t>(medium), status_t::config_mismatch_k;
+
+        // Every allocation precedes the commit, so nothing after it can fail.
+        std::string_view const old_relative = to_string_view(writer.parts[shard].relative);
+        std::string_view const directory = old_relative.substr(
+            0, old_relative.size() - safegraphs_basename(old_relative).size());
+        std::string_view const name = safegraphs_basename(path);
+        written_part_t written {paths_t {allocator_}, bytes, seekable_file_t {}};
+        retired_part_t retired {medium_t {}, paths_t {allocator_}};
+        auto [file, file_status] = seekable_file_t::open(path, file_access_t::read_write_k, allocator_);
+        status_t prepared = file_status;
+        if (succeeded(prepared) && failed(written.relative.resize_uninitialized(directory.size() + name.size())))
+            prepared = status_t::bad_alloc_k;
+        if (succeeded(prepared)) {
+            std::memcpy(written.relative.data(), directory.data(), directory.size());
+            std::memcpy(written.relative.data() + directory.size(), name.data(), name.size());
+            prepared = safegraphs_sibling_path(retired.path, to_string_view(writer.manifest), old_relative).status;
+        }
+        if (succeeded(prepared) &&
+            (failed(retired.path.push_back('\0')) || failed(writer.retired.reserve(writer.retired.size() + 1))))
+            prepared = status_t::bad_alloc_k;
+        if (failed(prepared)) return release_medium<wait_t>(medium), prepared;
+        written.file = std::move(file);
+
+        auto part_at = [&](std::size_t part) noexcept {
+            if (part == shard) return safegraphs_part_t {to_string_view(written.relative), bytes, opened.nodes};
+            return safegraphs_part_t {to_string_view(writer.parts[part].relative), writer.parts[part].bytes,
+                                      parts_[part].nodes};
+        };
+        if (status_t const committed = writer.lock.replace(to_string_view(writer.manifest), parts_.size(), part_at,
+                                                           allocator_);
+            failed(committed)) {
+            if (committed == status_t::contended_k) writer.lock = safegraphs_manifest_lock_t {};
+            return release_medium<wait_t>(medium), committed;
+        }
+
+        // Readers bracket every call by the epoch, so one overlapping the swap reads again.
+        begin_window_();
+        std::swap(media_[shard], medium);
+        parts_[shard] = opened;
+        end_window_();
+        retired.medium = std::move(medium);
+        writer.retired.push_back_reserved(std::move(retired));
+        writer.parts[shard] = std::move(written);
+        return status_t::success_k;
+    }
+
+    /**
+     *  @brief Commits the @p count durable parts @p part_of names as every part of a loaded index:
+     *      replaces the manifest to name them, then serves them in place of the parts it served,
+     *      however many those were, and files a held key table anew over @p executor.
+     *
+     *  @c part_of(part) answers a @c safegraphs_part_t whose path is where the part sits and whose
+     *  bytes are its length. No other call may overlap this one, since the parts change in number;
+     *  the superseded parts are removed once the index is released. Everything that may fail runs
+     *  before the manifest is replaced, so a refusal leaves the old manifest naming the old parts.
+     *
+     *  @par Statuses:
+     *  - @c read_only_k The index is a view.
+     *  - @c contended_k Another writer locked the staged manifest, now or at an
+     *    earlier replacement.
+     *  - @c invalid_argument_k @p count is zero.
+     *  - @c config_mismatch_k A new part differs from the served ones in geometry or key width.
+     *  - @c io_k A new part or the manifest cannot be written, flushed or moved into place.
+     *  - Any status @ref view answers for opening a part, or @ref hold_keys for filing the keys.
+     */
+    template <typename part_of_type_>
+    status_t replace_parts(std::size_t count, part_of_type_&& part_of, executor_t& executor) noexcept {
+        if (!writer_) return status_t::read_only_k;
+        if (!writer_->lock.file) return status_t::contended_k;
+        if (!count) return status_t::invalid_argument_k;
+        writer_t& writer = *writer_;
+        growing_buffer<medium_t, forkunion_allocator_t> media {allocator_};
+        growing_buffer<nvme_part_t, forkunion_allocator_t> parts {allocator_};
+        growing_buffer<written_part_t, forkunion_allocator_t> written {allocator_};
+        growing_buffer<retired_part_t, forkunion_allocator_t> retired {allocator_};
+        auto refused = [&](status_t status) noexcept {
+            for (medium_t& medium : media) release_medium<wait_t>(medium);
+            return status;
+        };
+        if (failed(media.reserve_exactly(count)) || failed(parts.reserve_exactly(count)) ||
+            failed(written.reserve_exactly(count)) || failed(retired.reserve_exactly(parts_.size())) ||
+            failed(writer.retired.reserve(writer.retired.size() + parts_.size())))
+            return status_t::bad_alloc_k;
+        std::string_view const served = to_string_view(writer.parts[0].relative);
+        std::string_view const directory = served.substr(0, served.size() - safegraphs_basename(served).size());
+        for (std::size_t part = 0; part != count; ++part) {
+            safegraphs_part_t const entry = part_of(part);
+            media.push_back_reserved(medium_t {});
+            nvme_part_t opened;
+            nk_kernel_kind_t kernel = kernel_;
+            if (status_t const vetted = index_t::open_part_(entry.path, safegraphs_key_dtype<key_t>(), kernel,
+                                                            allocator_, media.back(), opened);
+                failed(vetted))
+                return refused(vetted);
+            if (opened.dimensions != parts_[0].dimensions || opened.connectivity != parts_[0].connectivity ||
+                opened.value_row_bytes != parts_[0].value_row_bytes || opened.key_dtype != parts_[0].key_dtype)
+                return refused(status_t::config_mismatch_k);
+            parts.push_back_reserved(opened);
+            std::string_view const name = safegraphs_basename(entry.path);
+            written.push_back_reserved(written_part_t {paths_t {allocator_}, entry.bytes, seekable_file_t {}});
+            auto [file, file_status] = seekable_file_t::open(entry.path, file_access_t::read_write_k, allocator_);
+            if (failed(file_status)) return refused(file_status);
+            written.back().file = std::move(file);
+            if (failed(written.back().relative.resize_uninitialized(directory.size() + name.size())))
+                return refused(status_t::bad_alloc_k);
+            std::memcpy(written.back().relative.data(), directory.data(), directory.size());
+            std::memcpy(written.back().relative.data() + directory.size(), name.data(), name.size());
+        }
+        for (written_part_t const& superseded : writer.parts) {
+            retired.push_back_reserved(retired_part_t {medium_t {}, paths_t {allocator_}});
+            if (failed(safegraphs_sibling_path(retired.back().path, to_string_view(writer.manifest),
+                                               to_string_view(superseded.relative))
+                           .status) ||
+                failed(retired.back().path.push_back('\0')))
+                return refused(status_t::bad_alloc_k);
+        }
+
+        auto part_at = [&](std::size_t part) noexcept {
+            return safegraphs_part_t {to_string_view(written[part].relative), written[part].bytes, parts[part].nodes};
+        };
+        if (status_t const committed = writer.lock.replace(to_string_view(writer.manifest), count, part_at, allocator_);
+            failed(committed)) {
+            if (committed == status_t::contended_k) writer.lock = safegraphs_manifest_lock_t {};
+            return refused(committed);
+        }
+        begin_window_();
+        std::swap(media_, media);
+        std::swap(parts_, parts);
+        end_window_();
+        for (std::size_t part = 0; part != retired.size(); ++part) {
+            retired[part].medium = std::move(media[part]);
+            writer.retired.push_back_reserved(std::move(retired[part]));
+        }
+        writer.parts = std::move(written);
+        return resident_keys_.empty() ? status_t::success_k : file_keys_(executor);
+    }
+
+    /**
+     *  @brief Whether the writer still holds the lock on its manifest, which @ref replace_part
+     *      keeps on every manifest it moves into place.
+     *
+     *  @par Statuses:
+     *  - @c read_only_k The index is a view.
+     *  - @c contended_k A replacement met another writer, and the writer gave up its lock.
+     */
+    status_t relock_manifest() const noexcept {
+        if (!writer_) return status_t::read_only_k;
+        return writer_->lock.file ? status_t::success_k : status_t::contended_k;
+    }
+
+    /** Runs the reader @p read between part swaps, again once if a swap overlapped it, answering
+     *  @c contended_k if one overlapped that too, so whatever it returns read whole parts; a view
+     *  swaps nothing, so it runs @p read once. @p read answers an @c expected or a @c status_t. */
+    template <typename read_type_>
+    std::invoke_result_t<read_type_&> read_between_swaps(read_type_&& read) const noexcept {
+        using read_result_t = std::invoke_result_t<read_type_&>;
+        if (!writer_) return read();
+        for (std::size_t attempt = 0; attempt != 2; ++attempt) {
+            u64_t const epoch = read_epoch_();
+            read_result_t result = read();
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (atomic_ref<u64_t const>(writer_->epoch).load(std::memory_order_relaxed) == epoch) return result;
+        }
+        if constexpr (std::is_same_v<read_result_t, status_t>) return status_t::contended_k;
+        else return {{}, status_t::contended_k};
+    }
+
+#pragma endregion Writer
 
     /** The distance kind the parts were built for, as @ref view read it; unknown before one. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
@@ -367,8 +661,10 @@ struct nvme_indexes {
                        !aggregating_predicate<std::remove_cvref_t<predicate_type_>, key_t, scan_payload_t>) ||
                           per_thread_predicates<std::remove_cvref_t<predicate_type_>>,
                       "An engine driving its own threads takes an aggregating predicate per thread");
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
         if (config.traversal == traversal_t::scan_k)
-            return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies);
+            return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies,
+                              config.cache_bytes);
         return search_rows_(queries, dummy_heads_t {}, executor, config, matches.keys, matches.scores, matches.counts,
                             predicate, latencies, hints);
     }
@@ -417,7 +713,9 @@ struct nvme_indexes {
                                         search_config_t config, predicate_type_&& predicate, executor_t& executor,
                                         std::span<u64_t> latencies = {}, ranked_hints_view<key_t> = {}) noexcept {
         if (config.traversal != traversal_t::scan_k) return {{}, status_t::config_mismatch_k};
-        return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies);
+        if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+        return scan_rows_(queries, executor, matches.keys, matches.scores, matches.counts, predicate, latencies,
+                          config.cache_bytes);
     }
 
     /**
@@ -994,22 +1292,23 @@ struct nvme_indexes {
 #pragma region Health
 
     /**
-     *  @brief Reachability of every part from as many stride-spread landmarks as one search draws,
-     *      the RAM audit's seeds, each part swept level by level over its neighbors column, one
+     *  @brief Reachability of every part from one drawn root each, as the RAM group audits its
+     *      shards: the root's strong component, depths, in-links, and the islands outside it, one
      *      part after another.
      *
-     *  A part of N rows holds two bitsets of N bits, one per level, from the first thread's arena:
-     *  2 · N bits in flight, 1 GiB for a part of 2³² rows, the widest part's pair reused by every
-     *  part. A level reads its rows' neighbors in ID order, rows whose blocks touch merged into one
-     *  read of at most a scan run, as many in flight as the engines hold, so a dense level reads
-     *  near-sequentially and every reachable row is read once, by the level expanding it: at most N
-     *  reads per part, and at most the part's neighbors column in bytes per level.
+     *  A part of N rows holds four byte columns and three bitsets of N bits from the first thread's
+     *  arena, the widest part's reused by every part, and the islands' links beside them. A level
+     *  reads the rows it expands in ID order, rows whose blocks touch merged into one read of at
+     *  most a scan run, as many in flight as the engines hold, and certifies their way back in the
+     *  same read; then only the rows reached and not yet certified are read again, and once more
+     *  the islands and the rows linked to less than a row holds.
      *
      *  @param[in,out] executor The threads, their engines and their scratch; held for the call.
      *
      *  @par Statuses:
      *  - @c uninitialized_k Nothing is viewed, or @p executor holds no threads or pool workers.
      *  - @c contended_k Another call holds @p executor, or its pool is running another dispatch.
+     *  - @c bad_alloc_k The first thread's arena cannot hold the columns or the islands.
      *  - @c overflow_k A staging region's byte count overflows.
      *  - @c config_mismatch_k A medium the engines cannot read.
      */
@@ -1019,12 +1318,8 @@ struct nvme_indexes {
         for (nvme_part_t const& part : parts_) widest = max_of<std::size_t>(widest, part.nodes);
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return {{}, call_status};
-        std::size_t const words = max_of<std::size_t>(
-            divide_round_up<std::size_t>(widest, reachability_levels<atomic_ref>::lanes_k), 1);
-        arena_t& arena = executor.arena(0);
-        auto* const this_level = reinterpret_cast<u64_t*>(arena.allocate(words * sizeof(u64_t), default_alignment_k));
-        auto* const next_level = reinterpret_cast<u64_t*>(arena.allocate(words * sizeof(u64_t), default_alignment_k));
-        if (!this_level || !next_level) return {{}, status_t::bad_alloc_k};
+        audit_columns_t const columns = audit_columns_t::carve(executor.arena(0), widest);
+        if (!columns.bitset_words) return {{}, status_t::bad_alloc_k};
         reachability_t result;
         for (u32_t part_index = 0; part_index != parts_.size(); ++part_index) {
             nvme_part_t const& part = parts_[part_index];
@@ -1034,8 +1329,8 @@ struct nvme_indexes {
                                       part_index};
             };
             auto const [audited, status] = nvme_audit_reachability<node_id_t, atomic_ref>(
-                executor, to_span(media_), staging_bytes_(), {this_level, words}, {next_level, words}, part.nodes,
-                part.connectivity, scan_run_rows_(part_index, row_bytes), neighbors_extent);
+                executor, to_span(media_), staging_bytes_(), columns, part.nodes, part.connectivity,
+                scan_run_rows_(part_index, row_bytes), neighbors_extent);
             if (failed(status)) return {{}, status};
             result += audited;
         }
@@ -1586,6 +1881,20 @@ struct nvme_indexes {
 
 #pragma region Scans
 
+    /** Files every part's keys into the key table, its reserved tables sized for them; a failure
+     *  leaves none. */
+    status_t file_keys_(executor_t& executor) noexcept {
+        if (status_t const reserved = resident_keys_.reserve(to_span(parts_)); failed(reserved)) return reserved;
+        auto [call, call_status] = begin_scans_(executor, 1);
+        status_t const scanned = failed(call_status) ? call_status
+                                                     : scan_key_rows_(executor, [&](std::size_t, key_t const& key,
+                                                                                    shard_node_t locator) noexcept {
+                                                           resident_keys_.insert(locator.shard, key, locator.node);
+                                                       });
+        if (failed(scanned)) resident_keys_.reset();
+        return scanned;
+    }
+
     /** One run of whole rows of one column a scan reads: where it starts, its rows, and where its
      *  first row sits among the rows the scan covers. */
     struct run_t {
@@ -1602,13 +1911,14 @@ struct nvme_indexes {
 
     /** Begins a call of @p scans scans over every shard, each fetching @p reads_per_task_ reads per
      *  task, as @ref nvme_begin_scans begins one: every engine as deep as the call's depth, every
-     *  buffer as wide as a walk's, and at least @p buffers for a walk sharing the call. */
+     *  buffer @p buffer_bytes wide and never narrower than a walk's, and at least @p buffers for a
+     *  walk sharing the call. */
     template <std::size_t reads_per_task_ = 1>
     expected<call_t> begin_scans_(executor_t& executor, std::size_t scans, std::size_t scratch_bytes = 0,
-                                  std::size_t buffers = 0) const noexcept {
+                                  std::size_t buffers = 0, std::size_t buffer_bytes = 0) const noexcept {
         return nvme_begin_scans<reads_per_task_>(executor, to_span(media_),
                                                  nvme_call_depth(executor, to_span(media_), to_span(parts_)), scans,
-                                                 scratch_bytes, buffers, staging_bytes_());
+                                                 scratch_bytes, buffers, max_of(buffer_bytes, staging_bytes_()));
     }
 
     /** @ref nvme_scan_reads over every part's medium, inside a call @ref begin_scans_ began. */
@@ -1796,39 +2106,41 @@ struct nvme_indexes {
         return scan_reads_(executor, runs_count_(0, rows_count, key_column_k, read_bytes), describe, consume).status;
     }
 
-    /** One match a thread's scan keeps for a query: its distance and its row's key. */
-    struct scan_match_t {
-        distance_t distance = 0;
-        key_t key {};
-    };
+    /** The scorer every block of a scan's queries takes, from the kits the class picked. */
+    using scan_scorer_t = typename scan_scorer<tiles_kit_t, quads_kit_t>::scorer_t;
+    using raw_dot_t = typename dot_result_t::raw_t;
 
-    /** One thread's share of a scan, from its own arena: as many matches per query as a ranking is
-     *  wide, unordered, each query's kept count and worst distance, one step of engine dots, and
-     *  one quad of rows' distances to every query. */
+    /** One thread's share of a scan, from its own arena: every query's ranking as a max-heap of
+     *  keys beside their distances, @b [queries,wanted], each query's kept count and worst kept
+     *  distance, one run's row norms, and one step's dots and distances. */
     struct scan_share_t {
-        scan_match_t* matches = nullptr;
-        u32_t* kept = nullptr;
-        distance_t* thresholds = nullptr;
-        byte_t* dots = nullptr;
-        distance_t* quad_distances = nullptr;
+        nk::matrix_span<key_t> keys;
+        nk::matrix_span<distance_t> distances;
+        std::span<u32_t> kept;
+        std::span<distance_t> thresholds;
+        std::span<vector_norms_t> row_norms;
+        nk::matrix_span<raw_dot_t> dots;
+        nk::matrix_span<f32_t> step_distances;
     };
 
     /**
      *  @brief Exact rankings of every query over every row: each part's value column is read once,
-     *      in runs, every run paired with the key run of its rows and scored against the batch.
+     *      in runs as long as a device request, every run paired with the key run of its rows and
+     *      scored against the batch.
      *
-     *  A batch as wide as a tile streams through the matrix engine, packed once per block of the
-     *  kit's pack width; a narrower one, or a scalar no engine multiplies, scores four rows at a
-     *  time per query. Both finalize through the walk's quads kit. Every thread keeps its own
-     *  matches of every query, and they merge once the column ends. @p predicate sees a row's key
-     *  only once the row beats some query's worst match. One pass answers the whole batch, so
+     *  Every run meets every block of the batch while it stays in cache, each block as wide as the
+     *  class's scorer holds in half of @p cache_bytes, or packed once where a matrix engine
+     *  multiplies the scalar; both finalize through the walk's quads kit. Every thread keeps its
+     *  own ranking of every query, and they merge once the column ends. @p predicate sees a row's
+     *  key only once the row beats some query's worst match. One pass answers the whole batch, so
      *  every latency is that pass. The batch imports once into the first thread's arena, beside
      *  its norms and packs.
      */
     template <typename score_type_, typename predicate_type_>
     expected<search_result_t> scan_rows_(rows_view_t query_rows, executor_t& executor, nk::matrix_span<key_t> keys,
                                          nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
-                                         predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
+                                         predicate_type_& predicate, std::span<u64_t> latencies,
+                                         std::size_t cache_bytes) noexcept {
         using slice_t = arena_allocator<byte_t>;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
         std::size_t const queries_count = query_rows.rows, wanted = keys.extent(1), threads = executor.size();
@@ -1842,108 +2154,91 @@ struct nvme_indexes {
         if (!queries_count || !wanted) return {{}, status_t::success_k};
         auto const started = std::chrono::steady_clock::now();
 
-        // A batch narrower than a tile scores per query, as a lone query scans on RAM.
-        std::size_t pack_columns = 1, stream_rows = 0, pack_stride = 0;
-        bool tiled = false;
-        if constexpr (has_tiles_k) {
-            nk_size_t packed_bytes = 0;
-            tiled = queries_count >= tiles_kit_t::tile_columns_k &&
-                    tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions(), &packed_bytes) == nk_success_k;
-            pack_columns = tiles_kit_t::pack_columns_k, stream_rows = tiles_kit_t::stream_rows_k;
-            pack_stride = round_up_to_multiple<std::size_t>(packed_bytes, default_alignment_k);
-        }
-        std::size_t const packs = tiled ? divide_round_up(queries_count, pack_columns) : 0;
-        std::size_t const padded_queries = round_up_to_multiple<std::size_t>(queries_count, 4);
-        // Every arena takes a share, and thread zero's the packs, the queries' norms, the shares
-        // and the merge besides, so every arena is sized for both.
-        std::size_t const share_bytes = slice_t::reserved_bytes(queries_count * wanted * sizeof(scan_match_t)) +
+        // Runs are cut at the device's request, as the key scan cuts its reads, and follow the
+        // wider of the key and value rows, so both runs of a task fit a buffer.
+        std::size_t const rows_count = size(), dimensions = this->dimensions();
+        column_t const runs_column = parts_[0].value_row_bytes >= parts_[0].key_row_bytes ? value_column_k
+                                                                                          : key_column_k;
+        std::size_t const request_bytes = key_scan_bytes_();
+        std::size_t run_rows_limit = 0;
+        for (std::size_t part = 0; part != parts_.size(); ++part)
+            run_rows_limit = max_of(run_rows_limit,
+                                    scan_run_rows_(part, parts_[part].*runs_column.row_bytes, request_bytes));
+        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, queries_count, query_rows.columns);
+        std::size_t const query_bytes = divide_round_up(dimensions * nk_dtype_bits(vector_dtype_k), 8);
+        std::size_t const block_columns = scan_scorer_t::block_columns(queries_count, cache_bytes, query_bytes);
+        std::size_t const blocks = divide_round_up(queries_count, block_columns);
+        std::size_t const pack_stride = scan_scorer_t::packs_bytes(block_columns, dimensions);
+        std::size_t const step_rows = scan_scorer_t::step_rows_k, dots_columns = scan_scorer_t::dots_columns_k;
+        // Every arena takes a share, and thread zero's the batch, its packs, its norms and the
+        // shares besides, so every arena is sized for both.
+        std::size_t const share_bytes = slice_t::reserved_bytes(queries_count * wanted * sizeof(key_t)) +
+                                        slice_t::reserved_bytes(queries_count * wanted * sizeof(distance_t)) +
                                         slice_t::reserved_bytes(queries_count * sizeof(u32_t)) +
                                         slice_t::reserved_bytes(queries_count * sizeof(distance_t)) +
-                                        slice_t::reserved_bytes(stream_rows * pack_columns * sizeof(dot_result_t)) +
-                                        slice_t::reserved_bytes(queries_count * quad_lanes_k * sizeof(distance_t));
-        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_k, queries_count, query_rows.columns);
-        std::size_t const home_bytes = slice_t::reserved_bytes(staged_bytes) +
-                                       slice_t::reserved_bytes(packs * pack_stride) +
-                                       slice_t::reserved_bytes(padded_queries * sizeof(vector_norms_t)) +
-                                       slice_t::reserved_bytes(padded_queries * sizeof(dot_result_t)) +
-                                       slice_t::reserved_bytes(threads * sizeof(scan_share_t)) +
-                                       slice_t::reserved_bytes(threads * wanted * sizeof(scan_match_t));
-        auto [call, call_status] = begin_scans_<2>(executor, 1, share_bytes + home_bytes);
+                                        slice_t::reserved_bytes(run_rows_limit * sizeof(vector_norms_t)) +
+                                        slice_t::reserved_bytes(step_rows * dots_columns * sizeof(raw_dot_t)) +
+                                        slice_t::reserved_bytes(step_rows * block_columns * sizeof(f32_t));
+        std::size_t const first_arena_bytes = slice_t::reserved_bytes(staged_bytes) +
+                                              slice_t::reserved_bytes(blocks * pack_stride) +
+                                              slice_t::reserved_bytes(queries_count * sizeof(vector_norms_t)) +
+                                              slice_t::reserved_bytes(threads * sizeof(scan_share_t));
+        auto [call, call_status] = begin_scans_<2>(executor, 1, share_bytes + first_arena_bytes, 0, request_bytes);
         if (failed(call_status)) return {{}, call_status};
         if (status_t const opened = open_predicate(predicate, executor); failed(opened)) return {{}, opened};
+        std::size_t const read_bytes = executor.buffers_cut().buffer_bytes;
         auto carve = [](arena_t& arena, std::size_t bytes) noexcept {
             return arena.allocate(max_of<std::size_t>(bytes, 1), default_alignment_k);
         };
-        arena_t& home = executor.arena(0);
-        auto* const staged = carve(home, staged_bytes);
-        auto* const packed = carve(home, packs * pack_stride);
-        auto* const norms = reinterpret_cast<vector_norms_t*>(carve(home, padded_queries * sizeof(vector_norms_t)));
-        auto* const sumsqs = reinterpret_cast<dot_result_t*>(carve(home, padded_queries * sizeof(dot_result_t)));
-        auto* const shares = reinterpret_cast<scan_share_t*>(carve(home, threads * sizeof(scan_share_t)));
-        auto* const merged = reinterpret_cast<scan_match_t*>(carve(home, threads * wanted * sizeof(scan_match_t)));
-        if (!staged || !packed || !norms || !sumsqs || !shares || !merged) return {{}, status_t::bad_alloc_k};
+        arena_t& first_arena = executor.arena(0);
+        auto* const staged = carve(first_arena, staged_bytes);
+        auto* const packs = carve(first_arena, blocks * pack_stride);
+        auto* const norms = reinterpret_cast<vector_norms_t*>(
+            carve(first_arena, queries_count * sizeof(vector_norms_t)));
+        auto* const shares = reinterpret_cast<scan_share_t*>(carve(first_arena, threads * sizeof(scan_share_t)));
+        if (!staged || !packs || !norms || !shares) return {{}, status_t::bad_alloc_k};
         vectors_view_t const queries = import_staged_rows<elementwise_kit_t, rmscast_kit_t, scalar_t>(
             query_rows, 0, queries_count, kernel_, staged);
+        std::span<vector_norms_t> const query_norms {norms, queries_count};
+        for (std::size_t query = 0; query != queries_count; ++query)
+            query_norms[query] = index_t::norms_(kernel_, queries.row(query).as_vector());
+        for (std::size_t block = 0; block != blocks; ++block) {
+            std::size_t const first = block * block_columns;
+            scan_scorer_t::pack(queries(nk::range(first, min_of(first + block_columns, queries_count)), nk::slice),
+                                packs + block * pack_stride);
+        }
         for (std::size_t thread = 0; thread != threads; ++thread) {
             arena_t& arena = executor.arena(thread);
-            scan_share_t& share = *new (shares + thread) scan_share_t {
-                reinterpret_cast<scan_match_t*>(carve(arena, queries_count * wanted * sizeof(scan_match_t))),
-                reinterpret_cast<u32_t*>(carve(arena, queries_count * sizeof(u32_t))),
-                reinterpret_cast<distance_t*>(carve(arena, queries_count * sizeof(distance_t))),
-                carve(arena, stream_rows * pack_columns * sizeof(dot_result_t)),
-                reinterpret_cast<distance_t*>(carve(arena, queries_count * quad_lanes_k * sizeof(distance_t)))};
-            if (!share.matches || !share.kept || !share.thresholds || !share.dots || !share.quad_distances)
+            auto* const kept_keys = reinterpret_cast<key_t*>(carve(arena, queries_count * wanted * sizeof(key_t)));
+            auto* const kept_distances = reinterpret_cast<distance_t*>(
+                carve(arena, queries_count * wanted * sizeof(distance_t)));
+            auto* const kept = reinterpret_cast<u32_t*>(carve(arena, queries_count * sizeof(u32_t)));
+            auto* const thresholds = reinterpret_cast<distance_t*>(carve(arena, queries_count * sizeof(distance_t)));
+            auto* const row_norms = reinterpret_cast<vector_norms_t*>(
+                carve(arena, run_rows_limit * sizeof(vector_norms_t)));
+            auto* const dots = reinterpret_cast<raw_dot_t*>(carve(arena, step_rows * dots_columns * sizeof(raw_dot_t)));
+            auto* const step_distances = reinterpret_cast<f32_t*>(
+                carve(arena, step_rows * block_columns * sizeof(f32_t)));
+            if (!kept_keys || !kept_distances || !kept || !thresholds || !row_norms || !dots || !step_distances)
                 return {{}, status_t::bad_alloc_k};
-            std::memset(share.kept, 0, queries_count * sizeof(u32_t));
+            new (shares + thread) scan_share_t {{kept_keys, queries_count, wanted},
+                                                {kept_distances, queries_count, wanted},
+                                                {kept, queries_count},
+                                                {thresholds, queries_count},
+                                                {row_norms, run_rows_limit},
+                                                {dots, step_rows, dots_columns},
+                                                {step_distances, step_rows, block_columns}};
+            std::memset(kept, 0, queries_count * sizeof(u32_t));
             for (std::size_t query = 0; query != queries_count; ++query)
-                share.thresholds[query] = (std::numeric_limits<distance_t>::max)();
-            if (status_t const reserved = reserve_predicate(thread_predicate(predicate, thread),
-                                                            scan_round_capacity<tiles_kit_t>());
+                thresholds[query] = (std::numeric_limits<distance_t>::max)();
+            if (status_t const reserved = reserve_predicate(thread_predicate(predicate, thread), step_rows);
                 failed(reserved))
                 return {{}, reserved};
         }
-        for (std::size_t query = 0; query != padded_queries; ++query) {
-            norms[query] = query < queries_count ? index_t::norms_(kernel_, queries.row(query).as_vector())
-                                                 : vector_norms_t {};
-            sumsqs[query] = norms[query].sumsq;
-        }
-        if constexpr (has_tiles_k) {
-            for (std::size_t pack = 0; pack != packs; ++pack) {
-                std::size_t const first = pack * pack_columns, columns = min_of(pack_columns, queries_count - first);
-                vectors_view_t const block = queries(nk::range(first, first + columns), nk::slice);
-                [[maybe_unused]] nk_status_t const packed_status = tiles_kit_t::pack(
-                    block.raw_values_data(), columns, dimensions(), static_cast<std::size_t>(block.stride_bytes(0)),
-                    packed + pack * pack_stride, 0, columns, nullptr);
-                assert(packed_status == nk_success_k && "A matrix engine packs any block");
-            }
-        }
 
-        // Keeps a match in a thread's share of a query, and answers that query's new worst.
-        auto keep_match = [wanted](scan_share_t const& share, std::size_t query, scan_match_t match) noexcept {
-            scan_match_t* const kept = share.matches + query * wanted;
-            u32_t& count = share.kept[query];
-            if (count < wanted) {
-                kept[count++] = match;
-                if (count < wanted) return (std::numeric_limits<distance_t>::max)();
-            }
-            else {
-                std::size_t worst = 0;
-                for (std::size_t slot = 1; slot != wanted; ++slot)
-                    if (kept[slot].distance > kept[worst].distance) worst = slot;
-                kept[worst] = match;
-            }
-            distance_t threshold = kept[0].distance;
-            for (std::size_t slot = 1; slot != wanted; ++slot) threshold = max_of(threshold, kept[slot].distance);
-            return threshold;
-        };
-
-        // Runs follow the wider of the key and value rows, so both runs of a task fit a buffer.
-        std::size_t const rows_count = size();
-        column_t const runs_column = parts_[0].value_row_bytes >= parts_[0].key_row_bytes ? value_column_k
-                                                                                          : key_column_k;
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 2> {
             if (progress++) return {};
-            run_t const run = locate_run_(0, rows_count, task, runs_column, staging_bytes_());
+            run_t const run = locate_run_(0, rows_count, task, runs_column, read_bytes);
             return {run_extent_(run, key_column_k), run_extent_(run, value_column_k)};
         };
         auto consume = [&](std::size_t thread, std::size_t, u64_t, std::array<nvme_extent_t, 2> const& extents,
@@ -1954,105 +2249,63 @@ struct nvme_indexes {
             auto key_of = [&](std::size_t row) noexcept {
                 return safegraphs_widened_key<key_t>(fetched[0] + row * part.key_row_bytes, part.key_dtype);
             };
-            auto row_of = [&](std::size_t row) noexcept {
-                return vector_view_t {reinterpret_cast<scalar_t const*>(fetched[1] + row * part.value_row_bytes),
-                                      part.dimensions};
-            };
-            auto admits = [&]() noexcept {
-                if constexpr (filtered_k) return node_predicate {thread_predicate(predicate, thread), key_of};
-                else return dummy_predicate_t {};
-            }();
-            if constexpr (has_tiles_k)
-                if (tiled) {
-                    using raw_dot_t = typename dot_result_t::raw_t;
-                    // Rows may be padded past the logical width the queries were packed at.
-                    vectors_view_t const dense {reinterpret_cast<scalar_t const*>(fetched[1]), run_rows,
-                                                std::size_t {part.dimensions}};
-                    nk::shape_storage_<2> const logical {
-                        {run_rows, std::size_t {part.dimensions}},
-                        {static_cast<decltype(dense.stride_bytes(0))>(part.value_row_bytes), dense.stride_bytes(1)},
-                        2};
-                    vectors_view_t const rows {dense.byte_data(), logical};
-                    nk::matrix_span<raw_dot_t> const dots {reinterpret_cast<raw_dot_t*>(share.dots), stream_rows,
-                                                           pack_columns};
-                    auto row_sumsq = [&](std::size_t row) noexcept {
-                        return index_t::norms_(kernel_, row_of(row)).sumsq;
+            // Rows may be padded past the logical width the queries score at.
+            nk::shape_storage_<2> const logical {
+                {run_rows, dimensions},
+                {static_cast<std::ptrdiff_t>(part.value_row_bytes), queries.stride_bytes(1)},
+                2};
+            vectors_view_t const rows {reinterpret_cast<char const*>(fetched[1]), logical};
+            // A run's norms are derived once, into the thread's share.
+            std::span<vector_norms_t> const row_norms = share.row_norms.first(run_rows);
+            for (std::size_t row = 0; row != run_rows; ++row)
+                row_norms[row] = index_t::norms_(kernel_, rows.row(row).as_vector());
+            auto scan_run = [&](auto& admits) noexcept {
+                for (std::size_t block = 0; block != blocks; ++block) {
+                    std::size_t const first_column = block * block_columns;
+                    std::size_t const width = min_of(block_columns, queries_count - first_column);
+                    auto keep = [&](std::size_t column, scored_node_t scored) noexcept {
+                        std::size_t const query = first_column + column;
+                        keep_ranked(to_span(share.keys.row(query).as_vector()),
+                                    to_span(share.distances.row(query).as_vector()), share.kept[query],
+                                    share.thresholds[query], key_of(scored.node_id), scored.distance);
+                        return share.thresholds[query];
                     };
-                    for (std::size_t pack = 0; pack != packs; ++pack) {
-                        std::size_t const first = pack * pack_columns;
-                        std::size_t const columns = min_of(pack_columns, queries_count - first);
-                        auto keep_scored = [&](std::size_t column, scored_node_t scored) noexcept {
-                            return keep_match(share, first + column, {scored.distance, key_of(scored.node_id)});
-                        };
-                        scan_tiles<tiles_kit_t, quads_kit_t>(kernel_, rows, 0, packed + pack * pack_stride,
-                                                             std::span<dot_result_t const>(sumsqs + first, columns),
-                                                             std::span<distance_t>(share.thresholds + first, columns),
-                                                             dots, row_sumsq, admits, keep_scored);
-                    }
-                    return;
+                    scan_scorer_t const scorer {
+                        kernel_, queries(nk::range(first_column, first_column + width), nk::slice),
+                        query_norms.subspan(first_column, width), packs + block * pack_stride, share.dots};
+                    scan_block(scorer, rows, 0, std::span<vector_norms_t const>(row_norms),
+                               share.thresholds.subspan(first_column, width), share.step_distances, admits, keep);
                 }
-            for (std::size_t row = 0; row < run_rows; row += 4) {
-                std::size_t const lanes = min_of<std::size_t>(4, run_rows - row);
-                quad<vector_view_t> lane_rows;
-                quad<vector_norms_t> lane_norms;
-                for (std::size_t lane = 0; lane != 4; ++lane) {
-                    lane_rows[lane] = row_of(row + min_of(lane, lanes - 1));
-                    lane_norms[lane] = index_t::norms_(kernel_, lane_rows[lane]);
-                }
-                // Every query scores the quad first, so a lane beating some worst is asked once.
-                quad<bool> contends {};
-                for (std::size_t query = 0; query != queries_count; ++query) {
-                    quad<distance_t> const lane_distances = dense::distances<quads_kit_t>(
-                        kernel_, queries.row(query).as_vector(), norms[query], lane_rows, lane_norms);
-                    std::memcpy(share.quad_distances + query * quad_lanes_k, lane_distances.data(),
-                                sizeof(lane_distances));
-                    for (std::size_t lane = 0; lane != lanes; ++lane)
-                        contends[lane] |= lane_distances[lane] < share.thresholds[query];
-                }
-                auto keep_entry = [&](scan_payload_t contender) noexcept {
-                    for (std::size_t query = 0; query != queries_count; ++query) {
-                        distance_t const distance = share.quad_distances[query * quad_lanes_k + contender - row];
-                        if (distance < share.thresholds[query])
-                            share.thresholds[query] = keep_match(share, query, {distance, key_of(contender)});
-                    }
-                };
-                quad<node_id_t> nodes;
-                quad<scan_payload_t> payloads;
-                std::size_t filled = 0;
-                for (std::size_t lane = 0; lane != lanes; ++lane) {
-                    if (!contends[lane]) continue;
-                    nodes[filled] = static_cast<node_id_t>(row + lane);
-                    payloads[filled++] = static_cast<scan_payload_t>(row + lane);
-                }
-                ask_contenders(admits, nodes, payloads, filled, keep_entry);
-                settle_predicate(admits, keep_entry);
+            };
+            if constexpr (filtered_k) {
+                node_predicate admits {thread_predicate(predicate, thread), key_of};
+                scan_run(admits);
+            }
+            else {
+                dummy_predicate_t admits;
+                scan_run(admits);
             }
         };
-        auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column, staging_bytes_()),
+        auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column, read_bytes),
                                                     describe, consume);
         search_result_t result;
         result.scan_reads = reads;
         result.computed_distances = rows_count * queries_count;
         if (failed(status)) return {result, status};
 
-        // Every thread's matches of a query merge, the nearest first.
-        auto nearer = [](scan_match_t const& first, scan_match_t const& second) noexcept {
-            return first.distance < second.distance;
-        };
+        // Every thread's ranking of a query merges into the query's row, the nearest first.
         for (std::size_t query = 0; query != queries_count; ++query) {
-            std::size_t gathered = 0;
+            std::span<key_t> const keys_row = to_span(keys.row(query).as_vector());
+            std::span<score_type_> const distances_row = to_span(distances.row(query).as_vector());
+            std::size_t merged = 0;
             for (std::size_t thread = 0; thread != threads; ++thread) {
                 scan_share_t const& share = shares[thread];
-                std::memcpy(merged + gathered, share.matches + query * wanted,
-                            share.kept[query] * sizeof(scan_match_t));
-                gathered += share.kept[query];
+                for (std::size_t slot = 0; slot != share.kept[query]; ++slot)
+                    merged = merge_ranked(keys_row, distances_row, merged, key_t {share.keys(query, slot)},
+                                          static_cast<score_type_>(share.distances(query, slot)));
             }
-            std::size_t const kept = min_of(gathered, wanted);
-            partial_sort(std::span<scan_match_t>(merged, gathered), kept, nearer);
-            for (std::size_t rank = 0; rank != kept; ++rank)
-                keys(query, rank) = merged[rank].key, distances(query, rank) = merged[rank].distance;
-            counts[query] = kept;
-            result.count += kept;
+            counts[query] = merged;
+            result.count += merged;
         }
         u64_t const elapsed = static_cast<u64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
@@ -2593,6 +2846,133 @@ struct nvme_indexes {
         return status_t::success_k;
     }
 
+    /** One part a loaded index's manifest names: the entry's path as written, its bytes, and the
+     *  part open for writing. */
+    struct written_part_t {
+        paths_t relative;
+        std::size_t bytes = 0;
+        seekable_file_t file;
+    };
+
+    /** A part a refine superseded: its medium, open for readers that started before the swap, and
+     *  the path removed once the index is released. */
+    struct retired_part_t {
+        medium_t medium;
+        paths_t path;
+    };
+
+    /** What a loaded index owns beside its parts: the manifest it replaces and its lock, none once
+     *  a replacement met another writer, every part's entry, the epoch its readers check, the word
+     *  one refine claims, and the parts superseded so far. */
+    struct writer_t {
+        paths_t manifest;
+        safegraphs_manifest_lock_t lock;
+        growing_buffer<written_part_t, forkunion_allocator_t> parts;
+        growing_buffer<retired_part_t, forkunion_allocator_t> retired;
+
+        /** Odd while a swap is in progress, as @c ram_shards keeps its epoch. */
+        u64_t epoch = 0;
+
+        /** One while a refine holds the writer. */
+        u64_t refining = 0;
+
+        explicit writer_t(forkunion_allocator_t allocator) noexcept
+            : manifest(allocator), parts(allocator), retired(allocator) {}
+    };
+
+    /** The body of @ref load, into an empty catalog: the lock first, so two loads never
+     *  both open the manifest for writing, and last the parts a crash left that the
+     *  manifest does not name. */
+    status_t load_(std::string_view manifest) noexcept {
+        if (manifest.empty()) return status_t::invalid_argument_k;
+        if (names_transport_id(manifest)) return status_t::unsupported_k;
+        auto [lock, lock_status] = safegraphs_manifest_lock_t::open(manifest, allocator_);
+        if (failed(lock_status)) return lock_status;
+        std::array<byte_t, safegraphs_prefix_t::magic_k.size()> magic {};
+        // A manifest shorter than the magic reads short, and the view below refuses it.
+        [[maybe_unused]] status_t const sniffed = lock.file.read_at(0, magic);
+        if (std::memcmp(magic.data(), safegraphs_prefix_t::magic_k.data(), magic.size()) == 0)
+            return status_t::unsupported_k;
+        if (status_t const viewed = view_(manifest, {}); failed(viewed)) return viewed;
+
+        std::unique_ptr<writer_t> writer {new (std::nothrow) writer_t {allocator_}};
+        if (!writer || failed(writer->manifest.resize_uninitialized(manifest.size()))) return status_t::bad_alloc_k;
+        std::memcpy(writer->manifest.data(), manifest.data(), manifest.size());
+        writer->lock = std::move(lock);
+        status_t kept = status_t::success_k;
+        auto per_part = [&](safegraphs_part_t entry) noexcept {
+            written_part_t part {paths_t {allocator_}, entry.bytes, seekable_file_t {}};
+            if (failed(part.relative.resize_uninitialized(entry.path.size())))
+                return void(kept = status_t::bad_alloc_k);
+            std::memcpy(part.relative.data(), entry.path.data(), entry.path.size());
+            if (failed(writer->parts.push_back(std::move(part)))) kept = status_t::bad_alloc_k;
+        };
+        auto const [summary, summary_status] = safegraphs_read_manifest(manifest, allocator_, per_part);
+        if (failed(summary_status)) return summary_status;
+        if (failed(kept)) return kept;
+        if (writer->parts.size() != parts_.size()) return status_t::malformed_k;
+        paths_t resolved {allocator_};
+        for (written_part_t& part : writer->parts) {
+            auto const [path, path_status] = safegraphs_sibling_path(resolved, manifest, to_string_view(part.relative));
+            if (failed(path_status)) return path_status;
+            auto [file, file_status] = seekable_file_t::open(path, file_access_t::read_write_k, allocator_);
+            if (failed(file_status)) return file_status;
+            part.file = std::move(file);
+        }
+        writer_ = std::move(writer);
+        remove_orphans_();
+        return status_t::success_k;
+    }
+
+    /** Removes the files of every generation of every part but the one the manifest names; refines
+     *  take the lowest free generation, so past the save's own the files end at the first gap. */
+    void remove_orphans_() noexcept {
+        paths_t named_buffer {allocator_}, candidate_buffer {allocator_};
+        for (std::size_t shard = 0; shard != parts_.size(); ++shard) {
+            auto const [named, named_status] = part_path(shard, named_buffer);
+            if (failed(named_status)) continue;
+            for (std::size_t generation = 0;; ++generation) {
+                auto const [candidate, candidate_status] = generation_path(shard, generation, candidate_buffer);
+                if (failed(candidate_status)) break;
+                if (candidate == named) continue;
+                if (failed(seekable_file_t::open(candidate, file_access_t::read_only_k, allocator_).status)) {
+                    if (generation) break;
+                    continue;
+                }
+                std::remove(candidate_buffer.data());
+            }
+        }
+    }
+
+    /** The epoch a reader of a loaded index starts under: an even one, waiting out a swap in
+     *  progress through the waiter. */
+    u64_t read_epoch_() const noexcept {
+        atomic_ref<u64_t const> const epoch {writer_->epoch};
+        u64_t observed = epoch.load(std::memory_order_acquire);
+        for (; observed & 1; observed = epoch.load(std::memory_order_acquire)) wait_t {}(&writer_->epoch, observed, 0u);
+        return observed;
+    }
+
+    /** Opens a swap: the epoch turns odd before any store of it, which the fence keeps after it. */
+    void begin_window_() noexcept {
+        atomic_ref<u64_t>(writer_->epoch).store_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+    }
+
+    /** Closes the swap @ref begin_window_ opened, releasing its stores to the next reader. */
+    void end_window_() noexcept { atomic_ref<u64_t>(writer_->epoch).store_add(1, std::memory_order_release); }
+
+    /** Drops the writer, giving back every superseded part's medium and removing its file, since
+     *  no call names the index any longer. */
+    void release_writer_() noexcept {
+        if (!writer_) return;
+        for (retired_part_t& retired : writer_->retired) {
+            release_medium<wait_t>(retired.medium);
+            std::remove(retired.path.data());
+        }
+        writer_.reset();
+    }
+
 #pragma endregion Opening
 
     /** Every part's file or device, open for the engines, in part order. */
@@ -2609,6 +2989,9 @@ struct nvme_indexes {
 
     /** The distance kind the parts name, every walk ranks by, and every rewrite carries on. */
     nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;
+
+    /** What @ref load opened the manifest with; a view holds none, which alone makes it a view. */
+    std::unique_ptr<writer_t> writer_;
 };
 
 } // namespace unum::usearch::dense

@@ -3390,6 +3390,9 @@ class nvme_executor {
     /** The pool, its per-domain arenas and its one-caller hold. */
     forkunion_executor_t& threads() noexcept { return threads_; }
 
+    /** Bytes of cache each core of the host pool keeps to itself. */
+    std::size_t cache_bytes_per_core() const noexcept { return threads_.cache_bytes_per_core(); }
+
     /** Threads this executor drives. */
     std::size_t size() const noexcept { return threads_.size(); }
 

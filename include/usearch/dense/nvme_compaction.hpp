@@ -6,35 +6,47 @@
  *      parts of @c nvme_indexes views.
  *
  *  Compaction, refine and build are free functions over the views, each planning its rewrite as
- *  phases of steps that borrow an NVMe executor one at a time and write SafeGraphs parts beside a
+ *  phases of tasks that borrow an NVMe executor one at a time and write SafeGraphs parts beside a
  *  manifest. A rewrite never edits its sources. It lays its target out as spec-standard parts,
  *  keys, values, neighbors and the producer's norms, whose headers arrive last and the manifest
  *  after them, so a stopped rewrite reads as absent. Its RAM is the workspace the caller lends, the
  *  executor's arenas and its staging buffers: the workspace keeps a changed bit per target row at
- *  its front, every step carves its blocks and batches off an arena over the rest, sized from it,
- *  and a sweep tile's links stay at the front of that across the tile's steps. Reads go through the
- *  executor's engines, the target's included, and writes are blocking positional runs.
+ *  its front, a streamed round its columns after them, and every task carves its blocks and batches
+ *  off an arena over the rest, sized from it. Reads go through the executor's engines, the target's
+ *  included, and writes are blocking positional runs.
  *
  *  A compaction packs the source parts largest first into target parts of at most a shard capacity
  *  of rows, so one verb packs small parts together and, under a capacity below a part's rows, cuts
  *  it.
+ *
+ *  A loaded index absorbs, reshards and splits through the same rewrite: absorb and reshard pack
+ *  its parts, with the donors' for an absorb, into parts beside its manifest, which then names
+ *  them, and split cuts every part into one range per receiver, each receiver loading a manifest
+ *  of its own.
  *
  *  @section dense_nvme_compaction_phases Phases
  *
  *  - @b Copy moves keys and values in target order, derives the norms, and rewires the neighbors a
  *    target keeps.
  *  - @b Build builds contiguous blocks of rows in a RAM index inside the workspace and writes their
- *    rows.
- *  - @b Re-select re-selects a tile of target rows by walks of the target itself, each row's picks
- *    competing with its neighbors, and writes the tile, or runs in RAM when a whole part fits.
+ *    rows, each block healed by a RAM round stopped at its hubs.
+ *  - Then one refinement round runs on every target part that took in rows, lost edges or was
+ *    asked to refine, one part at a time: in RAM when the workspace holds the part as a RAM index,
+ *    streamed over its files otherwise.
  *
- *  @b Sweep collects the walked rows' links into tiles of target rows sized from the workspace, so
- *  no reverse link is lost between walk tiles. One sequential scan of the walked rows' neighbors
- *  counts the links into a tile, cut at the last row whose links fit its tape, and the rest opens
- *  the next tile. A second scan scatters them onto the tape, and each row of the tile scores its
- *  run, merges it with its members, and is written a second time.
- *
- *  @b Heal sweeps reachability from the landmarks each audit seeds from, and links islands back in.
+ *  A streamed round keeps about 14.5 bytes per entry at the workspace front: the health check's
+ *  four bytes and three bits, the neighborhood a gather gave the entry, its place in the order by
+ *  neighborhood and its start, and a changed bit. @b Health audits the part from its root and the
+ *  opening check heals the islands it names without a distance, row by row. @b Draw @b hubs reads
+ *  and packs one cache-sized pack of hubs, and @b gather streams the value column once past them,
+ *  filing every entry under its nearest, then gathers each neighborhood over capacity again among
+ *  hubs drawn from its own entries. @b Restitch reads one neighborhood's rows and links by points,
+ *  scores it against itself in cache, keeps each entry's diverse links among its own and its
+ *  nearest neighborhood-mates under the reach rule, and appends the changed rows to the restitch
+ *  tape, a scratch file beside the part holding one run per tile of rows. @b Write applies each run
+ *  to its tile of the neighbors column in one read and one write, and the closing @b health check
+ *  measures the round. Each entry's row is written only by its own neighborhood, which weighs both
+ *  ends of every pair, so no sweep collects reverse links.
  */
 #pragma once
 
@@ -46,7 +58,7 @@
 #include <new>         // placement `new`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
-#include <utility>     // `std::move`, `std::exchange`
+#include <utility>     // `std::move`, `std::exchange`, `std::as_const`
 
 #include "usearch/utilities/ram_sorts.hpp" // `partial_sort`
 #include "usearch/dense/types.hpp"         // `compact_config_t`, `compact_result_t`
@@ -56,9 +68,9 @@
 
 namespace unum::usearch::dense {
 
-/** What the current phase's steps do, declared in the order every rewrite runs them, which
- *  @c nvme_compact_plan::advance steps through one at a time, skipping phases with no steps, the
- *  three back-link phases once per sweep tile; @c finish_k once it answered false. */
+/** What the current phase's tasks do, declared in the order every rewrite runs them, which
+ *  @c nvme_compact_plan::advance tasks through one at a time, skipping phases with no tasks, the
+ *  round's phases once per target part that runs one; @c finish_k once it answered false. */
 enum class nvme_compact_phase_t : u8_t {
 
     /** Moves keys and values into the target in target order, with their norms and the neighbors it
@@ -68,20 +80,21 @@ enum class nvme_compact_phase_t : u8_t {
     /** Builds one block of target rows in a RAM index and writes their neighbors. */
     build_k,
 
-    /** Re-selects target rows: the appended part, repaired rows, or the refined range. */
-    reselect_k,
+    /** Audits a target part from its root, the opening check healing the islands it names; the
+     *  closing check too. */
+    health_k,
 
-    /** Counts the links of the walked rows into the open sweep tile of target rows. */
-    count_back_links_k,
+    /** Reads and packs one cache-sized pack of hubs. */
+    draw_hubs_k,
 
-    /** Scatters those links onto the tile's tape, into each target's run. */
-    scatter_back_links_k,
+    /** Files every entry under its nearest hub; then each neighborhood over capacity again. */
+    gather_k,
 
-    /** Scores each target's run, merges it into the target's row, and writes the row. */
-    merge_back_links_k,
+    /** Re-stitches one neighborhood onto the restitch tape, or a whole part held in RAM. */
+    restitch_k,
 
-    /** Counts every row's in-links, then links the rows nothing links to back in. */
-    heal_k,
+    /** Rewrites one tile of neighbor rows from its run on the restitch tape. */
+    write_k,
 
     /** Nothing left but @ref nvme_compact_plan::finish. */
     finish_k,
@@ -91,24 +104,27 @@ enum class nvme_compact_phase_t : u8_t {
  *  reads and writes behind it. */
 struct [[nodiscard]] nvme_compact_result_t {
 
-    /** The shards, the moved rows, the cut edges, and the re-selections, block builds and heal,
-     *  counted as a RAM refine counts them, but for the heal of each target part: its
-     *  @c islands_found are the rows nothing links to, and no sweep runs on it, so
-     *  @c reachable_nodes and @c sweeps stay zero; @c health on the committed view measures them.
-     *  A refine moves no rows. */
+    /** The shards, the moved rows, the cut edges, the block builds, and every part's round,
+     *  counted as a RAM round counts them, the health checks summed over the parts. A refine
+     *  moves no rows. */
     compact_result_t compaction;
 
-    /** Neighbors rows the walks and the heal read. */
+    /** Neighbors rows the heals and the restitches read. */
     nvme_reads_t neighbor_reads;
 
-    /** Value rows the walks, the selections and the back-links read. */
+    /** Value rows the hubs, the gathers over capacity and the restitches read. */
     nvme_reads_t value_reads;
 
-    /** Runs of whole rows the copies, the batches, the sweeps and the heal scanned. */
+    /** Runs of whole rows the copies, the blocks, the health checks, the gathers and the writes
+     *  scanned. */
     nvme_reads_t scan_reads;
 
     /** Bytes the target parts received. */
     std::size_t written_bytes = 0;
+
+    /** Rounds the target parts ran: one each for a refine, and until one stops improving where
+     *  the plan built blocks or moved entries. */
+    std::size_t rounds = 0;
 };
 
 template <typename indexes_type_>
@@ -119,12 +135,11 @@ struct nvme_compact_plan;
  *      @p config.shard_capacity rows.
  *
  *  Parts pack largest first, each bin's largest part keeps its IDs, every other part arrives after
- *  it with its edges rebased, its rows walk the target and link in, a sweep merges their back-links
- *  into the rows they name, then each target part heals; one manifest commits them all. A part past
- *  the capacity is cut into ranges of it, the edges the cut crosses dropped and counted, and every
- *  row of their target parts re-selects. @p save names the target parts' alignment and provenance,
- *  and the target is a manifest beside its parts whatever its layout. The sources are borrowed
- *  until the plan dies and never edited.
+ *  it with its edges rebased, and every target part that took in a part runs one round, which
+ *  links them; one manifest commits them all. A part past the capacity is cut into ranges of it,
+ *  the edges the cut crosses dropped and counted, and their target parts run a round too. @p save
+ *  names the target parts' alignment and provenance, and the target is a manifest beside its parts
+ *  whatever its layout. The sources are borrowed until the plan dies and never edited.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source, a @c NULL first source, a first source viewing nothing, or
@@ -146,10 +161,11 @@ expected<nvme_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_ 
                                                         save_config_t const& save = {}) noexcept;
 
 /**
- *  Copies @p source and re-selects @p rows of it, in placement order across its parts, by walks of
- *  the copy, or in RAM for a whole part the workspace holds, then merges the back-links and heals;
- *  empty rows heal alone. Every part keeps its rows, so the capacity plays no part. The source is
- *  borrowed until the plan dies.
+ *  @brief Copies @p source and runs one round on every part holding some of @p rows, in placement
+ *      order across its parts, in RAM for a part the workspace holds and streamed otherwise.
+ *
+ *  A round takes the whole part. Every part keeps its rows, so the capacity plays no part. The
+ *  source is borrowed until the plan dies.
  *
  *  @par Statuses:
  *  - @c uninitialized_k @p source views nothing, or holds no rows.
@@ -168,10 +184,32 @@ expected<nvme_compact_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
                                                        save_config_t const& save = {}) noexcept;
 
 /**
- *  Builds one graph per target part over every row of the parts at @p sources, their neighbors
- *  ignored, the parts packed as a compaction packs them, in contiguous blocks the workspace holds
- *  as a RAM index, each healed there before it is written, then links each part's later blocks
- *  across as a compaction links its appended parts.
+ *  @brief Copies the one part of @p source into the part file @p target and runs one round over
+ *      it, as @ref plan_refine does, writing no manifest.
+ *
+ *  @ref nvme_compact_plan::finish with a commit hands the sealed part to the caller, whose own
+ *  record names it. The source is borrowed until the plan dies, and so is @p target's text.
+ *
+ *  @par Statuses:
+ *  - @c uninitialized_k @p source views nothing, or holds no rows.
+ *  - @c config_mismatch_k @p source views more than one part, or @p save names an alignment below
+ *    the floor or not a power of two or a reserved provenance field.
+ *  - @c invalid_argument_k An empty @p target, or one that does not parse.
+ *  - @c bad_alloc_k @p workspace cannot hold one row of some phase.
+ *  - @c overflow_k A part past the node ID space.
+ *  - @c malformed_k A framed target header has no width.
+ */
+template <typename indexes_type_>
+expected<nvme_compact_plan<indexes_type_>> plan_refine_part(indexes_type_ const& source, std::string_view target,
+                                                            bytes_span_t workspace, compact_config_t const& config = {},
+                                                            save_config_t const& save = {}) noexcept;
+
+/**
+ *  @brief Builds one graph per target part over every row of the parts at @p sources, their
+ *      neighbors ignored, the parts packed as a compaction packs them.
+ *
+ *  Contiguous blocks the workspace holds as a RAM index build there, each healed before it is
+ *  written, then one streamed round links each part's blocks as a compaction links its parts.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source, or sources holding no rows.
@@ -195,13 +233,13 @@ expected<nvme_compact_plan<indexes_type_>> plan_build(std::span<std::string_view
                                                       save_config_t const& save = {}) noexcept;
 
 /**
- *  @brief One rewrite in flight: phases of steps, each step run across every thread of an executor.
+ *  @brief One rewrite in flight: phases of tasks, each task run across every thread of an executor.
  *
- *  Steps of a phase may run in any order, but one at a time, since each claims the executor while
- *  it runs, so searches on the same executor run between steps; a failed step may run again. The
- *  back-link phases repeat once per sweep tile, each tile's links living across its steps.
- *  @ref advance is the single-caller barrier between phases. A dying plan removes every target part
- *  no manifest committed, so a stopped rewrite reads as absent.
+ *  Tasks of a phase may run in any order, but one at a time, since each claims the executor while
+ *  it runs, so searches on the same executor run between tasks; a failed task may run again. The
+ *  round's phases repeat once per target part that runs one, its columns living across their
+ *  tasks. @ref advance is the single-caller barrier between phases. A dying plan removes every
+ *  target part no manifest committed and the restitch tape, so a stopped rewrite reads as absent.
  */
 template <typename indexes_type_>
 struct [[nodiscard]] nvme_compact_plan {
@@ -211,15 +249,16 @@ struct [[nodiscard]] nvme_compact_plan {
     using result_t = nvme_compact_result_t;
 
     /** One unit of the current phase. */
-    struct step_t {
+    struct task_t {
 
-        /** The step's position in its phase. */
+        /** The task's position in its phase. */
         std::size_t position = 0;
 
-        /** The source part a copy step reads, or the target part every other step writes. */
+        /** The source part a copy task reads, or the target part every other task writes. */
         std::size_t part = 0;
 
-        /** The node IDs it covers: source ones for a copy step, target ones otherwise. */
+        /** The node IDs it covers: source ones for a copy task, positions in the order by
+         *  neighborhood for a task over one neighborhood, target ones otherwise. */
         iota_view<node_id_t> nodes;
     };
 
@@ -229,8 +268,9 @@ struct [[nodiscard]] nvme_compact_plan {
     nvme_compact_plan(nvme_compact_plan const&) = delete;
     nvme_compact_plan& operator=(nvme_compact_plan const&) = delete;
 
-    /** Removes the target parts unless @ref finish committed them. */
+    /** Removes the target parts unless @ref finish committed them, and the restitch tape. */
     ~nvme_compact_plan() noexcept {
+        close_tape_();
         for (target_t& target : targets_) {
             [[maybe_unused]] status_t const closed = target.file.close();
             target.view = indexes_t {allocator_};
@@ -238,11 +278,12 @@ struct [[nodiscard]] nvme_compact_plan {
         }
     }
 
-    /** Step @p position of the current phase; an empty one past the last. */
-    step_t operator[](std::size_t position) const noexcept {
+    /** Task @p position of the current phase; an empty one past the last. */
+    task_t operator[](std::size_t position) const noexcept {
+        if (rounding_()) return round_task_(position);
         for (std::size_t unit = 0, first = 0; unit != units_(); ++unit) {
             cut_t const cut = cut_(unit);
-            std::size_t const count = cut.steps();
+            std::size_t const count = cut.tasks();
             if (position - first < count) {
                 iota_view<std::size_t> const rows = cut.rows_of(position - first);
                 return {position, unit, {static_cast<node_id_t>(rows.first), static_cast<node_id_t>(rows.bound)}};
@@ -252,61 +293,78 @@ struct [[nodiscard]] nvme_compact_plan {
         return {};
     }
 
-    /** The current phase's steps, positionally; none once the plan is done. */
-    indexed_range<nvme_compact_plan> steps() const noexcept {
+    /** The current phase's tasks, positionally; none once the plan is done. */
+    indexed_range<nvme_compact_plan> tasks() const noexcept {
+        if (rounding_()) return {this, round_tasks_()};
         std::size_t count = 0;
-        for (std::size_t unit = 0; unit != units_(); ++unit) count += cut_(unit).steps();
+        for (std::size_t unit = 0; unit != units_(); ++unit) count += cut_(unit).tasks();
         return {this, count};
     }
 
-    /** The phase whose steps run now. */
+    /** The phase whose tasks run now. */
     nvme_compact_phase_t phase() const noexcept { return phase_; }
 
     /**
-     *  Runs @p step of the current phase across every thread of @p executor, which it claims while
-     *  it runs.
+     *  @brief Runs @p task of the current phase across every thread of @p executor, which it claims
+     *      while it runs.
      *
      *  @par Statuses:
-     *  - @c config_mismatch_k @p step lies past the current phase's steps, a part rebuilt in RAM
+     *  - @c config_mismatch_k @p task lies past the current phase's tasks, a part rebuilt in RAM
      *    disagrees with its rows, or a medium the engines cannot read.
      *  - @c uninitialized_k The plan is done, or @p executor holds no pool or workers.
      *  - @c contended_k Another call holds @p executor, or its pool runs another dispatch.
-     *  - @c bad_alloc_k The workspace cannot hold the step's slices.
+     *  - @c bad_alloc_k The workspace cannot hold the task's slices.
      *  - @c overflow_k A part rebuilt in RAM passes a bound, a staging region's byte count
      *    overflows, or a write runs past a device's end.
      *  - @c unknown_kind_k A part rebuilt in RAM cannot finalize its kernel.
      */
-    status_t run(step_t const& step, executor_t& executor) noexcept {
-        if (step.position >= steps().size()) return status_t::config_mismatch_k;
+    status_t run(task_t const& task, executor_t& executor) noexcept {
+        if (task.position >= tasks().size()) return status_t::config_mismatch_k;
+        // The first task fixes a zero cache to the executor's, before any round sizes from it.
+        if (!cache_bytes_) cache_bytes_ = executor.cache_bytes_per_core();
         switch (phase_) {
-        case nvme_compact_phase_t::copy_k: return copy_(step, executor);
-        case nvme_compact_phase_t::build_k: return build_(step, executor);
-        case nvme_compact_phase_t::reselect_k: return reselect_(step, executor);
-        case nvme_compact_phase_t::count_back_links_k: return count_back_links_(step, executor);
-        case nvme_compact_phase_t::scatter_back_links_k: return scatter_back_links_(step, executor);
-        case nvme_compact_phase_t::merge_back_links_k: return merge_back_links_(step, executor);
-        case nvme_compact_phase_t::heal_k: return heal_(step, executor);
+        case nvme_compact_phase_t::copy_k: return copy_(task, executor);
+        case nvme_compact_phase_t::build_k: return build_(task, executor);
+        case nvme_compact_phase_t::health_k: return health_(task, executor);
+        case nvme_compact_phase_t::draw_hubs_k: return draw_hubs_(task, executor);
+        case nvme_compact_phase_t::gather_k: return gather_(task, executor);
+        case nvme_compact_phase_t::restitch_k:
+            return in_ram_(task.part) ? refine_in_ram_(task.part, executor) : restitch_(task, executor);
+        case nvme_compact_phase_t::write_k: return write_(task, executor);
         default: return status_t::uninitialized_k;
         }
     }
 
-    /** The barrier between phases, one caller after every step ran: enters the next phase with
-     *  steps and answers whether one follows. */
+    /** The barrier between phases, one caller after every task ran: enters the next phase with
+     *  tasks, ordering a gather's entries by neighborhood, and answers whether one follows. */
     bool advance() noexcept {
         while (phase_ != nvme_compact_phase_t::finish_k) {
             switch (phase_) {
-            case nvme_compact_phase_t::reselect_k: open_sweep_(0, 0); break;
-            case nvme_compact_phase_t::count_back_links_k:
-                offset_back_links_();
-                phase_ = nvme_compact_phase_t::scatter_back_links_k;
+            case nvme_compact_phase_t::build_k: open_round_(0); break;
+            case nvme_compact_phase_t::health_k:
+                if (health_after_ != nvme_compact_phase_t::write_k) phase_ = nvme_compact_phase_t::draw_hubs_k;
+                else if (another_round_()) health_after_ = nvme_compact_phase_t::build_k;
+                else close_part_();
                 break;
-            case nvme_compact_phase_t::merge_back_links_k:
-                if (sweep_.bound < targets_[sweep_part_].view.size()) open_sweep_(sweep_part_, sweep_.bound);
-                else open_sweep_(sweep_part_ + 1, 0);
+            case nvme_compact_phase_t::draw_hubs_k:
+                neighborhoods_ = 0;
+                phase_ = nvme_compact_phase_t::gather_k;
+                break;
+            // Neighborhoods over capacity gather again among their own entries.
+            case nvme_compact_phase_t::gather_k:
+                if (order_neighborhoods_() <= neighborhood_capacity_) phase_ = nvme_compact_phase_t::restitch_k;
+                break;
+            case nvme_compact_phase_t::restitch_k:
+                if (in_ram_(round_part_)) close_part_();
+                else phase_ = nvme_compact_phase_t::write_k;
+                break;
+            case nvme_compact_phase_t::write_k:
+                health_after_ = nvme_compact_phase_t::write_k;
+                phase_ = nvme_compact_phase_t::health_k;
                 break;
             default: phase_ = static_cast<nvme_compact_phase_t>(static_cast<u8_t>(phase_) + 1);
             }
-            if (!steps().empty()) return true;
+            if (!tasks().empty()) return true;
         }
         return false;
     }
@@ -323,33 +381,91 @@ struct [[nodiscard]] nvme_compact_plan {
      *  - @c invalid_argument_k The manifest path does not parse.
      */
     expected<result_t> finish() noexcept {
-        if (targets_.empty()) return {result_, status_t::uninitialized_k};
-        if (phase_ != nvme_compact_phase_t::finish_k) return {result_, status_t::cancelled_k};
+        if (status_t const sealed = seal_(); failed(sealed)) return {result_, sealed};
+        auto part_at = [&](std::size_t part) noexcept { return part_entry(part); };
+        return committed_(safegraphs_write_manifest(path_of_(manifest_), targets_.size(), part_at));
+    }
+
+    /**
+     *  @brief Writes every part header, then calls @p commit with the plan, which writes the record
+     *      naming the parts in place of the plan's own manifest and answers whether it did.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan holds no target part.
+     *  - @c cancelled_k The last phase has not ended.
+     *  - @c config_mismatch_k A part header does not fit before its data.
+     *  - Whatever @p commit answers; the parts are removed unless it succeeded.
+     */
+    template <typename commit_type_>
+    expected<result_t> finish(commit_type_&& commit) noexcept {
+        if (status_t const sealed = seal_(); failed(sealed)) return {result_, sealed};
+        return committed_(commit(std::as_const(*this)));
+    }
+
+    /** The entry a record names target part @p part by: its file's name, bytes and rows. */
+    safegraphs_part_t part_entry(std::size_t part) const noexcept {
+        target_t const& target = targets_[part];
+        return safegraphs_part_t {safegraphs_basename(path_of_(target.path)), target.header.monolith_bytes(),
+                                  target.view.size()};
+    }
+
+    /** The target parts the plan writes, and where target part @p part sits. */
+    std::size_t parts() const noexcept { return targets_.size(); }
+    std::string_view part_path(std::size_t part) const noexcept { return path_of_(targets_[part].path); }
+
+    /** Bytes of workspace that run a round over the one-part @p source in RAM: its changed bits,
+     *  and one RAM index of its rows with the round's columns beside a staged row, under the cache
+     *  @p config names. */
+    static std::size_t refine_in_ram_bytes(indexes_t const& source, compact_config_t const& config = {}) noexcept {
+        return round_in_ram_bytes(source, source.size(), config);
+    }
+
+    /** Bytes of workspace that run a round over a part of @p rows rows of the geometry of @p shape
+     *  in RAM, as @ref refine_in_ram_bytes counts them. */
+    static std::size_t round_in_ram_bytes(indexes_t const& shape, std::size_t rows,
+                                          compact_config_t const& config = {}) noexcept {
+        nvme_compact_plan plan;
+        plan.config_ = config;
+        plan.cache_bytes_ = config.cache_bytes;
+        if (failed(plan.add_sources_(shape, shape)) || plan.sources_.empty()) return 0;
+        carver_t counter;
+        [[maybe_unused]] refine_slices_t const sized = plan.refine_slices_(rows, 1, counter);
+        std::size_t const changed_bytes = workspace_allocator_t::reserved_bytes(divide_round_up<std::size_t>(rows, 64) *
+                                                                                sizeof(u64_t));
+        return workspace_allocator_t::alignment_k + changed_bytes + counter.bytes;
+    }
+
+  private:
+    /** Writes and flushes every part header, the parts' half of a commit. */
+    status_t seal_() noexcept {
+        if (targets_.empty()) return status_t::uninitialized_k;
+        if (phase_ != nvme_compact_phase_t::finish_k) return status_t::cancelled_k;
         std::span<safegraphs_custom_field_t const> const fields = to_span(fields_);
         for (target_t& target : targets_) {
             std::size_t const bytes = target.header.monolith_bytes();
             if (status_t const framed = safegraphs_write_header(file_span_t {&target.file, 0, bytes}, target.header,
                                                                 fields);
                 failed(framed))
-                return {result_, framed};
-            if (status_t const flushed = target.file.flush(); failed(flushed)) return {result_, flushed};
+                return framed;
+            if (status_t const flushed = target.file.flush(); failed(flushed)) return flushed;
         }
-        auto part_at = [&](std::size_t part) noexcept {
-            target_t const& target = targets_[part];
-            return safegraphs_part_t {safegraphs_basename(path_of_(target.path)), target.header.monolith_bytes(),
-                                      target.view.size()};
-        };
-        if (status_t const committed = safegraphs_write_manifest(path_of_(manifest_), targets_.size(), part_at);
-            failed(committed))
-            return {result_, committed};
+        return status_t::success_k;
+    }
+
+    /** Ends a commit whose record answered @p committed: a committed plan's parts outlive it, so
+     *  its destructor finds none to remove. */
+    expected<result_t> committed_(status_t committed) noexcept {
+        if (failed(committed)) return {result_, committed};
         result_.compaction.source_shards = sources_.size();
         result_.compaction.target_shards = targets_.size();
-        // Committed parts outlive the plan, so its destructor finds none to remove.
         targets_.clear();
         return {result_, status_t::success_k};
     }
 
-  private:
+    template <typename other_type_>
+    friend expected<nvme_compact_plan<other_type_>> plan_refine_part(other_type_ const&, std::string_view, bytes_span_t,
+                                                                     compact_config_t const&,
+                                                                     save_config_t const&) noexcept;
     template <typename other_type_>
     friend expected<nvme_compact_plan<other_type_>> plan_compact(std::span<other_type_ const* const>, std::string_view,
                                                                  bytes_span_t, compact_config_t const&,
@@ -362,6 +478,10 @@ struct [[nodiscard]] nvme_compact_plan {
     friend expected<nvme_compact_plan<other_type_>> plan_build(std::span<std::string_view const>, std::string_view,
                                                                bytes_span_t, compact_config_t const&,
                                                                save_config_t const&) noexcept;
+    template <typename other_type_, typename part_path_type_>
+    friend expected<nvme_compact_plan<other_type_>> plan_split_parts_(other_type_ const&, std::size_t,
+                                                                      part_path_type_ const&, bytes_span_t,
+                                                                      compact_config_t const&) noexcept;
 
     template <typename word_type_>
     using atomic_ref = typename indexes_t::template atomic_ref<word_type_>;
@@ -371,14 +491,15 @@ struct [[nodiscard]] nvme_compact_plan {
     using vector_view_t = typename indexes_t::vector_view_t;
     using vectors_view_t = typename indexes_t::vectors_view_t;
     using vector_norms_t = typename indexes_t::vector_norms_t;
-    using search_config_t = typename indexes_t::search_config_t;
     using medium_t = typename indexes_t::medium_t;
-    using walk_t = typename indexes_t::walk_t;
-    using results_array_t = typename indexes_t::results_array_t;
+    using arena_t = typename indexes_t::arena_t;
     using scratch_allocator_t = typename indexes_t::scratch_allocator_t;
+    using scan_scorer_t = typename indexes_t::scan_scorer_t;
+    using raw_dot_t = typename dot_result_t::raw_t;
+    using islands_t = audit_islands<node_id_t>;
     using paths_t = growing_buffer<char, forkunion_allocator_t>;
 
-    /** The arena every step carves the workspace from, the workspace its only chunk. */
+    /** The arena every task carves the workspace from, the workspace its only chunk. */
     using workspace_upstream_t = lent_allocator<byte_t>;
     using workspace_arena_t = growing_arena<workspace_upstream_t>;
     using workspace_allocator_t = arena_allocator<byte_t, workspace_upstream_t>;
@@ -430,8 +551,8 @@ struct [[nodiscard]] nvme_compact_plan {
         iota_view<std::size_t> kept;
     };
 
-    /** One target part: its file, its header, a one-part view the walks and scans read it
-     *  through, and the rows it re-selects. */
+    /** One target part: its file, its header, a one-part view the scans and rounds read it
+     *  through, and the rows that call for its round. */
     struct target_t {
         paths_t path;
         seekable_file_t file;
@@ -441,114 +562,12 @@ struct [[nodiscard]] nvme_compact_plan {
         /** The norms column, which the header's producer columns view. */
         safegraphs_named_column_t norms;
 
-        /** The rows the re-select phase re-selects, all of them unless the plan narrows them. */
+        /** The rows that call for a round, all of them unless the plan narrows them; a part runs
+         *  one whole round when any do. */
         iota_view<std::size_t> selected;
-
-        /** The first row of the appended nodes of a compaction or a build, every row below it
-         *  linking to no appended row yet; zero for none. */
-        std::size_t resident = 0;
 
         /** Where the part's rows start among the changed bits. */
         std::size_t changed_first = 0;
-    };
-
-    /** Every row's candidates of one batch: the best rows by exact distance, with their bytes
-     *  when the batch keeps them, so a selection reads nothing again. */
-    struct candidates_t {
-        scored_node_t* entries = nullptr;
-        byte_t* vectors = nullptr;
-        u32_t* counts = nullptr;
-        std::size_t slots = 0;
-        std::size_t row_bytes = 0;
-
-        scored_node_t* entries_of(std::size_t row) const noexcept { return entries + row * slots; }
-        byte_t* vector_of(std::size_t row, std::size_t slot) const noexcept {
-            return vectors + (row * slots + slot) * row_bytes;
-        }
-
-        /** Keeps @p candidate among the candidates of @p row, at most @p limit long, unless it is
-         *  there already or every kept one is closer; answers the slot it took, or @p limit. */
-        std::size_t offer(std::size_t row, scored_node_t candidate, std::size_t limit) const noexcept {
-            scored_node_t* const kept = entries_of(row);
-            std::size_t const count = counts[row];
-            std::size_t worst = 0;
-            for (std::size_t slot = 0; slot != count; ++slot) {
-                if (kept[slot].node_id == candidate.node_id) return limit;
-                if (kept[slot].distance > kept[worst].distance) worst = slot;
-            }
-            std::size_t slot = count;
-            if (count >= limit) {
-                if (!count || !(candidate.distance < kept[worst].distance)) return limit;
-                slot = worst;
-            }
-            else ++counts[row];
-            kept[slot] = candidate;
-            return slot;
-        }
-    };
-
-    /** The rows of a re-select batch: every scored row of every walk is offered to the row's
-     *  candidates with its bytes, the row itself excepted. */
-    struct reselect_query_t {
-        using key_t = typename indexes_t::key_t;
-        inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
-        inline static constexpr bool admitting_k = false;
-
-        /** Offers every scored lane of a quad to the row's candidates with the bytes its rescoring
-         *  saw. */
-        struct fold_t {
-            reselect_query_t* row = nullptr;
-
-            walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>) const noexcept {
-                inputs_t const& inputs = row->inputs;
-                candidates_t const& candidates = inputs.candidates;
-                for (std::size_t lane = 0; lane != scored.size(); ++lane) {
-                    if (scored[lane].node_id == inputs.first + row->row) continue;
-                    std::size_t const slot = candidates.offer(row->row, scored[lane], inputs.limit);
-                    if (slot != inputs.limit)
-                        std::memcpy(candidates.vector_of(row->row, slot), row->fetched[lane].byte_data(),
-                                    candidates.row_bytes);
-                }
-                return walk_demand_t::continue_k;
-            }
-        };
-
-        /** The batch every row of the call reads and fills. */
-        struct inputs_t {
-            vectors_view_t queries;
-            candidates_t candidates;
-            node_id_t first = 0;
-            std::size_t limit = 0;
-        };
-
-        inputs_t const& inputs;
-        std::size_t row = 0;
-        vector_view_t query;
-        vector_norms_t query_norms {};
-
-        /** The quad being scored, between its rescoring and its fold. */
-        quad<vector_view_t> fetched {};
-
-        reselect_query_t(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
-
-        status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
-
-        /** Primes @p new_query_index; its candidates keep what earlier walks of the batch kept. */
-        void prime_query(std::size_t new_query_index) noexcept {
-            row = new_query_index;
-            query = inputs.queries.row(row).as_vector();
-        }
-        void rescore_quad(quad<node_id_t> const&, quad<vector_view_t> const& vectors, quad<vector_norms_t> const&,
-                          scores_result<dot_result_t>&, std::size_t, std::span<key_t const>) noexcept {
-            fetched = vectors;
-        }
-        fold_t fold_of_walk(walk_t const&) noexcept { return {this}; }
-        results_array_t const& stopping_candidates(walk_t const& walk) const noexcept { return walk.results; }
-        void finish_walk(walk_t const&) noexcept {}
-        std::size_t output_count() const noexcept { return 0; }
-        shard_node_t output_locator(std::size_t) const noexcept { return {}; }
-        void resolve_output_key(std::size_t, key_t const&) noexcept {}
-        status_t finish_query() noexcept { return status_t::success_k; }
     };
 
     /** One column a scan fetches: where its row zero sits in the part, a row's width, and where row
@@ -559,21 +578,14 @@ struct [[nodiscard]] nvme_compact_plan {
         byte_t* staging = nullptr;
     };
 
-    /** The per-row scratch of one diverse selection. */
-    struct selection_t {
-        u32_t* order = nullptr;
-        u32_t* kept = nullptr;
-        vector_norms_t* kept_norms = nullptr;
-    };
-
-    /** The slices of one step so far: the arena they come off, null to only sum their bytes, and
+    /** The slices of one task so far: the arena they come off, null to only sum their bytes, and
      *  the bytes they reserve, the padding up to every next boundary included. */
     struct carver_t {
         workspace_arena_t* arena = nullptr;
         std::size_t bytes = 0;
     };
 
-    /** The columns a copy step stages, one row each per row it copies. */
+    /** The columns a copy task stages, one row each per row it copies. */
     struct copy_slices_t {
         byte_t* keys = nullptr;
         byte_t* values = nullptr;
@@ -596,35 +608,70 @@ struct [[nodiscard]] nvme_compact_plan {
         node_id_t* staging = nullptr;
     };
 
-    /** A re-select or merge batch: the rows' own values, their neighbors in and out and as they
-     *  were, the candidates with their rows, the reads and then the selections, and for a merge
-     *  what each row's last round carried over and where it stands in its run. */
-    struct reselect_slices_t {
-        byte_t* queries = nullptr;
+    /** A streamed round's columns at the workspace front, past the changed bits: the health check's
+     *  bytes and bitsets, per entry the neighborhood its last gather gave it and its place in the
+     *  order by neighborhood, the starts every split may write, and per tile of rows its run's
+     *  length on the restitch tape. */
+    struct round_slices_t {
+        u8_t* depth_columns = nullptr;
+        u64_t* reach_words = nullptr;
+        u16_t* entry_neighborhoods = nullptr;
+        node_id_t* neighborhood_entries = nullptr;
+        node_id_t* neighborhood_offsets = nullptr;
+        std::size_t* tape_runs = nullptr;
+    };
+
+    /** The hubs a gather scores against, past the round's columns: their nodes, value rows, norms
+     *  and pack. */
+    struct hub_slices_t {
+        node_id_t* nodes = nullptr;
+        byte_t* rows = nullptr;
+        vector_norms_t* norms = nullptr;
+        byte_t* packs = nullptr;
+    };
+
+    /** One neighborhood a restitch stages past the round's columns: the value rows of its entries
+     *  and then of the links leading out of it, its entries' norms and packs, its links, the slots
+     *  of those leading out, every entry's nearest neighborhood-mates, and its tape rows. */
+    struct restitch_slices_t {
+        byte_t* rows = nullptr;
+        vector_norms_t* norms = nullptr;
+        byte_t* packs = nullptr;
+        node_id_t* links = nullptr;
+        u32_t* outside_slots = nullptr;
+        scored_node_t* mates = nullptr;
+        node_id_t* tape_rows = nullptr;
+    };
+
+    /** One tile of neighbor rows a write stages past the round's columns, and its run off the
+     *  tape. */
+    struct write_slices_t {
         node_id_t* neighbors = nullptr;
-        node_id_t* previous_neighbors = nullptr;
-        u32_t* counts = nullptr;
-        scored_node_t* entries = nullptr;
-        byte_t* vectors = nullptr;
-        u32_t* orders = nullptr;
-        u32_t* kept_slots = nullptr;
+        node_id_t* tape_rows = nullptr;
+    };
+
+    /** One thread's share of a gather, from its own arena: each row's nearest hub so far and its
+     *  norms over one read, the hubs' thresholds, and one scorer task's dots and distances. */
+    struct gather_share_t {
+        scored_node_t* nearest = nullptr;
+        vector_norms_t* row_norms = nullptr;
+        std::span<distance_t> thresholds;
+        nk::matrix_span<raw_dot_t> dots;
+        nk::matrix_span<f32_t> step_distances;
+    };
+
+    /** One thread's share of a restitch, from its own arena: one block's thresholds, one scorer
+     *  task's dots and distances, and for one entry its live links, its candidates by staged row,
+     *  and its picks with the norms the diversity rule compares. */
+    struct restitch_share_t {
+        std::span<distance_t> thresholds;
+        nk::matrix_span<raw_dot_t> dots;
+        nk::matrix_span<f32_t> step_distances;
+        scored_node_t* live = nullptr;
+        scored_node_t* candidates = nullptr;
+        scored_node_t* selected = nullptr;
+        u32_t* kept_rows = nullptr;
         vector_norms_t* kept_norms = nullptr;
-        u32_t* carried = nullptr;
-        u32_t* cursors = nullptr;
-    };
-
-    /** A sweep tile's links: each row's count, then the offset of its run in the tape, then that
-     *  run's end, and the tape of rows linking to each. */
-    struct sweep_slices_t {
-        std::size_t* incoming_offsets = nullptr;
-        node_id_t* back_links = nullptr;
-    };
-
-    /** A heal's in-link counts, the target row it rewrites and its island links. */
-    struct heal_slices_t {
-        u64_t* in_links = nullptr;
-        node_id_t* target_row = nullptr;
-        u64_t* island_links = nullptr;
     };
 
 #pragma region Opening
@@ -640,28 +687,36 @@ struct [[nodiscard]] nvme_compact_plan {
         return status_t::success_k;
     }
 
-    /** Opens the plan's common state: the workspace, the configurations and the header fields
-     *  naming the kernel of @p view, and the target's paths, and removes a stale manifest so no
-     *  half-written part is ever named. */
+    /** Opens the plan's common state, then the target manifest's paths, removing a stale manifest
+     *  so no half-written part is ever named. */
     status_t open_(std::string_view target, bytes_span_t workspace, compact_config_t const& config,
                    save_config_t const& save, indexes_t const& view) noexcept {
-        if (status_t const valid = save.validate(); failed(valid)) return valid;
         if (target.empty()) return status_t::invalid_argument_k;
+        if (status_t const opened = open_workspace_(workspace, config, save, view); failed(opened)) return opened;
+        if (failed(keep_path_(manifest_, target)) || failed(keep_path_(stem_, safegraphs_stem(target))))
+            return status_t::bad_alloc_k;
+        std::remove(manifest_.data());
+        return status_t::success_k;
+    }
+
+    /** Opens the plan's common state: the workspace, the configurations and the header fields
+     *  naming the kernel of @p view. */
+    status_t open_workspace_(bytes_span_t workspace, compact_config_t const& config, save_config_t const& save,
+                             indexes_t const& view) noexcept {
+        if (status_t const valid = save.validate(); failed(valid)) return valid;
         if (!view.shards_count()) return status_t::uninitialized_k;
-        // Trimmed to whole boundaries, so a step's slices take exactly the bytes they reserve.
+        // Trimmed to whole boundaries, so a task's slices take exactly the bytes they reserve.
         std::size_t const alignment = workspace_allocator_t::alignment_k;
         std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(workspace.data());
         std::size_t const padding = min_of<std::size_t>(
             round_up_to_multiple<std::uintptr_t>(address, alignment) - address, workspace.size());
         workspace_ = workspace.subspan(padding, (workspace.size() - padding) / alignment * alignment);
         config_ = config;
+        cache_bytes_ = config.cache_bytes;
         save_ = save;
         if (failed(fields_.reserve_exactly(1 + save.provenance.size()))) return status_t::bad_alloc_k;
         fields_.push_back_reserved({"metric", nk_kernel_name(view.kernel())});
         for (safegraphs_custom_field_t const& field : save.provenance) fields_.push_back_reserved(field);
-        if (failed(keep_path_(manifest_, target)) || failed(keep_path_(stem_, safegraphs_stem(target))))
-            return status_t::bad_alloc_k;
-        std::remove(manifest_.data());
         return status_t::success_k;
     }
 
@@ -686,9 +741,33 @@ struct [[nodiscard]] nvme_compact_plan {
         return status_t::success_k;
     }
 
-    /** Creates one target part per entry of @p rows, with its header framed, its file sized and its
-     *  one-part view open, and keeps a changed bit per row of them at the workspace's front. */
+    /** Names target part @c part of @c parts after the manifest's stem, as SafeGraphs numbers
+     *  parts. */
+    struct stem_part_paths_t {
+        std::string_view stem;
+        expected<std::string_view> operator()(paths_t& buffer, std::size_t part, std::size_t parts) const noexcept {
+            return safegraphs_part_path(buffer, stem, part, parts);
+        }
+    };
+
+    /** Names the one target part a part replacement writes at @c path. */
+    struct replacing_part_path_t {
+        std::string_view path;
+        expected<std::string_view> operator()(paths_t&, std::size_t, std::size_t) const noexcept {
+            return {path, status_t::success_k};
+        }
+    };
+
+    /** The @ref open_targets_ of a rewrite committing a manifest, naming parts after the stem. */
     status_t open_targets_(std::span<std::size_t const> rows) noexcept {
+        return open_targets_(rows, stem_part_paths_t {path_of_(stem_)});
+    }
+
+    /** Creates one target part per entry of @p rows at the path @p part_path names, with its header
+     *  framed, its file sized and its one-part view open, and keeps a changed bit per row of them
+     *  at the workspace's front. */
+    template <typename part_path_type_>
+    status_t open_targets_(std::span<std::size_t const> rows, part_path_type_ const& part_path) noexcept {
         if (failed(targets_.reserve_exactly(rows.size()))) return status_t::bad_alloc_k;
         std::size_t total = 0;
         for (std::size_t part = 0; part != rows.size(); ++part) {
@@ -712,7 +791,7 @@ struct [[nodiscard]] nvme_compact_plan {
             target.selected = {0, rows[part]};
             target.view.kernel_ = kernel_();
             paths_t name {allocator_};
-            auto const [path, path_status] = safegraphs_part_path(name, path_of_(stem_), part, rows.size());
+            auto const [path, path_status] = part_path(name, part, rows.size());
             if (failed(path_status)) return path_status;
             if (status_t const kept = keep_path_(target.path, path); failed(kept)) return kept;
             auto [file, open_status] = seekable_file_t::open(path, file_access_t::truncate_read_write_k, allocator_);
@@ -737,10 +816,7 @@ struct [[nodiscard]] nvme_compact_plan {
         changed_ = {reinterpret_cast<u64_t*>(workspace_.data()), changed_words};
         std::memset(changed_.data(), 0, changed_.size_bytes());
         workspace_ = workspace_.subspan(changed_bytes);
-        std::size_t widest = 0;
-        for (std::size_t const part_rows : rows) widest = max_of(widest, part_rows);
-        if (heal_bytes_(widest) > workspace_.size()) return status_t::bad_alloc_k;
-        return size_steps_();
+        return size_tasks_();
     }
 
     /** Packs the source parts largest first into target parts of at most @p capacity rows, each
@@ -772,85 +848,100 @@ struct [[nodiscard]] nvme_compact_plan {
         return status_t::success_k;
     }
 
-    /** Refuses a workspace too small for a single row of any phase the plan runs. */
-    status_t size_steps_() const noexcept {
-        if (!copy_rows_() || !reselect_rows_() || !sweep_rows_() || !sweep_scan_rows_() || !merge_rows_())
-            return status_t::bad_alloc_k;
-        return status_t::success_k;
-    }
+    /** Refuses a workspace too small for a single row of a copy; a round refuses its own sizes when
+     *  it opens, since the cache it sizes from is known only then. */
+    status_t size_tasks_() const noexcept { return copy_rows_() ? status_t::success_k : status_t::bad_alloc_k; }
 
-    /** The units the current phase cuts into steps: source parts while copying, target parts
-     *  after. */
+    /** The units the copy and build phases cut into tasks: source parts while copying, target parts
+     *  while building. */
     std::size_t units_() const noexcept {
         switch (phase_) {
         case nvme_compact_phase_t::copy_k: return sources_.size();
-        case nvme_compact_phase_t::finish_k: return 0;
-        default: return targets_.size();
+        case nvme_compact_phase_t::build_k: return targets_.size();
+        default: return 0;
         }
     }
 
     /** Rows of one unit of the current phase: @b [first,first+rows) cut at every @c stride rows
-     *  past @c first, and into steps of at most @c chunk rows. */
+     *  past @c first, and into tasks of at most @c chunk rows. */
     struct cut_t {
         std::size_t first = 0;
         std::size_t rows = 0;
         std::size_t stride = 1;
         std::size_t chunk = 1;
 
-        std::size_t steps() const noexcept {
+        std::size_t tasks() const noexcept {
             return rows / stride * divide_round_up(stride, chunk) + divide_round_up(rows % stride, chunk);
         }
 
-        /** The rows of step @p step of the unit. */
-        iota_view<std::size_t> rows_of(std::size_t step) const noexcept {
-            std::size_t const per_stride = divide_round_up(stride, chunk), range = step / per_stride;
-            std::size_t const offset = range * stride + step % per_stride * chunk;
+        /** The rows of task @p task of the unit. */
+        iota_view<std::size_t> rows_of(std::size_t task) const noexcept {
+            std::size_t const per_stride = divide_round_up(stride, chunk), range = task / per_stride;
+            std::size_t const offset = range * stride + task % per_stride * chunk;
             return {first + offset, first + min_of(offset + chunk, min_of((range + 1) * stride, rows))};
         }
     };
 
-    /** Whether the re-select phase walks rows of target part @p part, whose links a sweep collects;
-     *  a part refined whole in RAM sweeps there. */
-    bool walked_(std::size_t part) const noexcept {
-        iota_view<std::size_t> const rows = targets_[part].selected;
-        std::size_t const nodes = targets_[part].view.size();
-        return !rows.empty() && !(rows.size() == nodes && refines_in_ram_(nodes));
-    }
-
-    /** How the current phase cuts unit @p unit: a copy step stays inside one target range of its
-     *  source part, a build step is a block, a re-select step a batch or a whole part refined in
-     *  RAM, a count or scatter step a run of the walked rows, a merge step a batch of the sweep's
-     *  tile, and a heal step a whole part. */
+    /** How the current phase cuts unit @p unit: a copy task stays inside one target range of its
+     *  source part, and a build task is a block. */
     cut_t cut_(std::size_t unit) const noexcept {
-        switch (phase_) {
-        case nvme_compact_phase_t::copy_k: {
+        if (phase_ == nvme_compact_phase_t::copy_k) {
             source_t const& source = sources_[unit];
             return {0, source.rows, source.stride, copy_rows_()};
         }
-        case nvme_compact_phase_t::build_k: {
-            std::size_t const nodes = targets_[unit].view.size(), block_rows = build_rows_();
-            return {0, block_rows ? nodes : 0, nodes, max_of<std::size_t>(block_rows, 1)};
+        std::size_t const nodes = targets_[unit].view.size(), block_rows = build_rows_();
+        return {0, block_rows ? nodes : 0, nodes, max_of<std::size_t>(block_rows, 1)};
+    }
+
+    /** Whether the current phase belongs to a round, whose tasks lie in one target part. */
+    bool rounding_() const noexcept {
+        return phase_ != nvme_compact_phase_t::copy_k && phase_ != nvme_compact_phase_t::build_k &&
+               phase_ != nvme_compact_phase_t::finish_k;
+    }
+
+    /** Opens the round of the first target part from @p part on that calls for one, in RAM where
+     *  the workspace holds it and from the opening health check otherwise; past the last part, it
+     *  ends the plan. */
+    void open_round_(std::size_t part) noexcept {
+        while (part != targets_.size() && targets_[part].selected.empty()) ++part;
+        round_part_ = part;
+        part_rounds_ = 0;
+        if (part == targets_.size()) {
+            phase_ = nvme_compact_phase_t::finish_k;
+            return;
         }
-        case nvme_compact_phase_t::reselect_k: {
-            iota_view<std::size_t> const rows = targets_[unit].selected;
-            std::size_t const nodes = targets_[unit].view.size();
-            // A whole part the workspace holds as one RAM index is refined in RAM, in one step.
-            bool const in_ram = rows.size() == nodes && refines_in_ram_(nodes);
-            return {rows.first, rows.size(), max_of<std::size_t>(rows.size(), 1), in_ram ? nodes : reselect_rows_()};
+        health_after_ = nvme_compact_phase_t::build_k;
+        phase_ = in_ram_(part) ? nvme_compact_phase_t::restitch_k : nvme_compact_phase_t::health_k;
+    }
+
+    /** The round's tasks in the current phase: one health check, one draw, one streaming gather
+     *  or one per neighborhood after it, one per neighborhood re-stitched or a whole part held in
+     *  RAM, and one per tile of rows written. */
+    std::size_t round_tasks_() const noexcept {
+        switch (phase_) {
+        case nvme_compact_phase_t::gather_k: return neighborhoods_ ? neighborhoods_ : 1;
+        case nvme_compact_phase_t::restitch_k: return in_ram_(round_part_) ? 1 : neighborhoods_;
+        case nvme_compact_phase_t::write_k: return divide_round_up(targets_[round_part_].view.size(), tile_rows_);
+        default: return 1;
         }
-        case nvme_compact_phase_t::count_back_links_k:
-        case nvme_compact_phase_t::scatter_back_links_k: {
-            iota_view<std::size_t> const rows = targets_[unit].selected;
-            return unit == sweep_part_ ? cut_t {rows.first, rows.size(), rows.size(), sweep_scan_rows_()} : cut_t {};
+    }
+
+    /** The round's task @p position: a neighborhood's positions in the order by neighborhood, a
+     *  tile's rows, or the whole part; an empty one past the last. */
+    task_t round_task_(std::size_t position) const noexcept {
+        if (position >= round_tasks_()) return {};
+        std::size_t const nodes = targets_[round_part_].view.size();
+        bool const per_neighborhood = (phase_ == nvme_compact_phase_t::gather_k && neighborhoods_) ||
+                                      (phase_ == nvme_compact_phase_t::restitch_k && !in_ram_(round_part_));
+        if (per_neighborhood)
+            return {position, round_part_, {neighborhood_offsets_[position], neighborhood_offsets_[position + 1]}};
+        if (phase_ == nvme_compact_phase_t::write_k) {
+            std::size_t const first = position * tile_rows_;
+            return {position,
+                    round_part_,
+                    {static_cast<node_id_t>(first), static_cast<node_id_t>(min_of(first + tile_rows_, nodes))}};
         }
-        case nvme_compact_phase_t::merge_back_links_k:
-            return unit == sweep_part_ ? cut_t {sweep_.first, sweep_.size(), sweep_.size(), merge_rows_()} : cut_t {};
-        case nvme_compact_phase_t::heal_k: {
-            std::size_t const nodes = targets_[unit].view.size();
-            return {0, nodes, nodes, nodes};
-        }
-        default: return {};
-        }
+        return {position, round_part_, {0, static_cast<node_id_t>(nodes)}};
     }
 
 #pragma endregion Opening
@@ -874,42 +965,13 @@ struct [[nodiscard]] nvme_compact_plan {
         return config_.expansion_factor ? config_.expansion_factor : default_expansion_factor(connectivity_());
     }
 
-    /** Rows one copy step covers, the most the workspace stages. */
+    /** Rows one copy task covers, the most the workspace stages. */
     std::size_t copy_rows_() const noexcept {
         return fitting_rows_(&nvme_compact_plan::copy_slices_, workspace_.size() / value_row_bytes_(),
                              workspace_.size());
     }
 
-    /** Rows one re-select step covers, the largest batch the workspace holds. */
-    std::size_t reselect_rows_() const noexcept {
-        return fitting_rows_(&nvme_compact_plan::reselect_slices_, workspace_.size() / value_row_bytes_(),
-                             workspace_.size());
-    }
-
-    /** Rows one sweep tile opens with: its counts and tape take at most half the workspace, and the
-     *  rest stages its scans and merges, whose batches a wider tile would narrow to single rows. */
-    std::size_t sweep_rows_() const noexcept {
-        return fitting_rows_(&nvme_compact_plan::sweep_slices_, workspace_.size() / neighbors_row_bytes_(),
-                             workspace_.size() / 2);
-    }
-
-    /** The workspace past a sweep tile's links, staging the tile's scans and merges. */
-    bytes_span_t sweep_spare_() const noexcept {
-        carver_t counter;
-        sweep_slices_(sweep_rows_(), counter);
-        return workspace_.subspan(counter.bytes);
-    }
-
-    /** Rows of the walked ones that one count or scatter step scans. */
-    std::size_t sweep_scan_rows_() const noexcept { return sweep_spare_().size() / neighbors_row_bytes_(); }
-
-    /** Rows of a sweep tile that one merge step covers. */
-    std::size_t merge_rows_() const noexcept {
-        std::size_t const spare = sweep_spare_().size();
-        return fitting_rows_(&nvme_compact_plan::reselect_slices_, spare / value_row_bytes_(), spare);
-    }
-
-    /** Rows one build step covers, the largest block the workspace fits; none unless the plan
+    /** Rows one build task covers, the largest block the workspace fits; none unless the plan
      *  builds over the views it opened. */
     std::size_t build_rows_() const noexcept {
         if (opened_.empty()) return 0;
@@ -919,34 +981,46 @@ struct [[nodiscard]] nvme_compact_plan {
     }
 
     std::size_t neighbors_row_bytes_() const noexcept { return connectivity_() * sizeof(node_id_t); }
-    std::size_t candidate_slots_() const noexcept { return expansion_factor_() + connectivity_(); }
 
-    /** Bytes a heal of a part of @p rows rows takes at least, with room for one island link; the
-     *  rest of the workspace holds more island links. */
-    std::size_t heal_bytes_(std::size_t rows) const noexcept {
+    /** Bytes one entry's row takes on the restitch tape: its node, then its links. */
+    std::size_t tape_row_bytes_() const noexcept { return (1 + connectivity_()) * sizeof(node_id_t); }
+
+    /** Whether target part @p part runs its round in RAM: its index, its round and one staged row
+     *  fit the workspace. */
+    bool in_ram_(std::size_t part) const noexcept {
         carver_t counter;
-        heal_slices_(rows, 1, counter);
-        return counter.bytes;
+        refine_slices_(targets_[part].view.size(), 1, counter);
+        return counter.bytes <= workspace_.size();
     }
 
-    /** Whether a whole part of @p rows rows refines in RAM: its index and one staged row fit. */
-    bool refines_in_ram_(std::size_t rows) const noexcept {
-        carver_t counter;
-        refine_slices_(rows, 1, counter);
-        return counter.bytes <= workspace_.size();
+    /** Bytes the columns a RAM round over @p rows rows keeps across its barriers take off the
+     *  index's arena under the plan's cache, its hubs counted at their most: the changed bits, one
+     *  pack of hubs with their nodes and norms, per entry its neighborhood and its place in the
+     *  order by neighborhood, and the starts every split may write. */
+    std::size_t round_bytes_(std::size_t rows, std::size_t row_bytes) const noexcept {
+        using ram_scorer_t = typename ram_index_t::scan_scorer_t;
+        std::size_t const hubs = ram_scorer_t::block_columns(rows, cache_bytes_, row_bytes);
+        return workspace_allocator_t::reserved_bytes(divide_round_up<std::size_t>(rows, 64) * sizeof(u64_t)) +
+               workspace_allocator_t::reserved_bytes(hubs * sizeof(node_id_t)) +
+               workspace_allocator_t::reserved_bytes(
+                   round_up_to_multiple<std::size_t>(hubs * row_bytes, default_alignment_k) +
+                   ram_scorer_t::packs_bytes(hubs, dimensions_())) +
+               workspace_allocator_t::reserved_bytes(hubs * sizeof(vector_norms_t)) +
+               workspace_allocator_t::reserved_bytes(rows * sizeof(u16_t)) +
+               workspace_allocator_t::reserved_bytes(rows * sizeof(node_id_t)) +
+               workspace_allocator_t::reserved_bytes(split_room(rows, hubs) * sizeof(node_id_t));
     }
 
     /** Bytes the columns of a RAM index of @p rows rows take off the arena it is built on: a slice
      *  per column of every chunk the rows reach, the key map's control bytes and slots over them,
-     *  and the audit and the pass its refine and heal run on the same allocator. */
+     *  and the audit and the round its refine and heal run on the same allocator. */
     std::size_t ram_bytes_(std::size_t rows) const noexcept {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
         using slots_schedule_t = typename ram_index_t::keyed_t::nodes_map_t::slots_schedule_t;
         typename ram_index_t::geometry_t const geometry {dimensions_(), static_cast<connectivity_t>(connectivity_())};
         std::size_t const values_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t);
         std::size_t bytes = workspace_allocator_t::reserved_bytes(ram_index_t::audit_memory_usage(rows)) +
-                            workspace_allocator_t::reserved_bytes(
-                                ram_index_t::refine_memory_usage(rows, rows, connectivity_(), 0));
+                            round_bytes_(rows, values_bytes);
         std::size_t const chunks = schedule_t::chunks_for(rows);
         for (std::size_t chunk = 0; chunk != chunks; ++chunk) {
             std::size_t const chunk_rows = schedule_t::nodes_in(chunk);
@@ -978,6 +1052,17 @@ struct [[nodiscard]] nvme_compact_plan {
             else high = middle - 1;
         }
         return low;
+    }
+
+    /** Value rows one pack block of @p columns holds under the plan's cache, at least one. */
+    std::size_t block_columns_(std::size_t columns) const noexcept {
+        return max_of<std::size_t>(scan_scorer_t::block_columns(columns, cache_bytes_, value_row_bytes_()), 1);
+    }
+
+    /** Bytes the packs of @p columns staged rows take, one pack per block. */
+    std::size_t packs_bytes_(std::size_t columns) const noexcept {
+        std::size_t const block_columns = block_columns_(columns);
+        return divide_round_up(columns, block_columns) * scan_scorer_t::packs_bytes(block_columns, dimensions_());
     }
 
 #pragma endregion Sizes
@@ -1024,30 +1109,41 @@ struct [[nodiscard]] nvme_compact_plan {
         return slices;
     }
 
-    reselect_slices_t reselect_slices_(std::size_t rows, carver_t& carver) const noexcept {
-        std::size_t const slots = candidate_slots_(), connectivity = connectivity_();
-        return {carve_<byte_t>(carver, rows * value_row_bytes_()),
-                carve_<node_id_t>(carver, rows * connectivity),
-                carve_<node_id_t>(carver, rows * connectivity),
-                carve_<u32_t>(carver, rows),
-                carve_<scored_node_t>(carver, rows * slots),
-                carve_<byte_t>(carver, rows * slots * value_row_bytes_()),
-                carve_<u32_t>(carver, rows * slots),
-                carve_<u32_t>(carver, rows * connectivity),
-                carve_<vector_norms_t>(carver, rows * connectivity),
-                carve_<u32_t>(carver, rows),
-                carve_<u32_t>(carver, rows)};
+    /** The columns of a streamed round over @p rows rows drawing at most @p hubs_per_draw hubs a
+     *  gather, writing @p tiles tiles of rows. */
+    round_slices_t round_slices_(std::size_t rows, std::size_t hubs_per_draw, std::size_t tiles,
+                                 carver_t& carver) const noexcept {
+        return {carve_<u8_t>(carver, 4 * rows),
+                carve_<u64_t>(carver, audit_columns_t::bitsets_k * audit_columns_t::words_for(rows)),
+                carve_<u16_t>(carver, rows),
+                carve_<node_id_t>(carver, rows),
+                carve_<node_id_t>(carver, split_room(rows, hubs_per_draw)),
+                carve_<std::size_t>(carver, tiles)};
     }
 
-    sweep_slices_t sweep_slices_(std::size_t rows, carver_t& carver) const noexcept {
-        return {carve_<std::size_t>(carver, rows), carve_<node_id_t>(carver, rows * connectivity_())};
+    /** One pack of @p hubs hubs. */
+    hub_slices_t hub_slices_(std::size_t hubs, carver_t& carver) const noexcept {
+        return {carve_<node_id_t>(carver, hubs), carve_<byte_t>(carver, hubs * value_row_bytes_()),
+                carve_<vector_norms_t>(carver, hubs),
+                carve_<byte_t>(carver, scan_scorer_t::packs_bytes(hubs, dimensions_()))};
     }
 
-    /** Two bits per row, the first in-link setting the low one and the second the high one, and
-     *  @p island_links island links. */
-    heal_slices_t heal_slices_(std::size_t rows, std::size_t island_links, carver_t& carver) const noexcept {
-        return {carve_<u64_t>(carver, divide_round_up<std::size_t>(rows, 32)),
-                carve_<node_id_t>(carver, connectivity_()), carve_<u64_t>(carver, island_links)};
+    /** One neighborhood of @p width entries, with its links and every one leading out staged. */
+    restitch_slices_t restitch_slices_(std::size_t width, carver_t& carver) const noexcept {
+        std::size_t const connectivity = connectivity_();
+        return {carve_<byte_t>(carver, width * (1 + connectivity) * value_row_bytes_()),
+                carve_<vector_norms_t>(carver, width),
+                carve_<byte_t>(carver, packs_bytes_(width)),
+                carve_<node_id_t>(carver, width * connectivity),
+                carve_<u32_t>(carver, width * connectivity),
+                carve_<scored_node_t>(carver, width * connectivity),
+                carve_<node_id_t>(carver, width * (1 + connectivity))};
+    }
+
+    /** One tile of @p rows neighbor rows and as many rows off the tape. */
+    write_slices_t write_slices_(std::size_t rows, carver_t& carver) const noexcept {
+        return {carve_<node_id_t>(carver, rows * connectivity_()),
+                carve_<node_id_t>(carver, rows * (1 + connectivity_()))};
     }
 
 #pragma endregion Slices
@@ -1064,7 +1160,7 @@ struct [[nodiscard]] nvme_compact_plan {
         return read_rows_(view, part, first, count, columns, executor);
     }
 
-    /** The @c scan_rows_ of a step whose call is already open, a scan's worth of slots
+    /** The @c scan_rows_ of a task whose call is already open, a scan's worth of slots
      *  begun. */
     status_t read_rows_(indexes_t const& view, u32_t part, std::size_t first, std::size_t count,
                         std::span<staged_column_t const> columns, executor_t& executor) noexcept {
@@ -1102,25 +1198,37 @@ struct [[nodiscard]] nvme_compact_plan {
     }
 
     /** Reads one row of the column at @p begin, @p row_bytes wide, of part zero of @p view per
-     *  task: row @c row_of(task) arrives at @c destination_of(task), and the reads count into
-     *  @p reads. */
-    template <typename row_of_type_, typename destination_of_type_>
+     *  task, inside a call already open: row <tt>row_of(task)</tt> reaches
+     *  <tt>consume_row(thread, task, bytes)</tt> on the thread that fetched it, and the reads count
+     *  into @p reads. */
+    template <typename row_of_type_, typename consume_row_type_>
     status_t read_points_(indexes_t const& view, u64_t begin, std::size_t row_bytes, std::size_t tasks,
-                          row_of_type_&& row_of, destination_of_type_&& destination_of, executor_t& executor,
+                          row_of_type_&& row_of, consume_row_type_&& consume_row, executor_t& executor,
                           nvme_reads_t& reads) noexcept {
         if (!tasks) return status_t::success_k;
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
             if (progress++) return {};
             return {nvme_extent_t {begin + u64_t(row_of(task)) * row_bytes, static_cast<u32_t>(row_bytes), 0}};
         };
-        auto consume = [&](std::size_t, std::size_t task, u64_t, auto const&, auto const& fetched) noexcept {
-            std::memcpy(destination_of(task), fetched[0], row_bytes);
+        auto consume = [&](std::size_t thread, std::size_t task, u64_t, auto const&, auto const& fetched) noexcept {
+            consume_row(thread, task, fetched[0]);
         };
-        auto [call, call_status] = view.begin_scans_(executor, 1);
-        if (failed(call_status)) return call_status;
         auto const [point_reads, status] = view.scan_reads_(executor, tasks, describe, consume);
         reads += point_reads;
         return status;
+    }
+
+    /** The @c read_points_ that copies row @c row_of(task) to @c destination_of(task). */
+    template <typename row_of_type_, typename destination_of_type_>
+    status_t copy_points_(indexes_t const& view, u64_t begin, std::size_t row_bytes, std::size_t tasks,
+                          row_of_type_&& row_of, destination_of_type_&& destination_of, executor_t& executor,
+                          nvme_reads_t& reads) noexcept {
+        return read_points_(
+            view, begin, row_bytes, tasks, row_of,
+            [&](std::size_t, std::size_t task, byte_t const* row) noexcept {
+                std::memcpy(destination_of(task), row, row_bytes);
+            },
+            executor, reads);
     }
 
     /** Runs @p per_task over @p tasks tasks on the threads of @p executor, claimed for the
@@ -1162,79 +1270,20 @@ struct [[nodiscard]] nvme_compact_plan {
         return vector_view_t {reinterpret_cast<scalar_t const*>(bytes), dimensions_()};
     }
 
+    /** @p count value rows staged from @p bytes as the scorer reads them, a value row apart. */
+    vectors_view_t rows_view_(byte_t const* bytes, std::size_t count) const noexcept {
+        vectors_view_t const packed {reinterpret_cast<scalar_t const*>(bytes), count, dimensions_()};
+        nk::shape_storage_<2> const strided {{count, dimensions_()},
+                                             {static_cast<std::ptrdiff_t>(value_row_bytes_()), packed.stride_bytes(1)},
+                                             2};
+        return {packed.byte_data(), strided};
+    }
+
     /** The exact distance between two rows. */
     f32_t distance_(byte_t const* first, vector_norms_t first_norms, byte_t const* second,
                     vector_norms_t second_norms) const noexcept {
         return dense::distance<typename indexes_t::quads_kit_t>(kernel_(), view_of_(first), first_norms,
                                                                 view_of_(second), second_norms);
-    }
-
-    /**
-     *  @brief Picks the neighbors of candidate row @p row into @p out, as the RAM insertion picks
-     *      them: walking its candidates nearest-first, a candidate is kept only when no kept one is
-     *      closer to it than the row is, and the slots left take the nearest rejected candidates.
-     *
-     *  Sentinels pad @p out.
-     *  @return The picks; @p computed counts the distances it took.
-     */
-    std::size_t select_diverse_(candidates_t const& candidates, std::size_t row, selection_t scratch,
-                                std::span<node_id_t> out, std::size_t& computed) const noexcept {
-        scored_node_t const* const entries = candidates.entries_of(row);
-        std::size_t const count = candidates.counts[row], limit = out.size();
-        for (u32_t slot = 0; slot != count; ++slot) scratch.order[slot] = slot;
-        partial_sort(std::span<u32_t>(scratch.order, count), count, [&](u32_t first, u32_t second) noexcept {
-            return entries[first].distance != entries[second].distance
-                       ? entries[first].distance < entries[second].distance
-                       : entries[first].node_id < entries[second].node_id;
-        });
-        std::size_t picks = 0;
-        for (std::size_t position = 0; position != count && picks != limit; ++position) {
-            u32_t const slot = scratch.order[position];
-            byte_t const* const candidate = candidates.vector_of(row, slot);
-            vector_norms_t const candidate_norms = norms_of_(candidate);
-            std::size_t kept = 0;
-            for (; kept != picks; ++kept) {
-                ++computed;
-                if (distance_(candidate, candidate_norms, candidates.vector_of(row, scratch.kept[kept]),
-                              scratch.kept_norms[kept]) < entries[slot].distance)
-                    break;
-            }
-            if (kept != picks) continue;
-            scratch.kept[picks] = slot;
-            scratch.kept_norms[picks++] = candidate_norms;
-        }
-        std::size_t const diverse = picks;
-        for (std::size_t position = 0; position != count && picks != limit; ++position) {
-            u32_t const slot = scratch.order[position];
-            std::size_t kept = 0;
-            while (kept != diverse && scratch.kept[kept] != slot) ++kept;
-            if (kept == diverse) scratch.kept[picks++] = slot;
-        }
-        for (std::size_t pick = 0; pick != limit; ++pick)
-            out[pick] = pick < picks ? entries[scratch.kept[pick]].node_id : sentinel_k;
-        return picks;
-    }
-
-    /** The scratch of one diverse selection of batch row @p row, out of per-row arrays carved for
-     *  the batch. */
-    selection_t selection_of_(u32_t* orders, u32_t* kept_slots, vector_norms_t* norms, std::size_t row,
-                              std::size_t slots) const noexcept {
-        return {orders + row * slots, kept_slots + row * connectivity_(), norms + row * connectivity_()};
-    }
-
-    /** Whether the sentinel-padded row @p row holds @p node. */
-    static bool holds_(std::span<node_id_t const> row, node_id_t node) noexcept {
-        for (node_id_t const neighbor : row)
-            if (neighbor == node) return true;
-        return false;
-    }
-
-    /** Whether the sentinel-padded row @p row holds a member @p before lacks; a set gains a member
-     *  only through a pick it lacked, and dropping one alone changes nothing. */
-    static bool gained_(std::span<node_id_t const> row, std::span<node_id_t const> before) noexcept {
-        for (node_id_t const neighbor : row)
-            if (neighbor != sentinel_k && !holds_(before, neighbor)) return true;
-        return false;
     }
 
     /** Marks row @p row of @p target counted as changed, answering whether it was already. */
@@ -1244,17 +1293,169 @@ struct [[nodiscard]] nvme_compact_plan {
         return atomic_ref<u64_t>(changed_[bit / 64]).fetch_or(mask, std::memory_order_relaxed) & mask;
     }
 
-    /** Folds the telemetry of one batch of walks into the result. */
-    void absorb_walks_(typename indexes_t::search_result_t const& walked) noexcept {
-        result_.compaction.graph.traversal_stats.visited_members += walked.visited_members;
-        result_.compaction.graph.traversal_stats.computed_distances += walked.computed_distances;
-        result_.compaction.graph.traversal_stats.restarts += walked.restarts;
-        result_.compaction.graph.traversal_stats.saturated_walks += walked.saturated_walks;
-        result_.neighbor_reads += walked.neighbor_reads;
-        result_.value_reads += walked.value_reads;
+    /** Adds @p value to the count at @p into, which several threads may add to at once. */
+    static void add_(std::size_t& into, std::size_t value) noexcept {
+        if (value) atomic_ref<std::size_t>(into).store_add(value, std::memory_order_relaxed);
     }
 
+    /** Whether @p left lies farther than @p right, the larger ID farther among equals. */
+    static constexpr auto further_ = [](scored_node_t const& left, scored_node_t const& right) noexcept {
+        return left.distance > right.distance || (left.distance == right.distance && left.node_id > right.node_id);
+    };
+
+    /** An empty place in a kept heap, farther than any entry. */
+    static constexpr scored_node_t farthest_ {node_id_unknown_k, std::numeric_limits<distance_t>::infinity()};
+
 #pragma endregion Selection
+
+#pragma region Reach
+
+    /** The depth no health check reached, 255; the depths saturate at 254. */
+    inline static constexpr u8_t unknown_depth_k = (std::numeric_limits<u8_t>::max)();
+
+    /** The round's health check's bitsets, in the order @c nvme_audit_reachability lays them. */
+    enum bitset_t : std::size_t { reached_k, reaches_root_k, two_ways_to_root_k };
+
+    std::size_t audit_word_(bitset_t bitset, std::size_t node) const noexcept {
+        return bitset * audit_columns_t::words_for(targets_[round_part_].view.size()) + node / audit_columns_t::lanes_k;
+    }
+    bool audit_contains_(bitset_t bitset, std::size_t node) const noexcept {
+        u64_t const word =
+            atomic_ref<u64_t>(audit_.bitset_words[audit_word_(bitset, node)]).load(std::memory_order_relaxed);
+        return (word >> (node % audit_columns_t::lanes_k)) & 1u;
+    }
+    bool release_two_ways_to_root_(std::size_t node) noexcept {
+        return atomic_ref<u64_t>(audit_.bitset_words[audit_word_(two_ways_to_root_k, node)])
+            .fetch_test_and_reset_bit(static_cast<unsigned>(node % audit_columns_t::lanes_k),
+                                      std::memory_order_relaxed);
+    }
+    bool in_component_(std::size_t node) const noexcept {
+        return audit_contains_(reached_k, node) && audit_contains_(reaches_root_k, node);
+    }
+    u8_t depth_from_root_(std::size_t node) const noexcept {
+        return atomic_ref<u8_t>(audit_.depths_from_root[node]).load(std::memory_order_relaxed);
+    }
+    u8_t depth_to_root_(std::size_t node) const noexcept {
+        return atomic_ref<u8_t>(audit_.depths_to_root[node]).load(std::memory_order_relaxed);
+    }
+    u8_t in_links_(std::size_t node) const noexcept {
+        return atomic_ref<u8_t>(audit_.in_links[node]).load(std::memory_order_relaxed);
+    }
+    void count_in_link_(std::size_t node) noexcept {
+        fu::atomic_fetch_add_if_at_most(atomic_ref<u8_t>(audit_.in_links[node]), u8_t {1}, unknown_depth_k,
+                                        std::memory_order_relaxed);
+    }
+
+    /** Takes one of @p node 's in-links, answering whether another remains. */
+    bool take_in_link_if_spare_(std::size_t node) noexcept {
+        return fu::atomic_fetch_sub_if_at_least(atomic_ref<u8_t>(audit_.in_links[node]), u8_t {1}, u8_t {1},
+                                                std::memory_order_relaxed) > 1;
+    }
+
+    /** Takes one of @p node 's links from the depth before it, answering whether one remains. */
+    bool take_shallower_in_link_if_spare_(std::size_t node) noexcept {
+        atomic_ref<u8_t> const shallower_in_links {audit_.shallower_in_links[node]};
+        u8_t observed = shallower_in_links.load(std::memory_order_relaxed);
+        while (observed > 1 &&
+               !shallower_in_links.compare_exchange_weak(observed, static_cast<u8_t>(observed - 1),
+                                                         std::memory_order_relaxed, std::memory_order_relaxed)) {}
+        return observed > 1;
+    }
+
+    /** The child depth of an entry at @p depth, none past the saturated one. */
+    static u8_t child_depth_(u8_t depth) noexcept {
+        return depth < unknown_depth_k - 1 ? static_cast<u8_t>(depth + 1) : unknown_depth_k;
+    }
+
+    /** Takes the link from @p owner to @p resident for a swap: one not from the depth before the
+     *  resident goes freely, a shallower in-link only while another remains. */
+    bool take_link_for_swap_if_spare_(std::size_t owner, std::size_t resident) noexcept {
+        u8_t const child_depth = child_depth_(depth_from_root_(owner));
+        return child_depth == unknown_depth_k || depth_from_root_(resident) != child_depth ||
+               take_shallower_in_link_if_spare_(resident);
+    }
+
+    /** Takes the link from @p owner to @p resident for a heal's swap, answering whether the reach
+     *  rule releases it: never the resident's last shallower in-link, and a link toward the root
+     *  only while the owner keeps another at that depth to root. */
+    bool take_link_under_lock_if_spare_(std::size_t owner, std::size_t resident) noexcept {
+        bool const way_to_root = audit_contains_(reaches_root_k, owner) && depth_to_root_(owner) != 0 &&
+                                 depth_to_root_(resident) < depth_to_root_(owner);
+        if (way_to_root && !audit_contains_(two_ways_to_root_k, owner)) return false;
+        if (!take_link_for_swap_if_spare_(owner, resident)) return false;
+        if (way_to_root) release_two_ways_to_root_(owner);
+        return true;
+    }
+
+    /** Files a heal's link from @p owner to island entry @p member in the depths a restitch keeps
+     *  reach by, so no restitch drops it. */
+    void record_heal_link_(std::size_t owner, std::size_t member) noexcept {
+        u8_t const owner_depth = depth_from_root_(owner);
+        if (depth_from_root_(member) == unknown_depth_k && owner_depth < unknown_depth_k - 1) {
+            atomic_ref<u8_t>(audit_.depths_from_root[member])
+                .store(static_cast<u8_t>(owner_depth + 1), std::memory_order_relaxed);
+            atomic_ref<u8_t>(audit_.shallower_in_links[member]).store(1, std::memory_order_relaxed);
+        }
+        u8_t const member_depth_to_root = depth_to_root_(member);
+        if (depth_to_root_(owner) == unknown_depth_k && member_depth_to_root < unknown_depth_k - 1)
+            atomic_ref<u8_t>(audit_.depths_to_root[owner])
+                .store(static_cast<u8_t>(member_depth_to_root + 1), std::memory_order_relaxed);
+    }
+
+    /** Puts back what the @p count picks at @p selected dropped of the @p live links that
+     *  reachability needs, as the RAM round does: a link whose last shallower in-link @p node is,
+     *  and, when no pick stands one depth to root closer, the row's nearest live link that does. A
+     *  short row grows by each; a full one gives up its farthest pick kept by neither. */
+    void keep_reach_(std::size_t node, std::span<scored_node_t const> live, scored_node_t* selected,
+                     std::size_t& count) noexcept {
+        u8_t const depth_to_root = depth_to_root_(node), child_depth = child_depth_(depth_from_root_(node));
+        auto position_in = [](scored_node_t const* among, std::size_t size, node_id_t member) noexcept {
+            std::size_t position = 0;
+            while (position != size && among[position].node_id != member) ++position;
+            return position;
+        };
+        auto releasable = [&](node_id_t member) noexcept {
+            return child_depth == unknown_depth_k || depth_from_root_(member) != child_depth ||
+                   position_in(live.data(), live.size(), member) == live.size() ||
+                   take_shallower_in_link_if_spare_(member);
+        };
+        // The kept links gather at the tail, ahead of which the farthest releasable pick gives way.
+        std::size_t kept = 0;
+        auto keep = [&](scored_node_t member) noexcept {
+            if (position_in(selected, count, member.node_id) != count) return;
+            if (count < connectivity_()) {
+                selected[count++] = member;
+                ++kept;
+                return;
+            }
+            std::size_t const tail = count - kept;
+            std::size_t position = tail;
+            while (position && !releasable(selected[position - 1].node_id)) --position;
+            if (!position--) return;
+            selected[position] = member;
+            std::swap(selected[position], selected[tail - 1]);
+            ++kept;
+        };
+        if (child_depth != unknown_depth_k)
+            for (scored_node_t const member : live) {
+                if (depth_from_root_(member.node_id) != child_depth ||
+                    position_in(selected, count, member.node_id) != count)
+                    continue;
+                if (!take_shallower_in_link_if_spare_(member.node_id)) keep(member);
+            }
+        if (depth_to_root != unknown_depth_k && depth_to_root != 0) {
+            std::size_t standing = 0;
+            while (standing != count && depth_to_root_(selected[standing].node_id) >= depth_to_root) ++standing;
+            scored_node_t way_to_root = standing != count ? selected[standing] : farthest_;
+            for (std::size_t position = 0; position != live.size() && standing == count; ++position)
+                if (depth_to_root_(live[position].node_id) < depth_to_root &&
+                    live[position].distance < way_to_root.distance)
+                    way_to_root = live[position];
+            if (way_to_root.node_id != node_id_unknown_k) keep(way_to_root);
+        }
+    }
+
+#pragma endregion Reach
 
 #pragma region Copy
 
@@ -1280,10 +1481,10 @@ struct [[nodiscard]] nvme_compact_plan {
     /** Copies one block of a source part into the target: keys and values are scanned in, norms are
      *  derived, neighbors rewired, and the target part the rows arrive in takes one positional
      *  write per column. */
-    status_t copy_(step_t const& step, executor_t& executor) noexcept {
-        source_t const& source = sources_[step.part];
+    status_t copy_(task_t const& task, executor_t& executor) noexcept {
+        source_t const& source = sources_[task.part];
         nvme_part_t const& part = source.view->parts_[source.part];
-        std::size_t const count = step.nodes.size(), first = step.nodes.first;
+        std::size_t const count = task.nodes.size(), first = task.nodes.first;
         std::size_t const value_bytes = value_row_bytes_(), neighbor_bytes = neighbors_row_bytes_();
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
@@ -1335,7 +1536,7 @@ struct [[nodiscard]] nvme_compact_plan {
 #pragma region RAM Blocks
 
     /** One traversal per executor thread over its own arena, sized for @p index, listed in the
-     *  first arena; runs inside the call its step began, which rewound the arenas. */
+     *  first arena; runs inside the call its task began, which rewound the arenas. */
     status_t traversals_(ram_index_t& index, executor_t& executor, traversals_t& traversals) noexcept {
         typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_())};
         if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
@@ -1383,11 +1584,11 @@ struct [[nodiscard]] nvme_compact_plan {
         return status_t::success_k;
     }
 
-    /** Builds target rows @p step.nodes in a RAM index inside the workspace from their value rows,
+    /** Builds target rows @p task.nodes in a RAM index inside the workspace from their value rows,
      *  heals it there, and writes their neighbors, every edge inside the block. */
-    status_t build_(step_t const& step, executor_t& executor) noexcept {
-        target_t& target = targets_[step.part];
-        std::size_t const count = step.nodes.size(), first = step.nodes.first;
+    status_t build_(task_t const& task, executor_t& executor) noexcept {
+        target_t& target = targets_[task.part];
+        std::size_t const count = task.nodes.size(), first = task.nodes.first;
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
         auto const [values, nodes, staging, index_bytes] = build_slices_(count, carver);
@@ -1422,23 +1623,27 @@ struct [[nodiscard]] nvme_compact_plan {
         };
         if (status_t const fanned = executor.for_tasks(count, insert); failed(fanned)) return fanned;
         if (failed(refusal)) return refusal;
-        // In RAM a block's orphan clusters cost DRAM sweeps to find; once written, only `health`
-        // finds them.
-        auto [healing, heal_status] = index.plan_refine({}, {}, {}, {static_cast<u32_t>(expansion_factor_())});
+        // A built block heals and stops at its hubs, so the heal's links stand and the closing
+        // health check measures them: a build stays a plain build.
+        typename ram_index_t::refine_config_t healing_config {static_cast<u32_t>(expansion_factor_())};
+        healing_config.cache_bytes = cache_bytes_;
+        auto [healing, heal_status] = index.plan_round(healing_config);
         if (failed(heal_status)) return heal_status;
         do {
-            auto const steps = healing.steps();
+            if (healing.drawing_hubs()) healing.stop();
+            auto const tasks = healing.tasks();
             auto heal = [&](std::size_t position, std::size_t thread, std::size_t) noexcept {
-                refuse(healing.run(steps[position], traversals[thread]));
+                refuse(healing.run(tasks[position], traversals[thread]));
             };
-            if (status_t const fanned = executor.for_tasks(steps.size(), heal); failed(fanned)) return fanned;
+            if (status_t const fanned = executor.for_tasks(tasks.size(), heal); failed(fanned)) return fanned;
             if (failed(refusal)) return refusal;
         } while (healing.advance());
-        auto const [healed, healed_status] = healing.finish();
-        if (failed(healed_status)) return healed_status;
-        // The heal walked the same traversals, so their counters already hold its telemetry.
+        // A stopped round finishes cancelled, its heal standing, and never reaches the scratch a
+        // context reserves for gathers and restitches; only a failure ends the block.
+        if (failed(healing.status())) return healing.status();
+        refine_report_t const healed = healing.finish().value;
         absorb_traversals_(traversals);
-        result_.compaction.graph.reselected_nodes += count + healed.reselected_nodes;
+        result_.compaction.graph.reselected_nodes += count;
         result_.compaction.graph.changed_nodes += healed.changed_nodes;
         result_.compaction.graph.islands_found += healed.islands_found;
         result_.compaction.graph.islands_reconnected += healed.islands_reconnected;
@@ -1448,9 +1653,9 @@ struct [[nodiscard]] nvme_compact_plan {
             [&](node_id_t node) noexcept { return static_cast<node_id_t>(first + keys[node]); });
     }
 
-    /** Refines target part @p part whole in a RAM index inside the workspace: its value and
-     *  neighbors columns load through a read-only mapping, the RAM refine re-selects and heals
-     *  every row, and the rows write back. */
+    /** Runs the round of target part @p part in a RAM index inside the workspace: its value and
+     *  neighbors columns load through a read-only mapping, one RAM round heals and re-stitches
+     *  every entry, and the rows write back. */
     status_t refine_in_ram_(std::size_t part, executor_t& executor) noexcept {
         target_t& target = targets_[part];
         std::size_t const nodes = target.view.size();
@@ -1487,12 +1692,12 @@ struct [[nodiscard]] nvme_compact_plan {
         {
             auto [load, load_status] = index.plan_load(nodes);
             if (failed(load_status)) return load_status;
-            auto const steps = load.steps();
+            auto const tasks = load.tasks();
             iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(nodes)};
             if (status_t const fanned = executor.for_tasks(
-                    steps.size(),
+                    tasks.size(),
                     [&](std::size_t position, std::size_t, std::size_t) noexcept {
-                        refuse(load.load(steps[position], columns, source_range,
+                        refuse(load.load(tasks[position], columns, source_range,
                                          [](node_id_t row) noexcept { return row; }));
                     });
                 failed(fanned))
@@ -1500,27 +1705,30 @@ struct [[nodiscard]] nvme_compact_plan {
             if (failed(refusal)) return refusal;
             if (status_t const loaded = load.finish(); failed(loaded)) return loaded;
         }
-        typename ram_index_t::refine_config_t const config {static_cast<u32_t>(expansion_factor_())};
-        auto [refining, refine_status] = index.plan_refine({0, static_cast<node_id_t>(nodes)}, {}, {}, config);
+        typename ram_index_t::refine_config_t config {static_cast<u32_t>(expansion_factor_())};
+        config.cache_bytes = cache_bytes_;
+        auto [refining, refine_status] = index.plan_round(config);
         if (failed(refine_status)) return refine_status;
+        part_rounds_ = 0;
         do {
-            auto const steps = refining.steps();
-            if (status_t const fanned = executor.for_tasks(
-                    steps.size(),
-                    [&](std::size_t position, std::size_t thread, std::size_t) noexcept {
-                        refuse(refining.run(steps[position], traversals[thread]));
-                    });
-                failed(fanned))
-                return fanned;
-            if (failed(refusal)) return refusal;
-        } while (refining.advance());
-        auto const [refined, finish_status] = refining.finish();
-        if (failed(finish_status)) return finish_status;
-        result_.compaction.graph.reselected_nodes += refined.reselected_nodes;
-        result_.compaction.graph.changed_nodes += refined.changed_nodes;
-        result_.compaction.graph.islands_found += refined.islands_found;
-        result_.compaction.graph.islands_reconnected += refined.islands_reconnected;
-        result_.compaction.graph.traversal_stats += refined.traversal_stats;
+            if (part_rounds_) refining.next_round();
+            for (traversal_context_t& traversal : traversals)
+                if (status_t const sized = refining.reserve(traversal); failed(sized)) return sized;
+            do {
+                auto const tasks = refining.tasks();
+                if (status_t const fanned = executor.for_tasks(
+                        tasks.size(),
+                        [&](std::size_t position, std::size_t thread, std::size_t) noexcept {
+                            refuse(refining.run(tasks[position], traversals[thread]));
+                        });
+                    failed(fanned))
+                    return fanned;
+                if (failed(refusal)) return refusal;
+            } while (refining.advance());
+            auto const [refined, finish_status] = refining.finish();
+            if (failed(finish_status)) return finish_status;
+            close_round_(refined);
+        } while (another_round_());
         return write_ram_rows_(
             index, target, 0, nodes, slices.staging, staged, executor,
             [](std::size_t row) noexcept { return static_cast<node_id_t>(row); },
@@ -1529,432 +1737,730 @@ struct [[nodiscard]] nvme_compact_plan {
 
 #pragma endregion RAM Blocks
 
-#pragma region Reselection and Back Links
+#pragma region Rounds
 
-    /** Reads the value rows of the candidates at @p points, each a position into @p candidates, and
-     *  scores each against its own row of @p queries. */
-    status_t score_points_(target_t const& target, candidates_t const& candidates, byte_t const* queries,
-                           std::span<u32_t const> points, executor_t& executor) noexcept {
-        std::size_t const row_bytes = candidates.row_bytes;
-        if (status_t const read = read_points_(
-                target.view, part_of_(target).values_begin, row_bytes, points.size(),
-                [&](std::size_t task) noexcept { return candidates.entries[points[task]].node_id; },
-                [&](std::size_t task) noexcept { return candidates.vectors + std::size_t(points[task]) * row_bytes; },
-                executor, result_.value_reads);
-            failed(read))
-            return read;
-        return fan_out_(executor, points.size(), [&](std::size_t point, std::size_t, std::size_t) noexcept {
-            std::size_t const position = points[point];
-            byte_t const* const query = queries + position / candidates.slots * row_bytes;
-            byte_t const* const candidate = candidates.vectors + position * row_bytes;
-            candidates.entries[position].distance = distance_(query, norms_of_(query), candidate, norms_of_(candidate));
-        });
+    /** The arena a share is carved from, null to only sum its bytes; a refused carve nulls it. */
+    struct share_carver_t {
+        arena_t* arena = nullptr;
+        std::size_t bytes = 0;
+    };
+
+    /** Takes @p count elements on the default alignment off the arena of @p carver, counting the
+     *  bytes they reserve; null when the arena is absent or refuses. */
+    template <typename value_type_>
+    static value_type_* carve_share_(share_carver_t& carver, std::size_t count) noexcept {
+        std::size_t const bytes = max_of<std::size_t>(count * sizeof(value_type_), 1);
+        carver.bytes += arena_allocator<byte_t, forkunion_allocator_t>::reserved_bytes(bytes);
+        if (!carver.arena) return nullptr;
+        value_type_* const carved = reinterpret_cast<value_type_*>(carver.arena->allocate(bytes, default_alignment_k));
+        if (!carved) carver.arena = nullptr;
+        return carved;
     }
 
-    /** Re-selects the tile of target rows @p step.nodes: each walks the target part from random
-     *  landmarks, the appended nodes of a compaction or a build walking across into the resident
-     *  rows alone first, its candidates keeping the best rows it scored and its current neighbors,
-     *  then a diverse pick, and the tile is written. A whole part the workspace holds is refined
-     *  in RAM instead. */
-    status_t reselect_(step_t const& step, executor_t& executor) noexcept {
-        target_t& target = targets_[step.part];
-        std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
-        if (count == nodes && refines_in_ram_(nodes)) return refine_in_ram_(step.part, executor);
-        std::size_t const slots = candidate_slots_(), connectivity = connectivity_();
-        nvme_part_t const& part = part_of_(target);
+    /** A gather's share of a thread scoring reads of up to @p run_rows rows. */
+    gather_share_t gather_share_(share_carver_t& carver, std::size_t run_rows) const noexcept {
+        std::size_t const step_rows = scan_scorer_t::step_rows_k, dots_columns = scan_scorer_t::dots_columns_k;
+        std::size_t const hubs = hubs_per_draw_;
+        return {carve_share_<scored_node_t>(carver, run_rows),
+                carve_share_<vector_norms_t>(carver, run_rows),
+                {carve_share_<distance_t>(carver, hubs), hubs},
+                {carve_share_<raw_dot_t>(carver, step_rows * dots_columns), step_rows, dots_columns},
+                {carve_share_<f32_t>(carver, step_rows * hubs), step_rows, hubs}};
+    }
+
+    /** A restitch's share of a thread scoring neighborhoods of up to @p width entries. */
+    restitch_share_t restitch_share_(share_carver_t& carver, std::size_t width) const noexcept {
+        std::size_t const step_rows = scan_scorer_t::step_rows_k, dots_columns = scan_scorer_t::dots_columns_k;
+        std::size_t const columns = block_columns_(width), connectivity = connectivity_();
+        return {{carve_share_<distance_t>(carver, columns), columns},
+                {carve_share_<raw_dot_t>(carver, step_rows * dots_columns), step_rows, dots_columns},
+                {carve_share_<f32_t>(carver, step_rows * columns), step_rows, columns},
+                carve_share_<scored_node_t>(carver, connectivity),
+                carve_share_<scored_node_t>(carver, 2 * connectivity),
+                carve_share_<scored_node_t>(carver, connectivity),
+                carve_share_<u32_t>(carver, connectivity),
+                carve_share_<vector_norms_t>(carver, connectivity)};
+    }
+
+    /** One share per thread of @p executor off its own arena, the shares listed in the first,
+     *  inside a call begun for @ref shares_bytes_; null when an arena refuses. */
+    template <typename share_type_, typename share_of_type_>
+    static share_type_* carve_shares_(executor_t& executor, share_of_type_&& share_of) noexcept {
+        std::size_t const threads = executor.size();
+        auto* const shares = reinterpret_cast<share_type_*>(
+            executor.arena(0).allocate(threads * sizeof(share_type_), default_alignment_k));
+        if (!shares) return nullptr;
+        for (std::size_t thread = 0; thread != threads; ++thread) {
+            share_carver_t carver {&executor.arena(thread)};
+            new (shares + thread) share_type_ {share_of(carver)};
+            if (!carver.arena) return nullptr;
+        }
+        return shares;
+    }
+
+    /** Bytes each arena of @p executor sets aside for one share per thread from @p share_of. */
+    template <typename share_type_, typename share_of_type_>
+    static std::size_t shares_bytes_(executor_t& executor, share_of_type_&& share_of) noexcept {
+        share_carver_t sizing;
+        static_cast<void>(share_of(sizing));
+        return sizing.bytes + executor.size() * sizeof(share_type_) + default_alignment_k;
+    }
+
+    /** Reads the neighbors row of @p node of @p target into @p row. */
+    status_t read_row_(target_t& target, std::size_t node, node_id_t* row) noexcept {
+        std::size_t const row_bytes = neighbors_row_bytes_();
+        result_.neighbor_reads += nvme_reads_t {1, row_bytes};
+        return target.file.read_at(part_of_(target).neighbors_begin + node * row_bytes,
+                                   bytes_span_t {reinterpret_cast<byte_t*>(row), row_bytes});
+    }
+
+    /** Sizes and places the round of target part @p target at the workspace front: as many hubs a
+     *  draw as one cache-sized pack holds and the workspace past the columns stages, a neighborhood
+     *  capacity both the core's cache and that workspace hold, tiles of rows the workspace rewrites
+     *  at once, and the restitch tape over them. */
+    status_t open_round_columns_(target_t const& target) noexcept {
+        std::size_t const rows = target.view.size(), row_bytes = value_row_bytes_();
+        std::size_t hubs_per_draw = scan_scorer_t::block_columns(rows, cache_bytes_, row_bytes);
+        carver_t fixed;
+        round_slices_(rows, hubs_per_draw, 0, fixed);
+        if (fixed.bytes >= workspace_.size()) return status_t::bad_alloc_k;
+        hubs_per_draw = fitting_rows_(&nvme_compact_plan::hub_slices_, hubs_per_draw, workspace_.size() - fixed.bytes);
+        fixed = {};
+        round_slices_(rows, hubs_per_draw, 0, fixed);
+        std::size_t const widest_tile = fitting_rows_(&nvme_compact_plan::write_slices_, rows,
+                                                      workspace_.size() - min_of(fixed.bytes, workspace_.size()));
+        if (!hubs_per_draw || !widest_tile) return status_t::bad_alloc_k;
+        std::size_t const tiles = divide_round_up(rows, widest_tile);
         workspace_arena_t arena = arena_over_(workspace_);
         carver_t carver {&arena};
-        auto const [queries, neighbors, previous_neighbors, counts, entries, vectors, orders, kept_slots, kept_norms,
-                    carried, cursors] = reselect_slices_(count, carver);
+        round_slices_t const slices = round_slices_(rows, hubs_per_draw, tiles, carver);
         if (carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
-        std::array<staged_column_t, 2> const columns {
-            {{part.values_begin, value_row_bytes_(), queries},
-             {part.neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(neighbors)}}};
-        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
-            return read;
-
-        candidates_t const candidates {entries, vectors, counts, slots, value_row_bytes_()};
-        std::memset(counts, 0, count * sizeof(u32_t));
-        using query_t = reselect_query_t;
-        typename query_t::inputs_t const inputs {
-            vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_()}, candidates,
-            static_cast<node_id_t>(first), expansion_factor_()};
-        search_config_t config {};
-        config.expansion_factor = static_cast<typename indexes_t::index_t::candidates_count_t>(expansion_factor_());
-        // Appended rows first walk across into the resident rows alone, since no resident row links
-        // to them yet: the part read as ending at the resident rows draws and expands nothing past
-        // them, and both walks fill the same candidates.
-        if (target.resident && first >= target.resident) {
-            u32_t& part_nodes = target.view.parts_[0].nodes;
-            u32_t const all_nodes = std::exchange(part_nodes, static_cast<u32_t>(target.resident));
-            auto const [crossed, cross_status] = target.view.template walk_queries_<query_t>(count, config, inputs, 0,
-                                                                                             {}, {}, executor);
-            part_nodes = all_nodes;
-            if (failed(cross_status)) return cross_status;
-            absorb_walks_(crossed);
-        }
-        auto const [walked, walk_status] = target.view.template walk_queries_<query_t>(count, config, inputs, 0, {}, {},
-                                                                                       executor);
-        if (failed(walk_status)) return walk_status;
-        absorb_walks_(walked);
-
-        // The current neighbors compete as the RAM refine's seeds do, their rows read into the
-        // candidates' spare slots.
-        std::size_t current = 0;
-        for (std::size_t row = 0; row != count; ++row)
-            for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                node_id_t const neighbor = neighbors[row * connectivity + slot];
-                if (neighbor >= nodes || neighbor == first + row) continue;
-                std::size_t const taken = candidates.offer(row, {neighbor, 0}, slots);
-                if (taken != slots) orders[current++] = static_cast<u32_t>(row * slots + taken);
-            }
-        if (status_t const scored = score_points_(target, candidates, queries, {orders, current}, executor);
-            failed(scored))
-            return scored;
-
-        std::size_t computed = current, changed = 0;
-        status_t const selected = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            std::span<node_id_t> const out {neighbors + row * connectivity, connectivity};
-            std::span<node_id_t> const before {previous_neighbors + row * connectivity, connectivity};
-            std::memcpy(before.data(), out.data(), neighbors_row_bytes_());
-            std::size_t local_computed = 0;
-            select_diverse_(candidates, row, selection_of_(orders, kept_slots, kept_norms, row, slots), out,
-                            local_computed);
-            atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
-            if (gained_(out, before) && !count_changed_(target, first + row))
-                atomic_ref<std::size_t>(changed).fetch_add(1, std::memory_order_relaxed);
-        });
-        if (failed(selected)) return selected;
-        result_.compaction.graph.traversal_stats.computed_distances += computed;
-        result_.compaction.graph.traversal_stats.computed_distances_in_refines += computed;
-        result_.compaction.graph.reselected_nodes += count;
-        result_.compaction.graph.changed_nodes += changed;
-        return write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
-                           reinterpret_cast<byte_t const*>(neighbors));
+        round_spare_ = workspace_.subspan(carver.bytes);
+        hubs_per_draw_ = hubs_per_draw;
+        tile_rows_ = divide_round_up(rows, tiles);
+        carver_t tile;
+        write_slices_(tile_rows_, tile);
+        // A neighborhood shares the core's cache with one pack of hubs, as the RAM round sizes it.
+        std::size_t const pack_bytes = scan_scorer_t::block_columns(hubs_per_draw, cache_bytes_, row_bytes) * row_bytes;
+        std::size_t const cached = cache_bytes_ ? max_of((cache_bytes_ - min_of(cache_bytes_, pack_bytes)) / row_bytes,
+                                                         scan_scorer_t::step_rows_k)
+                                                : rows;
+        neighborhood_capacity_ = fitting_rows_(&nvme_compact_plan::restitch_slices_, min_of(cached, rows),
+                                               round_spare_.size());
+        if (tile.bytes > round_spare_.size() || neighborhood_capacity_ < min_of<std::size_t>(rows, 2))
+            return status_t::bad_alloc_k;
+        audit_ = {slices.depth_columns, slices.depth_columns + rows, slices.depth_columns + 2 * rows,
+                  slices.depth_columns + 3 * rows, slices.reach_words};
+        entry_neighborhoods_ = {slices.entry_neighborhoods, rows};
+        neighborhood_entries_ = {slices.neighborhood_entries, rows};
+        neighborhood_offsets_ = {slices.neighborhood_offsets, split_room(rows, hubs_per_draw)};
+        tape_runs_ = {slices.tape_runs, tiles};
+        for (std::size_t& run : tape_runs_) run = 0;
+        return open_tape_(target, tiles * tile_rows_ * tape_row_bytes_());
     }
 
-    /** Opens the sweep's tile of target rows from @p first in target part @p part, up to
-     *  @c sweep_rows_ of them, none linked yet, or from row zero of the next part walked; past the
-     *  last one, enters the heal. */
-    void open_sweep_(std::size_t part, std::size_t first) noexcept {
-        for (; part != targets_.size() && !walked_(part); ++part) first = 0;
-        if (part == targets_.size()) {
-            phase_ = nvme_compact_phase_t::heal_k;
-            return;
-        }
-        std::size_t const tile_rows = sweep_rows_();
-        workspace_arena_t arena = arena_over_(workspace_);
-        carver_t carver {&arena};
-        sweep_slices_t const slices = sweep_slices_(tile_rows, carver);
-        sweep_part_ = part;
-        sweep_ = {first, min_of(first + tile_rows, targets_[part].view.size())};
-        incoming_offsets_ = {slices.incoming_offsets, sweep_.size()};
-        back_links_ = {slices.back_links, tile_rows * connectivity_()};
-        std::memset(slices.incoming_offsets, 0, incoming_offsets_.size_bytes());
-        ++result_.compaction.graph.swept_tiles;
-        phase_ = nvme_compact_phase_t::count_back_links_k;
+    /** Opens the restitch tape of @p bytes beside target part @p target, truncating any left. */
+    status_t open_tape_(target_t const& target, std::size_t bytes) noexcept {
+        close_tape_();
+        std::string_view const part = path_of_(target.path), suffix = ".tape";
+        if (failed(tape_path_.resize_uninitialized(part.size() + suffix.size() + 1))) return status_t::bad_alloc_k;
+        std::memcpy(tape_path_.data(), part.data(), part.size());
+        std::memcpy(tape_path_.data() + part.size(), suffix.data(), suffix.size());
+        tape_path_[part.size() + suffix.size()] = '\0';
+        auto [file, open_status] = seekable_file_t::open(path_of_(tape_path_), file_access_t::truncate_read_write_k,
+                                                         allocator_);
+        if (failed(open_status)) return open_status;
+        tape_ = std::move(file);
+        return tape_.truncate(bytes);
     }
 
-    /** Turns the sweep tile's counts into each row's first link's offset, which the scatter
-     *  advances to its end: the tile ends before the first row whose links pass the tape, and a
-     *  lone row past it keeps the tape's worth of them. */
-    void offset_back_links_() noexcept {
-        std::size_t offset = 0, rows = 0;
-        for (; rows != sweep_.size(); ++rows) {
-            std::size_t count = incoming_offsets_[rows];
-            if (offset + count > back_links_.size()) {
-                if (rows) break;
-                count = back_links_.size();
-            }
-            incoming_offsets_[rows] = offset;
-            offset += count;
-        }
-        sweep_.bound = sweep_.first + max_of<std::size_t>(rows, 1);
-        result_.compaction.graph.swept_links += offset;
+    /** Closes and removes the restitch tape, if one is open. */
+    void close_tape_() noexcept {
+        if (tape_path_.empty()) return;
+        [[maybe_unused]] status_t const closed = tape_.close();
+        std::remove(tape_path_.data());
+        tape_path_.clear();
     }
 
-    /** Scans the walked rows of @p step and calls @p per_link with every link into the sweep's
-     *  tile: the target's row in the tile and the linking row. A failed scan calls it for none, so
-     *  the step may run again, and no row is written between the count and the scatter, so both
-     *  read the same links. */
-    template <typename per_link_type_>
-    status_t scan_back_links_(step_t const& step, executor_t& executor, per_link_type_&& per_link) noexcept {
-        target_t& target = targets_[step.part];
-        std::size_t const count = step.nodes.size(), first = step.nodes.first, connectivity = connectivity_();
-        bytes_span_t const spare = sweep_spare_();
-        workspace_arena_t arena = arena_over_(spare);
-        carver_t carver {&arena};
-        node_id_t* const links = carve_<node_id_t>(carver, count * connectivity);
-        if (carver.bytes > spare.size()) return status_t::bad_alloc_k;
-        std::array<staged_column_t, 1> const columns {
-            {{part_of_(target).neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(links)}}};
-        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
-            return read;
-        return fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            node_id_t const source = static_cast<node_id_t>(first + row);
-            for (std::size_t slot = 0; slot != connectivity; ++slot) {
-                std::size_t const linked = links[row * connectivity + slot];
-                if (linked >= sweep_.first && linked < sweep_.bound && linked != source)
-                    per_link(linked - sweep_.first, source);
-            }
-        });
-    }
-
-    /** Counts every link of the walked rows of @p step into the sweep's tile. */
-    status_t count_back_links_(step_t const& step, executor_t& executor) noexcept {
-        return scan_back_links_(step, executor, [&](std::size_t row, node_id_t) noexcept {
-            atomic_ref<std::size_t>(incoming_offsets_[row]).fetch_add(1, std::memory_order_relaxed);
-        });
-    }
-
-    /** Scatters every link of the walked rows of @p step into the sweep's tile onto its target's
-     *  run; a link the tape has no room for is left out. */
-    status_t scatter_back_links_(step_t const& step, executor_t& executor) noexcept {
-        return scan_back_links_(step, executor, [&](std::size_t row, node_id_t source) noexcept {
-            std::size_t const position =
-                atomic_ref<std::size_t>(incoming_offsets_[row]).fetch_add(1, std::memory_order_relaxed);
-            if (position < back_links_.size()) back_links_[position] = source;
-        });
-    }
-
-    /** Merges the rows @p step.nodes of the sweep's tile with the rows linking to them. A row
-     *  holding all of those stays as it is; any other reads its members' value rows and its run's,
-     *  and they compete over rounds within its candidates, each round's picks carrying into the
-     *  next, so no link on the tape is dropped however many a hub draws and the row is never
-     *  thinner. The batch goes back in one write. */
-    status_t merge_back_links_(step_t const& step, executor_t& executor) noexcept {
-        target_t& target = targets_[step.part];
-        nvme_part_t const& part = part_of_(target);
-        std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
-        std::size_t const slots = candidate_slots_(), connectivity = connectivity_(), row_bytes = value_row_bytes_();
-        bytes_span_t const spare = sweep_spare_();
-        workspace_arena_t arena = arena_over_(spare);
-        carver_t carver {&arena};
-        auto const [queries, neighbors, previous_neighbors, counts, entries, vectors, orders, kept_slots, kept_norms,
-                    carried, cursors] = reselect_slices_(count, carver);
-        if (carver.bytes > spare.size()) return status_t::bad_alloc_k;
-        std::array<staged_column_t, 2> const columns {
-            {{part.values_begin, row_bytes, queries},
-             {part.neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(neighbors)}}};
-        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
-            return read;
-        std::memcpy(previous_neighbors, neighbors, count * neighbors_row_bytes_());
-        candidates_t const candidates {entries, vectors, counts, slots, row_bytes};
-
-        auto run_of = [&](std::size_t row) noexcept -> std::span<node_id_t> {
-            std::size_t const tile_row = first - sweep_.first + row, tape = back_links_.size();
-            std::size_t const begin = tile_row ? min_of(incoming_offsets_[tile_row - 1], tape) : 0;
-            return back_links_.subspan(begin, min_of(incoming_offsets_[tile_row], tape) - begin);
-        };
-        auto members_of = [&](std::size_t row) noexcept -> std::span<node_id_t const> {
-            return {previous_neighbors + row * connectivity, connectivity};
-        };
-        // Row `row`'s next links take the slots its last selection left; its members are no news.
-        auto take_links = [&](std::size_t row) noexcept {
-            std::span<node_id_t const> const run = run_of(row);
-            std::size_t cursor = cursors[row];
-            for (; cursor != run.size() && counts[row] != slots; ++cursor)
-                if (!holds_(members_of(row), run[cursor])) entries[row * slots + counts[row]++] = {run[cursor], 0};
-            cursors[row] = static_cast<u32_t>(cursor);
-        };
-        status_t const opened = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            std::span<node_id_t> const run = run_of(row);
-            // Filled in arrival order by the scatter; sorted, a hub's rounds are reproducible.
-            partial_sort(run, run.size());
-            std::size_t cursor = 0;
-            while (cursor != run.size() && holds_(members_of(row), run[cursor])) ++cursor;
-            carried[row] = counts[row] = 0;
-            cursors[row] = static_cast<u32_t>(cursor);
-            if (cursor == run.size()) return;
-            for (node_id_t const member : members_of(row))
-                if (member < nodes && member != first + row) entries[row * slots + counts[row]++] = {member, 0};
-            take_links(row);
-        });
-        if (failed(opened)) return opened;
-
-        std::size_t reads = 0;
-        auto queue_reads = [&]() noexcept {
-            reads = 0;
-            for (std::size_t row = 0; row != count; ++row)
-                for (std::size_t slot = carried[row]; slot != counts[row]; ++slot)
-                    orders[reads++] = static_cast<u32_t>(row * slots + slot);
-            return reads != 0;
-        };
-        if (!queue_reads()) return status_t::success_k;
-        std::size_t computed = 0, changed = 0;
-        do {
-            if (status_t const scored = score_points_(target, candidates, queries, {orders, reads}, executor);
-                failed(scored))
-                return scored;
-            computed += reads;
-            status_t const merged = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-                if (carried[row] == counts[row]) return;
-                selection_t const scratch = selection_of_(orders, kept_slots, kept_norms, row, slots);
-                std::size_t local_computed = 0;
-                std::size_t const picks = select_diverse_(
-                    candidates, row, scratch, {neighbors + row * connectivity, connectivity}, local_computed);
-                atomic_ref<std::size_t>(computed).fetch_add(local_computed, std::memory_order_relaxed);
-                // In ascending order, so no pick lands on one not yet moved.
-                partial_sort(std::span<u32_t>(scratch.kept, picks), picks);
-                for (std::size_t pick = 0; pick != picks; ++pick) {
-                    std::size_t const slot = scratch.kept[pick];
-                    if (slot == pick) continue;
-                    entries[row * slots + pick] = entries[row * slots + slot];
-                    std::memcpy(candidates.vector_of(row, pick), candidates.vector_of(row, slot), row_bytes);
-                }
-                carried[row] = counts[row] = static_cast<u32_t>(picks);
-                take_links(row);
-            });
-            if (failed(merged)) return merged;
-        } while (queue_reads());
-        // A row the pass never walked stays out of the report, whatever it gained.
-        iota_view<std::size_t> const walked = target.selected;
-        status_t const compared = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            std::size_t const node = first + row;
-            if (node < walked.first || node >= walked.bound) return;
-            std::span<node_id_t const> const out {neighbors + row * connectivity, connectivity};
-            if (gained_(out, members_of(row)) && !count_changed_(target, node))
-                atomic_ref<std::size_t>(changed).fetch_add(1, std::memory_order_relaxed);
-        });
-        if (failed(compared)) return compared;
-        result_.compaction.graph.traversal_stats.computed_distances += computed;
-        result_.compaction.graph.traversal_stats.computed_distances_in_reverse_refines += computed;
-        result_.compaction.graph.changed_nodes += changed;
-        return write_rows_(target, part.neighbors_begin, neighbors_row_bytes_(), first, count,
-                           reinterpret_cast<byte_t const*>(neighbors));
-    }
-
-#pragma endregion Reselection and Back Links
-
-#pragma region Heal
-
-    /** Heals target part @p step.part: one sequential pass of its neighbors column counts every
-     *  row's in-links, then each row nothing links to is read and arrives, in target order, in the
-     *  row of its first neighbor something links to, or of the landmark covering it. A cluster
-     *  linking only to itself stays, for @c health to report. */
-    status_t heal_(step_t const& step, executor_t& executor) noexcept {
-        target_t& target = targets_[step.part];
-        nvme_part_t const& part = part_of_(target);
+    /** Audits target part @p task.part from its root. The opening check places the round's columns
+     *  and its tape, seeds the round's draws from what it measured, and heals the islands it names
+     *  in the same call, whose first arena holds them; the closing check concludes the round and
+     *  folds it into the result. */
+    status_t health_(task_t const& task, executor_t& executor) noexcept {
+        target_t& target = targets_[task.part];
         std::size_t const nodes = target.view.size(), connectivity = connectivity_(),
                           row_bytes = neighbors_row_bytes_();
-        std::size_t const run_rows = target.view.scan_run_rows_(0, row_bytes);
-        std::size_t const seeds = min_of<std::size_t>(connectivity, nodes), spread = heal_spread(connectivity);
-        std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
-        // The island links take whatever the counts and the target row leave.
-        carver_t fixed;
-        heal_slices_(nodes, 0, fixed);
-        std::size_t const capacity = (workspace_.size() - min_of(fixed.bytes, workspace_.size())) / sizeof(u64_t);
-        workspace_arena_t arena = arena_over_(workspace_);
-        carver_t carver {&arena};
-        auto const [in_links, target_row, island_links] = heal_slices_(nodes, capacity, carver);
-        if (!capacity || carver.bytes > workspace_.size()) return status_t::bad_alloc_k;
-        std::memset(in_links, 0, words * sizeof(u64_t));
-        auto links_of = [&](std::size_t node) noexcept {
-            return static_cast<unsigned>(in_links[node / 32] >> (node % 32 * 2)) & 3u;
-        };
+        bool const opening = health_after_ != nvme_compact_phase_t::write_k;
+        if (opening) {
+            if (status_t const opened = open_round_columns_(target); failed(opened)) return opened;
+        }
+        else close_tape_();
         auto [call, call_status] = target.view.begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
-
-        auto whole_run = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
-            if (progress++) return {};
-            std::size_t const first = task * run_rows;
-            return {nvme_extent_t {part.neighbors_begin + first * row_bytes,
-                                   static_cast<u32_t>(min_of(run_rows, nodes - first) * row_bytes), 0}};
+        islands_t islands {typename islands_t::scratch_allocator_t {executor.arena(0)}};
+        u64_t const neighbors_begin = part_of_(target).neighbors_begin;
+        auto neighbors_extent = [&](std::size_t node) noexcept {
+            return nvme_extent_t {neighbors_begin + node * row_bytes, static_cast<u32_t>(row_bytes), 0};
         };
-        auto count_links = [&](std::size_t, std::size_t task, u64_t, auto const& extents,
-                               auto const& fetched) noexcept {
-            auto const* const neighbors = reinterpret_cast<node_id_t const*>(fetched[0]);
-            for (std::size_t slot = 0; slot != extents[0].length / sizeof(node_id_t); ++slot) {
-                std::size_t const neighbor = neighbors[slot];
-                if (neighbor >= nodes || neighbor == task * run_rows + slot / connectivity) continue;
-                atomic_ref<u64_t> const word {in_links[neighbor / 32]};
-                u64_t const once = u64_t {1} << (neighbor % 32 * 2);
-                if (word.fetch_or(once, std::memory_order_relaxed) & once)
-                    word.set_bits(once << 1, std::memory_order_relaxed);
+        auto const [audited, audit_status] = nvme_audit_reachability<node_id_t, atomic_ref>(
+            executor, to_span(target.view.media_), target.view.staging_bytes_(), audit_, islands, nodes, connectivity,
+            target.view.scan_run_rows_(0, row_bytes), neighbors_extent);
+        if (failed(audit_status)) return audit_status;
+        if (!opening) {
+            round_.reachability = audited;
+            // The restitch gave the islands the heal could not link their links, which a heal from
+            // this check follows without a distance, while each heal leaves fewer waiting.
+            bool const fewer_waiting = islands_waiting_ && islands_waiting_ < waiting_before_;
+            if (audited.reachable_nodes != audited.audited_nodes && fewer_waiting) {
+                for (std::size_t& run : tape_runs_) run = 0;
+                if (status_t const reopened = open_tape_(target, tape_runs_.size() * tile_rows_ * tape_row_bytes_());
+                    failed(reopened))
+                    return reopened;
+                health_after_ = nvme_compact_phase_t::health_k;
+                heal_from_(audited);
+                return heal_(target, islands);
             }
-        };
-        auto const [scanned, scan_status] = target.view.scan_reads_(executor, divide_round_up(nodes, run_rows),
-                                                                    whole_run, count_links);
-        result_.scan_reads += scanned;
-        if (failed(scan_status)) return scan_status;
+            round_.verdict = concluded_verdict(round_);
+            close_round_(round_);
+            return status_t::success_k;
+        }
+        round_ = {};
+        round_.opening = audited;
+        round_.islands_found = audited.audited_nodes - audited.reachable_nodes;
+        islands_waiting_ = (std::numeric_limits<std::size_t>::max)();
+        heal_from_(audited);
+        return heal_(target, islands);
+    }
 
-        for (std::size_t from = 0; from != nodes;) {
-            // The rows from `from` on whose islands the island links hold.
-            std::size_t bound = from, islands = 0;
-            for (; bound != nodes && islands != capacity; ++bound) islands += !links_of(bound);
-            result_.compaction.graph.islands_found += islands;
-            alignas(default_alignment_k) std::size_t taken = 0;
-            auto island_rows = [&](std::size_t task, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
-                std::size_t const task_first = from + task * run_rows;
-                std::size_t row = task_first + progress, end = min_of(task_first + run_rows, bound);
-                while (row != end && links_of(row)) ++row;
-                if (row == end) return {};
-                progress = row + 1 - task_first;
-                return {nvme_extent_t {part.neighbors_begin + row * row_bytes, static_cast<u32_t>(row_bytes), 0}};
-            };
-            auto pick_targets = [&](std::size_t, std::size_t, u64_t, auto const& extents,
-                                    auto const& fetched) noexcept {
-                std::size_t const island = static_cast<std::size_t>((extents[0].begin - part.neighbors_begin) /
-                                                                    row_bytes);
-                auto const* const neighbors = reinterpret_cast<node_id_t const*>(fetched[0]);
-                std::size_t linked = island * seeds / nodes * nodes / seeds;
-                for (std::size_t slot = 0; slot != connectivity; ++slot)
-                    if (neighbors[slot] < nodes && neighbors[slot] != island && links_of(neighbors[slot])) {
-                        linked = neighbors[slot];
-                        break;
-                    }
-                if (linked == island) return;
-                island_links[atomic_ref<std::size_t>(taken).fetch_add(1, std::memory_order_relaxed)] =
-                    static_cast<u64_t>(linked) << 32 | island;
-            };
-            auto const [read, pick_status] = target.view.scan_reads_(executor, divide_round_up(bound - from, run_rows),
-                                                                     island_rows, pick_targets);
-            result_.neighbor_reads += read;
-            if (failed(pick_status)) return pick_status;
+    /** Seeds the draws from the health check @p measured, so a round over a changed graph
+     *  draws anew while the ID order decides nothing, and starts counting the islands its
+     *  heal leaves waiting. */
+    void heal_from_(reachability_t const& measured) noexcept {
+        round_seed_ = mix_bits(
+            measured.audited_nodes ^
+            mix_bits(measured.reachable_nodes ^
+                     mix_bits(measured.unlinked ^ mix_bits(measured.underlinked ^ measured.depth_from_root))));
+        waiting_before_ = std::exchange(islands_waiting_, 0);
+    }
 
-            // In target order, so every target row is read and written once, near-sequentially.
-            partial_sort(std::span<u64_t> {island_links, taken}, taken);
-            for (std::size_t position = 0; position != taken;) {
-                std::size_t const linked = static_cast<std::size_t>(island_links[position] >> 32);
-                result_.neighbor_reads += nvme_reads_t {1, row_bytes};
-                if (status_t const fetched = target.file.read_at(part.neighbors_begin + linked * row_bytes,
-                                                                 {reinterpret_cast<byte_t*>(target_row), row_bytes});
-                    failed(fetched))
-                    return fetched;
-                for (; position != taken && island_links[position] >> 32 == linked; ++position) {
-                    std::size_t const island = static_cast<u32_t>(island_links[position]);
-                    std::size_t target_slot = 0;
-                    while (target_slot != connectivity && target_row[target_slot] < nodes) ++target_slot;
-                    // A full row gives up a tail slot spread by the island's ID whose resident
-                    // keeps another in-link; an island linked before counts none, so its slot
-                    // stays.
-                    for (std::size_t attempt = 0; target_slot == connectivity && attempt != spread; ++attempt) {
-                        std::size_t const slot = connectivity - 1 - (island + attempt) % spread;
-                        std::size_t const resident = target_row[slot];
-                        if (links_of(resident) != 3u) continue;
-                        in_links[resident / 32] &= ~(u64_t {2} << (resident % 32 * 2));
-                        target_slot = slot;
-                    }
-                    if (target_slot == connectivity) continue;
-                    target_row[target_slot] = static_cast<node_id_t>(island);
-                    ++result_.compaction.graph.islands_reconnected;
+    /** Rounds a part runs at most while each improves when the plan stitches moved entries in, so
+     *  a graph that never settles still ends; a refine, which moves none, runs one. */
+    inline static constexpr std::size_t stitching_rounds_limit_k = 8;
+
+    /** Whether the part in hand runs another round: the plan built blocks or moved entries, its
+     *  last round improved, and the limit is not reached. */
+    bool another_round_() const noexcept {
+        bool const stitching = !opened_.empty() || result_.compaction.moved_entries;
+        return stitching && part_.verdict == refine_verdict_t::improved_k && part_rounds_ < stitching_rounds_limit_k;
+    }
+
+    /** Takes in one round of the part in hand: its counts add to the part's, which keeps its first
+     *  opening check and its islands, and takes this round's closing check and verdict. */
+    void close_round_(refine_report_t const& round) noexcept {
+        ++result_.rounds;
+        if (!part_rounds_++) {
+            part_ = round;
+            return;
+        }
+        refine_report_t part = part_;
+        part += round;
+        part.opening = part_.opening;
+        part.islands_found = part_.islands_found;
+        part.reachability = round.reachability;
+        part.verdict = round.verdict;
+        part_ = part;
+    }
+
+    /** Folds the part in hand's rounds into the result, the first part setting the verdict the
+     *  others rank against, and opens the next part's round. */
+    void close_part_() noexcept {
+        if (!folded_parts_++) result_.compaction.graph.verdict = part_.verdict;
+        result_.compaction.graph += part_;
+        open_round_(round_part_ + 1);
+    }
+
+    /** Links every unreached or stranded island the health check named through the root's
+     *  component with no distance, as the RAM round heals: an unreached one's entry from the first
+     *  of its own links inside the component that takes it, a stranded one's entry to the entry of
+     *  the component linking to it, each row read, changed and written alone. A component with
+     *  neither counts as waiting for the links a restitch gives it. */
+    status_t heal_(target_t& target, islands_t const& islands) noexcept {
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_();
+        workspace_arena_t arena = arena_over_(round_spare_);
+        carver_t carver {&arena};
+        node_id_t* const links = carve_<node_id_t>(carver, connectivity);
+        node_id_t* const row = carve_<node_id_t>(carver, connectivity);
+        if (carver.bytes > round_spare_.size()) return status_t::bad_alloc_k;
+        for (std::size_t rank = 0; rank != islands.islands(); ++rank) {
+            if (!islands.island_first(rank)) continue;
+            u8_t const roles = islands.island_roles(rank);
+            node_id_t const entry = islands.island_entry(rank);
+            if (roles & islands_t::unreached_island_k) {
+                if (status_t const read = read_row_(target, entry, links); failed(read)) return read;
+                // A full owner row may refuse, so the next link inside the component offers its
+                // own; a row led by its own entry is a forgotten one, as the health check reads it.
+                bool linked = false, owned = false;
+                for (std::size_t slot = 0; slot != connectivity && links[0] != entry && !linked; ++slot) {
+                    node_id_t const owner = links[slot];
+                    if (owner >= nodes || owner == entry || !in_component_(owner)) continue;
+                    owned = true;
+                    auto const [written, status] = link_island_(target, owner, entry, row);
+                    if (failed(status)) return status;
+                    linked = written;
                 }
-                if (status_t const wrote = write_rows_(target, part.neighbors_begin, row_bytes, linked, 1,
-                                                       reinterpret_cast<byte_t const*>(target_row));
-                    failed(wrote))
-                    return wrote;
+                islands_waiting_ += !owned;
             }
-            from = bound;
+            node_id_t const parent = islands.island_entry_parent(rank);
+            bool const stranded = (roles & islands_t::stranded_island_k) != 0;
+            if (stranded && parent != node_id_unknown_k)
+                if (status_t const status = link_island_(target, entry, parent, row).status; failed(status))
+                    return status;
+            islands_waiting_ += stranded && parent == node_id_unknown_k;
         }
         return status_t::success_k;
     }
 
-#pragma endregion Heal
+    /** Links @p member from @p owner 's row, as the RAM heal does: a free slot first; else, inside
+     *  the root's component, the slot whose resident is linked to by the most entries, when it
+     *  stays linked to by more than @p member and the reach rule releases it. The owner's row
+     *  stages in @p row, and a written link counts the member's in-link and files its depths. */
+    expected<bool> link_island_(target_t& target, node_id_t owner, node_id_t member, node_id_t* row) noexcept {
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_();
+        if (owner == member || owner >= nodes || member >= nodes) return {false, status_t::success_k};
+        if (status_t const read = read_row_(target, owner, row); failed(read)) return {false, read};
+        if (row[0] == owner)
+            for (std::size_t slot = 0; slot != connectivity; ++slot) row[slot] = sentinel_k;
+        std::size_t free_slot = connectivity;
+        for (std::size_t slot = 0; slot != connectivity; ++slot) {
+            if (row[slot] == member) return {false, status_t::success_k};
+            if (free_slot == connectivity && row[slot] >= nodes) free_slot = slot;
+        }
+        if (free_slot == connectivity && in_component_(owner)) {
+            std::size_t richest = connectivity;
+            unsigned richest_links = in_links_(member);
+            for (std::size_t slot = 0; slot != connectivity; ++slot) {
+                if (row[slot] >= nodes || in_links_(row[slot]) <= richest_links + 1u) continue;
+                richest = slot, richest_links = in_links_(row[slot]);
+            }
+            if (richest == connectivity || !take_link_under_lock_if_spare_(owner, row[richest]))
+                return {false, status_t::success_k};
+            static_cast<void>(take_in_link_if_spare_(row[richest]));
+            free_slot = richest;
+        }
+        if (free_slot == connectivity) return {false, status_t::success_k};
+        row[free_slot] = member;
+        if (status_t const wrote = write_rows_(target, part_of_(target).neighbors_begin, neighbors_row_bytes_(), owner,
+                                               1, reinterpret_cast<byte_t const*>(row));
+            failed(wrote))
+            return {false, wrote};
+        count_in_link_(member);
+        record_heal_link_(owner, member);
+        round_.changed_nodes += !count_changed_(target, owner);
+        ++round_.islands_reconnected;
+        return {true, status_t::success_k};
+    }
+
+    /** The round's pack of hubs at the front of the workspace past its columns, placed alike by
+     *  every task that reads it. */
+    hub_slices_t hubs_() const noexcept {
+        workspace_arena_t arena = arena_over_(round_spare_);
+        carver_t carver {&arena};
+        return hub_slices_(hubs_per_draw_, carver);
+    }
+
+    /** Derives the norms of the first @p count staged hubs and packs them. */
+    void pack_hubs_(hub_slices_t const& hubs, std::size_t count) const noexcept {
+        for (std::size_t rank = 0; rank != count; ++rank)
+            hubs.norms[rank] = norms_of_(hubs.rows + rank * value_row_bytes_());
+        scan_scorer_t::pack(rows_view_(hubs.rows, count), hubs.packs);
+    }
+
+    /** Draws the round's hubs by seeded bijection over target part @p task.part, ascending, reads
+     *  their value rows and packs them. */
+    status_t draw_hubs_(task_t const& task, executor_t& executor) noexcept {
+        target_t& target = targets_[task.part];
+        std::size_t const rows = target.view.size(), row_bytes = value_row_bytes_();
+        std::size_t const hubs = round_hubs(rows, hubs_per_draw_, neighborhood_capacity_);
+        hub_slices_t const slices = hubs_();
+        for (std::size_t rank = 0; rank != hubs; ++rank)
+            slices.nodes[rank] = static_cast<node_id_t>(seeded_bijection(rank, rows, round_seed_));
+        partial_sort(std::span<node_id_t>(slices.nodes, hubs), hubs);
+        auto [call, call_status] = target.view.begin_scans_(executor, 1);
+        if (failed(call_status)) return call_status;
+        if (status_t const read = copy_points_(
+                target.view, part_of_(target).values_begin, row_bytes, hubs,
+                [&](std::size_t rank) noexcept { return slices.nodes[rank]; },
+                [&](std::size_t rank) noexcept { return slices.rows + rank * row_bytes; }, executor,
+                result_.value_reads);
+            failed(read))
+            return read;
+        pack_hubs_(slices, hubs);
+        return status_t::success_k;
+    }
+
+    /** Files each of the @p count rows staged at @p bytes under the nearest of the first
+     *  @p hubs_count packed @p hubs, the first among equals, as the neighborhood its node takes,
+     *  which @p node_of answers. */
+    template <typename node_of_type_>
+    void file_under_nearest_(gather_share_t const& share, hub_slices_t const& hubs, std::size_t hubs_count,
+                             byte_t const* bytes, std::size_t count, node_of_type_ const& node_of) noexcept {
+        std::span<vector_norms_t> const row_norms {share.row_norms, count};
+        for (std::size_t row = 0; row != count; ++row) {
+            row_norms[row] = norms_of_(bytes + row * value_row_bytes_());
+            share.nearest[row] = farthest_;
+        }
+        std::span<distance_t> const thresholds = share.thresholds.first(hubs_count);
+        for (distance_t& threshold : thresholds) threshold = farthest_.distance;
+        // Every hub's distance is heard, so the threshold never moves.
+        auto keep = [&](std::size_t hub, scored_node_t entry) noexcept {
+            scored_node_t& nearest = share.nearest[entry.node_id];
+            if (entry.distance < nearest.distance) nearest = {static_cast<node_id_t>(hub), entry.distance};
+            return farthest_.distance;
+        };
+        scan_scorer_t const scorer {kernel_(), rows_view_(hubs.rows, hubs_count),
+                                    std::span<vector_norms_t const>(hubs.norms, hubs_count), hubs.packs, share.dots};
+        dummy_predicate_t admits;
+        scan_block(scorer, rows_view_(bytes, count), 0, std::span<vector_norms_t const>(row_norms), thresholds,
+                   share.step_distances, admits, keep);
+        for (std::size_t row = 0; row != count; ++row) {
+            node_id_t const hub = share.nearest[row].node_id;
+            entry_neighborhoods_[node_of(row)] = static_cast<u16_t>(hub == node_id_unknown_k ? 0 : hub);
+        }
+    }
+
+    /** Files every entry of target part @p task.part under its nearest hub: the first gather
+     *  streams the value column once past the round's pack, each read scored where it landed; a
+     *  later one takes one neighborhood over capacity, draws hubs among its own entries as the RAM
+     *  round draws them, and scores each entry's row read by point. */
+    status_t gather_(task_t const& task, executor_t& executor) noexcept {
+        target_t& target = targets_[task.part];
+        nvme_part_t const& part = part_of_(target);
+        std::size_t const rows = target.view.size(), row_bytes = value_row_bytes_();
+        std::span<node_id_t const> const members {neighborhood_entries_.data() + task.nodes.first, task.nodes.size()};
+        if (neighborhoods_ && members.size() <= neighborhood_capacity_) return status_t::success_k;
+        std::size_t const entries = neighborhoods_ ? members.size() : rows;
+        std::size_t const hubs = round_hubs(entries, hubs_per_draw_, neighborhood_capacity_);
+        std::size_t const run_rows = neighborhoods_ ? 1 : target.view.scan_run_rows_(0, row_bytes);
+        auto share_of = [&](share_carver_t& carver) noexcept { return gather_share_(carver, run_rows); };
+        auto [call, call_status] = target.view.begin_scans_(executor, 1,
+                                                            shares_bytes_<gather_share_t>(executor, share_of));
+        if (failed(call_status)) return call_status;
+        gather_share_t* const shares = carve_shares_<gather_share_t>(executor, share_of);
+        if (!shares) return status_t::bad_alloc_k;
+        hub_slices_t const slices = hubs_();
+        round_.traversal_stats.computed_distances += entries * hubs;
+        if (!neighborhoods_) {
+            auto describe = [&](std::size_t run, u64_t& progress) noexcept -> std::array<nvme_extent_t, 1> {
+                if (progress++) return {};
+                std::size_t const first = run * run_rows;
+                return {nvme_extent_t {part.values_begin + u64_t(first) * row_bytes,
+                                       static_cast<u32_t>(min_of(run_rows, rows - first) * row_bytes), 0}};
+            };
+            auto consume = [&](std::size_t thread, std::size_t run, u64_t, auto const& extents,
+                               auto const& fetched) noexcept {
+                file_under_nearest_(shares[thread], slices, hubs, fetched[0], extents[0].length / row_bytes,
+                                    [&](std::size_t row) noexcept { return run * run_rows + row; });
+            };
+            auto const [reads, status] = target.view.scan_reads_(executor, divide_round_up(rows, run_rows), describe,
+                                                                 consume);
+            result_.scan_reads += reads;
+            return status;
+        }
+        u64_t const seed = mix_bits(round_seed_ ^ task.nodes.first);
+        if (status_t const read = copy_points_(
+                target.view, part.values_begin, row_bytes, hubs,
+                [&](std::size_t rank) noexcept { return members[seeded_bijection(rank, members.size(), seed)]; },
+                [&](std::size_t rank) noexcept { return slices.rows + rank * row_bytes; }, executor,
+                result_.value_reads);
+            failed(read))
+            return read;
+        pack_hubs_(slices, hubs);
+        return read_points_(
+            target.view, part.values_begin, row_bytes, members.size(),
+            [&](std::size_t position) noexcept { return members[position]; },
+            [&](std::size_t thread, std::size_t position, byte_t const* row) noexcept {
+                file_under_nearest_(shares[thread], slices, hubs, row, 1,
+                                    [&](std::size_t) noexcept { return members[position]; });
+            },
+            executor, result_.value_reads);
+    }
+
+    /** Sorts the round's entries by neighborhood after a gather, as @ref order_by_neighborhood does
+     *  after the draw and @ref split_wide_neighborhoods after a gather over the neighborhoods over
+     *  capacity, and answers the widest one's entries. */
+    std::size_t order_neighborhoods_() noexcept {
+        std::size_t const rows = targets_[round_part_].view.size();
+        std::span<u16_t const> const tags {entry_neighborhoods_.data(), rows};
+        neighborhood_order_t const order =
+            neighborhoods_ ? split_wide_neighborhoods(tags, neighborhood_entries_, neighborhood_offsets_,
+                                                      neighborhoods_, neighborhood_capacity_, hubs_per_draw_)
+                           : order_by_neighborhood(tags, round_hubs(rows, hubs_per_draw_, neighborhood_capacity_),
+                                                   neighborhood_entries_, neighborhood_offsets_);
+        neighborhoods_ = order.neighborhoods;
+        round_.neighborhoods = order.neighborhoods;
+        round_.widest_neighborhood = order.widest;
+        return order.widest;
+    }
+
+    /** Re-stitches the neighborhood at positions @p task.nodes of the order by neighborhood: reads
+     *  its entries' value rows and links by points and the value rows its links lead out to, scores
+     *  it against itself in cache, and re-selects every entry's links among its own and its nearest
+     *  neighborhood-mates, keeping only the diverse ones and those @ref keep_reach_ needs. The
+     *  changed rows go onto the restitch tape, one write per tile they fall in, each entry's row
+     *  written by this task alone. */
+    status_t restitch_(task_t const& task, executor_t& executor) noexcept {
+        target_t& target = targets_[task.part];
+        nvme_part_t const& part = part_of_(target);
+        std::span<node_id_t const> const members {neighborhood_entries_.data() + task.nodes.first, task.nodes.size()};
+        std::size_t const width = members.size(), nodes = target.view.size(), connectivity = connectivity_();
+        std::size_t const row_bytes = value_row_bytes_(), tape_values = 1 + connectivity;
+        workspace_arena_t arena = arena_over_(round_spare_);
+        carver_t carver {&arena};
+        restitch_slices_t const slices = restitch_slices_(width, carver);
+        if (carver.bytes > round_spare_.size()) return status_t::bad_alloc_k;
+        auto share_of = [&](share_carver_t& carver) noexcept { return restitch_share_(carver, width); };
+        auto [call, call_status] = target.view.begin_scans_(executor, 1,
+                                                            shares_bytes_<restitch_share_t>(executor, share_of));
+        if (failed(call_status)) return call_status;
+        restitch_share_t* const shares = carve_shares_<restitch_share_t>(executor, share_of);
+        if (!shares) return status_t::bad_alloc_k;
+
+        byte_t* const rows = slices.rows;
+        node_id_t* const links = slices.links;
+        if (status_t const read = copy_points_(
+                target.view, part.values_begin, row_bytes, width,
+                [&](std::size_t position) noexcept { return members[position]; },
+                [&](std::size_t position) noexcept { return rows + position * row_bytes; }, executor,
+                result_.value_reads);
+            failed(read))
+            return read;
+        if (status_t const read = copy_points_(
+                target.view, part.neighbors_begin, neighbors_row_bytes_(), width,
+                [&](std::size_t position) noexcept { return members[position]; },
+                [&](std::size_t position) noexcept {
+                    return reinterpret_cast<byte_t*>(links + position * connectivity);
+                },
+                executor, result_.neighbor_reads);
+            failed(read))
+            return read;
+
+        // A link's row is staged at its entry's position inside the neighborhood, or past the
+        // entries in the order of the slots leading out.
+        auto position_of = [&](node_id_t node) noexcept {
+            return static_cast<std::size_t>(lower_bound(members, node) - members.data());
+        };
+        std::size_t outside = 0;
+        for (std::size_t slot = 0; slot != width * connectivity; ++slot) {
+            node_id_t const link = links[slot];
+            if (link >= nodes || link == members[slot / connectivity]) continue;
+            std::size_t const position = position_of(link);
+            if (position == width || members[position] != link)
+                slices.outside_slots[outside++] = static_cast<u32_t>(slot);
+        }
+        std::span<u32_t const> const outside_slots {slices.outside_slots, outside};
+        auto staged_of = [&](std::size_t slot) noexcept {
+            std::size_t const position = position_of(links[slot]);
+            if (position != width && members[position] == links[slot]) return position;
+            return width + static_cast<std::size_t>(lower_bound(outside_slots, static_cast<u32_t>(slot)) -
+                                                    outside_slots.data());
+        };
+        auto node_of = [&](std::size_t staged) noexcept {
+            return staged < width ? members[staged] : links[outside_slots[staged - width]];
+        };
+        if (status_t const read = copy_points_(
+                target.view, part.values_begin, row_bytes, outside,
+                [&](std::size_t rank) noexcept { return links[outside_slots[rank]]; },
+                [&](std::size_t rank) noexcept { return rows + (width + rank) * row_bytes; }, executor,
+                result_.value_reads);
+            failed(read))
+            return read;
+
+        std::span<vector_norms_t> const norms {slices.norms, width};
+        for (std::size_t position = 0; position != width; ++position)
+            norms[position] = norms_of_(rows + position * row_bytes);
+        vectors_view_t const neighborhood = rows_view_(rows, width);
+        std::size_t const block_columns = block_columns_(width), blocks = divide_round_up(width, block_columns);
+        std::size_t const pack_stride = scan_scorer_t::packs_bytes(block_columns, dimensions_());
+        for (std::size_t block = 0; block != blocks; ++block) {
+            std::size_t const first = block * block_columns;
+            scan_scorer_t::pack(neighborhood(nk::range(first, min_of(first + block_columns, width)), nk::slice),
+                                slices.packs + block * pack_stride);
+        }
+
+        // Every entry's own heap, so the threads scoring other steps never touch it.
+        std::span<scored_node_t> const mates {slices.mates, width * connectivity};
+        for (scored_node_t& mate : mates) mate = farthest_;
+        auto mates_of = [&](std::size_t position) noexcept {
+            return mates.subspan(position * connectivity, connectivity);
+        };
+        std::size_t const step_rows = scan_scorer_t::step_rows_k;
+        auto score_step = [&](std::size_t step, std::size_t thread, std::size_t) noexcept {
+            restitch_share_t const& share = shares[thread];
+            std::size_t const first = step * step_rows, count = min_of(step_rows, width - first);
+            dummy_predicate_t admits;
+            for (std::size_t block = 0; block != blocks; ++block) {
+                std::size_t const first_column = block * block_columns;
+                std::size_t const columns = min_of(block_columns, width - first_column);
+                std::span<distance_t> const thresholds = share.thresholds.first(columns);
+                for (distance_t& threshold : thresholds) threshold = farthest_.distance;
+                auto keep = [&](std::size_t column, scored_node_t row) noexcept {
+                    std::size_t const mate = first_column + column;
+                    if (mate == row.node_id) return farthest_.distance;
+                    std::span<scored_node_t> const heap = mates_of(row.node_id);
+                    scored_node_t const offered {static_cast<node_id_t>(mate), row.distance};
+                    if (further_(heap[0], offered)) replace_farthest(heap, offered, further_);
+                    return farthest_.distance;
+                };
+                scan_scorer_t const scorer {kernel_(),
+                                            neighborhood(nk::range(first_column, first_column + columns), nk::slice),
+                                            std::span<vector_norms_t const>(norms).subspan(first_column, columns),
+                                            slices.packs + block * pack_stride, share.dots};
+                scan_block(scorer, neighborhood(nk::range(first, first + count), nk::slice),
+                           static_cast<node_id_t>(first), std::span<vector_norms_t const>(norms).subspan(first, count),
+                           thresholds, share.step_distances, admits, keep);
+            }
+        };
+        if (status_t const scored = executor.for_tasks(divide_round_up(width, step_rows), score_step); failed(scored))
+            return scored;
+
+        std::size_t added = 0, dropped = 0, changed = 0, computed = 0;
+        auto select = [&](std::size_t position, std::size_t thread, std::size_t) noexcept {
+            restitch_share_t const& share = shares[thread];
+            node_id_t const node = members[position];
+            byte_t const* const row = rows + position * row_bytes;
+            std::size_t live = 0, candidates = 0, local_computed = 0;
+            for (std::size_t slot = position * connectivity; slot != (position + 1) * connectivity; ++slot) {
+                if (links[slot] >= nodes || links[slot] == node) continue;
+                std::size_t const staged = staged_of(slot);
+                byte_t const* const link_row = rows + staged * row_bytes;
+                distance_t const distance = distance_(row, norms[position], link_row,
+                                                      staged < width ? norms[staged] : norms_of_(link_row));
+                ++local_computed;
+                share.live[live++] = {links[slot], distance};
+                share.candidates[candidates++] = {static_cast<node_id_t>(staged), distance};
+            }
+            for (scored_node_t const mate : mates_of(position)) {
+                bool listed = mate.node_id == node_id_unknown_k;
+                for (std::size_t rank = 0; rank != live && !listed; ++rank)
+                    listed = share.candidates[rank].node_id == mate.node_id;
+                if (!listed) share.candidates[candidates++] = mate;
+            }
+            // Equal distances order on the hashed ring around the entry, so a duplicate class links
+            // in a ring, not a star.
+            partial_sort(std::span<scored_node_t>(share.candidates, candidates), candidates,
+                         [&](scored_node_t const& first, scored_node_t const& second) noexcept {
+                             if (first.distance != second.distance) return first.distance < second.distance;
+                             return ring_offset(node_of(first.node_id), node) <
+                                    ring_offset(node_of(second.node_id), node);
+                         });
+            // The diverse picks alone: a candidate stays only when no kept one is nearer to it than
+            // the entry is; a second duplicate of the entry would only repeat the first's links.
+            std::size_t picks = 0;
+            bool kept_zero = false;
+            for (std::size_t rank = 0; rank != candidates && picks != connectivity; ++rank) {
+                scored_node_t const candidate = share.candidates[rank];
+                if (kept_zero && candidate.distance == 0) continue;
+                byte_t const* const candidate_row = rows + candidate.node_id * row_bytes;
+                vector_norms_t const candidate_norms = candidate.node_id < width ? norms[candidate.node_id]
+                                                                                 : norms_of_(candidate_row);
+                std::size_t kept = 0;
+                for (; kept != picks; ++kept) {
+                    ++local_computed;
+                    if (distance_(candidate_row, candidate_norms, rows + share.kept_rows[kept] * row_bytes,
+                                  share.kept_norms[kept]) < candidate.distance)
+                        break;
+                }
+                if (kept != picks) continue;
+                kept_zero |= candidate.distance == 0;
+                share.selected[picks] = {node_of(candidate.node_id), candidate.distance};
+                share.kept_rows[picks] = candidate.node_id;
+                share.kept_norms[picks++] = candidate_norms;
+            }
+            keep_reach_(node, {share.live, live}, share.selected, picks);
+            std::size_t kept = 0;
+            for (std::size_t pick = 0; pick != picks; ++pick)
+                for (std::size_t rank = 0; rank != live; ++rank)
+                    kept += share.selected[pick].node_id == share.live[rank].node_id;
+            add_(added, picks - kept);
+            add_(dropped, live - kept);
+            add_(computed, local_computed);
+            node_id_t* const taped = slices.tape_rows + position * tape_values;
+            taped[0] = sentinel_k;
+            if (kept == picks && kept == live) return;
+            taped[0] = node;
+            for (std::size_t slot = 0; slot != connectivity; ++slot)
+                taped[1 + slot] = slot < picks ? share.selected[slot].node_id : sentinel_k;
+            add_(changed, !count_changed_(target, node));
+        };
+        if (status_t const selected = executor.for_tasks(width, select); failed(selected)) return selected;
+        round_.reselected_nodes += width;
+        round_.changed_nodes += changed;
+        round_.added_links += added;
+        round_.dropped_links += dropped;
+        round_.traversal_stats.computed_distances += width * width + computed;
+        round_.traversal_stats.computed_distances_in_refines += computed;
+
+        // The changed rows ascend with their entries, so each tile's come in one run.
+        std::size_t const tape_bytes = tape_row_bytes_();
+        std::size_t taped_rows = 0;
+        for (std::size_t position = 0; position != width; ++position) {
+            node_id_t const* const taped = slices.tape_rows + position * tape_values;
+            if (taped[0] == sentinel_k) continue;
+            if (taped_rows != position) std::memmove(slices.tape_rows + taped_rows * tape_values, taped, tape_bytes);
+            ++taped_rows;
+        }
+        for (std::size_t first = 0; first != taped_rows;) {
+            std::size_t const tile = slices.tape_rows[first * tape_values] / tile_rows_;
+            std::size_t bound = first + 1;
+            while (bound != taped_rows && slices.tape_rows[bound * tape_values] / tile_rows_ == tile) ++bound;
+            std::size_t& run = tape_runs_[tile];
+            if (run + (bound - first) > tile_rows_) return status_t::overflow_k;
+            bytes_view_t const taped {reinterpret_cast<byte_t const*>(slices.tape_rows + first * tape_values),
+                                      (bound - first) * tape_bytes};
+            if (status_t const wrote = tape_.write_at((tile * tile_rows_ + run) * tape_bytes, taped); failed(wrote))
+                return wrote;
+            run += bound - first;
+            first = bound;
+        }
+        return status_t::success_k;
+    }
+
+    /** Rewrites tile @p task.position of target part @p task.part from its run on the restitch
+     *  tape: one read of its neighbors, its run applied, one write. */
+    status_t write_(task_t const& task, executor_t& executor) noexcept {
+        std::size_t const run = tape_runs_[task.position];
+        if (!run) return status_t::success_k;
+        target_t& target = targets_[task.part];
+        u64_t const neighbors_begin = part_of_(target).neighbors_begin;
+        std::size_t const first = task.nodes.first, count = task.nodes.size(), connectivity = connectivity_();
+        std::size_t const tape_bytes = tape_row_bytes_();
+        workspace_arena_t arena = arena_over_(round_spare_);
+        carver_t carver {&arena};
+        write_slices_t const slices = write_slices_(count, carver);
+        if (carver.bytes > round_spare_.size()) return status_t::bad_alloc_k;
+        std::array<staged_column_t, 1> const columns {
+            {{neighbors_begin, neighbors_row_bytes_(), reinterpret_cast<byte_t*>(slices.neighbors)}}};
+        if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
+            return read;
+        if (status_t const fetched = tape_.read_at(
+                task.position * tile_rows_ * tape_bytes,
+                bytes_span_t {reinterpret_cast<byte_t*>(slices.tape_rows), run * tape_bytes});
+            failed(fetched))
+            return fetched;
+        for (std::size_t taped = 0; taped != run; ++taped) {
+            node_id_t const* const row = slices.tape_rows + taped * (1 + connectivity);
+            std::memcpy(slices.neighbors + (row[0] - first) * connectivity, row + 1, neighbors_row_bytes_());
+        }
+        return write_rows_(target, neighbors_begin, neighbors_row_bytes_(), first, count,
+                           reinterpret_cast<byte_t const*>(slices.neighbors));
+    }
+
+#pragma endregion Rounds
 
     /** The host allocator behind the plan's catalogs, which never grow with the rows. */
     forkunion_allocator_t allocator_ {};
 
-    /** The memory every step carves its blocks, batches and tables from. */
+    /** The memory every task carves its blocks, batches and tables from. */
     bytes_span_t workspace_;
 
     /** The caller's configurations, the provenance borrowed until the plan finishes. */
@@ -1981,14 +2487,59 @@ struct [[nodiscard]] nvme_compact_plan {
      *  counts as changed, at the front of the workspace the caller lent. */
     std::span<u64_t> changed_;
 
-    /** The target part the sweep is in, and its open tile of target rows. */
-    std::size_t sweep_part_ = 0;
-    iota_view<std::size_t> sweep_;
+    /** Bytes of cache each core keeps to itself, which size a round's hubs and its neighborhood
+     *  capacity; zero until the first task reads the executor's. */
+    std::size_t cache_bytes_ = 0;
 
-    /** The open tile's counts, then offsets, one per row of it, and its tape, both at the
-     *  workspace's front. */
-    std::span<std::size_t> incoming_offsets_;
-    std::span<node_id_t> back_links_;
+    /** The target part whose round runs now. */
+    std::size_t round_part_ = 0;
+
+    /** The phase the health check in hand follows: write for the closing check, any other for the
+     *  opening one, and health for a heal a closing check opened again. */
+    nvme_compact_phase_t health_after_ = nvme_compact_phase_t::build_k;
+
+    /** The round's health check columns, at the workspace front past the changed bits. */
+    audit_columns_t audit_;
+
+    /** Per entry, the neighborhood its nearest hub gave it, among the hubs of its last gather. */
+    std::span<u16_t> entry_neighborhoods_;
+
+    /** The entries by neighborhood, each one's ascending, and the starts every split may write,
+     *  the first @c neighborhoods_ and one past them closing the order. */
+    std::span<node_id_t> neighborhood_entries_;
+    std::span<node_id_t> neighborhood_offsets_;
+    std::size_t neighborhoods_ = 0;
+
+    /** Per tile of rows, the rows its run on the restitch tape holds so far. */
+    std::span<std::size_t> tape_runs_;
+
+    /** The workspace past the round's columns, which its tasks stage in. */
+    bytes_span_t round_spare_;
+
+    /** Island components the last heal could not link, having no link to or from the root's, and
+     *  those the heal before it could not, which the repeats must shrink. */
+    std::size_t islands_waiting_ = 0;
+    std::size_t waiting_before_ = 0;
+
+    /** Hubs one gather draws at most, the most entries one neighborhood holds, and rows a tile. */
+    std::size_t hubs_per_draw_ = 0;
+    std::size_t neighborhood_capacity_ = 0;
+    std::size_t tile_rows_ = 0;
+
+    /** The seed of the round's draws. */
+    u64_t round_seed_ = 0;
+
+    /** The round in hand so far; the part's rounds so far, taken in by @ref close_round_; the
+     *  rounds it ran; and the parts folded into the result. */
+    refine_report_t round_;
+    refine_report_t part_;
+    std::size_t part_rounds_ = 0;
+    std::size_t folded_parts_ = 0;
+
+    /** The restitch tape's path and file, open from a streamed round's opening check to its
+     *  closing one. */
+    paths_t tape_path_ {allocator_};
+    seekable_file_t tape_;
 
     nvme_compact_phase_t phase_ = nvme_compact_phase_t::finish_k;
 
@@ -2011,25 +2562,23 @@ expected<nvme_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_ 
             return {std::move(plan), added};
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
     for (typename plan_t::source_t& part : plan.sources_) part.kept = {0, part.rows};
-    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
+    if (status_t const sized = plan.size_tasks_(); failed(sized)) return {std::move(plan), sized};
     growing_buffer<std::size_t, forkunion_allocator_t> target_rows {forkunion_allocator_t {}};
     if (status_t const packed = plan.pack_sources_(config.shard_capacity, target_rows); failed(packed))
         return {std::move(plan), packed};
     if (status_t const created = plan.open_targets_(to_span(target_rows)); failed(created))
         return {std::move(plan), created};
 
-    // The part arriving first in a target part stays resident and keeps its IDs; every later part
-    // arrives after it with its own edges rebased, so an appended row's walk navigates its own part
-    // and its old neighbors compete with what the walk finds. A cut range lost the edges past it,
-    // so every row of its target part re-selects.
+    // The part arriving first in a target part keeps its IDs; every later part arrives after it
+    // with its own edges rebased, and the round links them. A cut range lost the edges past it, so
+    // its target part runs a round too.
     for (typename plan_t::source_t const& part : plan.sources_) {
         if (part.base) continue;
         bool const cut = part.stride < part.rows;
         for (std::size_t first = 0, target_index = part.target; first < part.rows;
              first += part.stride, ++target_index) {
             typename plan_t::target_t& bin = plan.targets_[target_index];
-            bin.resident = min_of(part.stride, part.rows - first);
-            bin.selected = {cut ? 0 : bin.resident, bin.view.size()};
+            bin.selected = {cut ? 0 : min_of(part.stride, part.rows - first), bin.view.size()};
         }
     }
     plan.phase_ = nvme_compact_phase_t::copy_k;
@@ -2056,7 +2605,7 @@ expected<nvme_compact_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
         one.kept = {0, one.rows};
         part_rows.push_back_reserved(one.rows);
     }
-    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
+    if (status_t const sized = plan.size_tasks_(); failed(sized)) return {std::move(plan), sized};
     if (status_t const created = plan.open_targets_(to_span(part_rows)); failed(created))
         return {std::move(plan), created};
     // The range runs in placement order across the parts, so each part re-selects its own slice of
@@ -2066,6 +2615,31 @@ expected<nvme_compact_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
         std::size_t const low = max_of(rows.first, placed), high = min_of(rows.bound, placed + one.view.size());
         one.selected = low < high ? iota_view<std::size_t> {low - placed, high - placed} : iota_view<std::size_t> {};
     }
+    plan.phase_ = nvme_compact_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
+}
+
+template <typename indexes_type_>
+expected<nvme_compact_plan<indexes_type_>> plan_refine_part(indexes_type_ const& source, std::string_view target,
+                                                            bytes_span_t workspace, compact_config_t const& config,
+                                                            save_config_t const& save) noexcept {
+    using plan_t = nvme_compact_plan<indexes_type_>;
+    plan_t plan;
+    if (!source.shards_count()) return {std::move(plan), status_t::uninitialized_k};
+    if (source.shards_count() != 1) return {std::move(plan), status_t::config_mismatch_k};
+    if (target.empty()) return {std::move(plan), status_t::invalid_argument_k};
+    if (status_t const opened = plan.open_workspace_(workspace, config, save, source); failed(opened))
+        return {std::move(plan), opened};
+    if (status_t const added = plan.add_sources_(source, source); failed(added)) return {std::move(plan), added};
+    if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
+    typename plan_t::source_t& part = plan.sources_[0];
+    part.kept = {0, part.rows};
+    std::array<std::size_t, 1> const rows {part.rows};
+    if (status_t const sized = plan.size_tasks_(); failed(sized)) return {std::move(plan), sized};
+    if (status_t const created = plan.open_targets_(std::span<std::size_t const> {rows},
+                                                    typename plan_t::replacing_part_path_t {target});
+        failed(created))
+        return {std::move(plan), created};
     plan.phase_ = nvme_compact_phase_t::copy_k;
     return {std::move(plan), status_t::success_k};
 }
@@ -2091,31 +2665,28 @@ expected<nvme_compact_plan<indexes_type_>> plan_build(std::span<std::string_view
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
     std::size_t const block_rows = plan.build_rows_();
     if (!block_rows) return {std::move(plan), status_t::bad_alloc_k};
-    if (status_t const sized = plan.size_steps_(); failed(sized)) return {std::move(plan), sized};
+    if (status_t const sized = plan.size_tasks_(); failed(sized)) return {std::move(plan), sized};
     growing_buffer<std::size_t, forkunion_allocator_t> target_rows {forkunion_allocator_t {}};
     if (status_t const packed = plan.pack_sources_(config.shard_capacity, target_rows); failed(packed))
         return {std::move(plan), packed};
     if (status_t const created = plan.open_targets_(to_span(target_rows)); failed(created))
         return {std::move(plan), created};
-    // The first block of every target part stays resident, and every later block links in by walks
-    // across as a compaction's appended part does.
-    for (typename plan_t::target_t& one : plan.targets_) {
-        one.resident = min_of(block_rows, one.view.size());
-        one.selected = {one.resident, one.view.size()};
-    }
+    // Every block links only inside itself, so a part of more than one block runs a round.
+    for (typename plan_t::target_t& one : plan.targets_)
+        one.selected = {min_of(block_rows, one.view.size()), one.view.size()};
     plan.phase_ = nvme_compact_phase_t::copy_k;
     return {std::move(plan), status_t::success_k};
 }
 
-/** Drains @p planned over @p executor: every step of every phase in order, then the commit. */
+/** Drains @p planned over @p executor: every task of every phase in order, then the commit. */
 template <typename plan_type_>
 expected<nvme_compact_result_t> nvme_compact_drain_(expected<plan_type_>&& planned,
                                                     typename plan_type_::executor_t& executor) noexcept {
     if (!planned) return {{}, planned.status};
     plan_type_& plan = planned.value;
     do
-        for (typename plan_type_::step_t const step : plan.steps())
-            if (status_t const ran = plan.run(step, executor); failed(ran)) return {{}, ran};
+        for (typename plan_type_::task_t const task : plan.tasks())
+            if (status_t const ran = plan.run(task, executor); failed(ran)) return {{}, ran};
     while (plan.advance());
     return plan.finish();
 }
@@ -2200,6 +2771,443 @@ expected<nvme_compact_result_t> build(std::span<std::string_view const> sources,
                                       typename indexes_type_::executor_t& executor, bytes_span_t workspace,
                                       compact_config_t const& config = {}, save_config_t const& save = {}) noexcept {
     return nvme_compact_drain_(plan_build<indexes_type_>(sources, target, workspace, config, save), executor);
+}
+
+/** Names a fresh part beside part @p shard of the loaded @p index into @p buffer: the manifest's
+ *  stem with the first generation no file holds yet, then the part's position, as
+ *  <tt>index.1-00003-of-00006.safegraphs</tt>, so a replacement never truncates a part that a reader
+ *  may still be holding open. */
+template <typename indexes_type_>
+expected<std::string_view> nvme_replacing_part_path_(indexes_type_ const& index, std::size_t shard,
+                                                     typename indexes_type_::paths_t& buffer) noexcept {
+    using paths_t = typename indexes_type_::paths_t;
+    paths_t current_buffer {forkunion_allocator_t {}}, stem_buffer {forkunion_allocator_t {}};
+    auto const [current, current_status] = index.part_path(shard, current_buffer);
+    if (failed(current_status)) return {{}, current_status};
+    std::string_view const directory = current.substr(0, current.size() - safegraphs_basename(current).size());
+    std::string_view const stem = safegraphs_basename(safegraphs_stem(index.manifest_path()));
+    for (std::size_t generation = 1;; ++generation) {
+        auto print = [&](char* sink, std::size_t capacity) noexcept {
+            return std::snprintf(sink, capacity, "%.*s%.*s.%zu", static_cast<int>(directory.size()), directory.data(),
+                                 static_cast<int>(stem.size()), stem.data(), generation);
+        };
+        int const length = print(nullptr, 0);
+        if (length < 0) return {{}, status_t::io_k};
+        if (failed(stem_buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1)))
+            return {{}, status_t::bad_alloc_k};
+        print(stem_buffer.data(), stem_buffer.size());
+        std::string_view const generation_stem {stem_buffer.data(), static_cast<std::size_t>(length)};
+        auto const [candidate, candidate_status] = safegraphs_part_path(buffer, generation_stem, shard,
+                                                                        index.shards_count());
+        if (failed(candidate_status)) return {{}, candidate_status};
+        if (candidate == current) continue;
+        auto const [probe, probe_status] = seekable_file_t::open(candidate, file_access_t::read_only_k);
+        if (failed(probe_status)) return {candidate, status_t::success_k};
+    }
+}
+
+/** The body of @ref refine_parts, once the writer is claimed. */
+template <typename indexes_type_, typename progress_type_>
+expected<refine_report_t> refine_parts_(indexes_type_& index, refine_config_t const& config,
+                                        typename indexes_type_::executor_t& executor,
+                                        progress_type_& progress) noexcept {
+    using plan_t = nvme_compact_plan<indexes_type_>;
+    using paths_t = typename indexes_type_::paths_t;
+    compact_config_t compaction;
+    compaction.expansion_factor = static_cast<u32_t>(config.expansion_factor);
+    compaction.memory_limit = config.memory_limit;
+    compaction.cache_bytes = config.cache_bytes;
+    refine_report_t report;
+    std::size_t const population = index.size();
+    std::size_t refined_rows = 0;
+    growing_buffer<byte_t, forkunion_allocator_t> workspace {forkunion_allocator_t {}};
+    paths_t source_path {forkunion_allocator_t {}}, target_path {forkunion_allocator_t {}};
+    for (std::size_t shard = 0; shard != index.shards_count(); ++shard) {
+        std::size_t const rows = index.part_size(shard);
+        if (!rows) continue;
+        // The part alone, so a refine copies one part rather than the whole index.
+        auto const [source_part, source_status] = index.part_path(shard, source_path);
+        if (failed(source_status)) return {report, source_status};
+        indexes_type_ source {forkunion_allocator_t {}};
+        if (status_t const viewed = source.view(source_part); failed(viewed)) return {report, viewed};
+        std::size_t const workspace_bytes = config.memory_limit ? config.memory_limit
+                                                                : plan_t::refine_in_ram_bytes(source, compaction);
+        if (failed(workspace.resize_uninitialized(workspace_bytes))) return {report, status_t::bad_alloc_k};
+        auto const [target, target_status] = nvme_replacing_part_path_(index, shard, target_path);
+        if (failed(target_status)) return {report, target_status};
+        auto [plan, plan_status] = plan_refine_part(source, target, to_writable_span(workspace), compaction);
+        if (failed(plan_status)) return {report, plan_status};
+        // A stop before the commit drops the plan, which removes the new part, and the manifest
+        // still names the old one.
+        do
+            for (typename plan_t::task_t const task : plan.tasks()) {
+                if (status_t const ran = plan.run(task, executor); failed(ran)) return {report, ran};
+                if (progress(refined_rows, population) == continuation_t::cancel_k)
+                    return {report, status_t::cancelled_k};
+            }
+        while (plan.advance());
+        auto const [refined, finish_status] = plan.finish([&](plan_t const& sealed) noexcept {
+            return index.replace_part(shard, target, sealed.part_entry(0).bytes);
+        });
+        if (failed(finish_status)) return {report, finish_status};
+        // The first shard's round sets the verdict the later ones rank against.
+        if (refined_rows) report += refined.compaction.graph;
+        else report = refined.compaction.graph;
+        if (status_t const locked = index.relock_manifest(); failed(locked)) return {report, locked};
+        refined_rows += rows;
+        if (progress(refined_rows, population) == continuation_t::cancel_k) return {report, status_t::cancelled_k};
+    }
+    // The heals count only rows nothing links to, so one audit of the committed parts measures
+    // reachability as a fresh health call would.
+    auto const [audit, audit_status] = index.health(executor);
+    report.reachability = audit;
+    return {report, audit_status};
+}
+
+/**
+ *  @brief Refines every shard of the loaded @p index one at a time by replacing its part.
+ *
+ *  Each shard is copied and re-selected into a fresh part beside its own, as @ref plan_refine_part
+ *  plans it; the part is sealed, the manifest replaced durably to name it, and only then is it
+ *  swapped in for the index's readers.
+ *
+ *  Peak extra disk is one part per call beyond the parts superseded so far, which stay until the
+ *  index is released. @p config.memory_limit is each shard's workspace, zero deriving one that
+ *  rebuilds the part in RAM. @p progress hears rows of committed shards out of every row after
+ *  each task, and a cancel stops at the next task, leaving the shards before it refined.
+ *
+ *  @par Statuses:
+ *  - @c read_only_k @p index is a view.
+ *  - @c contended_k Another refine holds the writer, or another writer took the replaced
+ *    manifest's lock.
+ *  - @c cancelled_k @p progress stopped the pass; the report counts the shards committed.
+ *  - @c bad_alloc_k The workspace cannot be allocated or hold one row of some phase.
+ *  - Any status that @ref plan_refine_part, its tasks, @ref nvme_indexes::replace_part or the
+ *    closing health check answers.
+ */
+template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
+expected<refine_report_t> refine_parts(indexes_type_& index, refine_config_t config,
+                                       typename indexes_type_::executor_t& executor,
+                                       progress_type_&& progress = {}) noexcept {
+    if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+    if (status_t const claimed = index.begin_refine(); failed(claimed)) return {{}, claimed};
+    expected<refine_report_t> refined = refine_parts_(index, config, executor, progress);
+    index.end_refine();
+    return refined;
+}
+
+/** A stem beside the manifest of the loaded @p index that no file uses: the manifest's stem, then
+ *  @p label and the first number from one on, into @p buffer. With no @p receivers its manifest and
+ *  its parts of every count up to @p parts are free; with some, those of every receiver's stem, the
+ *  stem then a dash and the receiver's number from one on. */
+template <typename indexes_type_>
+expected<std::string_view> nvme_unused_stem_(indexes_type_ const& index, std::string_view label, std::size_t receivers,
+                                             std::size_t parts, typename indexes_type_::paths_t& buffer) noexcept {
+    using paths_t = typename indexes_type_::paths_t;
+    std::string_view const stem = safegraphs_stem(index.manifest_path());
+    paths_t named {forkunion_allocator_t {}}, probe {forkunion_allocator_t {}};
+    auto used = [&](std::string_view candidate) noexcept {
+        if (failed(named.resize_uninitialized(candidate.size() + 12))) return true;
+        std::snprintf(named.data(), named.size(), "%.*s.safegraphs", static_cast<int>(candidate.size()),
+                      candidate.data());
+        if (succeeded(seekable_file_t::open(named.data(), file_access_t::read_only_k).status)) return true;
+        for (std::size_t count = 1; count <= parts; ++count)
+            for (std::size_t part = 0; part != count; ++part) {
+                auto const [path, path_status] = safegraphs_part_path(probe, candidate, part, count);
+                if (failed(path_status) || succeeded(seekable_file_t::open(path, file_access_t::read_only_k).status))
+                    return true;
+            }
+        return false;
+    };
+    paths_t receiver {forkunion_allocator_t {}};
+    for (std::size_t number = 1;; ++number) {
+        auto print = [&](char* sink, std::size_t capacity) noexcept {
+            return std::snprintf(sink, capacity, "%.*s%.*s%zu", static_cast<int>(stem.size()), stem.data(),
+                                 static_cast<int>(label.size()), label.data(), number);
+        };
+        int const length = print(nullptr, 0);
+        if (length < 0) return {{}, status_t::io_k};
+        if (failed(buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1)))
+            return {{}, status_t::bad_alloc_k};
+        print(buffer.data(), buffer.size());
+        std::string_view const candidate {buffer.data(), static_cast<std::size_t>(length)};
+        bool taken = !receivers && used(candidate);
+        for (std::size_t position = 0; position != receivers && !taken; ++position) {
+            if (failed(receiver.resize_uninitialized(candidate.size() + 24))) return {{}, status_t::bad_alloc_k};
+            int const written = std::snprintf(receiver.data(), receiver.size(), "%.*s-%zu",
+                                              static_cast<int>(candidate.size()), candidate.data(), position + 1);
+            taken = used({receiver.data(), static_cast<std::size_t>(written)});
+        }
+        if (!taken) return {candidate, status_t::success_k};
+    }
+}
+
+/** Runs every task of @p plan over @p executor, @p progress hearing nothing done out of
+ *  @p population after each, so a cancel stops at the next task. */
+template <typename plan_type_, typename progress_type_>
+status_t nvme_drive_rewrite_(plan_type_& plan, typename plan_type_::executor_t& executor, std::size_t population,
+                             progress_type_& progress) noexcept {
+    do
+        for (typename plan_type_::task_t const task : plan.tasks()) {
+            if (status_t const ran = plan.run(task, executor); failed(ran)) return ran;
+            if (progress(std::size_t {0}, population) == continuation_t::cancel_k) return status_t::cancelled_k;
+        }
+    while (plan.advance());
+    return status_t::success_k;
+}
+
+/** Packs the parts of @p sources into parts of at most @p shard_capacity rows beside the manifest
+ *  of the loaded @p index, as @ref plan_compact packs them, each target part that took parts in
+ *  running its round, then commits them as every part of @p index. */
+template <typename indexes_type_, typename progress_type_>
+expected<nvme_compact_result_t> nvme_repack_parts_(indexes_type_& index, std::span<indexes_type_ const* const> sources,
+                                                   std::size_t shard_capacity, refine_config_t const& config,
+                                                   typename indexes_type_::executor_t& executor,
+                                                   progress_type_& progress) noexcept {
+    using plan_t = nvme_compact_plan<indexes_type_>;
+    using paths_t = typename indexes_type_::paths_t;
+    compact_config_t compaction;
+    compaction.shard_capacity = shard_capacity;
+    compaction.expansion_factor = static_cast<u32_t>(config.expansion_factor);
+    compaction.memory_limit = config.memory_limit;
+    compaction.cache_bytes = config.cache_bytes;
+    std::size_t rows = 0, parts = 0;
+    for (indexes_type_ const* source : sources) rows += source->size(), parts += source->shards_count();
+    paths_t stem_buffer {forkunion_allocator_t {}}, manifest {forkunion_allocator_t {}};
+    auto const [stem, stem_status] = nvme_unused_stem_(index, ".", 0, parts, stem_buffer);
+    if (failed(stem_status)) return {{}, stem_status};
+    std::string_view const suffix = ".safegraphs";
+    if (failed(manifest.resize_uninitialized(stem.size() + suffix.size()))) return {{}, status_t::bad_alloc_k};
+    std::memcpy(manifest.data(), stem.data(), stem.size());
+    std::memcpy(manifest.data() + stem.size(), suffix.data(), suffix.size());
+    std::size_t const capacity = shard_capacity && shard_capacity < node_id_unknown_k ? shard_capacity
+                                                                                      : node_id_unknown_k - 1;
+    std::size_t const workspace_bytes = config.memory_limit
+                                            ? config.memory_limit
+                                            : plan_t::round_in_ram_bytes(index, min_of(rows, capacity), compaction);
+    growing_buffer<byte_t, forkunion_allocator_t> workspace {forkunion_allocator_t {}};
+    if (failed(workspace.resize_uninitialized(workspace_bytes))) return {{}, status_t::bad_alloc_k};
+    auto [plan, plan_status] = plan_compact(sources, to_string_view(manifest), to_writable_span(workspace), compaction);
+    if (failed(plan_status)) return {{}, plan_status};
+    if (status_t const driven = nvme_drive_rewrite_(plan, executor, rows, progress); failed(driven))
+        return {{}, driven};
+    return plan.finish([&](plan_t const& sealed) noexcept {
+        return index.replace_parts(
+            sealed.parts(),
+            [&](std::size_t part) noexcept {
+                safegraphs_part_t const entry = sealed.part_entry(part);
+                return safegraphs_part_t {sealed.part_path(part), entry.bytes, entry.nodes};
+            },
+            executor);
+    });
+}
+
+/**
+ *  @brief Absorbs every entry of the @p donors into the loaded @p index, whose manifest then names
+ *      the parts they and its own pack into beside it.
+ *
+ *  The parts pack as @ref plan_compact packs them, and every target part that took a part in runs
+ *  rounds that link it until one stops improving. The donors are read, never edited, and a caller
+ *  drops them once this answers success; a failure or a cancel leaves @p index serving its own
+ *  parts. No other call on @p index may overlap this one. @p progress hears nothing done out of
+ *  every entry after each task.
+ *
+ *  @par Statuses:
+ *  - @c read_only_k @p index is a view.
+ *  - @c invalid_argument_k A null donor.
+ *  - @c config_mismatch_k @p index among the donors, or a donor of another kernel, geometry or key
+ *    width.
+ *  - @c contended_k A refine holds the writer.
+ *  - @c cancelled_k @p progress stopped the rewrite.
+ *  - Any status @ref plan_compact, its tasks or @ref nvme_indexes::replace_parts answers.
+ */
+template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
+expected<refine_report_t> absorb_parts(indexes_type_& index, std::span<indexes_type_* const> donors,
+                                       refine_config_t config, typename indexes_type_::executor_t& executor,
+                                       progress_type_&& progress = {}) noexcept {
+    growing_buffer<indexes_type_ const*, forkunion_allocator_t> sources {forkunion_allocator_t {}};
+    if (failed(sources.reserve_exactly(donors.size() + 1))) return {{}, status_t::bad_alloc_k};
+    sources.push_back_reserved(&index);
+    for (indexes_type_* const donor : donors) {
+        if (!donor) return {{}, status_t::invalid_argument_k};
+        if (donor == &index) return {{}, status_t::config_mismatch_k};
+        if (donor->shards_count()) sources.push_back_reserved(donor);
+    }
+    if (sources.size() == 1) return {{}, status_t::success_k};
+    if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+    if (status_t const claimed = index.begin_refine(); failed(claimed)) return {{}, claimed};
+    auto const [absorbed, status] = nvme_repack_parts_(index, to_span(sources), 0, config, executor, progress);
+    index.end_refine();
+    return {absorbed.compaction.graph, status};
+}
+
+/**
+ *  @brief Repacks the parts of the loaded @p index in place into as few parts as hold at most
+ *      @p shard_capacity rows each, zero meaning as many as a part addresses, as
+ *      @ref plan_compact packs them, every target part that took a part in running one streamed
+ *      round, and the manifest is replaced to name them.
+ *
+ *  An index of one part keeps it. No other call on @p index may overlap this one. @p progress
+ *  hears nothing done out of every entry after each task.
+ *
+ *  @par Statuses:
+ *  - @c read_only_k @p index is a view.
+ *  - @c contended_k A refine holds the writer.
+ *  - @c cancelled_k @p progress stopped the rewrite; @p index serves its own parts.
+ *  - Any status @ref plan_compact, its tasks or @ref nvme_indexes::replace_parts answers.
+ */
+template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
+expected<compact_result_t> reshard_parts(indexes_type_& index, std::size_t shard_capacity, refine_config_t config,
+                                         typename indexes_type_::executor_t& executor,
+                                         progress_type_&& progress = {}) noexcept {
+    if (status_t const refused = index.refuses_writes(); refused == status_t::read_only_k) return {{}, refused};
+    if (index.shards_count() < 2) return {{}, status_t::success_k};
+    if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+    if (status_t const claimed = index.begin_refine(); failed(claimed)) return {{}, claimed};
+    std::array<indexes_type_ const*, 1> const sources {&index};
+    auto const [repacked, status] = nvme_repack_parts_(index, std::span<indexes_type_ const* const> {sources},
+                                                       shard_capacity, config, executor, progress);
+    index.end_refine();
+    return {repacked.compaction, status};
+}
+
+/** The plan of @ref split_parts: every part of @p source cut into @p receivers contiguous ranges,
+ *  range @c r of part @c s arriving as target part <tt>s * receivers + r</tt> at the path that
+ *  @p part_path names, each running its rounds. */
+template <typename indexes_type_, typename part_path_type_>
+expected<nvme_compact_plan<indexes_type_>> plan_split_parts_(indexes_type_ const& source, std::size_t receivers,
+                                                             part_path_type_ const& part_path, bytes_span_t workspace,
+                                                             compact_config_t const& config) noexcept {
+    using plan_t = nvme_compact_plan<indexes_type_>;
+    plan_t plan;
+    if (status_t const opened = plan.open_workspace_(workspace, config, {}, source); failed(opened))
+        return {std::move(plan), opened};
+    if (status_t const added = plan.add_sources_(source, source); failed(added)) return {std::move(plan), added};
+    if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
+    growing_buffer<std::size_t, forkunion_allocator_t> rows {forkunion_allocator_t {}};
+    if (failed(rows.reserve_exactly(plan.sources_.size() * receivers))) return {std::move(plan), status_t::bad_alloc_k};
+    for (std::size_t part = 0; part != plan.sources_.size(); ++part) {
+        typename plan_t::source_t& one = plan.sources_[part];
+        std::size_t const stride = divide_round_up(one.rows, receivers);
+        if ((receivers - 1) * stride >= one.rows) return {std::move(plan), status_t::overflow_k};
+        one.target = part * receivers;
+        one.stride = stride;
+        one.kept = {0, one.rows};
+        for (std::size_t range = 0; range != receivers; ++range)
+            rows.push_back_reserved(min_of(stride, one.rows - range * stride));
+        plan.result_.compaction.moved_entries += one.rows - stride;
+    }
+    if (status_t const sized = plan.size_tasks_(); failed(sized)) return {std::move(plan), sized};
+    if (status_t const created = plan.open_targets_(to_span(rows), part_path); failed(created))
+        return {std::move(plan), created};
+    plan.phase_ = nvme_compact_phase_t::copy_k;
+    return {std::move(plan), status_t::success_k};
+}
+
+/**
+ *  @brief Splits the loaded @p index into the empty @p receivers, each loading a manifest of its
+ *      own beside @p index 's, which is left empty.
+ *
+ *  Every part is cut into one contiguous range per receiver, the edges the cuts cross dropped, and
+ *  range @c r of part @c s arrives as part @c s of receiver @c r, running rounds until one stops
+ *  improving. Ranges by ID, rather than parts grown over the links as the RAM split grows them,
+ *  keep the split a streamed copy, and the rounds re-stitch what the cuts dropped. Receiver @c r's
+ *  manifest is the manifest's stem, a dash, the first free split number, and a dash and @c r from
+ *  one on. No other call on @p index or a receiver may overlap this one. @p progress hears nothing
+ *  done out of every entry after each task.
+ *
+ *  @par Statuses:
+ *  - @c read_only_k @p index is a view.
+ *  - @c invalid_argument_k Fewer than two receivers, or a null one.
+ *  - @c config_mismatch_k A receiver holding entries, named twice, or @p index itself.
+ *  - @c overflow_k A part holds too few entries to give every receiver one.
+ *  - @c contended_k A refine holds the writer.
+ *  - @c cancelled_k @p progress stopped the rewrite; @p index serves its own parts.
+ *  - Any status the plan, its tasks, a manifest write or a receiver's load answers.
+ */
+template <typename indexes_type_, typename progress_type_ = dummy_progress_t>
+expected<refine_report_t> split_parts(indexes_type_& index, std::span<indexes_type_* const> receivers,
+                                      refine_config_t config, typename indexes_type_::executor_t& executor,
+                                      progress_type_&& progress = {}) noexcept {
+    using plan_t = nvme_compact_plan<indexes_type_>;
+    using paths_t = typename indexes_type_::paths_t;
+    if (status_t const refused = index.refuses_writes(); refused == status_t::read_only_k) return {{}, refused};
+    std::size_t const count = receivers.size(), parts = index.shards_count();
+    if (count < 2) return {{}, status_t::invalid_argument_k};
+    for (std::size_t position = 0; position != count; ++position) {
+        indexes_type_* const receiver = receivers[position];
+        if (!receiver) return {{}, status_t::invalid_argument_k};
+        if (receiver == &index || receiver->shards_count()) return {{}, status_t::config_mismatch_k};
+        for (std::size_t earlier = 0; earlier != position; ++earlier)
+            if (receivers[earlier] == receiver) return {{}, status_t::config_mismatch_k};
+    }
+    if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+    compact_config_t compaction;
+    compaction.expansion_factor = static_cast<u32_t>(config.expansion_factor);
+    compaction.memory_limit = config.memory_limit;
+    compaction.cache_bytes = config.cache_bytes;
+    std::size_t widest = 0;
+    for (std::size_t part = 0; part != parts; ++part) widest = max_of<std::size_t>(widest, index.part_size(part));
+    if (status_t const claimed = index.begin_refine(); failed(claimed)) return {{}, claimed};
+    paths_t stem_buffer {forkunion_allocator_t {}}, receiver_stem {forkunion_allocator_t {}};
+    auto const [stem, stem_status] = nvme_unused_stem_(index, "-split", count, parts, stem_buffer);
+    if (failed(stem_status)) return index.end_refine(), expected<refine_report_t> {{}, stem_status};
+    // Receiver `receiver`'s stem, or with `suffix` its manifest.
+    auto name = [&](paths_t& buffer, std::size_t receiver, std::string_view suffix) noexcept -> std::string_view {
+        auto print = [&](char* sink, std::size_t capacity) noexcept {
+            return std::snprintf(sink, capacity, "%.*s-%zu%.*s", static_cast<int>(stem.size()), stem.data(),
+                                 receiver + 1, static_cast<int>(suffix.size()), suffix.data());
+        };
+        int const length = print(nullptr, 0);
+        if (length < 0 || failed(buffer.resize_uninitialized(static_cast<std::size_t>(length) + 1))) return {};
+        print(buffer.data(), buffer.size());
+        return {buffer.data(), static_cast<std::size_t>(length)};
+    };
+    auto split = [&]() noexcept -> expected<refine_report_t> {
+        auto part_path = [&](paths_t& buffer, std::size_t target, std::size_t) noexcept -> expected<std::string_view> {
+            std::string_view const receiver = name(receiver_stem, target % count, {});
+            if (receiver.empty()) return {{}, status_t::bad_alloc_k};
+            return safegraphs_part_path(buffer, receiver, target / count, parts);
+        };
+        std::size_t const workspace_bytes = config.memory_limit
+                                                ? config.memory_limit
+                                                : plan_t::round_in_ram_bytes(index, divide_round_up(widest, count),
+                                                                             compaction);
+        growing_buffer<byte_t, forkunion_allocator_t> workspace {forkunion_allocator_t {}};
+        if (failed(workspace.resize_uninitialized(workspace_bytes))) return {{}, status_t::bad_alloc_k};
+        auto [plan, plan_status] = plan_split_parts_(index, count, part_path, to_writable_span(workspace), compaction);
+        if (failed(plan_status)) return {{}, plan_status};
+        if (status_t const driven = nvme_drive_rewrite_(plan, executor, index.size(), progress); failed(driven))
+            return {{}, driven};
+        paths_t manifest {forkunion_allocator_t {}};
+        auto const [split_result, finish_status] = plan.finish([&](plan_t const& sealed) noexcept {
+            for (std::size_t receiver = 0; receiver != count; ++receiver) {
+                std::string_view const path = name(manifest, receiver, ".safegraphs");
+                status_t const written = path.empty()
+                                             ? status_t::bad_alloc_k
+                                             : safegraphs_write_manifest(path, parts, [&](std::size_t part) noexcept {
+                                                   return sealed.part_entry(part * count + receiver);
+                                               });
+                if (failed(written)) {
+                    for (std::size_t back = 0; back <= receiver; ++back)
+                        if (!name(manifest, back, ".safegraphs").empty()) std::remove(manifest.data());
+                    return written;
+                }
+            }
+            return status_t::success_k;
+        });
+        return {split_result.compaction.graph, finish_status};
+    };
+    expected<refine_report_t> const split_report = split();
+    index.end_refine();
+    if (failed(split_report.status)) return split_report;
+    // The receivers' manifests are durable, so the source empties and each receiver loads its own.
+    index.release();
+    paths_t manifest {forkunion_allocator_t {}};
+    for (std::size_t receiver = 0; receiver != count; ++receiver)
+        if (status_t const loaded = receivers[receiver]->load(name(manifest, receiver, ".safegraphs")); failed(loaded))
+            return {split_report.value, loaded};
+    return split_report;
 }
 
 } // namespace unum::usearch::dense

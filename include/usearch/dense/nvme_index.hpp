@@ -179,6 +179,10 @@ struct nvme_index {
         /** How entries are reached; @c scan_k streams every part's value column, ignoring the
          *  breadth. */
         traversal_t traversal = traversal_t::walk_k;
+
+        /** Bytes of cache each executor thread keeps to itself: a scan scores each run against
+         *  blocks of its queries that stay there beside it, and zero scores every query as one. */
+        std::size_t cache_bytes = 0;
     };
 
     /** Telemetry of one batched call; matches go to the caller's spans. */

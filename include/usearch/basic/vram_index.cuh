@@ -499,9 +499,9 @@ __device__ __forceinline__ void vram_search_around( //
 }
 
 /**
- *  @brief The diversity rule of the CPU's @c keep_diverse_t: a candidate is kept only when it is
- *      closer to the node than to every kept neighbor, and the slots the rule leaves empty take the
- *      nearest rejected candidates, after the diverse picks.
+ *  @brief The diversity rule of the CPU's @c keep_diverse_t and its @c fill_selection: a candidate
+ *      is kept only when it is closer to the node than to every kept neighbor, and the slots the
+ *      rule leaves empty take the nearest rejected candidates, after the diverse picks.
  *
  *  A selector keeps neighbor rows of at most @c connectivity neighbors from candidates ascending by
  *  distance to the node, whose prepared @p query it may read; it writes the kept candidates'

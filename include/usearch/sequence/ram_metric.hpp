@@ -87,8 +87,8 @@ inline sz_string_view_t as_string_view(sz::string_view_t view) noexcept {
     return sz_string_view_t {.start = view.data(), .length = view.size()};
 }
 
-/** StringZilla's view of @p queries, read in place through an accessor, so a batch is never
- *  copied. */
+/** The strings view of @p queries, or of the values they borrow, read in place through an
+ *  accessor, so a batch is never copied. */
 template <typename query_type_>
 sz_strings_view_t as_strings_view(std::span<query_type_ const> queries) noexcept {
     sz_strings_view_t strings;
@@ -99,7 +99,7 @@ sz_strings_view_t as_strings_view(std::span<query_type_ const> queries) noexcept
                                    sz_string_view_t* views) noexcept {
         query_type_ const* const borrowed = static_cast<query_type_ const*>(handle);
         for (sz_size_t position = 0; position != count; ++position)
-            views[position] = as_string_view(sz::string_view_t {borrowed[indices[position]]});
+            views[position] = as_string_view(sz::string_view_t {basic::borrowed_query(borrowed[indices[position]])});
     };
     return strings;
 }
@@ -531,12 +531,14 @@ class levenshtein_metric {
         prepare_(queries);
     }
 
-    /** Opens rounds scoring every query of @p queries at once, all prepared into one engine, so
-     *  each @ref drain writes @b [queries,candidates]; a batch of one is a single query. */
+    /** Opens rounds scoring every query @p queries holds or borrows at once, all prepared into one
+     *  engine, so each @ref drain writes @b [queries,candidates]; a batch of one is one query. */
     template <typename query_type_>
-        requires std::convertible_to<query_type_ const&, sz::string_view_t>
+        requires requires(query_type_ const& query) {
+            { basic::borrowed_query(query) } -> std::convertible_to<sz::string_view_t>;
+        }
     void reset(std::span<query_type_ const> queries) noexcept {
-        if (queries.size() == 1) return reset(sz::string_view_t {queries.front()});
+        if (queries.size() == 1) return reset(sz::string_view_t {basic::borrowed_query(queries.front())});
         staged_.clear();
         engine_ = sz_levenshtein_engine_t {};
         arena_.clear();
@@ -730,13 +732,15 @@ class overlap_metric {
         prepare_(queries);
     }
 
-    /** Opens rounds scoring every query of @p queries at once, all hashed into one B-tree, so each
-     *  @ref drain writes @b [queries,candidates]; the views are read in place while the tree is
-     *  built, and a batch of one is a single query. */
+    /** Opens rounds scoring every query @p queries holds or borrows at once, all hashed into one
+     *  B-tree, so each @ref drain writes @b [queries,candidates]; the views are read in place while
+     *  the tree is built, and a batch of one is a single query. */
     template <typename query_type_>
-        requires std::convertible_to<query_type_ const&, sz::string_view_t>
+        requires requires(query_type_ const& query) {
+            { basic::borrowed_query(query) } -> std::convertible_to<sz::string_view_t>;
+        }
     void reset(std::span<query_type_ const> queries) noexcept {
-        if (queries.size() == 1) return reset(sz::string_view_t {queries.front()});
+        if (queries.size() == 1) return reset(sz::string_view_t {basic::borrowed_query(queries.front())});
         staged_.clear();
         engine_ = sz_overlap_engine_t {};
         arena_.clear();

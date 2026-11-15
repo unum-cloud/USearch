@@ -150,6 +150,19 @@ static_assert(buffer_allocator<forkunion_allocator_t>);
 
 #pragma region Executor
 
+/** Bytes of cache each core over @p topology keeps to itself, as ForkUnion names it per compute
+ *  domain, at its smallest across domains, or zero where no platform source names one. */
+inline std::size_t smallest_cache_bytes_per_core(fu_topology_t topology) noexcept {
+    std::size_t domains = 0, smallest = 0;
+    if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 0;
+    for (std::size_t domain = 0; domain != domains; ++domain) {
+        std::size_t bytes = 0;
+        if (fu_compute_cache_bytes_per_core_in(topology, domain, &bytes) != fu_success_k || !bytes) continue;
+        smallest = smallest ? min_of(smallest, bytes) : bytes;
+    }
+    return smallest;
+}
+
 /** The threads a bulk verb advances on and the scratch they walk with - one arena per
  *  thread, so a fan-out never leases or waits. Admits one caller at a time. */
 struct forkunion_executor_t {
@@ -182,6 +195,7 @@ struct forkunion_executor_t {
         std::swap(arenas_per_thread_, other.arenas_per_thread_);
         std::swap(threads_, other.threads_);
         std::swap(topology_, other.topology_);
+        std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
         std::swap(exclusivity_, other.exclusivity_);
     }
 
@@ -219,6 +233,7 @@ struct forkunion_executor_t {
             return {std::move(executor), status_t::bad_alloc_k};
         for (fu_memory_domain_id_t const domain : domains)
             executor.arenas_per_thread_.push_back_reserved(arena_t {forkunion_allocator_t(domain)});
+        executor.cache_bytes_per_core_ = smallest_cache_bytes_per_core(topology);
         return {std::move(executor), status_t::success_k};
     }
 
@@ -227,6 +242,7 @@ struct forkunion_executor_t {
     fu_pool_t release() noexcept {
         arenas_per_thread_.clear();
         topology_ = nullptr;
+        cache_bytes_per_core_ = 0;
         return std::exchange(threads_, nullptr);
     }
 
@@ -348,6 +364,9 @@ struct forkunion_executor_t {
     /** The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology() const noexcept { return topology_; }
 
+    /** Bytes of cache each core of the pool keeps to itself: the tile every bulk verb fills. */
+    std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
+
     /** Whether the caller runs a slice of every fan-out or stays out, read once from the pool. */
     fu_caller_exclusivity_t exclusivity() const noexcept { return exclusivity_; }
 
@@ -438,6 +457,9 @@ struct forkunion_executor_t {
 
     /** The topology the pool was spawned over; borrowed, never owned. */
     fu_topology_t topology_ = nullptr;
+
+    /** Bytes of cache each core of the pool keeps to itself, read once at @ref acquire. */
+    std::size_t cache_bytes_per_core_ = 0;
 
     /** The pool's exclusivity, read once at @ref acquire. */
     fu_caller_exclusivity_t exclusivity_ = fu_caller_inclusive_k;

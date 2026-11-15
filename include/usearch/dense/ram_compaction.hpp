@@ -9,8 +9,8 @@
  *  capacity of rows, each into the first with room, so it ends with as few shards as fit; an
  *  absorb packs the same way into the shard with the fewest rows. The shard a bin keeps stays
  *  resident with its IDs, every other source shard moves in after it with its edges rebased and its
- *  keys beside it, and only the appended nodes walk the target across the parts and link in, then
- *  each target shard heals. The moves and the walk are the absorb plan's own phases.
+ *  keys beside it, and the moved shards then run one round per target shard, which links them in.
+ *  The moves and the rounds are the absorb plan's own phases.
  */
 #pragma once
 
@@ -51,8 +51,8 @@ expected<ram_compact_plan<indexes_type_>> plan_compact(std::span<indexes_type_* 
 
 /**
  *  @brief The one-shot @ref unum::usearch::dense::plan_compact, run and finished over @p executor
- *      on contexts carved for the call; @p on_visited reports and cancels the re-selection alone,
- *      as in @c ram_compact_plan::run.
+ *      on contexts carved for the call; @p on_visited hears and cancels the rounds, as in
+ *      @c ram_compact_plan::run.
  *
  *  @par Statuses:
  *  - @c uninitialized_k No source, no target shard, or @p executor holds no threads, pool or
@@ -74,10 +74,9 @@ expected<compact_result_t> compact(std::span<indexes_type_* const> sources, inde
  *  @brief One compaction in flight into a RAM target, holding its dispensers closed meanwhile.
  *
  *  @ref run moves in the sources still pending, the target's own shards first when it compacts in
- *  place, each source staying empty, closed and sealed once it moved in, then drains the
- *  re-selection of the appended nodes and the heal; a cancel pauses only that walk, and a later
- *  call continues it.
- *  @ref finish heals what a stopped walk leaves, reopens the target and every source still pending,
+ *  place, each source staying empty, closed and sealed once it moved in, then drains one round per
+ *  target shard; a cancel pauses the rounds, and a later call continues them.
+ *  @ref finish runs the rounds to their end, reopens the target and every source still pending,
  *  and reports.
  */
 template <typename indexes_type_>
@@ -101,17 +100,17 @@ struct [[nodiscard]] ram_compact_plan {
     ~ram_compact_plan() noexcept { release_sources_(); }
 
     /**
-     *  @brief Moves in the pending sources on @p executor, then runs the re-selection until it ends
-     *      or @p on_visited cancels; @c cancelled_k means a later call continues exactly there.
+     *  @brief Moves in the pending sources on @p executor, then runs the rounds until they end or
+     *      @p on_visited cancels; @c cancelled_k means a later call continues exactly there.
      *
      *  A source failing to move in stays pending and closed, and so does every later one, for the
      *  next call to retry.
      *
      *  @param[in,out] executor The executor the plan was opened over.
-     *  @param[in,out] traversals The caller's context of every executor thread, which the walks run
+     *  @param[in,out] traversals The caller's context of every executor thread, which the tasks run
      *      on; the call sizes them.
-     *  @param[in] on_visited Fires per re-selected step with the nodes visited so far and the
-     *      population; a @c cancel_k answer stops the drain where its steps ran.
+     *  @param[in] on_visited Fires at every barrier of the rounds with the units of the phase it
+     *      closed, done and in all; a @c cancel_k answer stops the drain where its tasks ran.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is bound to no target, or @p executor holds no pool or no
@@ -133,9 +132,8 @@ struct [[nodiscard]] ram_compact_plan {
     }
 
     /**
-     *  @brief Stops any re-selection, heals on the caller's @p traversals, one per executor thread,
-     *      reopens the target and reports; a plan whose sources have not all moved in heals none of
-     *      the target index.
+     *  @brief Runs the rounds to their end on the caller's @p traversals, one per executor thread,
+     *      reopens the target and reports; a plan whose sources have not all moved in runs none.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is bound to no target, or @p executor holds no pool or no
@@ -195,7 +193,8 @@ struct [[nodiscard]] ram_compact_plan {
         if (status_t const closed = target.close_gated_(); failed(closed)) return {{}, closed};
         refining.owner_ = &target;
         refining.config_.expansion_factor = config.expansion_factor;
-        refining.config_.memory_limit = config.memory_limit;
+        // Tiles follow the cores the call runs on unless the caller overrides them.
+        refining.config_.cache_bytes = config.cache_bytes ? config.cache_bytes : executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != sources.size(); ++closing) {
             if (sources[closing] == &target) continue;
             if (status_t const closed = sources[closing]->close_gated_(); failed(closed)) {
@@ -216,9 +215,9 @@ struct [[nodiscard]] ram_compact_plan {
         plan.resident_shards_ = resident_shards;
         if (status_t const packed = target.plan_moves_(sources, capacity, rank_first_fit, refining); failed(packed))
             return {{}, packed};
-        std::size_t const shards = refining.part_offsets_.size() - 1;
-        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)) ||
-            failed(refining.stitched_parts_.resize(shards)))
+        // The moves may have opened a shard generation, whose shards take part like the others.
+        std::size_t const shards = target.shards_count();
+        if (failed(refining.shard_plans_.reserve_exactly(shards)) || failed(refining.cursors_.resize(shards)))
             return {{}, status_t::bad_alloc_k};
         // Every source row moves but those of the target's own shards that stay where they are.
         for (std::size_t shard = 0; shard != resident_shards; ++shard)
@@ -273,7 +272,7 @@ struct [[nodiscard]] ram_compact_plan {
         return {result, failed(finish_status) ? finish_status : ran};
     }
 
-    /** The absorb plan over the target: its moves, part runs and per-shard walks. */
+    /** The absorb plan over the target: its moves and per-shard rounds. */
     refine_plan_t refining_;
 
     /** The caller's source slots, borrowed until the plan dies. */

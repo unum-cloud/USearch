@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date September 5, 2026
  *  @brief The checkpoint plans every dense tower opens over its shard set: a lone live shard's
- *      SafeGraphs monolith, or one per live shard beside a manifest, saved and restored a step at
+ *      SafeGraphs monolith, or one per live shard beside a manifest, saved and restored a task at
  *      a time.
  *
  *  Both plans are components a tower returns as its own @c save_plan_t and @c load_plan_t. The
@@ -17,12 +17,13 @@
  *  - <tt>open_shard_load(shards, shard, rows)</tt>, one shard's own load at its watermark;
  *  - <tt>end_save(shards)</tt>, once a save finished or died;
  *  - on device residencies, <tt>open_sources(mappings)</tt> before the shards open, which opens one
- *    source per mapped part where the residency reads files itself, so its plans read a step's
+ *    source per mapped part where the residency reads files itself, so its plans read a task's
  *    host bytes from the part that holds them, and records how the load reads the parts.
  *
- *  Every shard keeps its own keys: a save reads them through the shard's <tt>keys()</tt>, and a
- *  load copies them with each step's rows through its shard plan's <tt>load</tt>, files them
- *  through <tt>publish_keys</tt>, one writer per shard, and publishes them with the rows.
+ *  Every shard keeps its own keys. A save task writes its rows' keys beside them, read through the
+ *  shard's @c keys, and a load task copies them with its rows through its shard plan's @c load,
+ *  which on RAM files them per run and on a device leaves them for @c publish_keys, one writer per
+ *  shard; @c finish then publishes the keys and the rows together, on every residency alike.
  *
  *  A load from a device's buffer reads only the headers and the keys on the host; its shard plans
  *  get the device's own column bytes, which the residency opened them to copy device to device.
@@ -31,6 +32,7 @@
  */
 #pragma once
 
+#include <cstdint> // `std::uintptr_t` - a staging span's place within a page
 #include <cstring> // `std::memset` - a buffer's head before its commit
 
 #include <bit>         // `std::has_single_bit` - a part's connectivity
@@ -38,10 +40,12 @@
 #include <string_view> // `std::string_view` - the checkpoint paths
 #include <utility>     // `std::move`, `std::exchange`
 
+#include <forkunion/topology.hpp> // `fu::ram_page_size` - the alignment of a direct read
+
 #include <numkong/capabilities.h> // `nk_kernel_name` - the metric every checkpoint names
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes` - the checkpoints' bytes
+#include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `column_source_t` - the checkpoints' bytes
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer` - the plans' catalogs
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator` - the plans' placement
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths, manifests & catalogs
@@ -241,8 +245,8 @@ expected<std::size_t> shard_storage_requirements(shards_type_ const& shards, sav
  *  @brief One save in flight across every live shard of a set: one shard plan and one part each,
  *      and the tail @ref finish commits - the keys, the headers, and the manifest.
  *
- *  Steps are flat and each names its shard, so a caller walks them from one thread or many;
- *  @ref steps_of names one shard's own run, which a home-first drain follows. A dying plan drops
+ *  Tasks are flat and each names its shard, so a caller walks them from one thread or many;
+ *  @ref tasks_of names one shard's own run, which a home-first drain follows. A dying plan drops
  *  its mappings and its shard plans, leaving parts no header commits, and ends the save on its
  *  residency.
  */
@@ -251,14 +255,14 @@ struct [[nodiscard]] shard_save_plan {
     using index_t = typename shards_type_::index_t;
     using key_t = typename shards_type_::key_t;
 
-    /** One step of one shard: its shard, and that shard's own step. */
-    struct step_t {
+    /** One task of one shard: its shard, and that shard's own task. */
+    struct task_t {
 
         /** The shard the rows come from. */
         std::size_t shard = 0;
 
-        /** The shard plan's own step. */
-        typename index_t::save_plan_t::step_t inner;
+        /** The shard plan's own task. */
+        typename index_t::save_plan_t::task_t inner;
     };
 
     shard_save_plan() noexcept : shard_save_plan(forkunion_allocator_t {}) {}
@@ -336,62 +340,75 @@ struct [[nodiscard]] shard_save_plan {
         return {std::move(plan), status_t::success_k};
     }
 
-    /** Step @p position of the plan; an empty one past the last. */
-    step_t operator[](std::size_t position) const noexcept {
-        step_t step;
-        if (position >= steps().size()) return step;
+    /** Task @p position of the plan; an empty one past the last. */
+    task_t operator[](std::size_t position) const noexcept {
+        task_t task;
+        if (position >= tasks().size()) return task;
         std::size_t part = 0;
         std::size_t first = 0;
-        for (; first + plans_[part].steps().size() <= position; ++part) first += plans_[part].steps().size();
-        step.shard = shards_->retired_shards() + part;
-        step.inner = plans_[part][position - first];
-        return step;
+        for (; first + plans_[part].tasks().size() <= position; ++part) first += plans_[part].tasks().size();
+        task.shard = shards_->retired_shards() + part;
+        task.inner = plans_[part][position - first];
+        return task;
     }
 
-    /** The steps the save spans - every live shard's own, in placement order; none once spent. */
-    indexed_range<shard_save_plan> steps() const noexcept {
+    /** The tasks the save spans - every live shard's own, in placement order; none once spent. */
+    indexed_range<shard_save_plan> tasks() const noexcept {
         std::size_t count = 0;
         if (shards_)
-            for (typename index_t::save_plan_t const& plan : plans_) count += plan.steps().size();
+            for (typename index_t::save_plan_t const& plan : plans_) count += plan.tasks().size();
         return {this, count};
     }
 
-    /** The contiguous run of steps shard @p shard owns - what a home-first drain takes. */
-    iota_view<std::size_t> steps_of(std::size_t shard) const noexcept {
+    /** The contiguous run of tasks shard @p shard owns - what a home-first drain takes. */
+    iota_view<std::size_t> tasks_of(std::size_t shard) const noexcept {
         if (!shards_ || shard < shards_->retired_shards() || shard - shards_->retired_shards() >= plans_.size())
             return {};
         std::size_t const part = shard - shards_->retired_shards();
         std::size_t first = 0;
-        for (std::size_t earlier = 0; earlier != part; ++earlier) first += plans_[earlier].steps().size();
-        return {first, first + plans_[part].steps().size()};
+        for (std::size_t earlier = 0; earlier != part; ++earlier) first += plans_[earlier].tasks().size();
+        return {first, first + plans_[part].tasks().size()};
     }
 
     /**
-     *  @brief Writes step @p step through its own shard's plan.
+     *  @brief Writes task @p task through its own shard's plan.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
-     *  - @c config_mismatch_k The step names a retired shard or no part, holds no rows, or the
+     *  - @c config_mismatch_k The task names a retired shard or no part, holds no rows, or the
      *    columns cannot hold them.
      */
-    status_t save(step_t const& step) noexcept {
+    status_t save(task_t const& task) noexcept {
         if (!shards_) return status_t::uninitialized_k;
-        std::size_t const part = step.shard - shards_->retired_shards();
-        if (step.shard < shards_->retired_shards() || part >= plans_.size()) return status_t::config_mismatch_k;
-        return plans_[part].save(step.inner);
+        std::size_t const part = task.shard - shards_->retired_shards();
+        if (task.shard < shards_->retired_shards() || part >= plans_.size()) return status_t::config_mismatch_k;
+        if (status_t const saved = plans_[part].save(task.inner); failed(saved)) return saved;
+        // The key column is chunked, so the task's keys go run by run beside its rows.
+        iota_view<node_id_t> const rows = task.inner.index_nodes;
+        safegraphs_header_t const& header = headers_[part];
+        bytes_span_t const key_rows = header.rows_of(target_(part), header.key, rows.first, rows.size());
+        std::size_t written = 0;
+        status_t wrote = status_t::success_k;
+        (*shards_)[task.shard].index->keys().column().for_each_span(
+            {rows.first, rows.bound}, [&](std::span<key_t const> run) noexcept {
+                if (succeeded(wrote))
+                    wrote = copy_bytes(key_rows.subspan(written, run.size_bytes()), bytes_of(run.data(), run.size()));
+                written += run.size_bytes();
+            });
+        return wrote;
     }
 
     /**
-     *  @brief Pronounces the checkpoint complete: every shard plan closes, its keys and its header
-     *      go into its part, and a save of several parts commits with its manifest - the commit
-     *      record, so a failed save leaves parts and no checkpoint.
+     *  @brief Pronounces the checkpoint complete: every shard plan closes, its header goes into its
+     *      part beside the rows and keys its tasks wrote, and a save of several parts commits with
+     *      its manifest - the commit record, so a failed save leaves parts and no checkpoint.
      *
      *  @param[in] on_saved Fires per finished shard with its index; answering @c cancel_k stops the
      *      remaining shards and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
-     *  - @c config_mismatch_k A shard's steps never wrote all its rows, or a header does not fit
+     *  - @c config_mismatch_k A shard's tasks never wrote all its rows, or a header does not fit
      *    before its data.
      *  - @c contended_k On RAM under @c concurrent_k, a counter moved during the save.
      *  - @c overflow_k A part is shorter than its header, or the manifest does not fit.
@@ -404,21 +421,6 @@ struct [[nodiscard]] shard_save_plan {
         std::size_t const retired = shards_->retired_shards();
         for (std::size_t part = 0; part != plans_.size(); ++part) {
             if (status_t const finished = plans_[part].finish(); failed(finished)) return finished;
-            safegraphs_header_t const& header = headers_[part];
-            bytes_span_t const target = target_(part);
-            std::size_t const nodes = plans_[part].visible;
-            // The key column is chunked, so its rows go run by run.
-            bytes_span_t const key_rows = header.rows_of(target, header.key, 0, nodes);
-            std::size_t written = 0;
-            status_t wrote = status_t::success_k;
-            (*shards_)[retired + part].index->keys().column().for_each_span(
-                {0, nodes}, [&](std::span<key_t const> run) noexcept {
-                    if (succeeded(wrote))
-                        wrote = copy_bytes(key_rows.subspan(written, run.size_bytes()),
-                                           bytes_of(run.data(), run.size()));
-                    written += run.size_bytes();
-                });
-            if (failed(wrote)) return wrote;
             // A lone part's header is the commit record, so it is written only once no cancel can
             // follow.
             if (plans_.size() > 1)
@@ -576,13 +578,13 @@ struct [[nodiscard]] shard_save_plan {
     /** Where each part starts inside the caller's buffer; empty for a save to files. */
     growing_buffer<std::size_t, forkunion_allocator_t> offsets_;
 
-    /** The custom fields every header carries, outliving the plan's steps. */
+    /** The custom fields every header carries, outliving the plan's tasks. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_;
 
     /** The checkpoint's own path, copied so the plan outlives the caller's view. */
     growing_buffer<char, forkunion_allocator_t> path_;
 
-    /** What the residency does beyond the shared steps, owned for the plan's whole life. */
+    /** What the residency does beyond the shared tasks, owned for the plan's whole life. */
     [[no_unique_address]] residency_type_ residency_ {};
 
     /** The shards being checkpointed; null in the empty plan a refused @ref open returns, and once
@@ -599,23 +601,41 @@ struct [[nodiscard]] shard_save_plan {
 template <typename index_type_>
 concept widens_neighbors = requires(typename index_type_::columns_view_t columns) { columns.connectivity; };
 
+/** Whether the load plans of @p index_type_ read their tasks a run at a time straight into
+ *  chunks they cover unfilled at planning, filing each run's keys themselves - the host's plans,
+ *  where a reservation ahead of the plan would only fill rows that the runs then overwrite. */
+template <typename index_type_>
+concept loads_in_runs = requires(typename index_type_::load_plan_t const& plan) { plan.run_rows; };
+
+/** A part's columns as a task of a plan that @ref loads_in_runs reads them: the column-sources
+ *  twin of an index's @c columns_view_t. */
+struct part_column_sources_t {
+    column_source_t vectors;
+    column_source_t neighbors;
+    column_source_t norms;
+
+    /** Neighbor IDs per row of @c neighbors. */
+    std::size_t connectivity = 0;
+};
+
 /**
  *  @brief One load in flight across every shard of a set: the mapped parts, one shard plan each,
- *      and the flat steps their rows arrive in - one per part's share of one chunk or batch.
+ *      and the flat tasks their rows arrive in - one per part's share of one chunk or batch.
  *
  *  Each part goes to a shard of its own, placed or opened for it, and the shards past the parts
  *  stay empty; @ref finish publishes every shard at once. Every shard's claim word stays closed
  *  from opening until the plan finishes or dies, so no insertion goes beside it. A dying plan
- *  releases every claim and publishes nothing.
+ *  releases every claim and publishes nothing. Where the shards @ref loads_in_runs, every part's
+ *  file opens a second time past the page cache, and each thread reads its runs straight from it.
  */
 template <typename shards_type_, typename residency_type_>
 struct [[nodiscard]] shard_load_plan {
     using index_t = typename shards_type_::index_t;
     using key_t = typename shards_type_::key_t;
 
-    /** One step of one shard: where it goes, which part it reads, and that part's own ID space
-     *  alongside the shard plan's step. */
-    struct step_t {
+    /** One task of one shard: where it goes, which part it reads, and that part's own ID space
+     *  alongside the shard plan's task. */
+    struct task_t {
 
         /** The shard the rows go into. */
         std::size_t shard = 0;
@@ -626,17 +646,18 @@ struct [[nodiscard]] shard_load_plan {
         /** The rows of that part the shard takes - the ID space they speak. */
         iota_view<node_id_t> source_range;
 
-        /** The shard plan's own step, cut to one part's share of one chunk or batch. */
-        typename index_t::load_plan_t::step_t inner;
+        /** The shard plan's own task, cut to one part's share of one chunk or batch. */
+        typename index_t::load_plan_t::task_t inner;
     };
 
     shard_load_plan() noexcept : shard_load_plan(forkunion_allocator_t {}) {}
 
     /** An empty plan over @p allocator; only @ref open ever fills it. */
     explicit shard_load_plan(forkunion_allocator_t allocator) noexcept
-        : mappings_(allocator), parts_(allocator), extra_columns_(allocator), keys_(allocator), plans_(allocator) {}
+        : mappings_(allocator), directs_(allocator), parts_(allocator), extra_columns_(allocator), keys_(allocator),
+          plans_(allocator) {}
     shard_load_plan(shard_load_plan&& other) noexcept
-        : mappings_(std::move(other.mappings_)), parts_(std::move(other.parts_)),
+        : mappings_(std::move(other.mappings_)), directs_(std::move(other.directs_)), parts_(std::move(other.parts_)),
           extra_columns_(std::move(other.extra_columns_)), keys_(std::move(other.keys_)),
           plans_(std::move(other.plans_)), residency_(std::move(other.residency_)),
           shards_(std::exchange(other.shards_, nullptr)) {}
@@ -685,6 +706,10 @@ struct [[nodiscard]] shard_load_plan {
         if constexpr (requires { plan.residency_.open_sources(to_writable_span(plan.mappings_)); })
             if (status_t const opened = plan.residency_.open_sources(to_writable_span(plan.mappings_)); failed(opened))
                 return {{}, opened};
+        if constexpr (loads_in_runs<index_t>) {
+            if (failed(plan.directs_.reserve_exactly(plan.mappings_.size()))) return {{}, status_t::bad_alloc_k};
+            for (mapped_file_t const& mapping : plan.mappings_) plan.directs_.push_back_reserved(mapping.open_direct());
+        }
         if (status_t const opened = plan.open_shards_(config); failed(opened)) return {{}, opened};
         return {std::move(plan), status_t::success_k};
     }
@@ -715,7 +740,7 @@ struct [[nodiscard]] shard_load_plan {
      *      host, nothing else.
      *
      *  A device's manifest and headers cross into host memory through @p copy, and so does each
-     *  part's key column, once, for the host key maps. The steps then hand the shard plans the
+     *  part's key column, once, for the host key maps. The tasks then hand the shard plans the
      *  device's own column bytes, so the residency must open plans that copy device to device.
      *
      *  @param[in] copy Copies device bytes into host memory, returning once they arrived:
@@ -748,53 +773,63 @@ struct [[nodiscard]] shard_load_plan {
         return loading_rows;
     }
 
-    /** Step @p position of the plan; an empty one past the last. */
-    step_t operator[](std::size_t position) const noexcept {
-        step_t found;
-        std::size_t passed = 0;
-        for_each_step_([&](step_t const& step) noexcept {
-            if (passed++ != position) return true;
-            found = step;
-            return false;
-        });
-        return found;
+    /** Task @p position of the plan - its shard's own task, cut to its part's rows; an empty one
+     *  past the last. */
+    task_t operator[](std::size_t position) const noexcept {
+        task_t task;
+        std::size_t const shard = shard_of_task_(position);
+        if (shard == plans_.size()) return task;
+        typename index_t::load_plan_t const& plan = plans_[shard];
+        std::size_t const part = shard - shards_->retired_shards(), first_row = plan.base;
+        std::size_t const bound_row = first_row + parts_[part].nodes;
+        typename index_t::load_plan_t::task_t const inner = plan[position - tasks_of(shard).first];
+        std::size_t const low = max_of<std::size_t>(inner.index_nodes.first, first_row);
+        std::size_t const high = max_of<std::size_t>(min_of<std::size_t>(inner.index_nodes.bound, bound_row), low);
+        task.shard = shard;
+        task.part = part;
+        task.source_range = {0, static_cast<node_id_t>(parts_[part].nodes)};
+        task.inner.position = inner.position;
+        task.inner.index_nodes = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
+        task.inner.source_nodes = {static_cast<node_id_t>(low - first_row), static_cast<node_id_t>(high - first_row)};
+        return task;
     }
 
-    /** The steps the load spans - every shard's own, in placement order; none once spent. */
-    indexed_range<shard_load_plan> steps() const noexcept {
-        std::size_t count = 0;
-        for_each_step_([&](step_t const&) noexcept {
-            ++count;
-            return true;
-        });
-        return {this, count};
+    /** The tasks the load spans - every loading shard's own, in order; none once spent. */
+    indexed_range<shard_load_plan> tasks() const noexcept { return {this, tasks_of(plans_.size()).first}; }
+
+    /** The contiguous run of tasks shard @p shard owns - what a home-first drain takes. */
+    iota_view<std::size_t> tasks_of(std::size_t shard) const noexcept {
+        if (!shards_) return {};
+        std::size_t const retired = shards_->retired_shards();
+        std::size_t first = 0;
+        for (std::size_t earlier = retired; earlier < shard && loads_part_(earlier); ++earlier)
+            first += plans_[earlier].tasks().size();
+        return {first, first + (shard >= retired && loads_part_(shard) ? plans_[shard].tasks().size() : 0)};
     }
 
-    /** The contiguous run of steps shard @p shard owns - what a home-first drain takes. */
-    iota_view<std::size_t> steps_of(std::size_t shard) const noexcept {
-        std::size_t first = 0, bound = 0;
-        for_each_step_([&](step_t const& step) noexcept {
-            first += step.shard < shard;
-            bound += step.shard <= shard;
-            return step.shard <= shard;
-        });
-        return {first, bound};
+    /** Bytes of staging each thread hands every task it runs: a run's keys as their part stores
+     *  them, and a page to align them for a read past the page cache. */
+    std::size_t staging_bytes() const noexcept {
+        std::size_t key_bytes = 0, run_rows = 0;
+        for (safegraphs_catalog_part_t const& part : parts_) key_bytes = max_of(key_bytes, part.header.key.row_bytes());
+        for (typename index_t::load_plan_t const& plan : plans_) run_rows = max_of(run_rows, plan.run_rows);
+        return run_rows * key_bytes + fu::ram_page_size();
     }
 
     /**
-     *  @brief Copies step @p step: its part's own columns, under that part's ID space, and its
+     *  @brief Copies task @p task: its part's own columns, under that part's ID space, and its
      *      rows' keys, widened to the shards' key type, through the shard's own plan.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
-     *  - @c config_mismatch_k The step names no shard or part, holds no rows, or the columns
+     *  - @c config_mismatch_k The task names no shard or part, holds no rows, or the columns
      *    cannot hold them, or its IDs rebase past the plan.
      *  - @c io_k On NVIDIA, a read through cuFile ended short, which never restarts on the host.
      */
-    status_t load(step_t const& step) noexcept {
+    status_t load(task_t const& task) noexcept {
         if (!shards_) return status_t::uninitialized_k;
-        if (step.shard >= plans_.size() || step.part >= parts_.size()) return status_t::config_mismatch_k;
-        safegraphs_catalog_part_t const& part = parts_[step.part];
+        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_t::config_mismatch_k;
+        safegraphs_catalog_part_t const& part = parts_[task.part];
         typename index_t::columns_view_t columns {
             part.header.data_of(part.monolith, part.header.value),
             part.header.data_of(part.monolith, part.header.neighbors),
@@ -802,23 +837,68 @@ struct [[nodiscard]] shard_load_plan {
         if constexpr (widens_neighbors<index_t>)
             columns.connectivity = regular_width(part.header.neighbors.shape).value_or(0);
         std::size_t const stored_bytes = part.header.key.row_bytes();
-        bytes_view_t const part_keys = keys_of_(step.part);
-        return plans_[step.shard].load(step.inner, columns, step.source_range, [&](node_id_t row) noexcept {
+        bytes_view_t const part_keys = keys_of_(task.part);
+        return plans_[task.shard].load(task.inner, columns, task.source_range, [&](node_id_t row) noexcept {
             return safegraphs_widened_key<key_t>(part_keys.data() + row * stored_bytes, part.header.key.dtype);
         });
     }
 
     /**
-     *  @brief Publishes the restored graph: every shard files the keys its steps copied, its map's
-     *      one writer, then publishes them with its rows - the order an insert keeps, so a lookup
-     *      finds a key exactly when a search reaches its row.
+     *  @brief Reads task @p task straight out of its part through the shard's own plan.
      *
-     *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k reports
-     *      @c cancelled_k.
+     *  Every column comes from the part's file past the page cache where it opened, else from its
+     *  mapping, and the run's keys through the page-aligned start of @p staging, widened to the
+     *  shards' key type on their way into the key column.
+     *
+     *  @param[in] staging At least @ref staging_bytes of the calling thread's own.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The plan is empty or spent.
-     *  - @c config_mismatch_k A shard's steps never copied all its rows.
+     *  - @c config_mismatch_k The task names no shard or part, holds no rows, the columns cannot
+     *    hold them, its IDs rebase past the plan, or @p staging is too short.
+     */
+    status_t load(task_t const& task, bytes_span_t staging) noexcept {
+        if (!shards_) return status_t::uninitialized_k;
+        if (task.shard >= plans_.size() || task.part >= parts_.size()) return status_t::config_mismatch_k;
+        safegraphs_catalog_part_t const& part = parts_[task.part];
+        file_view_t const file = task.part < directs_.size() && directs_[task.part]
+                                     ? file_view_t {&directs_[task.part], 0, part.monolith.size()}
+                                     : file_view_t {};
+        auto source_of = [&](bytes_view_t mapped) noexcept {
+            if (mapped.empty()) return column_source_t {};
+            return column_source_t {
+                mapped, file.subspan(static_cast<std::size_t>(mapped.data() - part.monolith.data()), mapped.size())};
+        };
+        part_column_sources_t const columns {
+            source_of(part.header.data_of(part.monolith, part.header.value)),
+            source_of(part.header.data_of(part.monolith, part.header.neighbors)),
+            source_of(norms_column_of(part.header, part.monolith, shard_norms_dtype(*shards_))),
+            regular_width(part.header.neighbors.shape).value_or(0)};
+        std::size_t const stored_bytes = part.header.key.row_bytes(), first = task.inner.source_nodes.first;
+        std::size_t const count = task.inner.source_nodes.size(), page = fu::ram_page_size();
+        std::size_t const skipped = (page - reinterpret_cast<std::uintptr_t>(staging.data()) % page) % page;
+        if (staging.size() < skipped + count * stored_bytes) return status_t::config_mismatch_k;
+        bytes_span_t const keys = staging.subspan(skipped, count * stored_bytes);
+        if (status_t const read = copy_entries(source_of(keys_of_(task.part)), first, count, stored_bytes, keys);
+            failed(read))
+            return read;
+        return plans_[task.shard].load(task.inner, columns, task.source_range, [&](node_id_t row) noexcept {
+            return safegraphs_widened_key<key_t>(keys.data() + (row - first) * stored_bytes, part.header.key.dtype);
+        });
+    }
+
+    /**
+     *  @brief Publishes the restored graph: every shard publishes its keys with its rows, the
+     *      order an insert keeps, so a lookup finds a key exactly when a search reaches its row.
+     *
+     *  On a device every shard first files the keys its tasks copied, its map's one writer, while
+     *  on RAM every run already filed its own.
+     *
+     *  @param[in] on_loaded Fires per finished shard; answering @c cancel_k reports @c cancelled_k.
+     *
+     *  @par Statuses:
+     *  - @c uninitialized_k The plan is empty or spent.
+     *  - @c config_mismatch_k A shard's tasks never copied all its rows.
      *  - @c device_error_k On NVIDIA or AMD, a shard's keys never reached the device.
      *  - @c unsupported_k or @c unsupported_layout_k On NVIDIA or AMD, a shard keeps this earlier
      *    refusal.
@@ -828,7 +908,7 @@ struct [[nodiscard]] shard_load_plan {
         if (!shards_) return status_t::uninitialized_k;
         for (std::size_t shard = 0; shard != plans_.size(); ++shard) {
             // Every plan finishes, an empty one included, since finishing releases the claim.
-            plans_[shard].publish_keys();
+            if constexpr (!loads_in_runs<index_t>) plans_[shard].publish_keys();
             if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
         }
         for (std::size_t shard = 0; shard != plans_.size(); ++shard)
@@ -875,7 +955,7 @@ struct [[nodiscard]] shard_load_plan {
      *      reserves every shard for its own part's rows or its share of @p config 's, and opens one
      *      load plan per shard over them.
      *
-     *  Part @c p goes to live shard @c p whole, so the flat steps are the intersections of its
+     *  Part @c p goes to live shard @c p whole, so the flat tasks are the intersections of its
      *  rows with the chunks or batches of that shard's plan. A part past the shard bound answers
      *  @c overflow_k, as does a residency that builds no shards where the parts outnumber them.
      */
@@ -905,7 +985,7 @@ struct [[nodiscard]] shard_load_plan {
         if (!shards.capacity() && !total && !config.capacity) return status_t::success_k;
 
         // The shards the parts open past the present ones are built like the rest, and each shard
-        // grows ahead of its own part's rows or its share of the config's, under the bound.
+        // grows to its own part's rows or its share of the config's, under the bound.
         typename index_t::reserve_capacity_t per_shard {};
         per_shard.ceiling = bound;
         for (std::size_t shard = 0; shard != shards.size(); ++shard)
@@ -915,12 +995,23 @@ struct [[nodiscard]] shard_load_plan {
             if (status_t const opened = residency_.open_shard_for_part(shards, part); failed(opened)) return opened;
         std::size_t const shards_count = shards.size();
         std::size_t const share = divide_round_up(config.capacity, shards_count - retired);
-        for (std::size_t shard = retired; shard != shards_count; ++shard) {
-            std::size_t const part = shard - retired;
-            per_shard.capacity = min_of(max_of(part < parts_.size() ? parts_[part].nodes : 0, share), bound);
-            if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
-                return reserved;
-        }
+        auto share_of = [&](std::size_t part) noexcept {
+            return min_of(max_of(part < parts_.size() ? parts_[part].nodes : 0, share), bound);
+        };
+        auto reserve_live = [&](auto capacity_of) noexcept {
+            for (std::size_t shard = retired; shard != shards_count; ++shard) {
+                per_shard.capacity = capacity_of(shard - retired);
+                if (status_t const reserved = shards[shard].index->reserve(per_shard).status; failed(reserved))
+                    return reserved;
+            }
+            return status_t::success_k;
+        };
+        // A device's plans need their storage grown ahead, while plans that load in runs cover
+        // their part's rows unfilled: ahead of those a shard takes its ceiling alone, and after
+        // them the config's share past its part.
+        status_t const reserved_ahead = loads_in_runs<index_t> ? reserve_live([](std::size_t) noexcept { return 0; })
+                                                               : reserve_live(share_of);
+        if (failed(reserved_ahead)) return reserved_ahead;
 
         if (failed(plans_.reserve_exactly(shards_count))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards_count; ++shard) {
@@ -930,11 +1021,11 @@ struct [[nodiscard]] shard_load_plan {
             if (failed(status)) return status;
             plans_.push_back_reserved(std::move(inner));
         }
-        return status_t::success_k;
+        return loads_in_runs<index_t> ? reserve_live(share_of) : status_t::success_k;
     }
 
     /** Copies every part's key column off device @p device into @c keys_, in part order, so a
-     *  step widens its keys on the host. */
+     *  task widens its keys on the host. */
     template <typename copy_type_>
     status_t stage_keys_(int device, copy_type_& copy) noexcept {
         std::size_t total = 0;
@@ -963,34 +1054,29 @@ struct [[nodiscard]] shard_load_plan {
         return to_span(keys_).subspan(first, found.nodes * found.header.key.row_bytes());
     }
 
-    /** Visits the flat steps in order, each part's share of each chunk or batch of its shard's
-     *  plan, until @p visit answers @c false; none once spent. */
-    template <typename visit_type_>
-    void for_each_step_(visit_type_&& visit) const noexcept {
-        if (!shards_) return;
-        std::size_t const retired = shards_->retired_shards();
-        for (std::size_t shard = retired; shard < plans_.size() && shard - retired < parts_.size(); ++shard) {
-            typename index_t::load_plan_t const& plan = plans_[shard];
-            std::size_t const part = shard - retired, first_row = plan.base, bound_row = first_row + parts_[part].nodes;
-            for (typename index_t::load_plan_t::step_t const batch : plan.steps()) {
-                std::size_t const low = max_of<std::size_t>(batch.index_nodes.first, first_row);
-                std::size_t const high = min_of<std::size_t>(batch.index_nodes.bound, bound_row);
-                if (low >= high) continue;
-                step_t step;
-                step.shard = shard;
-                step.part = part;
-                step.source_range = {0, static_cast<node_id_t>(parts_[part].nodes)};
-                step.inner.position = batch.position;
-                step.inner.index_nodes = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
-                step.inner.source_nodes = {static_cast<node_id_t>(low - first_row),
-                                           static_cast<node_id_t>(high - first_row)};
-                if (!visit(step)) return;
-            }
+    /** Whether shard @p shard takes a part, and so has tasks; none once spent. */
+    bool loads_part_(std::size_t shard) const noexcept {
+        return shards_ && shard < plans_.size() && shard >= shards_->retired_shards() &&
+               shard - shards_->retired_shards() < parts_.size();
+    }
+
+    /** The shard whose tasks hold flat task @p position, or the plan count past the last. */
+    std::size_t shard_of_task_(std::size_t position) const noexcept {
+        if (!shards_) return plans_.size();
+        for (std::size_t shard = shards_->retired_shards(); loads_part_(shard); ++shard) {
+            std::size_t const count = plans_[shard].tasks().size();
+            if (position < count) return shard;
+            position -= count;
         }
+        return plans_.size();
     }
 
     /** The files the parts were mapped from; every part's rows are read out of them. */
     growing_buffer<mapped_file_t, forkunion_allocator_t> mappings_;
+
+    /** Each part's file opened again past the page cache, empty where it would not open, or none
+     *  at all where the shards do not @ref loads_in_runs or the parts came from a buffer. */
+    growing_buffer<seekable_file_t, forkunion_allocator_t> directs_;
 
     /** The checkpoint's parts, vetted at opening. */
     growing_buffer<safegraphs_catalog_part_t, forkunion_allocator_t> parts_;
@@ -1005,7 +1091,7 @@ struct [[nodiscard]] shard_load_plan {
     /** One plan per shard, in placement order. */
     growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans_;
 
-    /** What the residency does beyond the shared steps, owned for the plan's whole life. */
+    /** What the residency does beyond the shared tasks, owned for the plan's whole life. */
     [[no_unique_address]] residency_type_ residency_ {};
 
     /** The shards being restored, their claim words closed so no batch interleaves with the

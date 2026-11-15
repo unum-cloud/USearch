@@ -35,6 +35,10 @@
 #include <utility>     // `std::forward`, `std::move`
 #include <variant>     // `std::variant` - the interchange's three row shapes
 
+#if !USEARCH_OS_WINDOWS_ && !USEARCH_OS_WASI_
+#include <sys/file.h> // `flock` - a manifest writer's advisory lock
+#endif
+
 #include <yyjson.h> // The JSON reader & writer - exceptions-free C
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the shared outcome
@@ -920,6 +924,149 @@ status_t safegraphs_write_manifest(std::string_view path, std::size_t parts, cal
                                  return replace_file_durably(path, bytes_of(json.data(), json.size()), allocator);
                              });
 }
+
+#if USEARCH_OS_WINDOWS_
+
+/** Takes the exclusive advisory lock on @p file without waiting, on one byte past any length a
+ *  manifest reaches, so readers of its bytes are never refused. */
+inline bool safegraphs_lock_manifest_(native_file_t file) noexcept {
+    OVERLAPPED last_byte {};
+    last_byte.Offset = MAXDWORD, last_byte.OffsetHigh = MAXDWORD;
+    return ::LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &last_byte) != 0;
+}
+
+/** Whether @p path still names the file @p file has open, rather than one moved over it since. */
+inline bool safegraphs_names_open_file_(native_file_t file, char const* path) noexcept {
+    native_file_t const named = ::CreateFileA(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                              OPEN_EXISTING, 0, nullptr);
+    if (named == invalid_native_file_k) return false;
+    BY_HANDLE_FILE_INFORMATION opened {}, found {};
+    bool const same = ::GetFileInformationByHandle(file, &opened) && ::GetFileInformationByHandle(named, &found) &&
+                      opened.dwVolumeSerialNumber == found.dwVolumeSerialNumber &&
+                      opened.nFileIndexHigh == found.nFileIndexHigh && opened.nFileIndexLow == found.nFileIndexLow;
+    ::CloseHandle(named);
+    return same;
+}
+
+#elif USEARCH_OS_WASI_
+
+/** WASI has no file locks, so no manifest is ever locked there. */
+inline bool safegraphs_lock_manifest_(native_file_t) noexcept { return false; }
+
+/** WASI locks nothing, so no locked file is ever compared with its path. */
+inline bool safegraphs_names_open_file_(native_file_t, char const*) noexcept { return true; }
+
+#else
+
+/** Takes the exclusive advisory lock on @p file without waiting; it belongs to the open file, so it
+ *  ends with it. */
+inline bool safegraphs_lock_manifest_(native_file_t file) noexcept { return ::flock(file, LOCK_EX | LOCK_NB) == 0; }
+
+/** Whether @p path still names the file @p file has open, rather than one moved over it since. */
+inline bool safegraphs_names_open_file_(native_file_t file, char const* path) noexcept {
+    struct stat opened, named;
+    return ::fstat(file, &opened) == 0 && ::stat(path, &named) == 0 && opened.st_dev == named.st_dev &&
+           opened.st_ino == named.st_ino;
+}
+
+#endif
+
+/**
+ *  @brief The advisory lock a manifest's one writer holds while it replaces the manifest's parts:
+ *      readers never take it, so views keep opening the manifest, and a second writer is refused.
+ *
+ *  The lock rides on the open file, so it ends when the lock dies. A replacement locks the staged
+ *  manifest before moving it over the path, so the file the path names is always locked, and only
+ *  then gives up the lock on the file it replaced.
+ */
+struct safegraphs_manifest_lock_t {
+    seekable_file_t file;
+
+    /**
+     *  @brief Opens @p path and locks it, opening it again whenever a replacement moved another
+     *      file over the path between the open and the lock.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k The path does not parse, or addresses a device or a span of one.
+     *  - @c bad_alloc_k The path could not be terminated.
+     *  - @c io_k The manifest cannot be opened.
+     *  - @c contended_k Another writer holds the lock, or on WASI, which locks nothing, always.
+     */
+    template <typename allocator_type_ = std::allocator<byte_t>>
+    static expected<safegraphs_manifest_lock_t> open(std::string_view path, allocator_type_ allocator = {}) noexcept {
+        auto const [address, address_status] = parse_file_address(path);
+        if (failed(address_status)) return {safegraphs_manifest_lock_t {}, address_status};
+        if (address.byte_base || address.byte_limit || address.location.size() != path.size())
+            return {safegraphs_manifest_lock_t {}, status_t::invalid_argument_k};
+        growing_buffer<char, allocator_type_> terminated {allocator};
+        if (failed(terminated.resize_uninitialized(path.size() + 1)))
+            return {safegraphs_manifest_lock_t {}, status_t::bad_alloc_k};
+        terminated[path.copy(terminated.data(), path.size())] = '\0';
+        for (;;) {
+            auto [file, open_status] = seekable_file_t::open(path, file_access_t::read_only_k, allocator);
+            if (failed(open_status)) return {safegraphs_manifest_lock_t {}, open_status};
+            if (!safegraphs_lock_manifest_(file.descriptor()))
+                return {safegraphs_manifest_lock_t {}, status_t::contended_k};
+            if (safegraphs_names_open_file_(file.descriptor(), terminated.data()))
+                return {safegraphs_manifest_lock_t {std::move(file)}, status_t::success_k};
+        }
+    }
+
+    /**
+     *  @brief Replaces the manifest at @p path, which this lock holds, with one over @p parts
+     *      entries drawn from @p part_at, as @ref safegraphs_write_manifest writes it.
+     *
+     *  The new manifest is staged in a sibling @c .tmp file locked before it moves over the path;
+     *  the lock then rides on the new file.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another process holds the staged file's lock; nothing moved.
+     *  - @c bad_alloc_k The names the OS demands terminated could not be formed.
+     *  - @c io_k The staged file could not be written, flushed or moved over the path, which still
+     *    names the old manifest; or the directory could not be flushed after the move, which leaves
+     *    the new manifest in place and this lock on it.
+     */
+    template <typename callback_type_, typename allocator_type_ = std::allocator<byte_t>>
+    status_t replace(std::string_view path, std::size_t parts, callback_type_&& part_at,
+                     allocator_type_ allocator = {}) noexcept {
+        safegraphs_yyjson_allocator_<allocator_type_> trampoline {allocator};
+        yyjson_alc const allocator_abi = trampoline.c_abi();
+        auto stage_and_move = [&](std::string_view json) noexcept {
+            constexpr std::string_view suffix = ".tmp";
+            constexpr std::string_view separators = USEARCH_OS_WINDOWS_ ? "/\\" : "/";
+            std::size_t const separator = path.find_last_of(separators);
+            std::string_view const parent = separator == std::string_view::npos
+                                                ? std::string_view {"."}
+                                                : path.substr(0, max_of<std::size_t>(separator, 1));
+            std::size_t const length = path.size();
+            growing_buffer<char, allocator_type_> names {allocator};
+            if (failed(names.resize_uninitialized(length + 1 + length + suffix.size() + 1 + parent.size() + 1)))
+                return status_t::bad_alloc_k;
+            char* const target = names.data();
+            char* const staged = target + length + 1;
+            char* const directory = staged + length + suffix.size() + 1;
+            target[path.copy(target, length)] = '\0';
+            staged[path.copy(staged, length) + suffix.copy(staged + length, suffix.size())] = '\0';
+            directory[parent.copy(directory, parent.size())] = '\0';
+            auto [staged_file, staged_status] = seekable_file_t::open(std::string_view {staged, length + suffix.size()},
+                                                                      file_access_t::truncate_read_write_k, allocator);
+            if (failed(staged_status)) return staged_status;
+            if (!safegraphs_lock_manifest_(staged_file.descriptor())) return status_t::contended_k;
+            status_t moved = staged_file.write_at(0, bytes_of(json.data(), json.size()));
+            if (succeeded(moved)) moved = staged_file.flush();
+            if (succeeded(moved)) moved = rename_file(staged, target);
+            if (failed(moved)) {
+                [[maybe_unused]] int const removed = std::remove(staged);
+                return moved;
+            }
+            // The replaced file closes as the staged handle leaves scope, releasing its lock last.
+            std::swap(file, staged_file);
+            return sync_directory(directory);
+        };
+        return safegraphs_print_(safegraphs_manifest_document_(parts, part_at, {}, allocator_abi), allocator_abi,
+                                 stage_and_move);
+    }
+};
 
 /**
  *  @brief Lays @p parts monoliths, @p part_at answering each one's bytes and nodes, behind the

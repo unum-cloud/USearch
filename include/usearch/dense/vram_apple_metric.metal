@@ -102,6 +102,43 @@ struct metal_warp_t {
         fence();
         return previous;
     }
+    static uint load_relaxed(device uint* word) { return atomic_load_explicit(atomic_(word), memory_order_relaxed); }
+
+    /** Byte @p index of @p column, which other lanes write byte by byte; Metal has no byte atomics,
+     *  so it loads the word holding it, which needs the column on a word boundary. */
+    static uint load_relaxed(device uchar* column, uint index) {
+        uint const word = atomic_load_explicit(atomic_((device uint*)column + (index >> 2)), memory_order_relaxed);
+        return (word >> ((index & 3u) * 8u)) & 0xFFu;
+    }
+    static uint exchange_relaxed(device uint* word, uint value) {
+        return atomic_exchange_explicit(atomic_(word), value, memory_order_relaxed);
+    }
+    static uint fetch_add_relaxed(device uint* word, uint value) {
+        return atomic_fetch_add_explicit(atomic_(word), value, memory_order_relaxed);
+    }
+    static uint fetch_min_relaxed(device uint* word, uint value) {
+        return atomic_fetch_min_explicit(atomic_(word), value, memory_order_relaxed);
+    }
+    static uint fetch_or_relaxed(device uint* word, uint value) {
+        return atomic_fetch_or_explicit(atomic_(word), value, memory_order_relaxed);
+    }
+    static uint fetch_and_relaxed(device uint* word, uint value) {
+        return atomic_fetch_and_explicit(atomic_(word), value, memory_order_relaxed);
+    }
+    static bool compare_exchange_relaxed(device uint* word, uint expected, uint desired) {
+        return atomic_compare_exchange_weak_explicit(atomic_(word), &expected, desired, memory_order_relaxed,
+                                                     memory_order_relaxed);
+    }
+
+    static uint reduce_add(uint value) { return simd_sum(value); }
+    static uint reduce_min(uint value) { return simd_min(value); }
+    static ulong reduce_min(ulong value) {
+        for (uint mask = width_k / 2; mask; mask >>= 1) {
+            ulong const other = shuffle_xor(value, mask);
+            value = other < value ? other : value;
+        }
+        return value;
+    }
 
   private:
     static device atomic_uint* atomic_(device uint* word) { return (device atomic_uint*)word; }

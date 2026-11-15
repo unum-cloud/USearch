@@ -560,6 +560,15 @@ struct cuda_device_specs_t {
     /** This device's generation on the @c cuda_arch_t scale - the kit chains' runtime ceiling. */
     cuda_arch_t arch() const noexcept { return cuda_arch_of(compute_major, compute_minor); }
 
+    /** Bytes one block keeps to itself while it holds a whole multiprocessor: the widest grant
+     *  within the multiprocessor's share, less the driver's reserve. A device tile is sized by it,
+     *  as a CPU tile is by a core's cache. */
+    std::size_t cache_bytes_per_core() const noexcept {
+        std::size_t const reserve = min_of(reserved_shared_memory_per_block_bytes,
+                                           shared_memory_per_multiprocessor_bytes);
+        return min_of(shared_memory_per_block_bytes, shared_memory_per_multiprocessor_bytes - reserve);
+    }
+
     /**
      *  Queries the driver for @p ordinal's specification; meaningful only on @c success_k.
      *
@@ -1977,6 +1986,7 @@ struct cuda_executor_t {
         std::swap(api_, other.api_);
         std::swap(streams_, other.streams_);
         std::swap(scratch_limit_, other.scratch_limit_);
+        std::swap(cache_bytes_per_core_, other.cache_bytes_per_core_);
     }
 
     /**
@@ -2000,9 +2010,22 @@ struct cuda_executor_t {
         if (streams.empty()) return {{}, status_t::config_mismatch_k};
         cuda_executor_t executor;
         executor.api_ = streams[0].api;
+        // Queried once here; every round reads it from the executor afterwards.
+        for (stream_t const& opened : streams) {
+            auto const [specs, status] = cuda_device_specs_t::query(*opened.api, opened.device);
+            if (failed(status)) return {{}, status};
+            std::size_t const bytes = specs.cache_bytes_per_core();
+            executor.cache_bytes_per_core_ = executor.cache_bytes_per_core_
+                                                 ? min_of(executor.cache_bytes_per_core_, bytes)
+                                                 : bytes;
+        }
         executor.streams_ = std::move(streams);
         return {std::move(executor), status_t::success_k};
     }
+
+    /** Bytes of shared memory a block keeps to itself on the smallest of this executor's devices,
+     *  the twin of @c forkunion_executor_t::cache_bytes_per_core. */
+    std::size_t cache_bytes_per_core() const noexcept { return cache_bytes_per_core_; }
 
     /**
      *  @brief Opens one stream per entry of @p devices through @p api, binding each first, since a
@@ -2108,6 +2131,9 @@ struct cuda_executor_t {
     /** The ceiling on each stream's run, which every call's scratch and outputs carve from; zero
      *  lets it grow as geometry asks. */
     std::size_t scratch_limit_ = 0;
+
+    /** What @ref cache_bytes_per_core answers, set once by @ref acquire. */
+    std::size_t cache_bytes_per_core_ = 0;
 };
 
 /** The NVIDIA types and driver calls a vendor-neutral VRAM index declares itself with and queues

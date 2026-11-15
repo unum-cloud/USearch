@@ -288,9 +288,9 @@ struct vram_apple_indexes {
      *
      *  The executor and every shard's claim over the rows it takes are held for the plan's whole
      *  life, one context per shard opened for the whole batch, and every shard's storage and keys
-     *  grown to the rows it takes, so a step fails only on its devices.
+     *  grown to the rows it takes, so a task fails only on its devices.
      *
-     *  Row @c t of the batch goes to shard @c (rotation+t) mod S. Steps run one after another on
+     *  Row @c t of the batch goes to shard @c (rotation+t) mod S. Tasks run one after another on
      *  one host thread, each writing its rows' keys and launching the rows, every launch finishing
      *  before it answers; @ref finish turns every shard's watermark inside one commit, so a reader
      *  spanning the shards sees the batch whole or not at all. A failed launch publishes nothing,
@@ -319,14 +319,15 @@ struct vram_apple_indexes {
         }
 
         /**
-         *  Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
-         *  the rows and the keys stay live until @ref finish. Mismatched arguments launch nothing,
-         *  any later refusal fails the plan.
+         *  @brief Launches @p rows from row @p first_row of the plan under @p keys on their shards;
+         *      the rows and the keys stay live until @ref finish.
+         *
+         *  Mismatched arguments launch nothing, any later refusal fails the plan.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
          *  - @c config_mismatch_k The @p keys are not one per row, the rows pass the batch or are
-         *    not as wide as the index, a step overlaps rows already launched, or @ref status keeps
+         *    not as wide as the index, a task overlaps rows already launched, or @ref status keeps
          *    it.
          *  - @c unsupported_layout_k Rows sit closer than one packed row apart, or @ref status
          *    keeps it.
@@ -356,16 +357,16 @@ struct vram_apple_indexes {
 
         /**
          *  @brief Publishes every row at once and reports the batch's telemetry. A plan short of
-         *      rows refuses and stays whole, so the missing steps can still be copied.
+         *      rows refuses and stays whole, so the missing tasks can still be copied.
          *
          *  Any other call spends the plan, and a failed launch publishes nothing and keeps its
          *  failure on every shard holding launched rows.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or spent.
-         *  - @c config_mismatch_k The steps launched fewer rows than the batch holds, or a step or
+         *  - @c config_mismatch_k The tasks launched fewer rows than the batch holds, or a task or
          *    @ref status keeps it.
-         *  - @c unsupported_layout_k A step or @ref status keeps it.
+         *  - @c unsupported_layout_k A task or @ref status keeps it.
          *  - @c cancelled_k The index keeps it, as @ref status says.
          */
         expected<insert_result_t> finish() noexcept {
@@ -418,14 +419,14 @@ struct vram_apple_indexes {
             std::size_t launched = 0;
         };
 
-        /** Launches the step's rows shard @p shard takes, from @p first on in strides of the shard
+        /** Launches the task's rows shard @p shard takes, from @p first on in strides of the shard
          *  count, under their keys. */
         status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const shards = shares_.size(), count = rows.rows;
             std::size_t const taking = shards_t::entries_from(count, first, shards);
             share_t& share = shares_[shard];
             if (!taking) return status_t::success_k;
-            // Overlapping steps would write keys past the cover the plan grew.
+            // Overlapping tasks would write keys past the cover the plan grew.
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             shard_t& slot = owner_->shards_[shard];
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
@@ -478,7 +479,7 @@ struct vram_apple_indexes {
         /** The telemetry the launches reported as they returned, summed. */
         insert_result_t result_ {};
 
-        /** The first refusal past a step's arguments, which leaves the whole batch unpublished. */
+        /** The first refusal past a task's arguments, which leaves the whole batch unpublished. */
         status_t status_ = status_t::success_k;
 
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
@@ -501,7 +502,7 @@ struct vram_apple_indexes {
      *  admitted, or a mixed fleet inserts partially, so a shard that cannot refuses the whole plan
      *  with @c config_mismatch_k.
      *
-     *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
+     *  @param[in] rows Rows in the batch; the plan's tasks launch each exactly once, in any order.
      *  @param[in,out] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      *
@@ -575,7 +576,7 @@ struct vram_apple_indexes {
     /**
      *  @brief Inserts a batch under @p keys, splitting rows across the shards round-robin from a
      *      rotating start, so they fill evenly and each sees the whole distribution:
-     *      @ref plan_insert, one step over every row, and its @c finish.
+     *      @ref plan_insert, one task over every row, and its @c finish.
      *
      *  Node IDs never cross this boundary: they are shard-local, and which shard a row went to is
      *  the index's business. The keys are what the caller gets its rows back by.
@@ -606,7 +607,7 @@ struct vram_apple_indexes {
         if (keys.size() != new_rows.rows) return {{size()}, status_t::config_mismatch_k};
         auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {{size()}, status};
-        // A refused step leaves rows short, and `finish` reports the refusal it kept or the
+        // A refused task leaves rows short, and `finish` reports the refusal it kept or the
         // shortfall.
         [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_rows);
         return plan.finish();
@@ -642,26 +643,25 @@ struct vram_apple_indexes {
      *  @brief One refine in flight over every device shard, holding every claim word closed
      *      meanwhile.
      *
-     *  It owns its walk contexts, which own their buffers, and its part starts, so nothing about it
-     *  lives in the index; @ref run continues it after a cancel, and @ref finish heals what a
-     *  stopped pass leaves and reopens. Every shard's @c refine_plan_t is driven phase by phase
-     *  from this thread: each phase queues on every shard's device first, then waits once per
-     *  shard, so the devices work side by side. An absorb's plan first appends its donors, one
-     *  after another, and only then opens the shards' passes over the parts they appended.
+     *  It owns its contexts, which own their buffers, so nothing about it lives in the index; @ref
+     *  run continues it after a cancel, and @ref finish closes what a stopped round leaves and
+     *  reopens. Every shard's @c refine_plan_t is driven phase by phase from this thread: each
+     *  phase queues on every shard's device first, then waits once per shard, so the devices work
+     *  side by side. An absorb's plan first appends its donors, one after another, and only then
+     *  opens one round on every shard, whose heal links the appended parts in and whose gather
+     *  mixes them with the resident ones.
      */
     struct [[nodiscard]] refine_plan_t {
         refine_plan_t() noexcept : refine_plan_t(forkunion_allocator_t {}) {}
 
         /** An empty plan over @p allocator; only @ref plan_absorb ever fills it. */
         explicit refine_plan_t(forkunion_allocator_t allocator) noexcept
-            : traversals_(allocator), shard_plans_(allocator), part_bases_(allocator), part_offsets_(allocator),
-              moves_(allocator) {}
+            : traversals_(allocator), shard_plans_(allocator), moves_(allocator) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : traversals_(std::move(other.traversals_)), shard_plans_(std::move(other.shard_plans_)),
-              part_bases_(std::move(other.part_bases_)), part_offsets_(std::move(other.part_offsets_)),
               moves_(std::move(other.moves_)), donors_(std::exchange(other.donors_, {})),
               receivers_(std::exchange(other.receivers_, {})), absorbed_donors_(other.absorbed_donors_),
-              config_(other.config_), population_(other.population_), owner_(std::exchange(other.owner_, nullptr)) {}
+              config_(other.config_), owner_(std::exchange(other.owner_, nullptr)) {}
         refine_plan_t& operator=(refine_plan_t&&) = delete;
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
@@ -683,8 +683,9 @@ struct vram_apple_indexes {
          *  stays empty, closed and sealed. The executor is held only for the call.
          *
          *  @param[in,out] executor The executor the plan was opened over.
-         *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
-         *      population; a @c cancel_k answer stops before the next phase.
+         *  @param[in] on_visited Fires at every barrier of a round with the units its phase did so
+         *      far and in all, summed over the shards; a @c cancel_k answer stops the plan before
+         *      the next phase opens.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished.
@@ -704,7 +705,7 @@ struct vram_apple_indexes {
             if (failed(claim_status)) return claim_status;
             for (; absorbed_donors_ != donors_.size(); ++absorbed_donors_) {
                 vram_apple_indexes*& donor = donors_[absorbed_donors_];
-                if (status_t const absorbed = owner_->absorb_(*donor, moves_of_(), executor, *this); failed(absorbed))
+                if (status_t const absorbed = owner_->absorb_(*donor, moves_of_(), executor); failed(absorbed))
                     return absorbed;
                 donor = nullptr;
             }
@@ -714,8 +715,8 @@ struct vram_apple_indexes {
         }
 
         /**
-         *  @brief Stops any re-selection, audits and heals, reopens the claim words, and reports. A
-         *      plan whose donors have not all been appended heals nothing and reports nothing.
+         *  @brief Stops every shard's round, runs its closing health check, reopens the claim
+         *      words, and reports; a plan whose donors were not all appended runs and reports none.
          *
          *  @par Statuses:
          *  - @c uninitialized_k The plan is empty or finished.
@@ -745,13 +746,47 @@ struct vram_apple_indexes {
             return {result, healed};
         }
 
-        /** The totals so far, summed over the shards' passes from the counters and telemetry the
-         *  last phase finished: what @ref finish reports once it healed, and zeros while donors are
-         *  pending. */
+        /** The totals so far, summed over the shards' rounds from the counters the last phase
+         *  finished: what @ref finish reports, and zeros while donors are pending. */
         refine_report_t running() const noexcept {
             refine_report_t result;
             for (typename index_t::refine_plan_t const& plan : shard_plans_) result += plan.finish().value;
             return result;
+        }
+
+        /** The phase the shards' rounds are in, by the name a progress line prints: the first shard
+         *  still rounding names it. */
+        char const* phase_name() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.phase_name();
+            return shard_plans_.empty() ? "health" : shard_plans_[0].phase_name();
+        }
+
+        /** Where that phase sits among a round's six; zero once every shard's round ended. */
+        std::size_t ordinal() const noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return plan.ordinal();
+            return 0;
+        }
+
+        /** Units of that phase done and in all, summed over the shards as the drive sums them. */
+        std::size_t completed() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.completed();
+            return sum;
+        }
+        std::size_t total() const noexcept {
+            std::size_t sum = 0;
+            for (typename index_t::refine_plan_t const& plan : shard_plans_) sum += plan.total();
+            return sum;
+        }
+
+        /** Opens every shard's next round once each one's ended, from the roots their closing
+         *  checks kept; a no-op while any shard is mid-round. */
+        void next_round() noexcept {
+            for (typename index_t::refine_plan_t const& plan : shard_plans_)
+                if (plan.rounding()) return;
+            for (typename index_t::refine_plan_t& plan : shard_plans_) plan.next_round();
         }
 
       private:
@@ -782,24 +817,14 @@ struct vram_apple_indexes {
             return to_span(moves_).subspan(moves_.size() - later - count, count);
         }
 
-        /** Opens every shard's pass over its parts on its own context, once no donor is pending. */
+        /** Opens one round on every shard on its own context once no donor is pending, as an
+         *  absorb's appended parts are islands its heal links and its gather mixes in. */
         status_t open_shards_() noexcept {
             for (std::size_t shard = 0; shard != owner_->shards_.size(); ++shard) {
-                std::span<node_id_t const> parts;
-                // A refine re-selects every row; an absorb only the rows appended after the
-                // resident part.
-                iota_view<node_id_t> nodes {0, node_id_unknown_k};
-                if (!part_offsets_.empty()) {
-                    parts = {part_bases_.data() + part_offsets_[shard],
-                             part_offsets_[shard + 1] - part_offsets_[shard]};
-                    nodes.first = parts.size() > 1 ? parts[1] : node_id_unknown_k;
-                }
-                auto [plan, status] = owner_->shards_[shard].index->plan_refine(nodes, parts, config_,
-                                                                                traversals_[shard]);
+                auto [plan, status] = owner_->shards_[shard].index->plan_round(config_, traversals_[shard]);
                 if (failed(status)) return shard_plans_.clear(), status;
                 shard_plans_.push_back_reserved(std::move(plan));
             }
-            population_ = owner_->size();
             return status_t::success_k;
         }
 
@@ -810,40 +835,33 @@ struct vram_apple_indexes {
             status_t outcome = status_t::success_k;
             std::size_t advancing = 0;
             do {
-                bool reselected = false;
-                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                    reselected |= shard_plans_[shard].reselecting();
-                    [[maybe_unused]] status_t const queued = shard_plans_[shard].queue(traversals_[shard], config_);
-                }
+                for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) [[maybe_unused]]
+                    status_t const queued = shard_plans_[shard].queue(traversals_[shard], config_);
                 for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard)
                     if (status_t const waited = shard_plans_[shard].wait(traversals_[shard]);
                         failed(waited) && succeeded(outcome))
                         outcome = waited;
+                // A round's every barrier is heard in its phase's units, as the RAM drain hears it.
+                std::size_t completed = 0, total = 0;
+                bool rounding = false;
                 advancing = 0;
-                std::size_t visited = 0;
                 for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                    advancing += shard_plans_[shard].advance(traversals_[shard]);
-                    visited += shard_plans_[shard].visited();
+                    typename index_t::refine_plan_t& plan = shard_plans_[shard];
+                    rounding |= plan.rounding();
+                    completed += plan.completed(), total += plan.total();
+                    advancing += plan.advance(traversals_[shard]);
                 }
-                if (advancing && reselected && on_visited(visited, population_) == continuation_t::cancel_k)
+                if (advancing && rounding && on_visited(completed, total) == continuation_t::cancel_k)
                     return status_t::cancelled_k;
             } while (advancing);
             return outcome;
         }
 
-        /** One walk context per shard over its stream, each pass queued on it across phases. */
+        /** One context per shard over its stream, each phase queued on it. */
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** Every shard's own pass in placement order; none until the donors were appended. */
         growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> shard_plans_;
-
-        /** The parts the moves appended, ascending per shard, @c node_id_unknown_k past the
-         *  last. */
-        growing_buffer<node_id_t, forkunion_allocator_t> part_bases_;
-
-        /** Where each shard's run of @c part_bases_ starts, and one past the last; empty with no
-         *  donors. */
-        growing_buffer<std::size_t, forkunion_allocator_t> part_offsets_;
 
         /** One move per donor shard, in move order, as @ref plan_absorb packed them; empty
          *  with no donors. */
@@ -858,11 +876,8 @@ struct vram_apple_indexes {
         /** Donors appended so far. */
         std::size_t absorbed_donors_ = 0;
 
-        /** The passes' knobs. */
+        /** The rounds' knobs. */
         refine_config_t config_ {};
-
-        /** The population @c on_visited reports: the rows published once donors were appended. */
-        std::size_t population_ = 0;
 
         /** The index refined, closed while the plan lives; null in an empty plan and once
          *  finished. */
@@ -886,18 +901,18 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  @brief Re-selects the neighbors of every stored node and heals the islands that leaves:
-     *      @ref plan_refine, then @c run and @c finish.
+     *  @brief Runs one refinement round on every shard, healing its islands and re-stitching its
+     *      neighborhoods: @ref plan_refine, then @c run and @c finish.
      *
-     *  A stopped pass leaves the graph correct and merely less improved. Every shard's claim word
-     *  stays closed for the pass, so a batch, load or save in flight refuses it with
+     *  A stopped round leaves the graph correct and merely less improved. Every shard's claim word
+     *  stays closed for the round, so a batch, load or save in flight refuses it with
      *  @c contended_k, and one arriving meanwhile is refused.
      *
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in,out] executor The streams and their scratch.
-     *  @param[in] on_visited Fires per re-selecting phase with the nodes visited so far and the
-     *      population; a @c cancel_k answer skips the rounds left, still heals, and reports
-     *      @c cancelled_k.
+     *  @param[in] on_visited Fires at every barrier of a round with the units its phase did so far
+     *      and in all; a @c cancel_k answer stops the round, still closes its health check, and
+     *      reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k The index has no shards.
@@ -928,16 +943,16 @@ struct vram_apple_indexes {
      *  one host copy per column, its keys beside them; every part goes before any shard publishes,
      *  and each shard's load files its keys just before its watermark turns. The donor then forgets
      *  its rows in place inside its window, keeping its shards and their storage, its slot nulls,
-     *  it stays closed and sealed, consumed, and its shards go among the receiving shards' parts in
-     *  the plan, so at most one donor's nodes are ever held twice.
+     *  it stays closed and sealed, consumed, so at most one donor's nodes are ever held twice.
      *
-     *  Once the last donor was appended, the plan's re-selection walks every shard across the parts
-     *  the moves appended, round by round; a cancel pauses only that walk. This index and every
+     *  Once the last donor was appended, the plan runs one round on every shard, whose heal links
+     *  the appended parts and whose gather and restitch mix them in; a cancel pauses only that
+     *  round, and the caller loops it through @c next_round while it improves. This index and every
      *  donor close here, each under its own gate, so the packing never goes stale: this index stays
      *  closed while the plan lives and each donor until it is appended, a batch, load or save in
      *  flight on any of them refuses the plan with @c contended_k, and an insertion into any of
-     *  them arriving meanwhile is refused. Searches of this index may not overlap the plan's
-     *  re-selection, whose merge rewrites neighbors in place; searches of a donor run throughout,
+     *  them arriving meanwhile is refused. Searches of this index may not overlap the plan's round,
+     *  whose heal and restitch rewrite neighbors in place; searches of a donor run throughout,
      *  retrying once around the window that empties it. An index never reserved takes the first
      *  donor's geometry.
      *
@@ -977,6 +992,8 @@ struct vram_apple_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.config_ = config;
+        // Tiles follow the devices the call runs on unless the caller overrides them, as on RAM.
+        if (!plan.config_.cache_bytes) plan.config_.cache_bytes = executor.cache_bytes_per_core();
         for (std::size_t closing = 0; closing != donors.size(); ++closing)
             if (status_t const closed = donors[closing]->close_gated_(); failed(closed)) {
                 while (closing) donors[--closing]->shards_.reopen();
@@ -1000,12 +1017,8 @@ struct vram_apple_indexes {
                                                      source_shard, device_of, rank_fewest_entries, open);
                 failed(packed))
                 return {{}, packed};
-            if (status_t const sized = shards_t::size_parts(to_span(plan.moves_), shards, plan.part_offsets_,
-                                                            plan.part_bases_);
-                failed(sized))
-                return {{}, sized};
         }
-        // A refine's walk contexts own their buffers, so they open as any verb's do.
+        // A refine's contexts own their buffers, so they open as any verb's do.
         if (status_t const opened = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(opened))
             return {{}, opened};
         if (donors.empty())
@@ -1016,7 +1029,7 @@ struct vram_apple_indexes {
     /**
      *  @brief Moves every row of each of @p donors into this index and links them in:
      *      @ref plan_absorb, then @c run and @c finish. @p on_visited answers as in @ref refine,
-     *      for the re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *      for the round alone; a cancel still closes its health check and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - @c uninitialized_k This index has no shards.
@@ -1067,8 +1080,8 @@ struct vram_apple_indexes {
     /**
      *  @brief Opens a split of this index into @p receivers, the inverse of @c plan_absorb: shard
      *      @c s parts its rows among shard @c s of every receiver on the device, then each receiver
-     *      re-selects its picked nodes, audits and heals; this index forgets its entries once every
-     *      row moved. Unverified on Linux.
+     *      runs one round over its part; this index forgets its entries once every row moved.
+     *      Unverified on Linux.
      *
      *  This index and every receiver stay closed for the plan's life.
      *
@@ -1109,6 +1122,7 @@ struct vram_apple_indexes {
         refine_plan_t plan {shards_.allocator()};
         plan.owner_ = this;
         plan.receivers_ = receivers;
+        if (!config.refine.cache_bytes) config.refine.cache_bytes = executor.cache_bytes_per_core();
         plan.config_ = config.refine;
         if (failed(plan.shard_plans_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         if (status_t const opened = fanout_t::reserve_traversals(shards_, plan.traversals_, executor); failed(opened))
@@ -1121,14 +1135,13 @@ struct vram_apple_indexes {
             if (failed(status)) return {{}, status};
             plan.shard_plans_.push_back_reserved(std::move(shard_plan));
         }
-        plan.population_ = size();
         return {std::move(plan), status_t::success_k};
     }
 
     /**
-     *  @brief Moves every row of this index into one graph-local part per receiver and links
-     *      each in: @ref plan_split, then @c run and @c finish. @p on_visited answers as in @ref
-     *      refine, for the re-selection alone; a cancel still heals and reports @c cancelled_k.
+     *  @brief Moves every row of this index into one graph-local part per receiver and links each
+     *      in: @ref plan_split, then @c run and @c finish. @p on_visited answers as in @ref refine,
+     *      for the rounds alone; a cancel still verifies and reports @c cancelled_k.
      *
      *  @par Statuses:
      *  - Those of @ref plan_split, @c run and @c finish.
@@ -1649,7 +1662,7 @@ struct vram_apple_indexes {
     using save_plan_t = shard_save_plan<shards_t, checkpoint_residency_t>;
 
     /** One load in flight across every shard: the mapped parts, one shard plan each, and the flat
-     *  steps their rows arrive in - one per part's share of one batch. */
+     *  tasks their rows arrive in - one per part's share of one batch. */
     using load_plan_t = shard_load_plan<shards_t, checkpoint_residency_t>;
 
     /** Bytes a buffer @ref save under @p config writes: a lone live shard's monolith, or the
@@ -1775,7 +1788,7 @@ struct vram_apple_indexes {
     }
 
     /**
-     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its steps
+     *  @brief Serializes the index under @p path - the one-shot over @ref plan_save, its tasks
      *      walked from this one host thread.
      *
      *  @param[in] path The monolith's path, or the manifest's.
@@ -1787,7 +1800,7 @@ struct vram_apple_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
      *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
-     *    rows, a shard's steps never copied all its rows, a header does not fit before its data,
+     *    rows, a shard's tasks never copied all its rows, a header does not fit before its data,
      *    or @ref status keeps it.
      *  - @c uninitialized_k The index has no shards or was never reserved.
      *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
@@ -1803,7 +1816,7 @@ struct vram_apple_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(path, config, executor);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
@@ -1815,7 +1828,7 @@ struct vram_apple_indexes {
      *  @par Statuses:
      *  - @c config_mismatch_k The @p config asks for @c concurrent_k or does not validate, the
      *    @p executor drives no stream on some shard's device, a shard's columns cannot hold its
-     *    rows, a shard's steps never copied all its rows, a header does not fit before its data,
+     *    rows, a shard's tasks never copied all its rows, a header does not fit before its data,
      *    or @ref status keeps it.
      *  - @c uninitialized_k The index has no shards or was never reserved.
      *  - @c contended_k Another call holds the @p executor, or a call, batch, load or plan holds
@@ -1830,13 +1843,13 @@ struct vram_apple_indexes {
                   progress_type_&& on_saved = {}) noexcept {
         auto [plan, status] = plan_save(buffer, config, executor);
         if (failed(status)) return status;
-        if (status_t const drained = drain_steps_(plan); failed(drained)) return drained;
+        if (status_t const drained = drain_tasks_(plan); failed(drained)) return drained;
         return plan.finish(on_saved);
     }
 
     /**
      *  @brief Restores the checkpoint at @p path into the placed shards - the one-shot over
-     *      @ref plan_load, its steps walked from this one host thread.
+     *      @ref plan_load, its tasks walked from this one host thread.
      *
      *  The index must be empty, and a batch in flight refuses the load as @c contended_k, as the
      *  load refuses a batch. A cancelled or failed load clears it and reports why, so nothing is
@@ -1846,7 +1859,7 @@ struct vram_apple_indexes {
      *  - @c uninitialized_k The index has no shards or a shard was never reserved.
      *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
      *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
-     *    step cannot write its rows, a shard's steps never copied them, or @ref status keeps it.
+     *    task cannot write its rows, a shard's tasks never copied them, or @ref status keeps it.
      *  - @c contended_k Another call holds the @p executor, or a batch or load holds a shard's
      *    claims.
      *  - @c invalid_argument_k The checkpoint or a part path does not parse.
@@ -1866,7 +1879,7 @@ struct vram_apple_indexes {
         {
             auto [plan, status] = plan_load(path, config, executor);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan);
+            settled = drain_tasks_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         // Nothing is published by a failed or cancelled load: the shards go back to empty, once
@@ -1885,7 +1898,7 @@ struct vram_apple_indexes {
      *  - @c uninitialized_k The index has no shards or a shard was never reserved.
      *  - @c config_mismatch_k The index holds entries, the @p executor drives no stream on some
      *    shard's device, the checkpoint's geometry, dtypes or metric differ from the shards', a
-     *    step cannot write its rows, a shard's steps never copied them, or @ref status keeps it.
+     *    task cannot write its rows, a shard's tasks never copied them, or @ref status keeps it.
      *  - @c contended_k Another call holds the @p executor, or a batch or load holds a shard's
      *    claims.
      *  - @c malformed_k The manifest lists no part, a part, its header or its key column does not
@@ -1904,7 +1917,7 @@ struct vram_apple_indexes {
         {
             auto [plan, status] = plan_load(buffer, config, executor);
             if (failed(status)) return status; // Nothing was claimed, so nothing needs undoing.
-            settled = drain_steps_(plan);
+            settled = drain_tasks_(plan);
             if (succeeded(settled)) settled = plan.finish(on_loaded);
         }
         if (failed(settled)) [[maybe_unused]]
@@ -2266,12 +2279,10 @@ struct vram_apple_indexes {
     }
 
     /** Appends every row of @p donor where @p moves, one per donor shard, put it and consumes it,
-     *  under both indexes' closed claim words and the executor's hold @p refining keeps: the
-     *  donor's gate and every other fallible step first, then one host copy per column, one drain,
-     *  and the publication, and the donor's shards enter the plan's parts as it then forgets all
-     *  its rows in its own window. */
-    status_t absorb_(vram_apple_indexes& donor, std::span<shard_move_t const> moves, executor_t& executor,
-                     refine_plan_t& refining) noexcept {
+     *  under both indexes' closed claim words and the executor's hold a refine keeps: the donor's
+     *  gate and every other fallible step first, then one host copy per column, one drain, and the
+     *  publication, as the donor then forgets all its rows in its own window. */
+    status_t absorb_(vram_apple_indexes& donor, std::span<shard_move_t const> moves, executor_t& executor) noexcept {
         std::size_t const shards = shards_.size();
         if (!donor.size()) return status_t::success_k;
         // The donor empties once its rows are copied, so its gate comes before anything that a
@@ -2302,10 +2313,10 @@ struct vram_apple_indexes {
                 shard_t const& donor_slot = donor.shards_[from];
                 node_id_t const part_rows = static_cast<node_id_t>(donor_slot.index->size());
                 if (!part_rows) continue;
-                typename index_t::load_plan_t::step_t step;
-                step.index_nodes = {base, base + part_rows};
-                step.source_nodes = {0, part_rows};
-                queued = plan.load(step, *donor_slot.index, step.source_nodes);
+                typename index_t::load_plan_t::task_t task;
+                task.index_nodes = {base, base + part_rows};
+                task.source_nodes = {0, part_rows};
+                queued = plan.load(task, *donor_slot.index, task.source_nodes);
                 base += part_rows;
             }
         }
@@ -2316,8 +2327,6 @@ struct vram_apple_indexes {
             if (status_t const published = plan.finish(); failed(published)) return published;
         }
 
-        // Each donor shard becomes a part of its own in the plan, which sized every shard's run.
-        shards_.record_parts(donor.shards_, moves, plans, refining.part_bases_.data(), to_span(refining.part_offsets_));
         donor.shards_.begin_window();
         donor.clear_();
         donor.shards_.end_window();
@@ -2349,25 +2358,25 @@ struct vram_apple_indexes {
         return {checkpoint_residency_t {this, std::move(claim)}, status_t::success_k};
     }
 
-    /** Walks @p plan 's steps from this one host thread, taking step @c s of every shard before
-     *  step @c s+1, and the first failing step ends it. A save writes each step, a load reads it
+    /** Walks @p plan 's tasks from this one host thread, taking task @c s of every shard before
+     *  task @c s+1, and the first failing task ends it. A save writes each task, a load reads it
      *  straight out of its part. */
     template <typename plan_type_>
-    status_t drain_steps_(plan_type_& plan) noexcept {
-        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step) {
-            planned.save(step);
+    status_t drain_tasks_(plan_type_& plan) noexcept {
+        constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::task_t const& task) {
+            planned.save(task);
         };
         std::size_t const shards = shards_.size();
-        auto const steps = plan.steps();
+        auto const tasks = plan.tasks();
         std::size_t deepest = 0;
-        for (std::size_t shard = 0; shard != shards; ++shard) deepest = max_of(deepest, plan.steps_of(shard).size());
+        for (std::size_t shard = 0; shard != shards; ++shard) deepest = max_of(deepest, plan.tasks_of(shard).size());
         for (std::size_t position = 0; position != deepest; ++position)
             for (std::size_t shard = 0; shard != shards; ++shard) {
-                iota_view<std::size_t> const own = plan.steps_of(shard);
+                iota_view<std::size_t> const own = plan.tasks_of(shard);
                 if (position >= own.size()) continue;
                 status_t stepped = status_t::success_k;
-                if constexpr (saving_k) stepped = plan.save(steps[own.first + position]);
-                else stepped = plan.load(steps[own.first + position]);
+                if constexpr (saving_k) stepped = plan.save(tasks[own.first + position]);
+                else stepped = plan.load(tasks[own.first + position]);
                 if (failed(stepped)) return stepped;
             }
         return status_t::success_k;

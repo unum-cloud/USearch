@@ -895,14 +895,31 @@ struct reachability_t {
      *  counted. */
     std::size_t audited_nodes = 0;
 
-    /** Of those, the nodes a search reaches from its entry points - the searcher's view. */
+    /** Of those, the nodes a search reaches from its entry points - the searcher's view; where the
+     *  audit draws one root, the entries of its strong component. */
     std::size_t reachable_nodes = 0;
 
-    /** Level-synchronous sweeps to convergence. */
-    std::size_t sweeps = 0;
+    /** Depths the walk from the root took to converge. */
+    std::size_t depth_from_root = 0;
 
-    /** Levels the sweep back toward the entry point took, where an audit sweeps both ways. */
-    std::size_t back_sweeps = 0;
+    /** Depths the walk back toward the root took, where a health check walks both ways. */
+    std::size_t depth_to_root = 0;
+
+    /** Entries no reached entry links to. */
+    std::size_t unlinked = 0;
+
+    /** Entries linked to by fewer entries than they link to. */
+    std::size_t underlinked = 0;
+
+    /** Entries deeper than the depth holding the most entries. */
+    std::size_t beyond_most_populated_depth = 0;
+
+    /** Islands no entry outside them links into, and islands with no link out. */
+    std::size_t unreached_islands = 0;
+    std::size_t stranded_islands = 0;
+
+    /** Components when direction is ignored. */
+    std::size_t components = 0;
 };
 
 /** Folds another shard's audit in: populations add, and the depth is the deepest shard's, since a
@@ -910,8 +927,14 @@ struct reachability_t {
 inline reachability_t& operator+=(reachability_t& into, reachability_t const& other) noexcept {
     into.audited_nodes += other.audited_nodes;
     into.reachable_nodes += other.reachable_nodes;
-    into.sweeps = max_of(into.sweeps, other.sweeps);
-    into.back_sweeps = max_of(into.back_sweeps, other.back_sweeps);
+    into.depth_from_root = max_of(into.depth_from_root, other.depth_from_root);
+    into.depth_to_root = max_of(into.depth_to_root, other.depth_to_root);
+    into.unlinked += other.unlinked;
+    into.underlinked += other.underlinked;
+    into.beyond_most_populated_depth += other.beyond_most_populated_depth;
+    into.unreached_islands += other.unreached_islands;
+    into.stranded_islands += other.stranded_islands;
+    into.components += other.components;
     return into;
 }
 
@@ -966,16 +989,33 @@ struct traversal_stats_t {
     }
 };
 
+/** What one refinement round concluded, valued as the C verdicts are. */
+enum class refine_verdict_t : u8_t {
+
+    /** The round changed some entry's link set, so another round can help. */
+    improved_k = 0,
+
+    /** The round changed no entry's link set. */
+    converged_k,
+
+    /** The round lowered nothing while something stands, as full entries leave no slot. */
+    stalled_k,
+
+    /** The caller stopped the round. */
+    stopped_k,
+};
+
 /** Outcome of one refinement or heal pass: every count means the same in every family, layer and
  *  residency. */
 struct [[nodiscard]] refine_report_t {
 
-    /** Nodes re-selected: the planned nodes, then the fresh nodes of every later round, then the
-     *  islands of every heal round. */
+    /** Nodes re-selected: every node of a round, or the planned nodes, then the fresh nodes of
+     *  every later pass, then the islands of every heal pass. */
     std::size_t reselected_nodes = 0;
 
-    /** Of those, the nodes whose neighbor set gained a member it lacked; order never counts, nor
-     *  does a back-link's re-selection of a node the pass did not re-select. */
+    /** Of those, the nodes whose neighbor set changed: a round counts any link added or dropped, a
+     *  pass a member gained; order never counts, nor does a back-link's re-selection of a node the
+     *  pass did not re-select. */
     std::size_t changed_nodes = 0;
 
     /** Nodes the first audit did not reach both ways, counted once. */
@@ -991,14 +1031,28 @@ struct [[nodiscard]] refine_report_t {
     /** Links the sweeps collected from the walked rows into their targets' merges. */
     std::size_t swept_links = 0;
 
-    /** The audit closing the heal, as a fresh health audit right after would take it. */
+    /** Neighborhoods the round re-stitched, and the widest one's entries. */
+    std::size_t neighborhoods = 0;
+    std::size_t widest_neighborhood = 0;
+
+    /** Links the round added, and links it dropped. */
+    std::size_t added_links = 0;
+    std::size_t dropped_links = 0;
+
+    /** What the round concluded; improved for a pass that runs no round. */
+    refine_verdict_t verdict = refine_verdict_t::improved_k;
+
+    /** The health check opening the round. */
+    reachability_t opening;
+
+    /** The health check closing the heal, as a fresh health audit right after would take it. */
     reachability_t reachability;
 
     /** The re-selection walks' and back-links' spend. */
     traversal_stats_t traversal_stats;
 
-    /** Folds another pass or shard in: every count is a population or a spend and adds, and the
-     *  audits fold as @c reachability_t does. */
+    /** Folds another pass or shard in: every count is a population or a spend and adds, the
+     *  widest neighborhood excepted, and the audits fold as @c reachability_t does. */
     refine_report_t& operator+=(refine_report_t const& other) noexcept {
         reselected_nodes += other.reselected_nodes;
         changed_nodes += other.changed_nodes;
@@ -1006,6 +1060,18 @@ struct [[nodiscard]] refine_report_t {
         islands_reconnected += other.islands_reconnected;
         swept_tiles += other.swept_tiles;
         swept_links += other.swept_links;
+        neighborhoods += other.neighborhoods;
+        widest_neighborhood = max_of(widest_neighborhood, other.widest_neighborhood);
+        added_links += other.added_links;
+        dropped_links += other.dropped_links;
+        // A stop anywhere stops the whole; else one shard improving is enough for another round,
+        // so a fold starts from its first report rather than from an empty one.
+        auto const rank = [](refine_verdict_t verdict) noexcept {
+            constexpr u8_t ranks_k[] = {2, 0, 1, 3};
+            return ranks_k[static_cast<u8_t>(verdict)];
+        };
+        if (rank(other.verdict) > rank(verdict)) verdict = other.verdict;
+        opening += other.opening;
         reachability += other.reachability;
         traversal_stats += other.traversal_stats;
         return *this;
@@ -1018,6 +1084,23 @@ struct [[nodiscard]] refine_report_t {
 template <typename size_type_>
 constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
     return connectivity / 2;
+}
+
+/** Hubs one gather over @p entries entries draws: as many as make a neighborhood half its
+ *  @p neighborhood_capacity on average, at most @p hubs_per_draw, and no more than the entries a
+ *  @c u16_t tag tells apart. */
+constexpr std::size_t round_hubs(std::size_t entries, std::size_t hubs_per_draw,
+                                 std::size_t neighborhood_capacity) noexcept {
+    constexpr std::size_t numbered_k = std::size_t {(std::numeric_limits<u16_t>::max)()} + 1;
+    if (!entries) return 0;
+    return min_of(min_of(hubs_per_draw, divide_round_up(2 * entries, neighborhood_capacity)), numbered_k);
+}
+
+/** What a round that reached its closing health check concludes: stopped as its caller left it,
+ *  converged when it changed no entry's link set, improved otherwise. */
+constexpr refine_verdict_t concluded_verdict(refine_report_t const& report) noexcept {
+    if (report.verdict == refine_verdict_t::stopped_k) return report.verdict;
+    return report.changed_nodes ? refine_verdict_t::improved_k : refine_verdict_t::converged_k;
 }
 
 /** The nodes that @p node_id walks across first in round @p round of merging @p parts parts, whose
@@ -1130,13 +1213,13 @@ concept scored_node = requires(entry_type_ entry) {
     entry.distance;
 };
 
-/** @brief A two-stage save or load in flight: move-only and never assigned over, its steps
- *      handed to threads one at a time, spent by @c finish. */
+/** A two-stage save or load in flight: move-only and never assigned over, its tasks handed to
+ *  threads one at a time, spent by @c finish. */
 template <typename plan_type_>
 concept index_plan = std::move_constructible<plan_type_> && !std::copy_constructible<plan_type_> &&
                      !std::is_copy_assignable_v<plan_type_> && !std::is_move_assignable_v<plan_type_> &&
                      requires(plan_type_ plan) {
-                         plan.steps().size();
+                         plan.tasks().size();
                          { plan.finish() } noexcept -> std::same_as<status_t>;
                      };
 
@@ -1198,6 +1281,52 @@ std::size_t merge_search_results(std::span<entry_type_ const> results, keys_of_i
         merged_count += merged_count != max_count;
     }
     return merged_count;
+}
+
+/**
+ *  @brief Keeps @p locator at @p distance in a ranking held as a max-heap of the @p kept leading
+ *      pairs of @p locators and @p ranked, replacing the farthest once full, and moves
+ *      @p threshold to the farthest kept once full.
+ *
+ *  The spans' common length is the ranking's capacity. A caller keeps only what beats
+ *  @p threshold, so a ranking filling up under a starting reach leaves the reach in place.
+ */
+template <typename locator_type_, typename distance_type_>
+void keep_ranked(std::span<locator_type_> locators, std::span<distance_type_> ranked, u32_t& kept,
+                 distance_type_& threshold, locator_type_ const& locator, distance_type_ distance) noexcept {
+    std::size_t const wanted = ranked.size();
+    std::size_t slot = 0;
+    if (kept != wanted)
+        for (slot = kept++; slot;) {
+            std::size_t const parent = (slot - 1) / 2;
+            if (!(ranked[parent] < distance)) break;
+            locators[slot] = locators[parent], ranked[slot] = ranked[parent];
+            slot = parent;
+        }
+    else
+        for (std::size_t child = 1; child < wanted; child = slot * 2 + 1) {
+            if (child + 1 < wanted && ranked[child + 1] > ranked[child]) ++child;
+            if (!(ranked[child] > distance)) break;
+            locators[slot] = locators[child], ranked[slot] = ranked[child];
+            slot = child;
+        }
+    locators[slot] = locator, ranked[slot] = distance;
+    if (kept == wanted) threshold = ranked[0];
+}
+
+/** Inserts @p locator at @p distance into an ascending ranking of the @p merged leading pairs of
+ *  @p locators and @p distances, dropping the farthest of a full one, as rankings kept by
+ *  @ref keep_ranked merge; answers the pairs merged after. */
+template <typename locator_type_, typename distance_type_>
+std::size_t merge_ranked(std::span<locator_type_> locators, std::span<distance_type_> distances, std::size_t merged,
+                         locator_type_ const& locator, distance_type_ distance) noexcept {
+    std::size_t const wanted = distances.size();
+    if (merged == wanted && !(distance < distances[wanted - 1])) return merged;
+    std::size_t position = merged == wanted ? wanted - 1 : merged++;
+    for (; position && distance < distances[position - 1]; --position)
+        locators[position] = locators[position - 1], distances[position] = distances[position - 1];
+    locators[position] = locator, distances[position] = distance;
+    return merged;
 }
 
 /** Tag: a capped monitored wait - re-checks on its own after a bounded pause. */
@@ -1363,6 +1492,24 @@ struct standard_atomic_ref {
     }
     void store_max(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
         fetch_max(operand, order);
+    }
+
+    /** Lowers the word to @p operand when it holds more, discarding what it held. */
+    void store_min(value_type_ operand, std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ observed = word_.load(std::memory_order_acquire);
+        while (operand < observed &&
+               !word_.compare_exchange_weak(observed, operand, acquiring_(order), std::memory_order_acquire)) {}
+    }
+
+    /** Subtracts @p operand only if the difference stays at least @p floor, returning the value
+     *  held before; the caller learns the outcome from <tt>observed - operand &gt;= floor</tt>. */
+    value_type_ fetch_sub_if_at_least(value_type_ operand, value_type_ floor,
+                                      std::memory_order order = std::memory_order_seq_cst) const noexcept {
+        value_type_ observed = word_.load(std::memory_order_acquire);
+        while (observed >= floor && observed - floor >= operand &&
+               !word_.compare_exchange_weak(observed, static_cast<value_type_>(observed - operand), acquiring_(order),
+                                            std::memory_order_acquire)) {}
+        return observed;
     }
 
   private:

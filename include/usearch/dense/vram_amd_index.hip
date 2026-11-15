@@ -66,6 +66,22 @@ bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type
            resident_blocks * block_bytes <= core.device_.shared_memory_per_multiprocessor_bytes;
 }
 
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
+bool vram_amd_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
+                      neighbors_allocator_type_, traversals_allocator_type_, key_type_,
+                      key_hash_type_>::round_scratch_fits(core_t const& core,
+                                                          std::size_t dynamic_bytes) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
+    std::size_t const statics = std::size_t {vram_warps_per_block_k} *
+                                    (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
+                                     sizeof(typename schedule_t::shared_t)) +
+                                sizeof(u32_t);
+    return statics + dynamic_bytes <= core.device_.shared_memory_per_block_bytes;
+}
+
 #pragma region Kernels
 
 /** Every AMD kernel of a walk basic graphs share: @p kernel_ picks the body, @p capability_ and
@@ -86,38 +102,17 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
         vram_insert<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k)
         vram_back_link<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.build));
-    else if constexpr (kernel_ == vram_kernel_t::refine_k)
-        vram_refine<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::search_k)
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         vram_rebase_links<warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
                                   graph.source_first, graph.source_bound, graph.shift);
-    else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
-        vram_mark_landmarks<warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
-        vram_reachability_sweep<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
-                                        graph.frontier, graph.next_frontier, graph.counter, graph.previous_counter,
-                                        graph.levels);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_back_sweep_k)
-        vram_reachability_back_sweep<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reaches_back,
-                                             graph.back_settled, graph.counter, graph.previous_counter, graph.levels,
-                                             graph.sweep_number);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_islands_k)
-        // The unreached and island counters lie back to back.
-        vram_reachability_islands<warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter + 1,
-                                          graph.reaches_back, graph.counter);
-    else if constexpr (kernel_ == vram_kernel_t::reached_in_links_k)
-        vram_reached_in_links<warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
-                                      graph.in_links);
-    else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
-        vram_reconnect_island<warp_t>(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count,
-                                      graph.reached, graph.rows_count, graph.seed_count, graph.in_links,
-                                      graph.reconnected, graph.reaches_back);
-    else if constexpr (kernel_ == vram_kernel_t::count_back_links_k) vram_count_back_links<warp_t>(arguments.sweep);
-    else if constexpr (kernel_ == vram_kernel_t::offset_back_links_k) vram_offset_back_links<warp_t>(arguments.sweep);
-    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k) vram_scatter_back_links<warp_t>(arguments.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::gather_neighborhoods_k)
+        vram_gather_neighborhoods<kit_t, warp_t>(vram_view<kit_t>(arguments.gather_neighborhoods));
+    else if constexpr (kernel_ == vram_kernel_t::restitch_k)
+        vram_restitch<kit_t, schedule_t, resident_blocks, vram_simt_mates>(vram_view<kit_t>(arguments.restitch));
+    else if constexpr (vram_health_kernel(kernel_)) vram_health_pass<kernel_, warp_t>(arguments.health);
     else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, warp_t>(graph);
     else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<warp_t>(arguments.gather);
     else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)
@@ -197,8 +192,6 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_wave_lanes(capabil
             vram_heads_rescoring<kit_t, warp_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads),
                                                  nullptr, heads.heads_count, heads.row_fragments});
     }
-    else if constexpr (kernel_ == vram_dense_kernel_t::merge_back_links_k)
-        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_dense_kernel_t::fold_k)
         vram_fold<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.fold));
     else if constexpr (kernel_ == vram_dense_kernel_t::derive_norms_k)

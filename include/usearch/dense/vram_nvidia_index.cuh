@@ -4,14 +4,14 @@
  *  @date July 18, 2026
  *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *
- *  The kernel side of the index: the exact scan and the two kernel templates, @c cuda_kernel for
- *  the walks basic graphs share and @c cuda_dense_kernel for the rest, over five arguments - the
- *  kernel, the capability ceiling, the dtype, the register rung and the attend value lookup - whose
- *  instantiations a fatbin carries. NVCC's device-only passes include it, one per dtype under one
- *  ceiling; each kernel turns the plain records of @c vram_index.hpp into the shared views of
- *  @c vram_index.cuh, runs the shared bodies there through
- *  @ref unum::usearch::utilities::cuda_warp_t, and the host finds it by the symbol
- *  @c vram_kernel_symbol spells.
+ *  The kernel side of the index: the exact scan, a round's gather and mates on the scan's step, and
+ *  the two kernel templates, @c cuda_kernel for the walks basic graphs share and
+ *  @c cuda_dense_kernel for the rest, over five arguments - the kernel, the capability ceiling, the
+ *  dtype, the register rung and the attend value lookup - whose instantiations a fatbin carries.
+ *  NVCC's device-only passes include it, one per dtype under one ceiling; each kernel turns the
+ *  plain records of @c vram_index.hpp into the shared views of @c vram_index.cuh, runs the shared
+ *  bodies there through @ref unum::usearch::utilities::cuda_warp_t, and the host finds it by the
+ *  symbol @c vram_kernel_symbol spells.
  */
 #pragma once
 
@@ -150,6 +150,22 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_t
                core.device_.shared_memory_per_multiprocessor_bytes;
 }
 
+template <nk_dtype_t vector_dtype_, typename kernels_type_, typename wait_type_, typename cache_hints_type_,
+          typename vectors_allocator_type_, typename neighbors_allocator_type_, typename traversals_allocator_type_,
+          typename key_type_, typename key_hash_type_>
+bool vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_type_, vectors_allocator_type_,
+                         neighbors_allocator_type_, traversals_allocator_type_, key_type_,
+                         key_hash_type_>::round_scratch_fits(core_t const& core,
+                                                             std::size_t dynamic_bytes) const noexcept {
+    using kit_t = typename quads_ladder<scalar_t, capability_k>::kit_t;
+    using schedule_t = typename schedule_ladder<capability_k>::schedule_t;
+    std::size_t const statics = std::size_t {vram_warps_per_block_k} *
+                                    (sizeof(vram_gathered<kit_t, typename schedule_t::warp_t>) +
+                                     sizeof(typename schedule_t::shared_t)) +
+                                sizeof(u32_t);
+    return statics + dynamic_bytes <= core.device_.shared_memory_per_block_bytes;
+}
+
 /** Post-drain structural audit of the neighbors matrix: every entry published, every ID in range,
  *  self-loop rows childless, no duplicate neighbors within a row. One warp scans one row, a
  *  warp-width of slots at a time; each bad row bumps @p violations once. */
@@ -182,6 +198,81 @@ bool vram_nvidia_kernels<vector_dtype_, kernels_type_, wait_type_, cache_hints_t
             }
         }
         if (cuda_warp_t::ballot(bad) && warp.lane == 0) cuda_warp_t::fetch_add_relaxed(*violations, u64_t {1});
+    }
+}
+
+/** The products of one scanning step added into @p tiles: a lane's two query tiles, the queries at
+ *  @c group and eight past it of each, against its four row tiles, the rows at twice @c quarter and
+ *  one past it of each. Per 64 bytes of depth a lane loads one fragment of each of its queries and
+ *  rows, its first two words feeding one kit tile step and its last two the next; a kit without a
+ *  tile step dots whole fragments instead, gathered from the four lanes holding them. */
+template <vram_quads_kit kit_>
+__device__ __forceinline__ void cuda_scan_products(typename kit_::fragment_t const* (&query_rows)[2][2],
+                                                   typename kit_::fragment_t const* (&rows)[4], u32_t row_fragments,
+                                                   u32_t group, u32_t quarter,
+                                                   std::array<typename kit_::dot_t, 4> (&tiles)[2][4]) noexcept {
+    using fragment_t = typename kit_::fragment_t;
+    using dot_t = typename kit_::dot_t;
+    using tile_t = std::array<dot_t, 4>;
+    u32_t const spans = divide_round_up(row_fragments, 4u);
+    for (u32_t span = 0; span != spans; ++span) {
+        u32_t const fragment = span * 4 + quarter;
+        bool const in_row = fragment < row_fragments;
+        fragment_t query_pieces[2][2], pieces[4];
+#pragma unroll
+        for (u32_t tile = 0; tile != 2; ++tile)
+#pragma unroll
+            for (u32_t half = 0; half != 2; ++half)
+                query_pieces[tile][half] = in_row ? query_rows[tile][half][fragment] : fragment_t {};
+#pragma unroll
+        for (u32_t tile = 0; tile != 4; ++tile) pieces[tile] = in_row ? rows[tile][fragment] : fragment_t {};
+        if constexpr (requires(tile_t tile) { kit_::accumulate_tile(fragment_t {}, uint2 {}, tile); }) {
+#pragma unroll
+            for (u32_t query_tile = 0; query_tile != 2; ++query_tile) {
+                fragment_t const top = query_pieces[query_tile][0], bottom = query_pieces[query_tile][1];
+                fragment_t const first {top.x, bottom.x, top.y, bottom.y}, second {top.z, bottom.z, top.w, bottom.w};
+#pragma unroll
+                for (u32_t row_tile = 0; row_tile != 4; ++row_tile) {
+                    fragment_t const row = pieces[row_tile];
+                    tile_t& tile = tiles[query_tile][row_tile];
+                    tile = kit_::accumulate_tile(first, uint2 {row.x, row.y}, tile);
+                    tile = kit_::accumulate_tile(second, uint2 {row.z, row.w}, tile);
+                }
+            }
+        }
+        else {
+#pragma unroll
+            for (u32_t holder = 0; holder != 4; ++holder) {
+                fragment_t queries[2][2];
+#pragma unroll
+                for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
+#pragma unroll
+                    for (u32_t half = 0; half != 2; ++half) {
+                        fragment_t const piece = query_pieces[query_tile][half];
+                        u32_t const source = group * 4 + holder;
+                        queries[query_tile][half] = {
+                            cuda_warp_t::shuffle(piece.x, source), cuda_warp_t::shuffle(piece.y, source),
+                            cuda_warp_t::shuffle(piece.z, source), cuda_warp_t::shuffle(piece.w, source)};
+                    }
+#pragma unroll
+                for (u32_t row_tile = 0; row_tile != 4; ++row_tile)
+#pragma unroll
+                    for (u32_t column = 0; column != 2; ++column) {
+                        fragment_t const piece = pieces[row_tile];
+                        u32_t const source = (quarter * 2 + column) * 4 + holder;
+                        fragment_t const row {
+                            cuda_warp_t::shuffle(piece.x, source), cuda_warp_t::shuffle(piece.y, source),
+                            cuda_warp_t::shuffle(piece.z, source), cuda_warp_t::shuffle(piece.w, source)};
+#pragma unroll
+                        for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
+#pragma unroll
+                            for (u32_t half = 0; half != 2; ++half) {
+                                dot_t& dot = tiles[query_tile][row_tile][half * 2 + column];
+                                dot = kit_::accumulate_dot(queries[query_tile][half], row, dot);
+                            }
+                    }
+            }
+        }
     }
 }
 
@@ -233,7 +324,6 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
     u32_t const visible = view.sampling_bound, count = sink.count;
     u32_t const ranges = cuda_scan_ranges(gridDim.x, resident_blocks_, blocks, visible);
     u32_t const range_rows = round_up_to_multiple(divide_round_up(visible, ranges), tile_k);
-    u32_t const spans = divide_round_up(storage.geometry.row_fragments, 4u);
     u32_t* const finished_ranges = reinterpret_cast<u32_t*>(view.arena);
     vram_scored_node<node_id_t>* const matches = reinterpret_cast<vram_scored_node<node_id_t>*>(
         finished_ranges + round_up_to_multiple(blocks, 4u));
@@ -354,66 +444,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
                         min_of(base + warp_rows + tile * 8 + quarter * 2 + column, end_row - 1));
             }
             tile_t tiles[2][4] = {};
-            for (u32_t span = 0; span != spans; ++span) {
-                u32_t const fragment = span * 4 + quarter;
-                bool const in_row = fragment < storage.geometry.row_fragments;
-                fragment_t query_pieces[2][2], pieces[4];
-#pragma unroll
-                for (u32_t tile = 0; tile != 2; ++tile)
-#pragma unroll
-                    for (u32_t half = 0; half != 2; ++half)
-                        query_pieces[tile][half] = in_row ? query_rows[tile][half][fragment] : fragment_t {};
-#pragma unroll
-                for (u32_t tile = 0; tile != 4; ++tile) pieces[tile] = in_row ? rows[tile][fragment] : fragment_t {};
-                if constexpr (requires(tile_t tile) { kit_::accumulate_tile(fragment_t {}, uint2 {}, tile); }) {
-#pragma unroll
-                    for (u32_t query_tile = 0; query_tile != 2; ++query_tile) {
-                        fragment_t const top = query_pieces[query_tile][0], bottom = query_pieces[query_tile][1];
-                        fragment_t const first {top.x, bottom.x, top.y, bottom.y},
-                            second {top.z, bottom.z, top.w, bottom.w};
-#pragma unroll
-                        for (u32_t row_tile = 0; row_tile != 4; ++row_tile) {
-                            fragment_t const row = pieces[row_tile];
-                            tile_t& tile = tiles[query_tile][row_tile];
-                            tile = kit_::accumulate_tile(first, uint2 {row.x, row.y}, tile);
-                            tile = kit_::accumulate_tile(second, uint2 {row.z, row.w}, tile);
-                        }
-                    }
-                }
-                else {
-#pragma unroll
-                    for (u32_t holder = 0; holder != 4; ++holder) {
-                        fragment_t queries[2][2];
-#pragma unroll
-                        for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
-#pragma unroll
-                            for (u32_t half = 0; half != 2; ++half) {
-                                fragment_t const piece = query_pieces[query_tile][half];
-                                u32_t const source = group * 4 + holder;
-                                queries[query_tile][half] = {
-                                    cuda_warp_t::shuffle(piece.x, source), cuda_warp_t::shuffle(piece.y, source),
-                                    cuda_warp_t::shuffle(piece.z, source), cuda_warp_t::shuffle(piece.w, source)};
-                            }
-#pragma unroll
-                        for (u32_t row_tile = 0; row_tile != 4; ++row_tile)
-#pragma unroll
-                            for (u32_t column = 0; column != 2; ++column) {
-                                fragment_t const piece = pieces[row_tile];
-                                u32_t const source = (quarter * 2 + column) * 4 + holder;
-                                fragment_t const row {
-                                    cuda_warp_t::shuffle(piece.x, source), cuda_warp_t::shuffle(piece.y, source),
-                                    cuda_warp_t::shuffle(piece.z, source), cuda_warp_t::shuffle(piece.w, source)};
-#pragma unroll
-                                for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
-#pragma unroll
-                                    for (u32_t half = 0; half != 2; ++half) {
-                                        dot_t& dot = tiles[query_tile][row_tile][half * 2 + column];
-                                        dot = kit_::accumulate_dot(queries[query_tile][half], row, dot);
-                                    }
-                            }
-                    }
-                }
-            }
+            cuda_scan_products<kit_>(query_rows, rows, storage.geometry.row_fragments, group, quarter, tiles);
 #pragma unroll
             for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
 #pragma unroll
@@ -504,6 +535,311 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
     }
 }
 
+/**
+ *  @brief Files every entry of a gather's runs under its nearest hub on the scan's step, one item a
+ *      block, the hubs as queries and the item's entries as rows, 64 of each at a time.
+ *
+ *  A lane keeps, for each of its eight rows, the nearest of its four hubs; the eight lanes sharing
+ *  those rows fold it by shuffles, and the two warps holding the other half of the hubs fold it
+ *  through shared memory, so ties go to the lower hub and no atomic decides one. Every distance
+ *  goes through @ref unum::usearch::dense::vram_scored_pair, as the SIMT gather's do. Hubs and
+ *  entries are read in place, as a scan reads its queries and rows.
+ */
+template <vram_quads_kit kit_, nk_kernel_kind_t kernel_>
+__device__ __forceinline__ void cuda_gather_neighborhoods(vram_gather_neighborhoods_view<kit_> const& view) {
+    using fragment_t = typename kit_::fragment_t;
+    using norms_t = typename kit_::norms_t;
+    using tile_t = std::array<typename kit_::dot_t, 4>;
+    using scored_t = vram_scored_node<node_id_t>;
+    static_assert(vram_warps_per_block_k == 4, "Four warps split a scanning step two by two");
+    constexpr u32_t tile_k = cuda_scan_tile_k, width_k = cuda_warp_t::width_k;
+    __shared__ scored_t halves[2][tile_k];
+    __shared__ scored_t nearest[tile_k];
+    __shared__ u32_t claimed;
+    vram_flat_view<kit_> const& storage = view.storage;
+    u32_t const warp = threadIdx.x / width_k, lane = threadIdx.x % width_k;
+    u32_t const group = lane / 4, quarter = lane % 4;
+    u32_t const warp_hubs = (warp >> 1) * 32, warp_rows = (warp & 1) * 32;
+    u32_t const items = view.run_items[view.runs_count];
+    vram_telemetry_t telemetry;
+    for (;;) {
+        if (threadIdx.x == 0) claimed = cuda_warp_t::fetch_add_relaxed(*view.assigned_items, 1u);
+        __syncthreads();
+        u32_t const item = claimed;
+        if (item >= items) break;
+        vram_gather_item_t const share = vram_gather_item(view, item, vram_warps_per_block_k);
+        vram_neighborhood_run_t const run = share.run;
+        u32_t const* const hub_nodes = view.hub_nodes + run.first_hub;
+        auto node_of = [&](u32_t position) noexcept {
+            position = min_of(position, share.bound - 1);
+            return view.entries ? view.entries[run.first + position] : run.first + position;
+        };
+        for (u32_t base = share.first; base < share.bound; base += tile_k) {
+            u32_t const rows_count = min_of(tile_k, share.bound - base);
+            // A lane loads rows `group` of its row tiles and keeps rows `2 * quarter` and the next.
+            fragment_t const* rows[4];
+            norms_t row_norms[4][2];
+#pragma unroll
+            for (u32_t tile = 0; tile != 4; ++tile) {
+                rows[tile] = storage.vector_span_for(node_of(base + warp_rows + tile * 8 + group));
+#pragma unroll
+                for (u32_t column = 0; column != 2; ++column)
+                    row_norms[tile][column] = storage.norm_for(
+                        node_of(base + warp_rows + tile * 8 + quarter * 2 + column));
+            }
+            if (threadIdx.x < tile_k) nearest[threadIdx.x] = scored_t::sentinel();
+            for (u32_t hub_base = 0; hub_base < run.hubs; hub_base += tile_k) {
+                fragment_t const* hub_rows[2][2];
+                norms_t hub_norms[2][2];
+#pragma unroll
+                for (u32_t tile = 0; tile != 2; ++tile)
+#pragma unroll
+                    for (u32_t half = 0; half != 2; ++half) {
+                        u32_t const hub = min_of(hub_base + warp_hubs + tile * 16 + half * 8 + group, run.hubs - 1);
+                        hub_rows[tile][half] = storage.vector_span_for(hub_nodes[hub]);
+                        hub_norms[tile][half] = storage.norm_for(hub_nodes[hub]);
+                    }
+                tile_t tiles[2][4] = {};
+                cuda_scan_products<kit_>(hub_rows, rows, storage.geometry.row_fragments, group, quarter, tiles);
+#pragma unroll
+                for (u32_t row_tile = 0; row_tile != 4; ++row_tile)
+#pragma unroll
+                    for (u32_t column = 0; column != 2; ++column) {
+                        scored_t kept = scored_t::sentinel();
+#pragma unroll
+                        for (u32_t hub_tile = 0; hub_tile != 2; ++hub_tile)
+#pragma unroll
+                            for (u32_t half = 0; half != 2; ++half) {
+                                u32_t const hub = hub_base + warp_hubs + hub_tile * 16 + half * 8 + group;
+                                if (hub >= run.hubs) continue;
+                                scored_t const scored = vram_scored_pair<kit_>(
+                                    kernel_, tiles[hub_tile][row_tile][half * 2 + column], row_norms[row_tile][column],
+                                    hub_norms[hub_tile][half], hub);
+                                if (scored < kept) kept = scored;
+                            }
+                    // The eight lanes holding these rows differ in bits 2 to 4.
+#pragma unroll
+                        for (u32_t mask = 4; mask != width_k; mask <<= 1) {
+                            scored_t const other = shuffle_xor<cuda_warp_t>(kept, mask);
+                            if (other < kept) kept = other;
+                        }
+                        if (group == 0) halves[warp >> 1][warp_rows + row_tile * 8 + quarter * 2 + column] = kept;
+                    }
+                __syncthreads();
+                if (threadIdx.x < tile_k) {
+                    scored_t kept = nearest[threadIdx.x];
+                    if (halves[0][threadIdx.x] < kept) kept = halves[0][threadIdx.x];
+                    if (halves[1][threadIdx.x] < kept) kept = halves[1][threadIdx.x];
+                    nearest[threadIdx.x] = kept;
+                }
+                __syncthreads();
+            }
+            // An entry no distance reached joins its run's first hub, as the SIMT gather files it.
+            if (threadIdx.x < rows_count)
+                view.entry_neighborhoods[node_of(base + threadIdx.x)] = static_cast<u16_t>(
+                    nearest[threadIdx.x] == scored_t::sentinel() ? 0 : nearest[threadIdx.x].id());
+            if (lane == 0) telemetry.scored += rows_count * run.hubs / vram_warps_per_block_k;
+            __syncthreads();
+        }
+    }
+    telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
+}
+
+/** The tile gather under the metric of @p view 's storage, fixed per instantiation, as the scan
+ *  picks its own: each kit's last metric is the one its @c distance falls back to. */
+template <vram_quads_kit kit_>
+__device__ __forceinline__ void cuda_gather_by_metric(vram_gather_neighborhoods_view<kit_> const& view) {
+    if constexpr (std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>) switch (view.storage.geometry.kernel) {
+        case nk_kernel_dot_k: cuda_gather_neighborhoods<kit_, nk_kernel_dot_k>(view); break;
+        case nk_kernel_hamming_k: cuda_gather_neighborhoods<kit_, nk_kernel_hamming_k>(view); break;
+        default: cuda_gather_neighborhoods<kit_, nk_kernel_jaccard_k>(view); break;
+        }
+    else switch (view.storage.geometry.kernel) {
+        case nk_kernel_dot_k: cuda_gather_neighborhoods<kit_, nk_kernel_dot_k>(view); break;
+        case nk_kernel_angular_k: cuda_gather_neighborhoods<kit_, nk_kernel_angular_k>(view); break;
+        default: cuda_gather_neighborhoods<kit_, nk_kernel_euclidean_k>(view); break;
+        }
+}
+
+/**
+ *  @brief Scores the @p count entries of one neighborhood all against all on the scan's step and
+ *      keeps each entry's nearest @c connectivity mates, by position, ascending, into its slice of
+ *      @p mates, the sentinel past the last.
+ *
+ *  The entries are both the queries and the rows, 64 of each a step, so both directions of every
+ *  pair are scored, each into its own query's mates, never an entry against itself, and no atomic
+ *  merges a pair. A candidate beating its query's worst mate stages in @p staged, the scan's
+ *  staged candidates, and every query merges its staged ones into its mates a warp a query, as the
+ *  scan merges its matches. Distances go through @ref unum::usearch::dense::vram_scored_pair, as
+ *  the SIMT mates' do.
+ */
+template <vram_quads_kit kit_, nk_kernel_kind_t kernel_>
+__device__ __forceinline__ void cuda_score_mates(vram_flat_view<kit_> const& storage, u32_t const* entries, u32_t count,
+                                                 vram_scored_node<node_id_t>* staged,
+                                                 vram_scored_node<node_id_t>* mates,
+                                                 vram_telemetry_t& telemetry) noexcept {
+    using fragment_t = typename kit_::fragment_t;
+    using norms_t = typename kit_::norms_t;
+    using tile_t = std::array<typename kit_::dot_t, 4>;
+    using scored_t = vram_scored_node<node_id_t>;
+    constexpr u32_t tile_k = cuda_scan_tile_k, staging_k = 2 * tile_k, width_k = cuda_warp_t::width_k;
+    constexpr u32_t rounds_k = staging_k / width_k;
+    __shared__ scored_t worst[tile_k];
+    __shared__ u32_t staged_counts[tile_k], kept_counts[tile_k];
+    __shared__ u32_t staging_full[3];
+    u32_t const warp = threadIdx.x / width_k, lane = threadIdx.x % width_k;
+    u32_t const group = lane / 4, quarter = lane % 4;
+    u32_t const warp_queries = (warp >> 1) * 32, warp_rows = (warp & 1) * 32;
+    u32_t const connectivity = storage.connectivity;
+    auto entry_of = [&](u32_t position) noexcept { return entries[min_of(position, count - 1)]; };
+    for (u32_t first_query = 0; first_query < count; first_query += tile_k) {
+        u32_t const block_queries = min_of(tile_k, count - first_query);
+        // Queries past the neighborhood keep nothing: no entry orders below the zero word.
+        for (u32_t local = threadIdx.x; local < tile_k; local += blockDim.x) {
+            worst[local] = local < block_queries ? scored_t::sentinel() : scored_t {0};
+            staged_counts[local] = 0, kept_counts[local] = 0;
+        }
+        if (threadIdx.x < 3) staging_full[threadIdx.x] = 0;
+        fragment_t const* query_rows[2][2];
+        norms_t query_norms[2][2];
+#pragma unroll
+        for (u32_t tile = 0; tile != 2; ++tile)
+#pragma unroll
+            for (u32_t half = 0; half != 2; ++half) {
+                u32_t const node = entry_of(first_query + warp_queries + tile * 16 + half * 8 + group);
+                query_rows[tile][half] = storage.vector_span_for(node);
+                query_norms[tile][half] = storage.norm_for(node);
+            }
+        __syncthreads();
+        for (u32_t base = 0, step = 0;; base += tile_k, ++step) {
+            bool const finished = base >= count;
+            if (step == 0 || finished || staging_full[(step + 2) % 3]) {
+                // Kept mates only move up, so moving them top down overwrites none unread.
+                for (u32_t local = warp; local < block_queries; local += vram_warps_per_block_k) {
+                    u32_t const pending = staged_counts[local], held = kept_counts[local];
+                    if (!pending) continue;
+                    scored_t* const kept = mates + std::size_t {first_query + local} * connectivity;
+                    scored_t const* const candidates = staged + local * staging_k;
+                    u32_t places[rounds_k];
+#pragma unroll
+                    for (u32_t round = 0; round != rounds_k; ++round) {
+                        u32_t const index = round * width_k + lane;
+                        places[round] = 0;
+                        if (index >= pending) continue;
+                        scored_t const candidate = candidates[index];
+                        for (u32_t other = 0; other != pending; ++other) places[round] += candidates[other] < candidate;
+                        places[round] += vram_rank_below(held, candidate.bits_, vram_ties_t::excluded_k,
+                                                         [&](u32_t rank) noexcept { return kept[rank].bits_; });
+                    }
+                    for (u32_t top = held; top;) {
+                        u32_t const first = top > width_k ? top - width_k : 0;
+                        u32_t const index = first + lane;
+                        scored_t const value = index < top ? kept[index] : scored_t::sentinel();
+                        cuda_warp_t::sync();
+                        u32_t place = index;
+                        for (u32_t other = 0; other != pending; ++other) place += candidates[other] < value;
+                        if (index < top && place < connectivity) kept[place] = value;
+                        cuda_warp_t::sync();
+                        top = first;
+                    }
+#pragma unroll
+                    for (u32_t round = 0; round != rounds_k; ++round) {
+                        u32_t const index = round * width_k + lane;
+                        if (index < pending && places[round] < connectivity) kept[places[round]] = candidates[index];
+                    }
+                    cuda_warp_t::sync();
+                    u32_t const now_held = min_of(held + pending, connectivity);
+                    if (lane == 0) {
+                        kept_counts[local] = now_held, staged_counts[local] = 0;
+                        worst[local] = now_held == connectivity ? kept[connectivity - 1] : scored_t::sentinel();
+                    }
+                }
+                __syncthreads();
+                if (finished) break;
+            }
+            // The next step's flag was read two barriers ago, and is raised past this one.
+            if (threadIdx.x == 0) staging_full[(step + 1) % 3] = 0;
+            fragment_t const* rows[4];
+            norms_t row_norms[4][2];
+#pragma unroll
+            for (u32_t tile = 0; tile != 4; ++tile) {
+                rows[tile] = storage.vector_span_for(entry_of(base + warp_rows + tile * 8 + group));
+#pragma unroll
+                for (u32_t column = 0; column != 2; ++column)
+                    row_norms[tile][column] = storage.norm_for(
+                        entry_of(base + warp_rows + tile * 8 + quarter * 2 + column));
+            }
+            tile_t tiles[2][4] = {};
+            cuda_scan_products<kit_>(query_rows, rows, storage.geometry.row_fragments, group, quarter, tiles);
+#pragma unroll
+            for (u32_t query_tile = 0; query_tile != 2; ++query_tile)
+#pragma unroll
+                for (u32_t half = 0; half != 2; ++half)
+#pragma unroll
+                    for (u32_t row_tile = 0; row_tile != 4; ++row_tile)
+#pragma unroll
+                        for (u32_t column = 0; column != 2; ++column) {
+                            u32_t const row = base + warp_rows + row_tile * 8 + quarter * 2 + column;
+                            u32_t const local = warp_queries + query_tile * 16 + half * 8 + group;
+                            if (row >= count || row == first_query + local) continue;
+                            scored_t const candidate = vram_scored_pair<kit_>(
+                                kernel_, tiles[query_tile][row_tile][half * 2 + column], query_norms[query_tile][half],
+                                row_norms[row_tile][column], row);
+                            if (!(candidate < worst[local])) continue;
+                            u32_t const slot = cuda_warp_t::fetch_add_relaxed(staged_counts[local], 1u);
+                            staged[local * staging_k + slot] = candidate;
+                            if (slot >= staging_k - tile_k) staging_full[step % 3] = 1;
+                        }
+            if (lane == 0) telemetry.scored += min_of(tile_k, count - base) * block_queries / vram_warps_per_block_k;
+            __syncthreads();
+        }
+        for (u32_t local = threadIdx.x; local < block_queries; local += blockDim.x)
+            if (kept_counts[local] < connectivity)
+                mates[std::size_t {first_query + local} * connectivity + kept_counts[local]] = scored_t::sentinel();
+        __syncthreads();
+    }
+}
+
+/** The tile mate scoring of metric @p kernel_: @ref cuda_score_mates over the scan's staged
+ *  candidates in the block's shared memory when the launch granted them, or else the SIMT scoring
+ *  with every row read in place. */
+template <nk_kernel_kind_t kernel_>
+struct cuda_tile_mates {
+    template <vram_quads_kit kit_, typename warp_type_>
+    static __device__ __forceinline__ void score(vram_restitch_view<kit_> const& view, u32_t const* entries,
+                                                 u32_t count, byte_t* shared, vram_scored_node<node_id_t>* mates,
+                                                 u32_t warp, u32_t lane, vram_telemetry_t& telemetry) noexcept {
+        if (!view.staged_bytes)
+            return vram_simt_mates::score<kit_, warp_type_>(view, entries, count, shared, mates, warp, lane, telemetry);
+        cuda_score_mates<kit_, kernel_>(view.storage, entries, count,
+                                        reinterpret_cast<vram_scored_node<node_id_t>*>(shared), mates, telemetry);
+    }
+};
+
+/** The restitch with tile mates under the metric of @p view 's storage, picked as
+ *  @ref cuda_gather_by_metric picks it. */
+template <vram_quads_kit kit_, vram_schedule<kit_> schedule_, u32_t resident_blocks_>
+__device__ __forceinline__ void cuda_restitch(vram_restitch_view<kit_> const& view) {
+    if constexpr (std::is_same_v<typename kit_::scalar_t, nk::u1x8_t>) switch (view.storage.geometry.kernel) {
+        case nk_kernel_dot_k:
+            vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_dot_k>>(view);
+            break;
+        case nk_kernel_hamming_k:
+            vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_hamming_k>>(view);
+            break;
+        default: vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_jaccard_k>>(view); break;
+        }
+    else switch (view.storage.geometry.kernel) {
+        case nk_kernel_dot_k:
+            vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_dot_k>>(view);
+            break;
+        case nk_kernel_angular_k:
+            vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_angular_k>>(view);
+            break;
+        default: vram_restitch<kit_, schedule_, resident_blocks_, cuda_tile_mates<nk_kernel_euclidean_k>>(view); break;
+        }
+}
+
 #pragma region Kernels
 
 /** What every NVIDIA dense kernel @p kernel_ does first under @p capability_ with
@@ -543,41 +879,17 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         vram_insert<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.build));
     else if constexpr (kernel_ == vram_kernel_t::back_link_k)
         vram_back_link<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.build));
-    else if constexpr (kernel_ == vram_kernel_t::refine_k)
-        vram_refine<kit_t, schedule_t, slots_, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_kernel_t::search_k)
         vram_walk_rung<kit_t, schedule_t, slots_, resident_blocks>(
             vram_view<kit_t>(arguments.search), vram_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     else if constexpr (kernel_ == vram_kernel_t::rebase_links_k)
         vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
                                        graph.source_first, graph.source_bound, graph.shift);
-    else if constexpr (kernel_ == vram_kernel_t::mark_landmarks_k)
-        vram_mark_landmarks<cuda_warp_t>(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_sweep_k)
-        vram_reachability_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
-                                             graph.frontier, graph.next_frontier, graph.counter, graph.previous_counter,
-                                             graph.levels);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_back_sweep_k)
-        vram_reachability_back_sweep<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity,
-                                                  graph.reaches_back, graph.back_settled, graph.counter,
-                                                  graph.previous_counter, graph.levels, graph.sweep_number);
-    else if constexpr (kernel_ == vram_kernel_t::reachability_islands_k)
-        // The unreached and island counters lie back to back.
-        vram_reachability_islands<cuda_warp_t>(graph.reached, graph.rows_count, graph.island_ids, graph.counter + 1,
-                                               graph.reaches_back, graph.counter);
-    else if constexpr (kernel_ == vram_kernel_t::reached_in_links_k)
-        vram_reached_in_links<cuda_warp_t>(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached,
-                                           graph.in_links);
-    else if constexpr (kernel_ == vram_kernel_t::reconnect_island_k)
-        vram_reconnect_island<cuda_warp_t>(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count,
-                                           graph.reached, graph.rows_count, graph.seed_count, graph.in_links,
-                                           graph.reconnected, graph.reaches_back);
-    else if constexpr (kernel_ == vram_kernel_t::count_back_links_k)
-        vram_count_back_links<cuda_warp_t>(arguments.sweep);
-    else if constexpr (kernel_ == vram_kernel_t::offset_back_links_k)
-        vram_offset_back_links<cuda_warp_t>(arguments.sweep);
-    else if constexpr (kernel_ == vram_kernel_t::scatter_back_links_k)
-        vram_scatter_back_links<cuda_warp_t>(arguments.sweep);
+    else if constexpr (kernel_ == vram_kernel_t::gather_neighborhoods_k)
+        cuda_gather_by_metric<kit_t>(vram_view<kit_t>(arguments.gather_neighborhoods));
+    else if constexpr (kernel_ == vram_kernel_t::restitch_k)
+        cuda_restitch<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.restitch));
+    else if constexpr (vram_health_kernel(kernel_)) vram_health_pass<kernel_, cuda_warp_t>(arguments.health);
     else if constexpr (vram_split_kernel(kernel_)) vram_split_pass<kernel_, cuda_warp_t>(graph);
     else if constexpr (kernel_ == vram_kernel_t::gather_vectors_k) vram_gather_vectors<cuda_warp_t>(arguments.gather);
     else if constexpr (kernel_ == vram_kernel_t::sum_counts_k)
@@ -674,8 +986,6 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
             vram_heads_rescoring<kit_t, warp_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads),
                                                  nullptr, heads.heads_count, heads.row_fragments});
     }
-    else if constexpr (kernel_ == vram_dense_kernel_t::merge_back_links_k)
-        vram_merge_back_links<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.refine));
     else if constexpr (kernel_ == vram_dense_kernel_t::fold_k)
         vram_fold<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.fold));
     else if constexpr (kernel_ == vram_dense_kernel_t::derive_norms_k)

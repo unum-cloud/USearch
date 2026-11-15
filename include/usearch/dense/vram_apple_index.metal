@@ -2,8 +2,8 @@
  *  @file include/usearch/dense/vram_apple_index.metal
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The Metal walk, insert, refine and search kernels of the dense Apple index - the MSL port of
- *      @c vram_index.cuh and the kernels of @c vram_nvidia_index.cuh.
+ *  @brief The Metal walk, insert, search and round kernels of the dense Apple index - the MSL port
+ *      of @c vram_index.cuh and the kernels of @c vram_nvidia_index.cuh.
  *
  *  One 32-wide simdgroup walks one query or inserts one node, with the same packed scored nodes,
  *  register candidates, exact visited sets, slot-0 lock words and admission waves as the CUDA design, over
@@ -116,9 +116,6 @@ struct metal_sorted_candidates {
     /** The frontier verbs of the CUDA register frontier. */
     void clear(thread metal_walk_t& walk);
 
-    /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
-    void renew() {}
-
     /** Nothing to compact or drop: the ranks keep the nearest of every union by construction. */
     uint compactions() { return 0; }
     uint dropped() { return 0; }
@@ -202,8 +199,6 @@ struct metal_arena_frontier {
 
     void clear(thread metal_walk_t& walk);
 
-    /** Grants a further walk over what this frontier holds its own expansion budget. */
-    void renew() { expansions = 0; }
     uint compactions() { return tail_compactions; }
     uint dropped() { return tail_dropped; }
     bool holds(uint staged_id, uint lane) { return head.holds(staged_id, lane); }
@@ -1157,118 +1152,6 @@ inline void metal_back_link(constant metal_arguments_t& arguments, device uint4*
     metal_flush(walk);
 }
 
-/** One simdgroup re-selects one node at a time into the shadow matrix, read-only on the live one,
- *  marks it in @p walked, and chains itself onto every pick through @p link_heads and @p link_next,
- *  as an insertion does, for @ref metal_merge_back_links to fold. */
-template <uint slots_>
-inline void metal_refine(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
-                         device uint* neighbors, device uint const* node_ids, device uchar* arena,
-                         device atomic_uint* counters, device uint* shadow, device uint const* part_bases,
-                         device uint* link_heads, device uint* link_next, device uchar* walked, uint slice, uint lane) {
-    metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
-    while (true) {
-        uint offset = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
-        offset = warp_t::shuffle(offset, 0);
-        if (arguments.first_id + offset >= arguments.end_id) break;
-        uint const node_id = arguments.use_node_ids ? node_ids[offset] : arguments.first_id + offset;
-        walk.epoch = arguments.epoch_base + offset + 1;
-        walk.random = metal_lane_generator(node_id, lane);
-        metal_stage_query(walk, walk.vector_for(node_id));
-        norms_t const query_norms = walk.norm_for(node_id);
-
-        typename metal_frontier_of<slots_>::type frontier;
-        frontier.clear(walk);
-        metal_fold_t fold {};
-        walk.test_and_set(node_id);
-        // The walk across runs first, from the landmarks of the round's neighboring group of parts alone, the
-        // rows `part_across` names to the CUDA and HIP refines, and both walks share one call site, so the walk
-        // inlines once.
-        uint sampling_first = 0, sampling_bound = 0;
-        if (arguments.parts > 1) {
-            uint part = 0;
-            while (part + 1 < arguments.parts && part_bases[part + 1] <= node_id) ++part;
-            uint const first = ((part >> arguments.round) ^ 1u) << arguments.round;
-            uint const bound = first + (1u << arguments.round);
-            if (first < arguments.parts) {
-                sampling_first = part_bases[first];
-                sampling_bound = bound < arguments.parts ? part_bases[bound] : arguments.sampling_bound;
-            }
-        }
-#pragma unroll 1
-        for (uint walk_number = sampling_first < sampling_bound ? 0 : 1; walk_number != 2; ++walk_number) {
-            if (walk_number) {
-                frontier.renew();
-                sampling_first = 0, sampling_bound = arguments.sampling_bound;
-                device uint* const own = walk.neighbors_for(node_id);
-                uint const first_value = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(own) : 0u, 0);
-                if (first_value != metal_unknown_k && first_value != node_id)
-                    for (uint slot_base = 0; slot_base < walk.connectivity; slot_base += warp_t::width_k) {
-                        uint const slot = slot_base + lane;
-                        uint const seed = slot == 0                  ? first_value
-                                          : slot < walk.connectivity ? warp_t::load_acquire(own + slot)
-                                                                     : metal_unknown_k;
-                        uint const count = walk.stage_fresh(seed != node_id ? seed : metal_unknown_k, frontier);
-                        if (count) metal_score_into_frontier(walk, frontier, query_norms, count, fold);
-                    }
-            }
-            metal_search_ahead(walk, frontier, query_norms, sampling_first, sampling_bound, arguments.sampling_bound,
-                               fold);
-        }
-        walk.tail_compactions += frontier.compactions();
-        walk.tail_dropped += frontier.dropped();
-        uint const selected = metal_select_diverse(walk, frontier);
-        device uint* const shadow_row = metal_row(shadow, node_id, walk.connectivity);
-        for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k)
-            shadow_row[slot] = slot < selected ? walk.selected_ids[slot] : slot == 0 ? node_id : metal_unknown_k;
-        for (uint slot = lane; slot < selected; slot += warp_t::width_k) {
-            uint const pick = node_id * walk.connectivity + slot;
-            link_next[pick] = warp_t::exchange_acquire(link_heads + walk.selected_ids[slot], pick);
-        }
-        if (lane == 0) walked[node_id] = 1;
-        warp_t::sync();
-    }
-    metal_flush(walk);
-}
-
-/** One simdgroup folds one row at a time into its live row, assigning itself rows from the launch
- *  counter: a row the pass walked first takes its forward picks from @p shadow, counted changed
- *  when they gained a member the live row lacked, then every walker chained onto the row folds in
- *  through @ref metal_back_link_one, and its chain resets for the next pass. Exclusive pass: no
- *  simdgroup reads another's row. */
-inline void metal_merge_back_links(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
-                                   device uint* neighbors, device uchar* arena, device atomic_uint* counters,
-                                   device uint const* shadow, device uint* link_heads, device uint const* link_next,
-                                   device uchar const* walked, uint slice, uint lane) {
-    metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
-    while (true) {
-        uint node_id = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
-        node_id = warp_t::shuffle(node_id, 0);
-        if (node_id >= arguments.end_id) break;
-        bool const forward = walked[node_id] != 0;
-        if (!forward && link_heads[node_id] == metal_unknown_k) continue;
-        if (forward) {
-            device uint* const live_row = walk.neighbors_for(node_id);
-            device uint const* const picked = metal_row(shadow, node_id, walk.connectivity);
-            bool lane_gained = false;
-            for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k) {
-                uint const pick = picked[slot];
-                bool lacked = pick != metal_unknown_k && pick != node_id;
-                for (uint old_slot = 0; lacked && old_slot != walk.connectivity; ++old_slot)
-                    lacked = live_row[old_slot] != pick;
-                lane_gained = lane_gained || lacked;
-            }
-            bool const gained = simd_any(lane_gained);
-            warp_t::sync();
-            for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k) live_row[slot] = picked[slot];
-            warp_t::fence();
-            if (lane == 0 && gained) atomic_fetch_add_explicit(counters + metal_changed_k, 1u, memory_order_relaxed);
-        }
-        metal_back_link_one(walk, node_id, link_heads, link_next, 0, walk.selection_nodes - 1);
-        if (lane == 0) link_heads[node_id] = metal_unknown_k;
-    }
-    metal_flush(walk);
-}
-
 /** One simdgroup walks one query at a time, assigning itself queries from the batch counter,
  *  writing its nearest IDs and distances, or under @p fold.keeps the pairs it scored and their
  *  count, ranked under indexer heads when the fold names any. Slot zero walks the arena frontier
@@ -1400,57 +1283,6 @@ template [[host_name("metal_insert_kernel_16")]] kernel void metal_insert_kernel
     uint lane [[thread_index_in_simdgroup]]) {
     metal_back_link(arguments, vectors, norms, neighbors, arena, counters,
                     {link_heads, link_next, touched_ids, touched_count}, group * metal_simdgroups_k + simdgroup, lane);
-}
-
-template <uint slots_>
-kernel void metal_refine_kernel(constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
-                                device uint4* vectors [[buffer(metal_vectors_buffer_k)]],
-                                device norms_t* norms [[buffer(metal_norms_buffer_k)]],
-                                device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
-                                device uint const* node_ids [[buffer(metal_staging_buffer_k)]],
-                                device uchar* arena [[buffer(metal_arena_buffer_k)]],
-                                device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
-                                device uint* shadow [[buffer(metal_shadow_buffer_k)]],
-                                device uint const* part_bases [[buffer(metal_part_bases_buffer_k)]],
-                                device uint* link_heads [[buffer(metal_chain_heads_buffer_k)]],
-                                device uint* link_next [[buffer(metal_chain_links_buffer_k)]],
-                                device uchar* walked [[buffer(metal_walked_buffer_k)]],
-                                uint group [[threadgroup_position_in_grid]],
-                                uint simdgroup [[simdgroup_index_in_threadgroup]],
-                                uint lane [[thread_index_in_simdgroup]]) {
-    metal_refine<slots_>(arguments, vectors, norms, neighbors, node_ids, arena, counters, shadow, part_bases,
-                         link_heads, link_next, walked, group * metal_simdgroups_k + simdgroup, lane);
-}
-
-template [[host_name("metal_refine_kernel_0")]] kernel void metal_refine_kernel<0>(
-    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
-template [[host_name("metal_refine_kernel_2")]] kernel void metal_refine_kernel<2>(
-    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
-template [[host_name("metal_refine_kernel_4")]] kernel void metal_refine_kernel<4>(
-    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
-template [[host_name("metal_refine_kernel_8")]] kernel void metal_refine_kernel<8>(
-    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
-template [[host_name("metal_refine_kernel_16")]] kernel void metal_refine_kernel<16>(
-    constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint const*, device uchar*,
-    device atomic_uint*, device uint*, device uint const*, device uint*, device uint*, device uchar*, uint, uint, uint);
-
-/** One merge launch per refine pass, over every row the pass walked or a walker picked. */
-[[host_name("metal_merge_back_links_kernel")]] kernel void metal_merge_back_links_kernel(
-    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
-    device uint4* vectors [[buffer(metal_vectors_buffer_k)]], device norms_t* norms [[buffer(metal_norms_buffer_k)]],
-    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]], device uchar* arena [[buffer(metal_arena_buffer_k)]],
-    device atomic_uint* counters [[buffer(metal_counters_buffer_k)]],
-    device uint const* shadow [[buffer(metal_shadow_buffer_k)]],
-    device uint* link_heads [[buffer(metal_chain_heads_buffer_k)]],
-    device uint const* link_next [[buffer(metal_chain_links_buffer_k)]],
-    device uchar const* walked [[buffer(metal_walked_buffer_k)]], uint group [[threadgroup_position_in_grid]],
-    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-    metal_merge_back_links(arguments, vectors, norms, neighbors, arena, counters, shadow, link_heads, link_next, walked,
-                           group * metal_simdgroups_k + simdgroup, lane);
 }
 
 /*  Searches and graph products share one entry point per width, plus slot zero's arena frontier past the widest
@@ -1674,28 +1506,1007 @@ inline bool metal_converged(constant metal_arguments_t& arguments, device uint c
         atomic_fetch_add_explicit((device atomic_uint*)(placed + (arguments.round & 1u)), room, memory_order_relaxed);
 }
 
-/** Marks in @p picked every row linking into another part, one simdgroup per row. */
-[[host_name("metal_partition_picked_kernel")]] kernel void metal_partition_picked_kernel(
-    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
-    device uint const* neighbors [[buffer(metal_neighbors_buffer_k)]],
-    device uint const* node_parts [[buffer(metal_node_parts_buffer_k)]],
-    device uint* picked [[buffer(metal_picked_buffer_k)]], uint group [[threadgroup_position_in_grid]],
-    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
-    uint const slices = groups * metal_simdgroups_k, rows = arguments.end_id;
-    for (uint row = group * metal_simdgroups_k + simdgroup; row < rows; row += slices) {
-        uint const part = node_parts[row];
-        device uint const* const links = metal_row(neighbors, row, arguments.connectivity);
-        bool across = false;
-        for (uint slot = lane; slot < arguments.connectivity; slot += metal_simdgroup_width_k) {
-            uint const target = links[slot];
-            across = across ||
-                     (target != metal_unknown_k && target != row && target < rows && node_parts[target] != part);
+#pragma endregion Gathers and Splits
+
+/*  The refine round on the device, the Metal twins of the CUDA and HIP kernels: a health check
+ *  from one root with exact depths both ways, island components labeled in parallel, the heal
+ *  linking them with no distance, a gather filing every entry under its nearest hub, and a
+ *  restitch of each neighborhood all against all. Rows and hubs stage in threadgroup memory while
+ *  they fit its 32 KB, and are read in place past it, as the walks read theirs. */
+
+#pragma region Rounds
+
+/** Whether bit @p row of @p words is set, read through the word other lanes set bits in. */
+inline bool metal_bit(device uint* words, uint row) {
+    return (warp_t::load_relaxed(words + row / 32) >> (row % 32)) & 1u;
+}
+
+/** Sets bit @p row of @p words, answering whether it was set already. */
+inline bool metal_bitset_claim(device uint* words, uint row) {
+    uint const bit = 1u << (row % 32);
+    return (warp_t::fetch_or_relaxed(words + row / 32, bit) & bit) != 0;
+}
+
+/** Clears bit @p row of @p words, answering whether it was set. */
+inline bool metal_bitset_release(device uint* words, uint row) {
+    uint const bit = 1u << (row % 32);
+    return (warp_t::fetch_and_relaxed(words + row / 32, ~bit) & bit) != 0;
+}
+
+/** Adds @p value to the tally at @p counter, carrying into its high word. */
+inline void metal_tally_add(device uint* counters, uint counter, uint value) {
+    if (!value) return;
+    uint const low = warp_t::fetch_add_relaxed(counters + counter, value);
+    if (low + value < low) warp_t::fetch_add_relaxed(counters + counter + 1, 1u);
+}
+
+/** The dot of two rows of @p fragments, each staged in threadgroup memory or read in place. */
+template <typename left_type_, typename right_type_>
+inline dot_t metal_rows_dot(left_type_ left, right_type_ right, uint fragments) {
+    dot_t sum = dot_t(0);
+    for (uint fragment = 0; fragment != fragments; ++fragment)
+        sum = kit_t::accumulate_dot(left[fragment], right[fragment], sum);
+    return sum;
+}
+
+/** The columns of one health check, as the RAM audit names them, beside the round's counters:
+ *  depths both ways a byte each, the exact in-link and shallower in-link counts, and the reached,
+ *  reaching-root and two-ways bits. */
+struct metal_health_t {
+    device uint* neighbors;
+    device uint* counters;
+    device uchar* depths_from_root;
+    device uchar* depths_to_root;
+    device uint* in_links;
+    device uint* shallower_in_links;
+    device uint* reached;
+    device uint* reaches_root;
+    device uint* two_ways_to_root;
+    uint rows_count, connectivity;
+
+    device uint* row(uint node) { return metal_row(neighbors, node, connectivity); }
+    uint depth_from_root(uint node) { return warp_t::load_relaxed(depths_from_root, node); }
+    uint depth_to_root(uint node) { return warp_t::load_relaxed(depths_to_root, node); }
+    bool in_component(uint node) { return metal_bit(reached, node) && metal_bit(reaches_root, node); }
+
+    /** The in-links of @p node read saturated at 255, so every decision matches the RAM audit's
+     *  byte. */
+    uint in_links_of(uint node) { return min(warp_t::load_relaxed(in_links + node), 255u); }
+
+    /** Marks @p node 's way to the root one past @p lowest, and its two ways when two links met it;
+     *  answers whether it marked. */
+    uint mark_reaches_root(uint node, uint lowest, uint at_lowest) {
+        if (lowest == metal_unknown_depth_k) return 0;
+        uint const depth = min(lowest + 1u, uint(metal_deepest_depth_k));
+        depths_to_root[node] = uchar(depth);
+        metal_bitset_claim(reaches_root, node);
+        if (at_lowest > 1 && lowest < depth) metal_bitset_claim(two_ways_to_root, node);
+        return 1;
+    }
+
+    /** Takes one of @p node 's links from the depth before it, answering whether another
+     *  remains. */
+    bool take_shallower_in_link_if_spare(uint node) {
+        uint observed = warp_t::load_relaxed(shallower_in_links + node);
+        while (observed > 1 && !warp_t::compare_exchange_relaxed(shallower_in_links + node, observed, observed - 1))
+            observed = warp_t::load_relaxed(shallower_in_links + node);
+        return observed > 1;
+    }
+
+    /** Takes one of @p node 's in-links for a swap, answering whether another remains. */
+    bool take_in_link_if_spare(uint node) {
+        uint observed = warp_t::load_relaxed(in_links + node);
+        while (observed && !warp_t::compare_exchange_relaxed(in_links + node, observed, observed - 1))
+            observed = warp_t::load_relaxed(in_links + node);
+        return observed > 1;
+    }
+
+    /** Takes the link from @p owner to @p resident for a swap: one not from the depth before the
+     *  resident goes freely, a shallower in-link only while another remains. */
+    bool take_link_for_swap_if_spare(uint owner, uint resident) {
+        uint const owner_depth = depth_from_root(owner);
+        uint const child = owner_depth < metal_deepest_depth_k ? owner_depth + 1 : uint(metal_unknown_depth_k);
+        return child == metal_unknown_depth_k || depth_from_root(resident) != child ||
+               take_shallower_in_link_if_spare(resident);
+    }
+
+    /** Takes that link when the reach rule releases it: never the resident's last shallower
+     *  in-link, and a link toward the root only while the owner keeps another as close to it. */
+    bool take_link_under_lock_if_spare(uint owner, uint resident) {
+        bool const way_to_root = metal_bit(reaches_root, owner) && depth_to_root(owner) != 0 &&
+                                 depth_to_root(resident) < depth_to_root(owner);
+        if (way_to_root && !metal_bit(two_ways_to_root, owner)) return false;
+        if (!take_link_for_swap_if_spare(owner, resident)) return false;
+        if (way_to_root) metal_bitset_release(two_ways_to_root, owner);
+        return true;
+    }
+
+    /** Files a heal's link from @p owner to island entry @p member in the columns the reach rule
+     *  keeps, as the RAM audit's @c record_heal_link does. */
+    void record_heal_link(uint owner, uint member) {
+        uint const owner_depth = depth_from_root(owner);
+        if (depth_from_root(member) == metal_unknown_depth_k && owner_depth < metal_deepest_depth_k) {
+            depths_from_root[member] = uchar(owner_depth + 1);
+            shallower_in_links[member] = 1;
         }
-        if (simd_any(across) && lane == 0) metal_bitset_insert(picked, row);
+        uint const member_depth_to_root = depth_to_root(member);
+        if (depth_to_root(owner) == metal_unknown_depth_k && member_depth_to_root < metal_deepest_depth_k)
+            depths_to_root[owner] = uchar(member_depth_to_root + 1);
+    }
+};
+
+/** The lowest depth to root among the links one simdgroup read, and how many links met it. */
+struct metal_way_to_root_t {
+    uint lowest = metal_unknown_depth_k, at_lowest = 0;
+
+    void note(uint depth) {
+        if (depth < lowest) lowest = depth, at_lowest = 1;
+        else at_lowest += depth == lowest && depth != metal_unknown_depth_k;
+    }
+
+    /** The lowest depth every lane met, and the links meeting it, on every lane. */
+    metal_way_to_root_t reduced() const {
+        uint const least = warp_t::reduce_min(lowest);
+        metal_way_to_root_t way;
+        way.lowest = least, way.at_lowest = warp_t::reduce_add(lowest == least ? at_lowest : 0u);
+        return way;
+    }
+};
+
+/** Calls @p visit on the lanes holding a link of @p node 's row below the rows but its own, the
+ *  links past the first sentinel ignored; a row whose slot zero is the sentinel or the node itself
+ *  holds none. Every lane calls it; @p visit runs on some. */
+template <typename visit_type_>
+inline void metal_for_each_link(thread metal_health_t& health, uint node, uint lane, visit_type_ visit) {
+    device uint* const row = health.row(node);
+    uint const first = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(row) : 0u, 0);
+    if (first == metal_unknown_k || first == node) return;
+    for (uint base = 0; base < health.connectivity; base += warp_t::width_k) {
+        uint const slot = base + lane;
+        uint const target = slot >= health.connectivity ? metal_unknown_k
+                            : slot                      ? warp_t::load_relaxed(row + slot)
+                                                        : first;
+        uint const ends = warp_t::ballot(target == metal_unknown_k);
+        bool const listed = !ends || lane < ctz(ends);
+        if (listed && target < health.rows_count && target != node) visit(target);
+        if (ends) return;
     }
 }
 
-#pragma endregion Gathers and Splits
+/** The rank of @p node among the @p islands ascending island nodes, or @p islands when none. */
+inline uint metal_island_rank(device uint* island_nodes, uint islands, uint node) {
+    uint low = 0, high = islands;
+    while (low < high) {
+        uint const middle = (low + high) / 2;
+        if (island_nodes[middle] < node) low = middle + 1;
+        else high = middle;
+    }
+    return low < islands && island_nodes[low] == node ? low : islands;
+}
+
+/** Calls @p visit with the rank of every island node that island node @p node links to, the islands
+ *  as ordered, so a way to the root marked meanwhile changes no component's links. */
+template <typename visit_type_>
+inline void metal_for_each_island_link(thread metal_health_t& health, device uint* island_nodes, uint islands,
+                                       uint node, uint lane, visit_type_ visit) {
+    metal_for_each_link(health, node, lane, [&](uint target) {
+        uint const rank = metal_island_rank(island_nodes, islands, target);
+        if (rank != islands) visit(rank);
+    });
+}
+
+/** Files @p key of island member @p rank under its @p component in two 32-bit minimums, the key's
+ *  in the high word on the first pass and the least rank holding it in the low word on the second:
+ *  64-bit atomic minimums exist only from Apple GPU family 9, and one source serves them all. */
+inline void metal_claim_entry(device uint* entries, uint component, uint key) {
+    warp_t::fetch_min_relaxed(entries + 2 * component + 1, key);
+}
+inline void metal_settle_entry(device uint* entries, uint component, uint key, uint rank) {
+    if (entries[2 * component + 1] == key) warp_t::fetch_min_relaxed(entries + 2 * component, rank);
+}
+
+/** The key an island member stands for its component by, the least first: a member a link crosses
+ *  through, then the fewest in-links, ties by a keyed draw, as the RAM audit orders them. */
+inline uint metal_entry_key(thread metal_health_t& health, uint node, uint parent, uint roles) {
+    bool const crosses = parent != metal_unknown_k || (roles & metal_links_to_component_k) != 0;
+    return (crosses ? 0u : 1u << 31) | health.in_links_of(node) << 23 | uint(metal_mix_bits(node) >> 41);
+}
+
+/** The root of @p rank 's set among the union-find @p parents, halving its path. */
+inline uint metal_find(device uint* parents, uint rank) {
+    for (;;) {
+        uint const parent = warp_t::load_relaxed(parents + rank);
+        if (parent == rank) return rank;
+        uint const grand = warp_t::load_relaxed(parents + parent);
+        if (grand != parent) warp_t::compare_exchange_relaxed(parents + rank, parent, grand);
+        rank = grand;
+    }
+}
+
+/** Joins the sets of @p first and @p second, the higher root hooked under the lower one. */
+inline void metal_unite(device uint* parents, uint first, uint second) {
+    for (;;) {
+        first = metal_find(parents, first), second = metal_find(parents, second);
+        if (first == second) return;
+        if (warp_t::compare_exchange_relaxed(parents + max(first, second), max(first, second), min(first, second)))
+            return;
+    }
+}
+
+/** The health columns bound at their slots, every check's kernel taking them alike. */
+inline metal_health_t metal_health(constant metal_arguments_t& arguments, device uint* neighbors, device uint* counters,
+                                   device uchar* depths_from_root, device uchar* depths_to_root, device uint* in_links,
+                                   device uint* shallower_in_links, device uint* reached, device uint* reaches_root,
+                                   device uint* two_ways_to_root) {
+    metal_health_t health;
+    health.neighbors = neighbors, health.counters = counters;
+    health.depths_from_root = depths_from_root, health.depths_to_root = depths_to_root;
+    health.in_links = in_links, health.shallower_in_links = shallower_in_links;
+    health.reached = reached, health.reaches_root = reaches_root, health.two_ways_to_root = two_ways_to_root;
+    health.rows_count = arguments.end_id, health.connectivity = arguments.connectivity;
+    return health;
+}
+
+/** One depth of a health check from its root, one simdgroup an entry: every entry at @c depth
+ *  counts an in-link into each target, reaches the targets no entry reached before one depth
+ *  deeper, counts a shallower in-link into every target at that depth or still being stored, and
+ *  marks its own way to the root in the same read, as the RAM audit's @c expand_ does. */
+[[host_name("metal_health_expand_kernel")]] kernel void metal_health_expand_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    uint group [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint const depth = arguments.depth;
+    bool const saturated = depth >= metal_deepest_depth_k;
+    uint const own = min(depth, uint(metal_deepest_depth_k)), child = min(depth + 1u, uint(metal_deepest_depth_k));
+    uint reached_count = 0, marked_count = 0;
+    for (uint row = group * metal_simdgroups_k + simdgroup; row < health.rows_count;
+         row += groups * metal_simdgroups_k) {
+        bool expands = lane == 0 && metal_bit(reached, row) && health.depth_from_root(row) == own;
+        // Past the deepest recorded depth an entry marks its expansion in its shallower in-links.
+        if (expands && saturated) expands = !warp_t::exchange_relaxed(shallower_in_links + row, 1u);
+        if (!warp_t::shuffle(uint(expands), 0)) continue;
+        metal_way_to_root_t way;
+        metal_for_each_link(health, row, lane, [&](uint target) {
+            if (!warp_t::fetch_add_relaxed(in_links + target, 1u) && !metal_bitset_claim(reached, target)) {
+                depths_from_root[target] = uchar(child);
+                ++reached_count;
+            }
+            // A depth still unknown is one another simdgroup reached this depth and is storing.
+            uint const target_depth = health.depth_from_root(target);
+            if (child != metal_deepest_depth_k && (target_depth == child || target_depth == metal_unknown_depth_k))
+                warp_t::fetch_add_relaxed(shallower_in_links + target, 1u);
+            way.note(health.depth_to_root(target));
+        });
+        way = way.reduced();
+        if (lane == 0 && health.depth_to_root(row) == metal_unknown_depth_k)
+            marked_count += health.mark_reaches_root(row, way.lowest, way.at_lowest);
+    }
+    reached_count = warp_t::reduce_add(reached_count);
+    if (lane == 0 && reached_count) warp_t::fetch_add_relaxed(counters + metal_round_reached_k, reached_count);
+    if (lane == 0 && marked_count) warp_t::fetch_add_relaxed(counters + metal_round_marked_k, marked_count);
+}
+
+/** Re-reads the reached entries not yet marked, one simdgroup an entry, marking each that now links
+ *  to an entry reaching the root, as the RAM audit's @c recheck_reaches_root_ does. */
+[[host_name("metal_health_recheck_kernel")]] kernel void metal_health_recheck_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    uint group [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint marked_count = 0;
+    for (uint row = group * metal_simdgroups_k + simdgroup; row < health.rows_count;
+         row += groups * metal_simdgroups_k) {
+        bool const rechecks = lane == 0 && metal_bit(reached, row) && !metal_bit(reaches_root, row);
+        if (!warp_t::shuffle(uint(rechecks), 0)) continue;
+        metal_way_to_root_t way;
+        metal_for_each_link(health, row, lane, [&](uint target) { way.note(health.depth_to_root(target)); });
+        way = way.reduced();
+        if (lane == 0) marked_count += health.mark_reaches_root(row, way.lowest, way.at_lowest);
+    }
+    if (lane == 0 && marked_count) warp_t::fetch_add_relaxed(counters + metal_round_marked_k, marked_count);
+}
+
+/** Writes the entries outside the root's component in ascending order on one threadgroup, a word of
+ *  entries a thread and a threadgroup's words at a time, so the ranks match the RAM audit's. */
+[[host_name("metal_order_islands_kernel")]] kernel void metal_order_islands_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    uint thread_index [[thread_position_in_threadgroup]], uint group_threads [[threads_per_threadgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint simdgroup_counts[metal_simdgroups_k];
+    uint const rows = arguments.end_id, words = (rows + 31) / 32;
+    uint written = 0;
+    for (uint first = 0; first < words; first += group_threads) {
+        uint const word = first + thread_index;
+        uint lanes = 0;
+        if (word < words) {
+            uint const visible = rows - word * 32;
+            lanes = ~(reached[word] & reaches_root[word]) & (visible >= 32 ? 0xFFFFFFFFu : (1u << visible) - 1u);
+        }
+        uint const count = popcount(lanes), before = simd_prefix_exclusive_sum(count);
+        if (lane == warp_t::width_k - 1) simdgroup_counts[simdgroup] = before + count;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint offset = written + before, total = 0;
+        for (uint other = 0; other != metal_simdgroups_k; ++other) {
+            if (other < simdgroup) offset += simdgroup_counts[other];
+            total += simdgroup_counts[other];
+        }
+        for (; lanes; lanes &= lanes - 1) island_nodes[offset++] = word * 32 + ctz(lanes);
+        written += total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (thread_index == 0) counters[metal_round_islands_k] = written;
+}
+
+/** Opens every island's columns, one simdgroup an island: marks those linking into the root's
+ *  component and their ways to the root, and starts its labels from its own rank, as the RAM
+ *  audit's @c gather_islands_ does. */
+[[host_name("metal_health_islands_kernel")]] kernel void metal_health_islands_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    device uint* island_components [[buffer(metal_island_components_buffer_k)]],
+    device uint* island_labels [[buffer(metal_island_labels_buffer_k)]],
+    device uint* island_parents [[buffer(metal_island_parents_buffer_k)]],
+    device uint* island_entries [[buffer(metal_island_entries_buffer_k)]],
+    device uint* island_roles [[buffer(metal_island_roles_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    for (uint rank = group * metal_simdgroups_k + simdgroup; rank < arguments.islands;
+         rank += groups * metal_simdgroups_k) {
+        uint const node = island_nodes[rank];
+        bool links = false;
+        metal_way_to_root_t way;
+        metal_for_each_link(health, node, lane, [&](uint target) {
+            if (!health.in_component(target)) return;
+            links = true;
+            way.note(health.depth_to_root(target));
+        });
+        links = simd_any(links);
+        way = way.reduced();
+        if (lane != 0) continue;
+        island_roles[rank] = links ? uint(metal_links_to_component_k) : 0u;
+        island_parents[rank] = metal_unknown_k;
+        island_components[rank] = metal_unknown_k;
+        island_labels[2 * rank] = island_labels[2 * rank + 1] = rank;
+        // The members a component counts while labeled, until the labels pass files its entry here.
+        island_entries[2 * rank] = island_entries[2 * rank + 1] = 0;
+        // A reached island never links into the component, or a recheck marked it.
+        health.mark_reaches_root(node, way.lowest, way.at_lowest);
+    }
+}
+
+/** One pass of the island components, the strong components among the islands, each named by its
+ *  least rank as the RAM audit's Tarjan walk names it. Pass zero lowers, one simdgroup an island,
+ *  the forward label of every unlabeled island it links to and its own backward label to theirs,
+ *  and marks its way to the root through the islands it links to; pass one settles, a thread an
+ *  island, every one whose labels meet, as both name the least rank it reaches and is reached
+ *  from, counting its members, and restarts the rest from their own ranks. */
+[[host_name("metal_island_components_kernel")]] kernel void metal_island_components_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    device uint* island_components [[buffer(metal_island_components_buffer_k)]],
+    device uint* island_labels [[buffer(metal_island_labels_buffer_k)]],
+    device uint* island_entries [[buffer(metal_island_entries_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint position [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint const islands = arguments.islands;
+    uint changed = 0;
+    if (arguments.pass == 1) {
+        for (uint rank = position; rank < islands; rank += threads) {
+            if (island_components[rank] != metal_unknown_k) continue;
+            uint const forward = island_labels[2 * rank], backward = island_labels[2 * rank + 1];
+            if (forward == backward) {
+                island_components[rank] = forward;
+                warp_t::fetch_add_relaxed(island_entries + 2 * forward, 1u);
+                ++changed;
+            }
+            else island_labels[2 * rank] = island_labels[2 * rank + 1] = rank;
+        }
+    }
+    else
+        for (uint rank = group * metal_simdgroups_k + simdgroup; rank < islands; rank += groups * metal_simdgroups_k) {
+            uint const node = island_nodes[rank];
+            bool const open = island_components[rank] == metal_unknown_k;
+            bool const unmarked = warp_t::shuffle(
+                uint(lane == 0 && health.depth_to_root(node) == metal_unknown_depth_k), 0);
+            if (!open && !unmarked) continue;
+            uint const forward = open ? warp_t::load_relaxed(island_labels + 2 * rank) : 0u;
+            uint lowered = 0;
+            metal_way_to_root_t way;
+            metal_for_each_island_link(health, island_nodes, islands, node, lane, [&](uint next) {
+                if (unmarked) way.note(health.depth_to_root(island_nodes[next]));
+                if (!open || island_components[next] != metal_unknown_k) return;
+                lowered += warp_t::fetch_min_relaxed(island_labels + 2 * next, forward) > forward;
+                uint const backward = warp_t::load_relaxed(island_labels + 2 * next + 1);
+                lowered += warp_t::fetch_min_relaxed(island_labels + 2 * rank + 1, backward) > backward;
+            });
+            way = way.reduced();
+            lowered = warp_t::reduce_add(lowered);
+            if (lane == 0 && unmarked) lowered += health.mark_reaches_root(node, way.lowest, way.at_lowest);
+            if (lane == 0) changed += lowered;
+        }
+    changed = warp_t::reduce_add(changed);
+    if (lane == 0 && changed) warp_t::fetch_add_relaxed(counters + metal_round_relabeled_k, changed);
+}
+
+/** Counts the entries no reached entry links to and those linked to by fewer entries than they link
+ *  to, one simdgroup an entry, and files the least entry of the root's component linking to each
+ *  island as its parent, as the RAM audit's @c count_in_and_out_links_ does. */
+[[host_name("metal_health_count_links_kernel")]] kernel void metal_health_count_links_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    device uint* island_parents [[buffer(metal_island_parents_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint unlinked = 0, underlinked = 0;
+    for (uint row = group * metal_simdgroups_k + simdgroup; row < health.rows_count;
+         row += groups * metal_simdgroups_k) {
+        bool const member = warp_t::shuffle(uint(lane == 0 && health.in_component(row)), 0);
+        uint out_links = 0;
+        metal_for_each_link(health, row, lane, [&](uint target) {
+            ++out_links;
+            if (!member || health.in_component(target)) return;
+            uint const rank = metal_island_rank(island_nodes, arguments.islands, target);
+            if (rank != arguments.islands) warp_t::fetch_min_relaxed(island_parents + rank, row);
+        });
+        out_links = warp_t::reduce_add(out_links);
+        uint const linked_by = health.in_links_of(row);
+        unlinked += linked_by == 0, underlinked += linked_by < out_links;
+    }
+    if (lane != 0) return;
+    if (unlinked) warp_t::fetch_add_relaxed(counters + metal_round_unlinked_k, unlinked);
+    if (underlinked) warp_t::fetch_add_relaxed(counters + metal_round_underlinked_k, underlinked);
+}
+
+/** One pass of labeling the islands, as the RAM audit's @c label_islands_ does. Pass zero, a thread
+ *  an island, marks every component first unreached and stranded, empties the entries and starts
+ *  the weak components' union-find, the root's component in the last slot. Pass one, a simdgroup an
+ *  island, clears the roles its links disprove, files its entry key and joins the weak components
+ *  its links join. Pass two, a thread an island, settles the entries, spreads each component's
+ *  roles to its members and counts the unreached and stranded ones. Pass three counts the weak
+ *  components, the union-find's roots. */
+[[host_name("metal_label_islands_kernel")]] kernel void metal_label_islands_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    device uint* island_components [[buffer(metal_island_components_buffer_k)]],
+    device uint* island_labels [[buffer(metal_island_labels_buffer_k)]],
+    device uint* island_parents [[buffer(metal_island_parents_buffer_k)]],
+    device uint* island_entries [[buffer(metal_island_entries_buffer_k)]],
+    device uint* island_roles [[buffer(metal_island_roles_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint groups [[threadgroups_per_grid]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint position [[thread_position_in_grid]],
+    uint threads [[threads_per_grid]]) {
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint const islands = arguments.islands;
+    // The forward and backward labels served the components; the union-find takes their slots.
+    device uint* const weak = island_labels;
+    uint const component_roles = metal_unreached_island_k | metal_stranded_island_k;
+    if (arguments.pass == 0) {
+        for (uint rank = position; rank <= islands; rank += threads) {
+            weak[rank] = rank;
+            if (rank == islands) continue;
+            if (island_components[rank] == rank) warp_t::fetch_or_relaxed(island_roles + rank, component_roles);
+            island_entries[2 * rank] = island_entries[2 * rank + 1] = metal_unknown_k;
+        }
+        return;
+    }
+    if (arguments.pass == 1) {
+        for (uint rank = group * metal_simdgroups_k + simdgroup; rank < islands; rank += groups * metal_simdgroups_k) {
+            uint const node = island_nodes[rank], component = island_components[rank];
+            uint const parent = island_parents[rank], roles = warp_t::load_relaxed(island_roles + rank);
+            metal_for_each_island_link(health, island_nodes, islands, node, lane, [&](uint linked) {
+                metal_unite(weak, rank, linked);
+                uint const next = island_components[linked];
+                if (next == component) return;
+                warp_t::fetch_and_relaxed(island_roles + component, ~uint(metal_stranded_island_k));
+                warp_t::fetch_and_relaxed(island_roles + next, ~uint(metal_unreached_island_k));
+            });
+            if (lane != 0) continue;
+            if (parent != metal_unknown_k) {
+                warp_t::fetch_or_relaxed(island_roles + rank, metal_linked_from_component_k);
+                warp_t::fetch_and_relaxed(island_roles + component, ~uint(metal_unreached_island_k));
+            }
+            if (roles & metal_links_to_component_k)
+                warp_t::fetch_and_relaxed(island_roles + component, ~uint(metal_stranded_island_k));
+            if (parent != metal_unknown_k || (roles & metal_links_to_component_k)) metal_unite(weak, rank, islands);
+            metal_claim_entry(island_entries, component, metal_entry_key(health, node, parent, roles));
+        }
+        return;
+    }
+    uint counted[2] = {0, 0};
+    for (uint rank = position; rank <= islands && arguments.pass == 3; rank += threads)
+        counted[0] += metal_find(weak, rank) == rank;
+    for (uint rank = position; rank < islands && arguments.pass == 2; rank += threads) {
+        uint const node = island_nodes[rank], component = island_components[rank];
+        uint const roles = warp_t::load_relaxed(island_roles + rank);
+        metal_settle_entry(island_entries, component, metal_entry_key(health, node, island_parents[rank], roles), rank);
+        uint const roles_of_component = warp_t::load_relaxed(island_roles + component) & component_roles;
+        if (component != rank) warp_t::fetch_or_relaxed(island_roles + rank, roles_of_component);
+        else {
+            counted[0] += (roles_of_component & metal_unreached_island_k) != 0;
+            counted[1] += (roles_of_component & metal_stranded_island_k) != 0;
+        }
+    }
+    counted[0] = warp_t::reduce_add(counted[0]), counted[1] = warp_t::reduce_add(counted[1]);
+    if (lane != 0) return;
+    if (arguments.pass == 3 && counted[0]) warp_t::fetch_add_relaxed(counters + metal_round_components_k, counted[0]);
+    if (arguments.pass == 2 && counted[0])
+        warp_t::fetch_add_relaxed(counters + metal_round_unreached_islands_k, counted[0]);
+    if (arguments.pass == 2 && counted[1])
+        warp_t::fetch_add_relaxed(counters + metal_round_stranded_islands_k, counted[1]);
+}
+
+/** Links @p member from @p owner 's row, as the RAM round's @c add_or_swap_link_ does keeping none:
+ *  a free slot first; else, inside the root's component, the slot whose resident is linked to by
+ *  the most entries, when it stays linked to by more than @p member and the reach rule releases it.
+ *  The heal runs alone, so it writes rows with plain stores; answers whether it wrote. */
+inline bool metal_add_or_swap_link(thread metal_health_t& health, device uint* changed, uint owner, uint member,
+                                   thread uint& changed_rows) {
+    if (owner == member || owner >= health.rows_count || member >= health.rows_count) return false;
+    device uint* const row = health.row(owner);
+    uint const connectivity = health.connectivity, first = row[0];
+    bool written = false;
+    if (first == owner) row[0] = member, written = true;
+    else {
+        bool present = first == member;
+        uint free_slot = connectivity, richest = connectivity;
+        for (uint slot = 1; slot != connectivity && !present; ++slot) {
+            uint const resident = row[slot];
+            present = resident == member;
+            if (resident == metal_unknown_k) {
+                free_slot = slot;
+                break;
+            }
+        }
+        uint richest_links = health.in_links_of(member);
+        for (uint slot = 0; !present && free_slot == connectivity && slot != connectivity && health.in_component(owner);
+             ++slot) {
+            uint const resident = slot ? row[slot] : first;
+            if (resident >= health.rows_count || health.in_links_of(resident) <= richest_links + 1u) continue;
+            richest = slot, richest_links = health.in_links_of(resident);
+        }
+        uint const displaced = richest == connectivity ? metal_unknown_k : richest ? row[richest] : first;
+        if (present) {}
+        else if (free_slot != connectivity) row[free_slot] = member, written = true;
+        else if (richest != connectivity && health.take_link_under_lock_if_spare(owner, displaced)) {
+            row[richest] = member;
+            health.take_in_link_if_spare(displaced);
+            written = true;
+        }
+    }
+    if (!written) return false;
+    warp_t::fetch_add_relaxed(health.in_links + member, 1u);
+    changed_rows += !metal_bitset_claim(changed, owner);
+    return true;
+}
+
+/** Links every unreached or stranded island component through the root's component with no
+ *  distance, in rank order on one lane, as the RAM round's @c heal_ does: an unreached one's entry
+ *  from the first of its own links inside the component, a stranded one's entry to the entry of the
+ *  component linking to it. */
+[[host_name("metal_heal_islands_kernel")]] kernel void metal_heal_islands_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* changed [[buffer(metal_changed_buffer_k)]],
+    device uint* island_nodes [[buffer(metal_island_nodes_buffer_k)]],
+    device uint* island_components [[buffer(metal_island_components_buffer_k)]],
+    device uint* island_parents [[buffer(metal_island_parents_buffer_k)]],
+    device uint* island_entries [[buffer(metal_island_entries_buffer_k)]],
+    device uint* island_roles [[buffer(metal_island_roles_buffer_k)]], uint position [[thread_position_in_grid]]) {
+    if (position != 0) return;
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint healed = 0, changed_rows = 0;
+    for (uint rank = 0; rank != arguments.islands; ++rank) {
+        if (island_components[rank] != rank) continue;
+        uint const roles = island_roles[rank], member = island_entries[2 * rank], entry = island_nodes[member];
+        if (roles & metal_unreached_island_k) {
+            device uint* const row = health.row(entry);
+            uint owner = metal_unknown_k;
+            for (uint slot = 0; slot != health.connectivity && owner == metal_unknown_k; ++slot) {
+                uint const link = row[slot];
+                if (link == metal_unknown_k) break;
+                if (link < health.rows_count && link != entry && health.in_component(link)) owner = link;
+            }
+            if (owner != metal_unknown_k && metal_add_or_swap_link(health, changed, owner, entry, changed_rows))
+                health.record_heal_link(owner, entry), ++healed;
+        }
+        uint const parent = island_parents[member];
+        if ((roles & metal_stranded_island_k) && parent != metal_unknown_k &&
+            metal_add_or_swap_link(health, changed, entry, parent, changed_rows))
+            health.record_heal_link(entry, parent), ++healed;
+    }
+    counters[metal_round_healed_k] += healed;
+    counters[metal_round_changed_k] += changed_rows;
+}
+
+/** Files every entry of a gather's runs under its nearest hub, the lower one among equals, one item
+ *  a threadgroup: the item's run stages its hub rows and norms in threadgroup memory while they
+ *  fit, or reads them in place, and each simdgroup takes an entry, one hub a lane, whole dots, so
+ *  only the minimum crosses lanes. A first gather's run spans IDs; a later one positions among the
+ *  entries in neighborhood order. An entry no distance reached joins the first neighborhood of its
+ *  run, as on RAM. */
+[[host_name("metal_gather_neighborhoods_kernel")]] kernel void metal_gather_neighborhoods_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint4* vectors [[buffer(metal_vectors_buffer_k)]], device norms_t* norms [[buffer(metal_norms_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device ushort* entry_neighborhoods [[buffer(metal_entry_neighborhoods_buffer_k)]],
+    device uint* neighborhood_entries [[buffer(metal_neighborhood_entries_buffer_k)]],
+    device uint* hub_nodes [[buffer(metal_hub_nodes_buffer_k)]], device uint4* runs [[buffer(metal_runs_buffer_k)]],
+    device uint* run_items [[buffer(metal_run_items_buffer_k)]], uint thread_index [[thread_position_in_threadgroup]],
+    uint group_threads [[threads_per_threadgroup]], uint simdgroup [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint4 staged[uint(metal_round_staged_bytes_k) / metal_fragment_bytes_k];
+    threadgroup uint claimed;
+    uint const fragments = arguments.row_fragments, items = run_items[arguments.runs_count];
+    bool const has_norms = arguments.has_norms != 0;
+    for (;;) {
+        if (thread_index == 0) claimed = warp_t::fetch_add_relaxed(counters + metal_round_claimed_k, 1u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint const item = claimed;
+        if (item >= items) return;
+        uint low = 0, high = arguments.runs_count;
+        while (high - low > 1) {
+            uint const middle = (low + high) / 2;
+            if (run_items[middle] <= item) low = middle;
+            else high = middle;
+        }
+        // A run is its first entry, its width, its first hub and its hubs.
+        uint4 const run = runs[low];
+        uint const first = (item - run_items[low]) * run.w, bound = min(first + run.w, run.y);
+        bool const staging = run.w * (fragments * metal_fragment_bytes_k + 8) <= metal_round_staged_bytes_k;
+        threadgroup norms_t* const hub_norms = (threadgroup norms_t*)(staged + run.w * fragments);
+        for (uint at = thread_index; staging && at < run.w * fragments; at += group_threads) {
+            device uint4 const* const hub_row = metal_row(vectors, hub_nodes[run.z + at / fragments], fragments);
+            staged[at] = hub_row[at % fragments];
+        }
+        for (uint hub = thread_index; staging && hub < run.w; hub += group_threads)
+            hub_norms[hub] = has_norms ? norms[hub_nodes[run.z + hub]] : norms_t(0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint position = first + simdgroup; position < bound; position += metal_simdgroups_k) {
+            uint const node = arguments.pass ? neighborhood_entries[run.x + position] : run.x + position;
+            device uint4 const* const entry = metal_row(vectors, node, fragments);
+            norms_t const entry_norms = has_norms ? norms[node] : norms_t(0);
+            ulong nearest = metal_sentinel_k;
+            for (uint hub = lane; hub < run.w; hub += warp_t::width_k) {
+                uint const hub_node = hub_nodes[run.z + hub];
+                float const distance =
+                    staging
+                        ? kit_t::distance(arguments.metric, metal_rows_dot(entry, staged + hub * fragments, fragments),
+                                          entry_norms, hub_norms[hub])
+                        : kit_t::distance(arguments.metric,
+                                          metal_rows_dot(entry, metal_row(vectors, hub_node, fragments), fragments),
+                                          entry_norms, has_norms ? norms[hub_node] : norms_t(0));
+                ulong const scored = isnan(distance) ? metal_sentinel_k : metal_make(distance, hub);
+                nearest = scored < nearest ? scored : nearest;
+            }
+            nearest = warp_t::reduce_min(nearest);
+            if (lane == 0) entry_neighborhoods[node] = ushort(nearest == metal_sentinel_k ? 0u : metal_id_of(nearest));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+/** One simdgroup's slice of a restitch's scratch: its candidates as scored nodes of their
+ *  positions, ascending, two rows' worth; the entry's nearest neighborhood-mates, a row's worth;
+ *  the candidates' IDs, the live links first, and distances, two rows' worth each; and the
+ *  positions it keeps, a row's worth. */
+struct metal_stitch_t {
+    device ulong* sorted;
+    device ulong* mates;
+    device uint* ids;
+    device float* distances;
+    device uint* kept;
+};
+
+/** Puts back what the kept candidates dropped of the @p live_count live links that reachability
+ *  needs, exactly as the RAM index's @c keep_reach_ does, on one lane: a member whose last
+ *  shallower in-link @p node is, and, when no pick stands closer to the root, the nearest live
+ *  member that does. Answers the kept count. */
+inline uint metal_keep_reach(thread metal_health_t& health, uint node, metal_stitch_t stitch, uint live_count,
+                             uint kept_count, uint connectivity) {
+    uint const depth = health.depth_from_root(node), depth_to_root = health.depth_to_root(node);
+    // The saturated depth counts no shallower in-links, so its children are never released.
+    uint const child = depth < metal_deepest_depth_k ? depth + 1 : uint(metal_unknown_depth_k);
+    auto holds = [&](uint candidate) {
+        for (uint rank = 0; rank != kept_count; ++rank)
+            if (stitch.kept[rank] == candidate) return true;
+        return false;
+    };
+    auto releasable = [&](uint candidate) {
+        uint const member = stitch.ids[candidate];
+        return child == metal_unknown_depth_k || health.depth_from_root(member) != child || candidate >= live_count ||
+               health.take_shallower_in_link_if_spare(member);
+    };
+    // The kept members gather at the tail, ahead of which the farthest releasable pick gives way.
+    uint tail_kept = 0;
+    auto keep = [&](uint candidate) {
+        if (holds(candidate)) return;
+        if (kept_count < connectivity) {
+            stitch.kept[kept_count++] = candidate;
+            ++tail_kept;
+            return;
+        }
+        uint const tail = kept_count - tail_kept;
+        uint at = tail;
+        while (at && !releasable(stitch.kept[at - 1])) --at;
+        if (!at) return;
+        stitch.kept[at - 1] = stitch.kept[tail - 1];
+        stitch.kept[tail - 1] = candidate;
+        ++tail_kept;
+    };
+    if (child != metal_unknown_depth_k)
+        for (uint candidate = 0; candidate != live_count; ++candidate) {
+            uint const member = stitch.ids[candidate];
+            if (health.depth_from_root(member) != child || holds(candidate)) continue;
+            if (!health.take_shallower_in_link_if_spare(member)) keep(candidate);
+        }
+    if (depth_to_root != metal_unknown_depth_k && depth_to_root != 0) {
+        uint standing = 0;
+        while (standing != kept_count && health.depth_to_root(stitch.ids[stitch.kept[standing]]) >= depth_to_root)
+            ++standing;
+        uint way = standing != kept_count ? stitch.kept[standing] : metal_unknown_k;
+        for (uint candidate = 0; candidate != live_count && standing == kept_count; ++candidate)
+            if (health.depth_to_root(stitch.ids[candidate]) < depth_to_root &&
+                (way == metal_unknown_k || stitch.distances[candidate] < stitch.distances[way]))
+                way = candidate;
+        if (way != metal_unknown_k) keep(way);
+    }
+    return kept_count;
+}
+
+/** Re-stitches each neighborhood, one threadgroup a neighborhood claimed from a counter: its rows
+ *  and norms stage in threadgroup memory while they fit, or are read in place; each simdgroup takes
+ *  an entry, keeps its nearest neighborhood-mates by position in its own slice, both directions of
+ *  every pair and never itself, so no atomic merges a pair, then lets its live links, scored
+ *  against it, and its mates no live link names compete, ascending. Only the diverse ones stay,
+ *  with no refill, then the reach rule, and a row is rewritten only where its link set changed,
+ *  slot zero released last, counted once in @c changed. */
+[[host_name("metal_restitch_kernel")]] kernel void metal_restitch_kernel(
+    constant metal_arguments_t& arguments [[buffer(metal_arguments_buffer_k)]],
+    device uint4* vectors [[buffer(metal_vectors_buffer_k)]], device norms_t* norms [[buffer(metal_norms_buffer_k)]],
+    device uint* neighbors [[buffer(metal_neighbors_buffer_k)]],
+    device uint* counters [[buffer(metal_round_counters_buffer_k)]],
+    device uchar* depths_from_root [[buffer(metal_depths_from_root_buffer_k)]],
+    device uchar* depths_to_root [[buffer(metal_depths_to_root_buffer_k)]],
+    device uint* in_links [[buffer(metal_in_links_buffer_k)]],
+    device uint* shallower_in_links [[buffer(metal_shallower_in_links_buffer_k)]],
+    device uint* reached [[buffer(metal_reached_buffer_k)]],
+    device uint* reaches_root [[buffer(metal_reaches_root_buffer_k)]],
+    device uint* two_ways_to_root [[buffer(metal_two_ways_to_root_buffer_k)]],
+    device uint* changed [[buffer(metal_changed_buffer_k)]],
+    device uint* neighborhood_entries [[buffer(metal_neighborhood_entries_buffer_k)]],
+    device uint* neighborhood_offsets [[buffer(metal_neighborhood_offsets_buffer_k)]],
+    device uchar* stitch_scratch [[buffer(metal_stitch_buffer_k)]], uint group [[threadgroup_position_in_grid]],
+    uint thread_index [[thread_position_in_threadgroup]], uint group_threads [[threads_per_threadgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint4 staged[uint(metal_round_staged_bytes_k) / metal_fragment_bytes_k];
+    threadgroup uint claimed;
+    metal_health_t health = metal_health(arguments, neighbors, counters, depths_from_root, depths_to_root, in_links,
+                                         shallower_in_links, reached, reaches_root, two_ways_to_root);
+    uint const fragments = arguments.row_fragments, connectivity = arguments.connectivity, metric = arguments.metric;
+    bool const has_norms = arguments.has_norms != 0;
+    device uchar* const slice = metal_row(stitch_scratch, group * metal_simdgroups_k + simdgroup,
+                                          arguments.slice_bytes);
+    metal_stitch_t stitch;
+    stitch.sorted = (device ulong*)slice;
+    stitch.mates = (device ulong*)(slice + 16 * connectivity);
+    stitch.ids = (device uint*)(slice + 24 * connectivity);
+    stitch.distances = (device float*)(slice + 32 * connectivity);
+    stitch.kept = (device uint*)(slice + 40 * connectivity);
+    uint added = 0, dropped = 0, changed_rows = 0;
+    for (;;) {
+        if (thread_index == 0) claimed = warp_t::fetch_add_relaxed(counters + metal_round_claimed_k, 1u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        uint const neighborhood = claimed;
+        if (neighborhood >= arguments.neighborhoods) break;
+        uint const first = neighborhood_offsets[neighborhood], count = neighborhood_offsets[neighborhood + 1] - first;
+        device uint* const entries = neighborhood_entries + first;
+        bool const staging = count * (fragments * metal_fragment_bytes_k + 8) <= metal_round_staged_bytes_k;
+        threadgroup norms_t* const staged_norms = (threadgroup norms_t*)(staged + count * fragments);
+        for (uint at = thread_index; staging && at < count * fragments; at += group_threads) {
+            device uint4 const* const member_row = metal_row(vectors, entries[at / fragments], fragments);
+            staged[at] = member_row[at % fragments];
+        }
+        for (uint member = thread_index; staging && member < count; member += group_threads)
+            staged_norms[member] = has_norms ? norms[entries[member]] : norms_t(0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto norm_of = [&](uint id) { return has_norms ? norms[id] : norms_t(0); };
+        auto member_norms = [&](uint member) { return staging ? staged_norms[member] : norm_of(entries[member]); };
+        auto mate_distance = [&](uint position, uint member) {
+            dot_t const dot = staging ? metal_rows_dot(staged + position * fragments, staged + member * fragments,
+                                                       fragments)
+                                      : metal_rows_dot(metal_row(vectors, entries[position], fragments),
+                                                       metal_row(vectors, entries[member], fragments), fragments);
+            return kit_t::distance(metric, dot, member_norms(position), member_norms(member));
+        };
+        for (uint position = simdgroup; position < count; position += metal_simdgroups_k) {
+            uint const node_id = entries[position];
+            norms_t const node_norms = member_norms(position);
+
+            // The nearest neighborhood-mates, by position, never the entry itself.
+            metal_sorted_buffer nearest {stitch.mates, 0, connectivity};
+            for (uint base = 0; base < count; base += warp_t::width_k) {
+                uint const member = base + lane;
+                bool const other = member < count && member != position;
+                float const distance = other ? mate_distance(position, member) : 0.0f;
+                ulong const scored = other && !isnan(distance) ? metal_make(distance, member) : metal_sentinel_k;
+                nearest.insert_batch(metal_sort_lanes(scored, lane),
+                                     popcount(warp_t::ballot(scored != metal_sentinel_k)), lane);
+            }
+
+            // The live links first, scored against the entry; a self-loop in slot zero means none.
+            device uint* const row = health.row(node_id);
+            uint const first_value = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(row) : 0u, 0);
+            uint live_count = 0;
+            for (uint base = 0; base < connectivity; base += warp_t::width_k) {
+                uint const slot = base + lane;
+                uint const target = first_value == metal_unknown_k || first_value == node_id ? metal_unknown_k
+                                    : slot >= connectivity                                   ? metal_unknown_k
+                                    : slot ? warp_t::load_relaxed(row + slot)
+                                           : first_value;
+                bool const usable = target != metal_unknown_k && target != node_id && target < health.rows_count;
+                uint const usable_mask = warp_t::ballot(usable);
+                if (usable) stitch.ids[live_count + popcount(usable_mask & warp_t::below(lane))] = target;
+                live_count += popcount(usable_mask);
+                warp_t::sync();
+            }
+            for (uint candidate = lane; candidate < live_count; candidate += warp_t::width_k) {
+                uint const target = stitch.ids[candidate];
+                dot_t const dot = staging ? metal_rows_dot(staged + position * fragments,
+                                                           metal_row(vectors, target, fragments), fragments)
+                                          : metal_rows_dot(metal_row(vectors, node_id, fragments),
+                                                           metal_row(vectors, target, fragments), fragments);
+                stitch.distances[candidate] = kit_t::distance(metric, dot, node_norms, norm_of(target));
+            }
+            warp_t::sync();
+
+            // Then the mates no live link names.
+            uint candidates = live_count;
+            for (uint rank = 0; rank != nearest.size; ++rank) {
+                ulong const mate = nearest.at(rank);
+                uint const mate_id = entries[metal_id_of(mate)];
+                bool held = false;
+                for (uint candidate = lane; candidate < live_count; candidate += warp_t::width_k)
+                    held = held || stitch.ids[candidate] == mate_id;
+                if (simd_any(held)) continue;
+                if (lane == 0) stitch.ids[candidates] = mate_id, stitch.distances[candidates] = metal_distance_of(mate);
+                ++candidates;
+                warp_t::sync();
+            }
+
+            // All of them ascending, then the greedy diverse prefix with no refill.
+            metal_sorted_buffer sorted {stitch.sorted, 0, 2 * connectivity};
+            for (uint base = 0; base < candidates; base += warp_t::width_k) {
+                uint const candidate = base + lane;
+                ulong const scored = candidate < candidates ? metal_make(stitch.distances[candidate], candidate)
+                                                            : metal_sentinel_k;
+                sorted.insert_batch(metal_sort_lanes(scored, lane), min(candidates - base, warp_t::width_k), lane);
+            }
+            uint kept = 0;
+            for (uint rank = 0; rank != sorted.size && kept != connectivity; ++rank) {
+                uint const candidate = metal_id_of(sorted.at(rank));
+                uint const candidate_id = stitch.ids[candidate];
+                float const to_node = stitch.distances[candidate];
+                bool diverse = true;
+                for (uint base = 0; base < kept && diverse; base += warp_t::width_k) {
+                    bool lane_diverse = true;
+                    if (base + lane < kept) {
+                        uint const other_id = stitch.ids[stitch.kept[base + lane]];
+                        dot_t const dot = metal_rows_dot(metal_row(vectors, candidate_id, fragments),
+                                                         metal_row(vectors, other_id, fragments), fragments);
+                        lane_diverse = kit_t::distance(metric, dot, norm_of(candidate_id), norm_of(other_id)) >=
+                                       to_node;
+                    }
+                    diverse = simd_all(lane_diverse);
+                }
+                if (!diverse) continue;
+                if (lane == 0) stitch.kept[kept] = candidate;
+                ++kept;
+                warp_t::sync();
+            }
+            kept = warp_t::shuffle(
+                lane == 0 ? metal_keep_reach(health, node_id, stitch, live_count, kept, connectivity) : 0u, 0);
+            warp_t::sync();
+
+            // Equal link sets write nothing, else the row takes the kept links, slot zero last.
+            uint in_live = 0;
+            for (uint rank = lane; rank < kept; rank += warp_t::width_k) in_live += stitch.kept[rank] < live_count;
+            in_live = warp_t::reduce_add(in_live);
+            if (in_live == kept && in_live == live_count) continue;
+            for (uint slot = lane; slot < connectivity; slot += warp_t::width_k)
+                if (slot)
+                    warp_t::store_relaxed(row + slot, slot < kept ? stitch.ids[stitch.kept[slot]] : metal_unknown_k);
+            warp_t::fence();
+            if (lane != 0) continue;
+            warp_t::store_release(row, kept ? stitch.ids[stitch.kept[0]] : node_id);
+            added += kept - in_live, dropped += live_count - in_live;
+            changed_rows += !metal_bitset_claim(changed, node_id);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane != 0) return;
+    metal_tally_add(counters, metal_round_added_k, added);
+    metal_tally_add(counters, metal_round_dropped_k, dropped);
+    if (changed_rows) warp_t::fetch_add_relaxed(counters + metal_round_changed_k, changed_rows);
+}
+
+#pragma endregion Rounds
 
 } // namespace unum::usearch::dense
