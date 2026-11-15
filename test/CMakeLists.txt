@@ -16,8 +16,8 @@ usearch_setup_target(usearch_test_header_only_witness HOST)
 target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
-# The dependency-free core: `basic/ram_index.hpp` and its `utilities/` suppliers compile with no sibling on the
-# include path, so a stray include fails here instead of hiding behind the suites' links.
+# The dependency-free core: `basic/ram_index.hpp` and its `utilities/` suppliers compile with no sibling on the include
+# path, so a stray include fails here instead of hiding behind the suites' links.
 add_library(usearch_test_header_core OBJECT header_core.cpp)
 target_compile_features(usearch_test_header_core PRIVATE cxx_std_20)
 target_include_directories(usearch_test_header_core PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/c)
@@ -69,16 +69,16 @@ function (usearch_test_vram_shards vendor_ architecture_macro_)
     )
 endfunction ()
 
-# One row per vendor: NVIDIA's cells run the class of the newest generation the listed architectures name, and AMD
-# compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run.
+# One row per vendor: NVIDIA's cells run the newest class the build keeps, on the devices the library picks it for, and
+# AMD compiles for the listed processors of the CDNA3 class, which CDNA3 and CDNA4 run. Neither defines a NumKong or
+# StringZilla kernel, as the library's class units define none.
 set(usearch_test_vram_shards_)
 if (USEARCH_CUDA_ARCH)
-    usearch_cuda_capabilities(usearch_test_cuda_capabilities_ "${usearch_cuda_architectures_}")
     usearch_test_vram_shards(
         nvidia USEARCH_ARCH_CUDA_
         ENTRY dense/vram_nvidia.cpp
         SOURCES sequence/vram_index.cpp shapes/vram_index.cpp geospatial/vram_index.cpp
-        DEFINITIONS ${usearch_test_cuda_capabilities_}
+        DEFINITIONS ${usearch_gpu_gates_} "NUMKONG_TARGET_CUDA=0" "STRINGZILLA_TARGET_CUDA=0"
     )
 endif ()
 if (USEARCH_ROCM_ARCH)
@@ -87,7 +87,7 @@ if (USEARCH_ROCM_ARCH)
         amd USEARCH_ARCH_ROCM_
         ENTRY dense/vram_amd.hip
         DEVICE dense/vram_kernels_amd.hip
-        DEFINITIONS "NUMKONG_TARGET_CDNA3=1"
+        DEFINITIONS "NUMKONG_TARGET_ROCM=0" "STRINGZILLA_TARGET_ROCM=0"
         CODES ${usearch_test_rocm_codes_}
     )
 endif ()
@@ -146,8 +146,25 @@ target_link_libraries(
 )
 add_test(NAME usearch_test COMMAND usearch_test)
 
-# The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`, round-tripping
-# a checkpoint of every modality through the C interface, and the slots of a file standing as a raw drive.
+# The class bundles hold USearch's kernels alone: no NumKong or StringZilla kernel or device table rides along.
+if (USEARCH_CUDA_ARCH OR USEARCH_ROCM_ARCH)
+    if (USEARCH_CUDA_ARCH)
+        find_program(usearch_test_cuobjdump_ cuobjdump HINTS ${CUDAToolkit_BIN_DIR} REQUIRED)
+    endif ()
+    if (USEARCH_ROCM_ARCH)
+        find_program(usearch_test_offload_bundler_ clang-offload-bundler HINTS /opt/rocm/llvm/bin REQUIRED)
+        find_program(usearch_test_readelf_ llvm-readelf HINTS /opt/rocm/llvm/bin REQUIRED)
+    endif ()
+    add_test(
+        NAME usearch_test_gpu_bundles
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/bundles.sh ${PROJECT_BINARY_DIR}/src/bundles "${usearch_test_cuobjdump_}"
+                "${usearch_test_offload_bundler_}" "${usearch_test_readelf_}" ${usearch_rocm_architectures_}
+    )
+endif ()
+
+# The command-line tools' suite: the Arrow export and import behind `usearch export` and `usearch import`,
+# round-tripping a checkpoint of every modality through the C interface, and the slots of a file standing as a raw
+# drive.
 add_executable(usearch_test_tools tools.cpp)
 usearch_setup_target(usearch_test_tools HOST)
 target_include_directories(usearch_test_tools PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/tools)

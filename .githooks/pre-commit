@@ -2228,13 +2228,13 @@ check_type_suffixes() {
         }' "$staged_code_path" || true)
     [ -z "$templates" ] || reject_with_reason "$templates" \
         "$staged_path suffixes a class template with '_t' - the template stays bare and the alias that materializes it carries the suffix:"
-    variables=$(printf '%s\n' "$staged_added_text" | "$fastest_awk" '
+    variables=$(scan_staged_file_marking_added_lines '
         function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
-        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
-        pending && suffixed($0) { print; pending = 0; next }
+        /^[[:space:]]*template[[:space:]]*</ { opened = FNR in added; if (suffixed($0)) { if (opened) printf "line %d: %s\n", FNR, $0 } else pending = 1; next }
+        pending && suffixed($0) { if (opened || FNR in added) printf "line %d: %s\n", FNR, $0; pending = 0; next }
         pending && /\{[[:space:]]*$/ { pending = 0; next }
-        pending && /^\+[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
-        { pending = 0 }')
+        pending && /^[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
+        { pending = 0 }' "$staged_code_path")
     [ -z "$variables" ] || reject_with_reason "$variables" \
         "$staged_path suffixes a variable template with '_k' or '_t' - the template stays bare, like \`template <typename type_> constexpr bool bounded\`:"
 }
@@ -4654,6 +4654,16 @@ check_sibling_pins_agree() {
     )
 }
 
+# Rejects a NumKong or StringZilla `_ARCH_` flag, which says what compiles inside that library's own build; USearch
+# reads the libraries' public `_TARGET_` switches and names its GPU class through `USEARCH_TARGET_<VENDOR>_<CLASS>`.
+check_library_arch_flags_unnamed() {
+    local named
+    named=$(printf '%s\n' "$staged_added_text" | grep -E "^\+.*(NUMKONG|STRINGZILLA)_ARCH_[A-Z0-9_]+" || true)
+    [ -z "$named" ] || reject_with_reason "$named" \
+        "$staged_path names a NumKong or StringZilla _ARCH_ flag, which only that library's own build may read;" \
+        "            test its public _TARGET_ switch, or USEARCH_TARGET_<VENDOR>_<CLASS> for a GPU class:"
+}
+
 # Routes one staged file through the checks only USearch has.
 run_project_checks() {
     case "$staged_path" in
@@ -4678,6 +4688,7 @@ run_project_checks() {
         check_trailing_returns
         check_iterator_laundering
         check_expected_bindings
+        check_library_arch_flags_unnamed
         ;;
     esac
     case "$staged_path" in

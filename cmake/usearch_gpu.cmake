@@ -15,14 +15,14 @@ endif ()
 
 # The library compiles one unit per GPU class, each for its own codes alone, and only the classes a resolved code names.
 # `all` is the release set, of which each class compiles the lowest code its kernels need, never below CUDA 13's Turing
-# floor: PTX at a plain code where one suffices, so it runs on every later GPU, and the `100f` cubin where datacenter
-# Blackwell's `tcgen05` needs a family code. `native` maps each GPU `nvidia-smi` lists to the code its class needs,
-# family suffix included, where a bare compute capability would drop it, and a native or named code compiles as SASS
-# alone. The CUDA tests and the dispatch unit read the same codes, and a NumKong GPU capability turns on in the tests
-# only when every code runs it.
+# floor: PTX at a plain code where one suffices, so it runs on every later GPU, and a cubin where a family code is
+# needed, `90a` for Hopper's `wgmma` and `100f` for datacenter Blackwell's `tcgen05`. `native` maps each GPU
+# `nvidia-smi` lists to the code its class needs, family suffix included, where a bare compute capability would drop it,
+# and a native or named code compiles as SASS alone. The CUDA tests and the dispatch unit read the same codes, and a
+# NumKong GPU capability turns on in the tests only when every code runs it.
 set(usearch_cuda_architectures_)
 if (USEARCH_CUDA_ARCH STREQUAL "all")
-    set(usearch_cuda_architectures_ 80-virtual 89-virtual 90-virtual 100f-real 120-virtual)
+    set(usearch_cuda_architectures_ 80-virtual 89-virtual 90a-real 100f-real 120-virtual)
 elseif (USEARCH_CUDA_ARCH STREQUAL "native")
     set(usearch_cuda_native_codes_
         75-real=75-real

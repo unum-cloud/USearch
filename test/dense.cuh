@@ -142,8 +142,8 @@ static bool dense_cell_admitted() noexcept {
     if ((fu::runtime_capabilities() & atomics_k) != atomics_k) return false;
     if constexpr (caps_ != nk_cap_serial_k) {
         nk_capability_t available = 0;
-        if (nk_cpu_capabilities_enabled(&available) != nk_success_k || (available & caps_) != caps_) return false;
-        if (nk_cpu_configure_thread(available) != nk_success_k) return false;
+        if (nk_capabilities_enabled_cpu(&available) != nk_success_k || (available & caps_) != caps_) return false;
+        if (nk_configure_thread_cpu(available) != nk_success_k) return false;
     }
     return true;
 }

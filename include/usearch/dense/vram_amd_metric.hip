@@ -9,12 +9,12 @@
  *  the generation slot names the oldest tier whose instructions the kit needs: @c rocm for what
  *  every ROCm device runs, @c cdna3 for @c v_dot4_i32_i8 and @c v_dot2_f32_f16, which MI400
  *  dropped, @c cdna4 for @c v_dot2_f32_bf16 and the OCP fp8 conversions, and @c cdna5 for
- *  @c v_dot4_i32_iu8. Each class unit compiles for its own processor with that tier's
- *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist and are
- *  stubs elsewhere. Every kit states its @c capability_k and @c compiled_k, and a ladder picks the
- *  first both admit through @c highest_kit. MI300's fp8 conversions read the FNUZ encodings rather
- *  than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software, through NumKong's
- *  converters.
+ *  @c v_dot4_i32_iu8. Every kit compiles in every unit, and its @c capability_k lists the classes
+ *  it runs on, whose masks carry exactly the tiers they keep, so CDNA5 never picks a kit needing a
+ *  dot it dropped and only the picked kit's instructions are emitted. A ladder picks the first kit
+ *  whose @c capability_k the class admits through @c highest_kit. MI300's fp8 conversions read the
+ *  FNUZ encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in
+ *  software, through NumKong's converters.
  *
  *  Fragments are 16 bytes, rows and the metric are runtime state of the flat view, and the
  *  cross-lane reductions live in @c vram_index.cuh over the schedule's @ref hip_warp, exactly as on
@@ -178,7 +178,6 @@ __device__ __forceinline__ std::array<f32_t, 8> hip_weighted_bf16x8_rocm( //
 /** f16 kit - every ROCm device, widening into f32 multiply-adds. */
 struct f16_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -212,7 +211,6 @@ struct f16_rocm_quads_kit_t {
 /** bf16 kit - every ROCm device, widening into f32 multiply-adds. */
 struct bf16_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -243,8 +241,6 @@ struct bf16_rocm_quads_kit_t {
     }
 };
 
-#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
 /** Eight @c f16 products of a fragment pair, two per @c v_dot2_f32_f16 into the f32 sum. */
 __device__ __forceinline__ f32_t hip_dot_f16x8_cdna3(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
@@ -258,7 +254,6 @@ __device__ __forceinline__ f32_t hip_dot_f16x8_cdna3(uint4 a, uint4 b, f32_t sum
 /** f16 kit - CDNA3 and CDNA4, @c v_dot2_f32_f16, which MI400 dropped. */
 struct f16_cdna3_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -289,19 +284,6 @@ struct f16_cdna3_quads_kit_t {
     }
 };
 
-#else
-
-/** The kit this unit cannot carry - CDNA3's half dot, absent before CDNA3 and on MI400 - kept so
- *  its ladder names it whatever the unit compiles. */
-struct f16_cdna3_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
-#if NUMKONG_TARGET_CDNA4
-
 /** Eight @c bf16 products of a fragment pair, two per @c v_dot2_f32_bf16 into the f32 sum. */
 __device__ __forceinline__ f32_t hip_dot_bf16x8_cdna4(uint4 a, uint4 b, f32_t sum) noexcept {
     u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
@@ -315,7 +297,6 @@ __device__ __forceinline__ f32_t hip_dot_bf16x8_cdna4(uint4 a, uint4 b, f32_t su
 /** bf16 kit - CDNA4, @c v_dot2_f32_bf16. */
 struct bf16_cdna4_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -345,17 +326,6 @@ struct bf16_cdna4_quads_kit_t {
         return hip_convert_to_distance(kernel, ranked);
     }
 };
-
-#else
-
-/** The kit this unit cannot carry - CDNA4's brain-float dot, which only CDNA4 units compile - kept
- *  so its ladder names it whatever the unit compiles. */
-struct bf16_cdna4_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA4
 
 #pragma endregion Half Precision Floats
 
@@ -432,7 +402,6 @@ __device__ __forceinline__ int2 hip_moments_i8x16_rocm(uint4 a, int2 moments) no
 /** i8 kit - every ROCm device, NumKong's portable byte dot. */
 struct i8_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -463,8 +432,6 @@ struct i8_rocm_quads_kit_t {
     }
 };
 
-#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
 /** Four signed byte products added to @p sum by @c v_dot4_i32_i8. */
 __device__ __forceinline__ int hip_dot_i8x4_cdna3(u32_t a, u32_t b, int sum) noexcept {
     return __builtin_amdgcn_sdot4(static_cast<int>(a), static_cast<int>(b), sum, false);
@@ -493,7 +460,6 @@ __device__ __forceinline__ int2 hip_moments_i8x16_cdna3(uint4 a, int2 moments) n
 /** i8 kit - CDNA3 and CDNA4, @c v_dot4_i32_i8. */
 struct i8_cdna3_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -524,19 +490,6 @@ struct i8_cdna3_quads_kit_t {
     }
 };
 
-#else
-
-/** The kit this unit cannot carry - CDNA3's signed byte dot, absent before CDNA3 and on MI400 -
- *  kept so its ladder names it whatever the unit compiles. */
-struct i8_cdna3_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
-#if NUMKONG_TARGET_CDNA5
-
 /** Four signed byte products added to @p sum by @c v_dot4_i32_iu8, both operands flagged signed. */
 __device__ __forceinline__ int hip_dot_i8x4_cdna5(u32_t a, u32_t b, int sum) noexcept {
     return __builtin_amdgcn_sudot4(true, static_cast<int>(a), true, static_cast<int>(b), sum, false);
@@ -565,7 +518,6 @@ __device__ __forceinline__ int2 hip_moments_i8x16_cdna5(uint4 a, int2 moments) n
 /** i8 kit - CDNA5, @c v_dot4_i32_iu8. */
 struct i8_cdna5_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -596,21 +548,9 @@ struct i8_cdna5_quads_kit_t {
     }
 };
 
-#else
-
-/** The kit this unit cannot carry - MI400's signedness-flagged byte dot - kept so its ladder names
- *  it whatever the unit compiles. */
-struct i8_cdna5_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA5
-
 /** u8 kit - every ROCm device, @c v_dot4_u32_u8. */
 struct u8_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -869,7 +809,6 @@ __device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e2m3x16_rocm( //
 /** e5m2 kit - every ROCm device, widening in software. */
 struct e5m2_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -903,7 +842,6 @@ struct e5m2_rocm_quads_kit_t {
 /** e4m3 kit - every ROCm device, widening in software. */
 struct e4m3_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -937,7 +875,6 @@ struct e4m3_rocm_quads_kit_t {
 /** e3m2 kit - every ROCm device, widening in software. */
 struct e3m2_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -971,7 +908,6 @@ struct e3m2_rocm_quads_kit_t {
 /** e2m3 kit - every ROCm device, widening in software. */
 struct e2m3_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1001,8 +937,6 @@ struct e2m3_rocm_quads_kit_t {
         return hip_convert_to_distance(kernel, ranked);
     }
 };
-
-#if NUMKONG_ARCH_ROCM_CDNA4_
 
 /** A packed OCP @c e4m3 pair widened to two floats in one @c v_cvt_pk_f32_fp8, on CDNA4 and every
  *  tier since. */
@@ -1108,8 +1042,7 @@ __device__ __forceinline__ std::array<f32_t, 16> hip_weighted_e4m3x16_cdna4( //
 
 /** e5m2 kit - CDNA4 and CDNA5, widening through the conversion. */
 struct e5m2_cdna4_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = true;
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k | nk_cap_cdna5_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1142,8 +1075,7 @@ struct e5m2_cdna4_quads_kit_t {
 
 /** e4m3 kit - CDNA4 and CDNA5, widening through the conversion. */
 struct e4m3_cdna4_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = true;
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k | nk_cap_cdna5_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1173,23 +1105,6 @@ struct e4m3_cdna4_quads_kit_t {
         return hip_convert_to_distance(kernel, ranked);
     }
 };
-
-#else
-
-/** The kit this unit cannot carry - the OCP fp8 conversions, from CDNA4 on - kept so its ladder
- *  names it whatever the unit compiles. */
-struct e5m2_cdna4_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-/** The @c e4m3 twin of the @c e5m2_cdna4_quads_kit_t stub. */
-struct e4m3_cdna4_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_ARCH_ROCM_CDNA4_
 
 #pragma endregion Minifloats
 
@@ -1299,7 +1214,6 @@ __device__ __forceinline__ int2 hip_moments_i4x32_rocm(uint4 a, int2 moments) no
 /** i4x2 kit - every ROCm device, NumKong's portable byte dot over unpacked nibbles. */
 struct i4x2_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1329,8 +1243,6 @@ struct i4x2_rocm_quads_kit_t {
         return hip_convert_to_distance(kernel, ranked);
     }
 };
-
-#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
 
 /** Thirty-two signed @c i4 products of a fragment pair, two @c v_dot4_i32_i8 per source word. */
 __device__ __forceinline__ int hip_dot_i4x32_cdna3(uint4 a, uint4 b, int sum) noexcept {
@@ -1362,7 +1274,6 @@ __device__ __forceinline__ int2 hip_moments_i4x32_cdna3(uint4 a, int2 moments) n
 /** i4x2 kit - CDNA3 and CDNA4, the byte engine over unpacked nibbles. */
 struct i4x2_cdna3_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1392,19 +1303,6 @@ struct i4x2_cdna3_quads_kit_t {
         return hip_convert_to_distance(kernel, ranked);
     }
 };
-
-#else
-
-/** The kit this unit cannot carry - the nibbles over CDNA3's signed byte dot - kept so its ladder
- *  names it whatever the unit compiles. */
-struct i4x2_cdna3_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
-
-#if NUMKONG_TARGET_CDNA5
 
 /** Thirty-two signed @c i4 products of a fragment pair, two @c v_dot4_i32_iu8 per source word. */
 __device__ __forceinline__ int hip_dot_i4x32_cdna5(uint4 a, uint4 b, int sum) noexcept {
@@ -1436,7 +1334,6 @@ __device__ __forceinline__ int2 hip_moments_i4x32_cdna5(uint4 a, int2 moments) n
 /** i4x2 kit - CDNA5, the byte engine over unpacked nibbles. */
 struct i4x2_cdna5_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    inline static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1467,21 +1364,9 @@ struct i4x2_cdna5_quads_kit_t {
     }
 };
 
-#else
-
-/** The kit this unit cannot carry - the nibbles over MI400's byte dot - kept so its ladder names it
- *  whatever the unit compiles. */
-struct i4x2_cdna5_quads_kit_t {
-    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    inline static constexpr bool compiled_k = false;
-};
-
-#endif // NUMKONG_TARGET_CDNA5
-
 /** u4x2 kit - every ROCm device, the byte engine over unpacked nibbles. */
 struct u4x2_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1538,7 +1423,6 @@ __device__ __forceinline__ std::array<f32_t, 128> hip_weighted_u1x128_rocm( //
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 struct u1x8_rocm_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1598,8 +1482,7 @@ __device__ __forceinline__ void hip_copy_rows(storage_ const& storage, cache_ ca
  *  registers, and one wavefront barrier publishes them before the staging returns. */
 struct rocm_registers_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_;
-    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    using warp_t = hip_warp<capability_k>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies are plain stores. */
@@ -1643,8 +1526,7 @@ struct rocm_registers_schedule_t {
  *  are wired. */
 struct cdna5_registers_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    inline static constexpr bool compiled_k = NUMKONG_TARGET_CDNA5;
-    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    using warp_t = hip_warp<capability_k>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies are plain stores. */
@@ -1704,8 +1586,7 @@ __device__ __forceinline__ __attribute__((address_space(3))) void* hip_shared_po
 /** The CDNA3 staging: LDS DMA of one 32-bit word per lane. */
 struct cdna3_lds_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_CDNA3_;
-    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    using warp_t = hip_warp<capability_k>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
@@ -1760,8 +1641,7 @@ struct cdna3_lds_schedule_t {
 /** The CDNA4 staging: LDS DMA of a whole fragment per lane. */
 struct cdna4_lds_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_ROCM_CDNA4_;
-    using warp_t = hip_warp<hip_wave_lanes(capability_k)>;
+    using warp_t = hip_warp<capability_k>;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */

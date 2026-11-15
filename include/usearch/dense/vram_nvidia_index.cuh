@@ -23,7 +23,7 @@
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the rows map's state
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the two below test before including it
+#include <numkong/types.h>       // the vendor detection the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import and export casts' device body
 #include <numkong/each/cuda.cuh> // `nk_each_rmscast_e4m3_cuda_vectors_` & kin - the unit-RMS import's device bodies
 

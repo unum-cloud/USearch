@@ -9,7 +9,11 @@
 
 #include <cstring> // `std::memcpy` - a lane's byte copies
 
+#include <type_traits> // `std::is_integral_v` - the values a warp sums in one step
+
 #include <cuda/atomic> // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
+
+#include <stringzilla/strings/ampere.cuh> // `sz_u32_lanes_sum_ampere_`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_nvidia_device.hpp"
@@ -56,6 +60,23 @@ struct cuda_warp_t {
     static __device__ __forceinline__ value_type_ shuffle_down(value_type_ value, u32_t delta,
                                                                u32_t width = width_k) noexcept {
         return __shfl_down_sync(all_k, value, delta, width);
+    }
+
+    /** The sum of @p value over @p lane and every lane below it. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ inclusive_sum(value_type_ value, u32_t lane) noexcept {
+        for (u32_t delta = 1; delta != width_k; delta <<= 1) {
+            value_type_ const below = shuffle_up(value, delta);
+            if (lane >= delta) value += below;
+        }
+        return value;
+    }
+
+    /** The sum of a 32-bit integer @p value over the warp, in every lane, in one @c redux.sync . */
+    template <typename value_type_>
+        requires(std::is_integral_v<value_type_> && sizeof(value_type_) == 4)
+    static __device__ __forceinline__ value_type_ sum(value_type_ value) noexcept {
+        return static_cast<value_type_>(sz_u32_lanes_sum_ampere_(static_cast<u32_t>(value)));
     }
     // The predicates are `int`, as the warp intrinsics take them, so any nonzero lane votes.
     static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot_sync(all_k, predicate); }

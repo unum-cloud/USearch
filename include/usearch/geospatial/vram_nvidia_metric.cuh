@@ -21,7 +21,6 @@
 #include <utility>  // `std::index_sequence` - every rung's kernels, `std::swap` - the cone winners
 
 #include <numkong/geospatial.h> // `nk_clearance_f32_cuda_`, `nk_sqrt_f64_cuda_` and kin - with its CUDA backend
-#include <numkong/types.h>      // `NUMKONG_ARCH_CUDA_AMPERE_` - the kit this unit carries
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
@@ -142,7 +141,6 @@ struct vram_keep_octants_t {
  *  tangent-plane cone. */
 struct i32_ampere_geospatial_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
     inline static constexpr u32_t lanes_per_entry_k = 1;
 
     using warp_t = cuda_warp_t;

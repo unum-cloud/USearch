@@ -39,7 +39,6 @@ using namespace unum::usearch::utilities;
 /** The geospatial kernels for any CPU. */
 struct i32_serial_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_serial;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -52,7 +51,6 @@ struct i32_serial_geospatial_kit_t {
 /** The geospatial kernels for Arm NEON. */
 struct i32_neon_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_neon;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -74,7 +72,6 @@ struct i32_neon_geospatial_kit_t {
 /** The geospatial kernels for Intel Haswell AVX2. */
 struct i32_haswell_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_haswell;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -96,7 +93,6 @@ struct i32_haswell_geospatial_kit_t {
 /** The geospatial kernels for Intel Skylake-X AVX-512. */
 struct i32_skylake_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_skylake;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -118,7 +114,6 @@ struct i32_skylake_geospatial_kit_t {
 /** The geospatial kernels for the RISC-V Vector extension. */
 struct i32_rvv_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_rvv;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -140,7 +135,6 @@ struct i32_rvv_geospatial_kit_t {
 /** The geospatial kernels for IBM Power VSX. */
 struct i32_powervsx_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_powervsx;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -162,7 +156,6 @@ struct i32_powervsx_geospatial_kit_t {
 /** The geospatial kernels for WebAssembly Relaxed SIMD. */
 struct i32_v128relaxed_geospatial_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto sqeuclideans3d = nk_sqeuclideans3d_i32_v128relaxed;
     static constexpr auto terrain_pack_size = nk_terrain_pack_size_f32_serial;
     static constexpr auto terrain_pack = nk_terrain_pack_f32_serial;
@@ -180,8 +173,8 @@ struct i32_v128relaxed_geospatial_kit_t {
 #endif // NUMKONG_TARGET_V128RELAXED
 
 /** The widest geospatial kit this build compiled in among the backends @p caps_ admits, newest
- *  first; each kit states its @c capability_k and its @c compiled_k, so an unselected kit's body
- *  never has to exist. */
+ *  first; each kit states its @c capability_k, and a stub its @c compiled_k as false, so an
+ *  unselected kit's body never has to exist. */
 template <nk_capability_t caps_>
 struct geospatial_ladder;
 

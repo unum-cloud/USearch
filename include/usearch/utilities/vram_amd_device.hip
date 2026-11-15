@@ -11,6 +11,9 @@
 
 #include <hip/hip_runtime.h> // `__shfl`, `__ballot`, `__lane_id` & the agent-scope atomics
 
+#include <stringzilla/strings/cdna3.cuh> // `sz_u32_wavefront_prefix_sum_cdna3_`, `sz_u64_wavefront_prefix_sum_cdna3_`
+#include <stringzilla/strings/cdna5.cuh> // `sz_u32_lanes_prefix_sum_cdna5_`, `sz_u64_lanes_prefix_sum_cdna5_`
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
 #include "usearch/utilities/vram_queue.cuh"
@@ -23,17 +26,16 @@ static_assert(sizeof(hip_allocation_properties_t) == 32 && sizeof(hip_access_des
 
 /**
  *  @brief The AMD warp policy the shared walk code is written against, the twin of
- *      @c cuda_warp_t: wavefronts of @p width_ lanes and agent-scope atomics.
+ *      @c cuda_warp_t: wavefronts of @c width_k lanes and agent-scope atomics.
  *
  *  A wavefront moves in lockstep, so the votes and shuffles take no participation mask, and
  *  @ref sync is a wave-scoped fence pair around the scheduling barrier. Masks are as wide as the
- *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The width is the class's, which a
- *  schedule takes from its ceiling, so one code object may carry kernels of either width.
+ *  wavefront, @c u64_t for the 64 lanes of CDNA3 and CDNA4. The tier is the schedule's, which
+ *  sets the width and lets the scans move values through DPP from CDNA3 on.
  */
-template <u32_t width_>
+template <nk_capability_t capability_>
 struct hip_warp {
-    static_assert(width_ == 32 || width_ == 64);
-    inline static constexpr u32_t width_k = width_;
+    inline static constexpr u32_t width_k = hip_wave_lanes(capability_);
     using mask_t = std::conditional_t<width_k == 64, u64_t, u32_t>;
     inline static constexpr mask_t all_k = ~mask_t(0);
 
@@ -53,6 +55,28 @@ struct hip_warp {
     static __device__ __forceinline__ value_type_ shuffle_down(value_type_ value, u32_t delta,
                                                                u32_t width = width_k) noexcept {
         return __shfl_down(value, delta, width);
+    }
+
+    /** The sum of @p value over @p lane and every lane below it: StringZilla's DPP scans from CDNA3
+     *  on, the LDS crossbar's shuffles below. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ inclusive_sum(value_type_ value, u32_t lane) noexcept {
+        static_assert(std::is_unsigned_v<value_type_> && (sizeof(value_type_) == 4 || sizeof(value_type_) == 8));
+        if constexpr (capability_ & nk_cap_cdna5_k) {
+            if constexpr (sizeof(value_type_) == 4) return sz_u32_lanes_prefix_sum_cdna5_(value);
+            else return sz_u64_lanes_prefix_sum_cdna5_(value);
+        }
+        else if constexpr (capability_ & (nk_cap_cdna3_k | nk_cap_cdna4_k)) {
+            if constexpr (sizeof(value_type_) == 4) return sz_u32_wavefront_prefix_sum_cdna3_(value);
+            else return sz_u64_wavefront_prefix_sum_cdna3_(value);
+        }
+        else {
+            for (u32_t delta = 1; delta != width_k; delta <<= 1) {
+                value_type_ const below = shuffle_up(value, delta);
+                if (lane >= delta) value += below;
+            }
+            return value;
+        }
     }
     // The predicates are `int`, as the vote intrinsics take them, so any nonzero lane votes.
     static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot(predicate); }

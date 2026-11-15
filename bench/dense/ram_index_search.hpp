@@ -153,8 +153,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         auto& bench = *static_cast<bench_t*>(punned);
         // AMX tile state needs a per-thread OS permission handshake before first use.
         nk_capability_t available = 0;
-        if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
-        [[maybe_unused]] nk_status_t const configured = nk_cpu_configure_thread(available);
+        if (nk_capabilities_enabled_cpu(&available) != nk_success_k) available = nk_cap_serial_k;
+        [[maybe_unused]] nk_status_t const configured = nk_configure_thread_cpu(available);
         fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty()
                                                  ? fu_memory_domain_id_t {-1}
                                                  : bench.settings.memory_domains.front();
@@ -246,7 +246,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.kernel),
                  bit_name(compute_choices_k, index_t::quads_kit_t::capability_k, "serial"));
     nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k) available = nk_cap_serial_k;
     if (index_t::quads_kit_t::capability_k == nk_cap_serial_k &&
         (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");

@@ -26,7 +26,7 @@
 #endif
 
 #include "harness.hpp"
-#include "lib.hpp" // `gpu_class_t`, `nvidia_class_of` - the class the library picks a unit by
+#include "lib.hpp" // `gpu_class_t`, `pick_gpu_class` - the class the library picks a unit by
 
 #if USEARCH_ARCH_CUDA_
 
@@ -291,11 +291,9 @@ std::size_t check_shapes_vram(settings_t const& settings, gpu_device_t const& de
     constexpr nk_capability_t blackwell_k = ampere_k | nk_cap_ada_k | nk_cap_blackwell_k;
     std::size_t failures = check_shapes_vram_class<gpu_class_t::nvidia_ampere_k, ampere_k>(settings, executor,
                                                                                            "ampere");
-    // A build whose architectures name no Blackwell compiles no Blackwell shapes kits to link
-    // against.
-    if constexpr (NUMKONG_TARGET_BLACKWELL)
-        if (nvidia_class_of(cuda_arch_of(device.architecture_major, device.architecture_minor)) ==
-            gpu_class_t::nvidia_blackwell_k)
+    // A build that keeps no Blackwell class compiles no Blackwell shapes kits to link against.
+    if constexpr (USEARCH_TARGET_NVIDIA_BLACKWELL)
+        if (pick_gpu_class(device, usearch_gpu_class_unknown_k) == gpu_class_t::nvidia_blackwell_k)
             failures += check_shapes_vram_class<gpu_class_t::nvidia_blackwell_k, blackwell_k>(settings, executor,
                                                                                               "blackwell");
     return failures;

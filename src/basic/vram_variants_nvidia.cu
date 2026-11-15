@@ -6,7 +6,8 @@
  *
  *  The rebase of absorbed nodes, the reachability audit with its reconnection, a sweep's count and
  *  scatter, and a split's partition and scatter read the neighbors matrix alone and move values as
- *  opaque bytes, so one unit serves every modality on every NVIDIA class.
+ *  opaque bytes, so one unit serves every modality on every NVIDIA class, compiled as the Ampere
+ *  floor or as a monoversioned build's one class.
  *
  *  Compiled twice: by NVCC device-only into the unit's fatbin, and by Clang host-only, where it
  *  names that fatbin, linked in beside it, to the faces, which load it at their first @c reserve.
@@ -19,13 +20,29 @@
 #include "usearch/dense/vram_index.cuh"             // `vram_rebase_links`, the audits' & splits' bodies
 #include "usearch/basic/vram_nvidia_index.hpp"
 
+#include "lib.hpp" // `gpu_class_t`, `cuda_class_k` - the class this unit compiles as
+
+/** The bounds of the fatbin every basic face loads, linked in as raw bytes, from the table CMake
+ *  writes for the class this unit compiles as; the other classes' tables stay unreferenced. */
+extern "C" byte_t const* const basic_nvidia_ampere_bundles[];
+extern "C" byte_t const* const basic_nvidia_ada_bundles[];
+extern "C" byte_t const* const basic_nvidia_hopper_bundles[];
+extern "C" byte_t const* const basic_nvidia_blackwell_bundles[];
+extern "C" byte_t const* const basic_nvidia_blackwellrtx_bundles[];
+template <gpu_class_t gpu_class_>
+byte_t const* const* basic_bundles() noexcept {
+    if constexpr (gpu_class_ == gpu_class_t::nvidia_ada_k) return basic_nvidia_ada_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_hopper_k) return basic_nvidia_hopper_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwell_k) return basic_nvidia_blackwell_bundles;
+    else if constexpr (gpu_class_ == gpu_class_t::nvidia_blackwellrtx_k) return basic_nvidia_blackwellrtx_bundles;
+    else return basic_nvidia_ampere_bundles;
+}
+
 namespace unum::usearch::basic {
 
-/** The unit's fatbin, linked in as raw bytes, which every basic face loads. */
-extern "C" byte_t const basic_nvidia_bundle_start[], basic_nvidia_bundle_end[];
-
 bytes_view_t cuda_graph_fatbin_t::bytes() noexcept {
-    return {basic_nvidia_bundle_start, static_cast<std::size_t>(basic_nvidia_bundle_end - basic_nvidia_bundle_start)};
+    byte_t const* const* const bounds = basic_bundles<cuda_class_k>();
+    return {bounds[0], bounds[1]};
 }
 
 /** Every shared NVIDIA basic kernel: @p kernel_ picks the pass, and @p node_id_type_ the IDs of the

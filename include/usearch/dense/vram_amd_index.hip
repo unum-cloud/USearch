@@ -17,7 +17,7 @@
 #include <cstddef> // `std::size_t`
 #include <utility> // `std::index_sequence` - every rung of one dtype
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_ROCM_`, which the two below test before including it
+#include <numkong/types.h>       // the vendor detection the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import casts' device body
 #include <numkong/each/rocm.cuh> // `nk_each_rmscast_e4m3_rocm_vectors_` & kin - the unit-RMS import's device bodies
 

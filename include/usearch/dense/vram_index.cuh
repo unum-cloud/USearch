@@ -26,7 +26,7 @@
 #include <type_traits> // `std::conditional_t` - a builder's frontier by its rung
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` - the views carry the metric
-#include <numkong/types.h>        // `NUMKONG_ARCH_CUDA_` & `NUMKONG_ARCH_ROCM_`, which the cast below tests
+#include <numkong/types.h>        // the vendor detection the cast below tests before including it
 #include <numkong/cast/simt.cuh>  // `nk_cast_unit_simt_` - a gathered row's cast
 
 #include "usearch/utilities/types.hpp"
@@ -109,14 +109,21 @@ __device__ __forceinline__ dot_type_ vram_reduce(dot_type_ partial, u32_t lanes_
     return partial;
 }
 
-/** Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
- *  arithmetic kits, {popcount,popcount} for the binary ones. */
+/** Full-warp reduction of a two-component norms accumulator, {sum,sumsq} for the arithmetic kits
+ *  and {popcount,popcount} for the binary ones, in one step per component where the warp policy
+ *  sums its integers so. */
 template <typename warp_type_, typename pair_type_>
 __device__ __forceinline__ pair_type_ vram_reduce_norms(pair_type_ partial) noexcept {
+    if constexpr (requires { warp_type_::sum(partial.x); }) {
+        partial.x = warp_type_::sum(partial.x);
+        partial.y = warp_type_::sum(partial.y);
+    }
+    else {
 #pragma unroll
-    for (u32_t offset = warp_type_::width_k / 2; offset; offset >>= 1) {
-        partial.x += warp_type_::shuffle_down(partial.x, offset);
-        partial.y += warp_type_::shuffle_down(partial.y, offset);
+        for (u32_t offset = warp_type_::width_k / 2; offset; offset >>= 1) {
+            partial.x += warp_type_::shuffle_down(partial.x, offset);
+            partial.y += warp_type_::shuffle_down(partial.y, offset);
+        }
     }
     return partial;
 }
@@ -441,7 +448,7 @@ concept vram_schedule = requires(
 
 /** The schedule cascade, the twin of @c quads_ladder: each vendor specializes it under a constraint
  *  on @p caps_, naming the picked @c schedule_t and its @c picked_k. Schedules state their
- *  @c capability_k and @c compiled_k as kits do, and the first both admit wins. */
+ *  @c capability_k as kits do, and the first it admits wins. */
 template <nk_capability_t caps_>
 struct schedule_ladder;
 
@@ -1968,10 +1975,7 @@ __device__ __forceinline__ void vram_compact_products(vram_ranking_view const& g
                     total += gathered.shifted(shard * block_bytes).counts[query];
                 totals[query] = total;
             }
-            for (u32_t delta = 1; delta < warp_type_::width_k; delta <<= 1) {
-                std::size_t const below = warp_type_::shuffle_up(kept, delta);
-                if (lane >= delta) kept += below;
-            }
+            kept = warp_type_::inclusive_sum(kept, lane);
             if (query < queries_count) tape.offsets[query + 1] = carried + kept;
             carried += warp_type_::shuffle(kept, warp_type_::width_k - 1);
         }
@@ -3391,10 +3395,7 @@ __device__ __forceinline__ void vram_gather_tape(byte_t const* values, u64_t con
         for (u32_t base = 0; base < listed_count; base += warp_type_::width_k) { // Warp-uniform for the scan.
             u32_t const entry = base + lane;
             u64_t bytes = entry < listed_count ? offsets[listed[entry] + 1] - offsets[listed[entry]] : 0;
-            for (u32_t delta = 1; delta < warp_type_::width_k; delta <<= 1) {
-                u64_t const below = warp_type_::shuffle_up(bytes, delta);
-                if (lane >= delta) bytes += below;
-            }
+            bytes = warp_type_::inclusive_sum(bytes, lane);
             if (entry < listed_count) output_offsets[entry + 1] = carried + bytes;
             carried += warp_type_::shuffle(bytes, warp_type_::width_k - 1);
         }

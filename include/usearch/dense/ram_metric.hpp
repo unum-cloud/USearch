@@ -24,9 +24,9 @@
  *  The shape is uniform - the @c quads_kit concept enforces it.
  *
  *  @b Ladders - one @c quads_ladder<scalar,caps> per supported scalar. A linear list of kits fed
- *  to @c highest_kit picks the first one this build compiled, by its @c compiled_k, whose
- *  @c capability_k the caps admit, else falls back to serial. A kit the build cannot carry is a
- *  stub in the @c \#else of its @c NUMKONG_TARGET_* guard, stating only those two facts.
+ *  to @c highest_kit picks the first one this build compiled whose @c capability_k the caps
+ *  admit, else falls back to serial. A kit the build cannot carry is a stub in the @c \#else of
+ *  its @c NUMKONG_TARGET_* guard, stating only its @c capability_k and @c compiled_k as false.
  *  Unsupported scalars simply have no specialization. Adding an ISA tier is one row and one stub.
  *  @c src/ climbs every ladder once per dtype and CPU class and hands each dense engine the kits
  *  they pick, so no engine derives a pick from a capability mask.
@@ -205,7 +205,6 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
 /** bf16 inner-product distance kit - serial reference. */
 struct bf16_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -226,7 +225,6 @@ struct bf16_serial_quads_kit_t {
 /** bf16 inner-product distance kit - Intel Haswell AVX2. */
 struct bf16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x16_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -256,7 +254,6 @@ struct bf16_haswell_quads_kit_t {
 /** bf16 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct bf16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -286,7 +283,6 @@ struct bf16_skylake_quads_kit_t {
 /** bf16 inner-product distance kit - AMD Genoa AVX-512 + VNNI BF16. */
 struct bf16_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x32_state_genoa_t;
     using step_vec_t = nk_b512_vec_t;
@@ -316,7 +312,6 @@ struct bf16_genoa_quads_kit_t {
 /** bf16 inner-product distance kit - Arm NEON. */
 struct bf16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -346,7 +341,6 @@ struct bf16_neon_quads_kit_t {
 /** bf16 inner-product distance kit - Arm BFDOT. */
 struct bf16_neonbfdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonbfdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_neonbfdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -376,7 +370,6 @@ struct bf16_neonbfdot_quads_kit_t {
 /** bf16 inner-product distance kit - WebAssembly SIMD128. */
 struct bf16_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -406,7 +399,6 @@ struct bf16_v128_quads_kit_t {
 /** bf16 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct bf16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -437,7 +429,6 @@ struct bf16_v128relaxed_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct bf16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     using accumulator_t = nk_dot_bf16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -465,7 +456,6 @@ struct bf16_powervsx_quads_kit_t {
 /** f16 inner-product distance kit - serial reference. */
 struct f16_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -493,7 +483,6 @@ struct f16_serial_quads_kit_t {
  */
 struct f16_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -523,7 +512,6 @@ struct f16_haswell_quads_kit_t {
 /** f16 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct f16_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -553,7 +541,6 @@ struct f16_skylake_quads_kit_t {
 /** f16 inner-product distance kit - Arm NEON. */
 struct f16_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -583,7 +570,6 @@ struct f16_neon_quads_kit_t {
 /** f16 inner-product distance kit - Arm FP16 FML, with the norms of the NEON f16 moments kernel. */
 struct f16_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -614,7 +600,6 @@ struct f16_neonfhm_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct f16_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_through_f32x4_state_v128relaxed_t_;
     using step_vec_t = nk_b128_vec_t;
@@ -645,7 +630,6 @@ struct f16_v128relaxed_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct f16_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     using accumulator_t = nk_dot_f16x8_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -673,7 +657,6 @@ struct f16_powervsx_quads_kit_t {
 /** e5m2 inner-product distance kit - serial reference. */
 struct e5m2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -699,7 +682,6 @@ struct e5m2_serial_quads_kit_t {
  */
 struct e5m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -729,7 +711,6 @@ struct e5m2_haswell_quads_kit_t {
 /** e5m2 inner-product distance kit - Intel Skylake-X AVX-512, widening in the update. */
 struct e5m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -762,7 +743,6 @@ struct e5m2_skylake_quads_kit_t {
  *  come from the AVX-512 one. */
 struct e5m2_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_f16_state_diamond_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -793,7 +773,6 @@ struct e5m2_diamond_quads_kit_t {
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e5m2_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -823,7 +802,6 @@ struct e5m2_genoa_quads_kit_t {
 /** e5m2 inner-product distance kit - Arm FP16 FML. */
 struct e5m2_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -853,7 +831,6 @@ struct e5m2_neonfhm_quads_kit_t {
 /** e5m2 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e5m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -884,7 +861,6 @@ struct e5m2_neonfp8_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e5m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     using accumulator_t = nk_dot_e5m2x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -912,7 +888,6 @@ struct e5m2_v128relaxed_quads_kit_t {
 /** e4m3 inner-product distance kit - serial reference. */
 struct e4m3_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -933,7 +908,6 @@ struct e4m3_serial_quads_kit_t {
 /** e4m3 inner-product distance kit - Intel Haswell AVX2, widening in the update. */
 struct e4m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f32_state_haswell_t_;
     using step_vec_t = nk_b256_vec_t;
@@ -963,7 +937,6 @@ struct e4m3_haswell_quads_kit_t {
 /** e4m3 inner-product distance kit - Intel Skylake-X AVX-512, widening on load. */
 struct e4m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f32_state_skylake_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -996,7 +969,6 @@ struct e4m3_skylake_quads_kit_t {
  *  come from the AVX-512 one. */
 struct e4m3_diamond_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_diamond_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_f16_state_diamond_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -1027,7 +999,6 @@ struct e4m3_diamond_quads_kit_t {
  *  widen each step to bf16 so the dot rides the BF16 accumulator. */
 struct e4m3_genoa_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_genoa_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_through_bf16_state_genoa_t_;
     using step_vec_t = nk_b512_vec_t;
@@ -1057,7 +1028,6 @@ struct e4m3_genoa_quads_kit_t {
 /** e4m3 inner-product distance kit - Arm FP16 FML. */
 struct e4m3_neonfhm_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfhm_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfhm_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1087,7 +1057,6 @@ struct e4m3_neonfhm_quads_kit_t {
 /** e4m3 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e4m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1118,7 +1087,6 @@ struct e4m3_neonfp8_quads_kit_t {
  *  Four dimensions per step, since the widened f32 quad fills the 128-bit vec. */
 struct e4m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     using accumulator_t = nk_dot_e4m3x4_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1152,7 +1120,6 @@ struct e4m3_v128relaxed_quads_kit_t {
  */
 struct e3m2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1173,7 +1140,6 @@ struct e3m2_serial_quads_kit_t {
 /** e3m2 inner-product distance kit - Intel Haswell AVX2. */
 struct e3m2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x32_state_haswell_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1203,7 +1169,6 @@ struct e3m2_haswell_quads_kit_t {
 /** e3m2 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e3m2_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x32_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1233,7 +1198,6 @@ struct e3m2_skylake_quads_kit_t {
 /** e3m2 inner-product distance kit - Arm SDOT, with the norms of the NEON moments kernel. */
 struct e3m2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonsdot_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1263,7 +1227,6 @@ struct e3m2_neonsdot_quads_kit_t {
 /** e3m2 inner-product distance kit - Arm FP8 DOT, with the norms of the NEON moments kernel. */
 struct e3m2_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1293,7 +1256,6 @@ struct e3m2_neonfp8_quads_kit_t {
 /** e3m2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e3m2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     using accumulator_t = nk_dot_e3m2x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1321,7 +1283,6 @@ struct e3m2_v128relaxed_quads_kit_t {
 /** e2m3 inner-product distance kit - serial reference. One element per byte. */
 struct e2m3_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1342,7 +1303,6 @@ struct e2m3_serial_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Haswell AVX2. */
 struct e2m3_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_haswell_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1372,7 +1332,6 @@ struct e2m3_haswell_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Skylake-X AVX-512 Foundation. */
 struct e2m3_skylake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x64_state_skylake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1402,7 +1361,6 @@ struct e2m3_skylake_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct e2m3_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1432,7 +1390,6 @@ struct e2m3_alder_quads_kit_t {
 /** e2m3 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct e2m3_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1462,7 +1419,6 @@ struct e2m3_sierra_quads_kit_t {
 /** e2m3 inner-product distance kit - Arm SDOT. */
 struct e2m3_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1492,7 +1448,6 @@ struct e2m3_neonsdot_quads_kit_t {
 /** e2m3 inner-product distance kit - Arm FP8 DOT. */
 struct e2m3_neonfp8_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonfp8_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_neonfp8_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1522,7 +1477,6 @@ struct e2m3_neonfp8_quads_kit_t {
 /** e2m3 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct e2m3_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     using accumulator_t = nk_dot_e2m3x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1550,7 +1504,6 @@ struct e2m3_v128relaxed_quads_kit_t {
 /** u8 inner-product distance kit - serial reference. */
 struct u8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1571,7 +1524,6 @@ struct u8_serial_quads_kit_t {
 /** u8 inner-product distance kit - Haswell AVX2. */
 struct u8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1601,7 +1553,6 @@ struct u8_haswell_quads_kit_t {
 /** u8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD. */
 struct u8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1631,7 +1582,6 @@ struct u8_icelake_quads_kit_t {
 /** u8 inner-product distance kit - Intel Alder Lake AVX-VNNI. */
 struct u8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1661,7 +1611,6 @@ struct u8_alder_quads_kit_t {
 /** u8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct u8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1691,7 +1640,6 @@ struct u8_sierra_quads_kit_t {
 /** u8 inner-product distance kit - Arm UDOT. */
 struct u8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1721,7 +1669,6 @@ struct u8_neonsdot_quads_kit_t {
 /** u8 inner-product distance kit - WebAssembly SIMD128. */
 struct u8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1751,7 +1698,6 @@ struct u8_v128_quads_kit_t {
 /** u8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1781,7 +1727,6 @@ struct u8_v128relaxed_quads_kit_t {
 /** u8 inner-product distance kit - IBM POWER VSX. */
 struct u8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     using accumulator_t = nk_dot_u8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1809,7 +1754,6 @@ struct u8_powervsx_quads_kit_t {
 /** i8 inner-product distance kit - serial reference. */
 struct i8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1830,7 +1774,6 @@ struct i8_serial_quads_kit_t {
 /** i8 inner-product distance kit - Intel Haswell AVX2. */
 struct i8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1860,7 +1803,6 @@ struct i8_haswell_quads_kit_t {
 /** i8 inner-product distance kit - Intel Ice Lake AVX-512 + VNNI VPDPBUSD compensation. */
 struct i8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x64_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -1892,7 +1834,6 @@ struct i8_icelake_quads_kit_t {
  *  which Alder Lake also implements. */
 struct i8_alder_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_alder_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x32_state_alder_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1922,7 +1863,6 @@ struct i8_alder_quads_kit_t {
 /** i8 inner-product distance kit - Intel Sierra Forest AVX-VNNI. */
 struct i8_sierra_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sierra_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x32_state_sierra_t;
     using step_vec_t = nk_b256_vec_t;
@@ -1952,7 +1892,6 @@ struct i8_sierra_quads_kit_t {
 /** i8 inner-product distance kit - Arm SDOT. */
 struct i8_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -1982,7 +1921,6 @@ struct i8_neonsdot_quads_kit_t {
 /** i8 inner-product distance kit - WebAssembly SIMD128. */
 struct i8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2012,7 +1950,6 @@ struct i8_v128_quads_kit_t {
 /** i8 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct i8_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2042,7 +1979,6 @@ struct i8_v128relaxed_quads_kit_t {
 /** i8 inner-product distance kit - IBM POWER VSX. */
 struct i8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     using accumulator_t = nk_dot_i8x16_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2072,7 +2008,6 @@ struct i8_powervsx_quads_kit_t {
  *  @c i32 like every other integral kit, even though @c dot_result_t is unsigned. */
 struct u4x2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
@@ -2093,7 +2028,6 @@ struct u4x2_serial_quads_kit_t {
 /** u4x2 inner-product distance kit - Intel Haswell AVX2. */
 struct u4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2123,7 +2057,6 @@ struct u4x2_haswell_quads_kit_t {
 /** u4x2 inner-product distance kit - Ice Lake VNNI. */
 struct u4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x128_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -2153,7 +2086,6 @@ struct u4x2_icelake_quads_kit_t {
 /** u4x2 inner-product distance kit - Arm UDOT. */
 struct u4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2183,7 +2115,6 @@ struct u4x2_neonsdot_quads_kit_t {
 /** u4x2 inner-product distance kit - WebAssembly relaxed SIMD. */
 struct u4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     using accumulator_t = nk_dot_u4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2211,7 +2142,6 @@ struct u4x2_v128relaxed_quads_kit_t {
 /** i4x2 inner-product distance kit - serial reference. */
 struct i4x2_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x16_state_serial_t;
     using step_vec_t = nk_b64_vec_t;
@@ -2232,7 +2162,6 @@ struct i4x2_serial_quads_kit_t {
 /** i4x2 inner-product distance kit - Haswell AVX2. */
 struct i4x2_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2262,7 +2191,6 @@ struct i4x2_haswell_quads_kit_t {
 /** i4 inner-product distance kit - Ice Lake VNNI. */
 struct i4x2_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x128_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -2292,7 +2220,6 @@ struct i4x2_icelake_quads_kit_t {
 /** i4 inner-product distance kit - Arm SDOT. */
 struct i4x2_neonsdot_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neonsdot_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_neonsdot_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2323,7 +2250,6 @@ struct i4x2_neonsdot_quads_kit_t {
  *  4-bit moments kernel for this tier, so the norms come from the serial one. */
 struct i4x2_v128relaxed_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     using accumulator_t = nk_dot_i4x32_state_v128relaxed_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2351,7 +2277,6 @@ struct i4x2_v128relaxed_quads_kit_t {
 /** u1x8 inner-product distance kit - serial reference (binary AND-popcount). */
 struct u1x8_serial_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_serial_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2372,7 +2297,6 @@ struct u1x8_serial_quads_kit_t {
 /** u1x8 inner-product distance kit - Intel Haswell AVX2 + POPCNT. */
 struct u1x8_haswell_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_haswell_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2402,7 +2326,6 @@ struct u1x8_haswell_quads_kit_t {
 /** u1x8 inner-product distance kit - Intel Ice Lake AVX-512 + VPOPCNTQ. */
 struct u1x8_icelake_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x512_state_icelake_t;
     using step_vec_t = nk_b512_vec_t;
@@ -2432,7 +2355,6 @@ struct u1x8_icelake_quads_kit_t {
 /** u1x8 inner-product distance kit - Arm NEON (binary AND-popcount). */
 struct u1x8_neon_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_neon_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2463,7 +2385,6 @@ struct u1x8_neon_quads_kit_t {
  *  binary moments kernel for this tier, so the norms come from the serial one. */
 struct u1x8_v128_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_v128_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2494,7 +2415,6 @@ struct u1x8_v128_quads_kit_t {
  *  kernel for this tier, so the norms come from the serial one. */
 struct u1x8_powervsx_quads_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     using accumulator_t = nk_dot_u1x128_state_powervsx_t;
     using step_vec_t = nk_b128_vec_t;
@@ -2540,7 +2460,6 @@ struct u1x8_powervsx_quads_kit_t {
  */
 struct u32_skylake_visits_hash_set_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
 
     template <typename hasher_type_>
     static inline u32_t* locate_slot(u32_t* slots, std::size_t capacity, hasher_type_ const& hasher,
@@ -2792,7 +2711,6 @@ struct quads_ladder<nk::u1x8_t, caps_> {
  *  kernels every CPU runs. */
 struct serial_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_serial;
     static constexpr auto scale = nk_each_scale_f32_serial;
     static constexpr auto blend = nk_each_blend_f32_serial;
@@ -2804,7 +2722,6 @@ struct serial_elementwise_kit_t {
 #if NUMKONG_TARGET_HASWELL
 struct haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto scale = nk_each_scale_f32_haswell;
     static constexpr auto blend = nk_each_blend_f32_haswell;
@@ -2826,7 +2743,6 @@ struct haswell_elementwise_kit_t {
 /** Skylake's casts and arithmetic over Haswell's exponentials, as one tile fills a single AVX2 register. */
 struct skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto scale = nk_each_scale_f32_skylake;
     static constexpr auto blend = nk_each_blend_f32_skylake;
@@ -2847,7 +2763,6 @@ struct skylake_elementwise_kit_t {
 /** Icelake's casts over Skylake's arithmetic, which Icelake adds no kernels to. */
 struct icelake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_icelake;
     static constexpr auto scale = skylake_elementwise_kit_t::scale;
     static constexpr auto blend = skylake_elementwise_kit_t::blend;
@@ -2868,7 +2783,6 @@ struct icelake_elementwise_kit_t {
 /** Sapphire's half-precision casts over Skylake's arithmetic. */
 struct sapphire_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_sapphire;
     static constexpr auto scale = skylake_elementwise_kit_t::scale;
     static constexpr auto blend = skylake_elementwise_kit_t::blend;
@@ -2888,7 +2802,6 @@ struct sapphire_elementwise_kit_t {
 #if NUMKONG_TARGET_NEON
 struct neon_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto scale = nk_each_scale_f32_neon;
     static constexpr auto blend = nk_each_blend_f32_neon;
@@ -2909,14 +2822,12 @@ struct neon_elementwise_kit_t {
 #if NUMKONG_TARGET_RVV
 struct rvv_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto scale = nk_each_scale_f32_rvv;
     static constexpr auto blend = nk_each_blend_f32_rvv;
 
     /** RVV's @c vfloat32m4_t is sizeless, so no tile copies into it; the serial helper takes its
      *  place. */
-    using vec_t = serial_elementwise_kit_t::vec_t;
     using vec_t = serial_elementwise_kit_t::vec_t;
     static constexpr auto exp2 = serial_elementwise_kit_t::exp2;
 };
@@ -2933,7 +2844,6 @@ struct rvv_elementwise_kit_t {
 #if NUMKONG_TARGET_V128RELAXED
 struct v128relaxed_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto scale = nk_each_scale_f32_v128relaxed;
     static constexpr auto blend = nk_each_blend_f32_v128relaxed;
@@ -2956,7 +2866,6 @@ struct v128relaxed_elementwise_kit_t {
 /** POWER's casts over the serial arithmetic, which POWER adds no kernels to. */
 struct powervsx_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_powervsx;
     static constexpr auto scale = serial_elementwise_kit_t::scale;
     static constexpr auto blend = serial_elementwise_kit_t::blend;
@@ -2995,7 +2904,6 @@ struct elementwise_ladder {
  *  does, so rows cast plainly. */
 struct no_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
 };
 
 /** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products accumulate in
@@ -3008,34 +2916,28 @@ struct rmscast_ladder {
 
 struct f16_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_f16_serial;
 };
 struct e4m3_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_serial;
 };
 struct e5m2_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e5m2_serial;
 };
 struct e2m3_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e2m3_serial;
 };
 struct e3m2_serial_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e3m2_serial;
 };
 
 #if NUMKONG_TARGET_HASWELL
 struct e4m3_haswell_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_haswell;
 };
 #else
@@ -3051,7 +2953,6 @@ struct e4m3_haswell_rmscast_kit_t {
 #if NUMKONG_TARGET_SKYLAKE
 struct e4m3_skylake_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_skylake;
 };
 #else
@@ -3067,12 +2968,10 @@ struct e4m3_skylake_rmscast_kit_t {
 #if NUMKONG_TARGET_NEON
 struct f16_neon_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_f16_neon;
 };
 struct e4m3_neon_rmscast_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
-    static constexpr bool compiled_k = true;
     static constexpr auto rmscast = nk_each_rmscast_e4m3_neon;
 };
 #else
@@ -3927,7 +3826,6 @@ struct dummy_rescoring_t {
  *  the 4-way kits. */
 struct no_tiles_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-    static constexpr bool compiled_k = true;
 };
 
 #if NUMKONG_TARGET_SAPPHIREAMX
@@ -3935,7 +3833,6 @@ struct no_tiles_kit_t {
 /** bf16 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct bf16_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3948,7 +3845,6 @@ struct bf16_sapphireamx_tiles_kit_t {
 /** i8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct i8_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3961,7 +3857,6 @@ struct i8_sapphireamx_tiles_kit_t {
 /** u8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct u8_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3974,7 +3869,6 @@ struct u8_sapphireamx_tiles_kit_t {
 /** e4m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e4m3_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -3987,7 +3881,6 @@ struct e4m3_sapphireamx_tiles_kit_t {
 /** e5m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e5m2_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4000,7 +3893,6 @@ struct e5m2_sapphireamx_tiles_kit_t {
 /** e3m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e3m2_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4013,7 +3905,6 @@ struct e3m2_sapphireamx_tiles_kit_t {
 /** e2m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
 struct e2m3_sapphireamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4062,7 +3953,6 @@ struct e2m3_sapphireamx_tiles_kit_t {
 /** f16 tiles kit - Intel AMX-FP16. */
 struct f16_graniteamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4075,7 +3965,6 @@ struct f16_graniteamx_tiles_kit_t {
 /** e5m2 tiles kit - Intel AMX-FP16. */
 struct e5m2_graniteamx_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4104,7 +3993,6 @@ struct e5m2_graniteamx_tiles_kit_t {
 /** bf16 tiles kit - Arm SME. */
 struct bf16_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4117,7 +4005,6 @@ struct bf16_sme_tiles_kit_t {
 /** f16 tiles kit - Arm SME. */
 struct f16_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4130,7 +4017,6 @@ struct f16_sme_tiles_kit_t {
 /** i8 tiles kit - Arm SME. */
 struct i8_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4143,7 +4029,6 @@ struct i8_sme_tiles_kit_t {
 /** u8 tiles kit - Arm SME. */
 struct u8_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4156,7 +4041,6 @@ struct u8_sme_tiles_kit_t {
 /** e4m3 tiles kit - Arm SME. */
 struct e4m3_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e4m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4169,7 +4053,6 @@ struct e4m3_sme_tiles_kit_t {
 /** e5m2 tiles kit - Arm SME. */
 struct e5m2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e5m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4182,7 +4065,6 @@ struct e5m2_sme_tiles_kit_t {
 /** e3m2 tiles kit - Arm SME. */
 struct e3m2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e3m2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4195,7 +4077,6 @@ struct e3m2_sme_tiles_kit_t {
 /** e2m3 tiles kit - Arm SME. */
 struct e2m3_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::e2m3_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4208,7 +4089,6 @@ struct e2m3_sme_tiles_kit_t {
 /** i4x2 tiles kit - Arm SME. */
 struct i4x2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i4x2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4221,7 +4101,6 @@ struct i4x2_sme_tiles_kit_t {
 /** u4x2 tiles kit - Arm SME. */
 struct u4x2_sme_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sme_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u4x2_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4282,7 +4161,6 @@ struct u4x2_sme_tiles_kit_t {
 /** u1x8 tiles kit - Arm SME binary outer products. */
 struct u1x8_smebi32_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_smebi32_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u1x8_t;
     static constexpr std::size_t tile_columns_k = 16;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4307,7 +4185,6 @@ struct u1x8_smebi32_tiles_kit_t {
 /** bf16 tiles kit - IBM POWER MMA. */
 struct bf16_powermma_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::bf16_t;
     static constexpr std::size_t tile_columns_k = 8;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4320,7 +4197,6 @@ struct bf16_powermma_tiles_kit_t {
 /** f16 tiles kit - IBM POWER MMA. */
 struct f16_powermma_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::f16_t;
     static constexpr std::size_t tile_columns_k = 8;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4333,7 +4209,6 @@ struct f16_powermma_tiles_kit_t {
 /** i8 tiles kit - IBM POWER MMA. */
 struct i8_powermma_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::i8_t;
     static constexpr std::size_t tile_columns_k = 8;
     static constexpr std::size_t pack_columns_k = 256;
@@ -4346,7 +4221,6 @@ struct i8_powermma_tiles_kit_t {
 /** u8 tiles kit - IBM POWER MMA. */
 struct u8_powermma_tiles_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_powermma_k;
-    static constexpr bool compiled_k = true;
     using scalar_t = nk::u8_t;
     static constexpr std::size_t tile_columns_k = 8;
     static constexpr std::size_t pack_columns_k = 256;

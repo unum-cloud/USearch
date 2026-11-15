@@ -1616,7 +1616,7 @@ enum class gpu_vendor_t : u32_t {
 
 /** One GPU as its vendor's driver reports it - the vendor, that vendor's own ordinal and its raw
  *  architecture - with what a banner or a benchmark row reports, so no harness calls a vendor SDK;
- *  the C layer maps the architecture to a class. */
+ *  the C layer picks a class by whether the driver loads its unit there. */
 struct gpu_device_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     u32_t vendor_ordinal = 0;
@@ -1666,14 +1666,19 @@ inline constexpr io_capability_t operator|(io_capability_t first, io_capability_
     return static_cast<io_capability_t>(static_cast<u32_t>(first) | static_cast<u32_t>(second));
 }
 
+/** Whether this build carries @p kit_ 's body: every kit but a stub, which alone states
+ *  @c compiled_k, as false. */
+template <typename kit_>
+inline constexpr bool kit_compiled = !requires { requires !kit_::compiled_k; };
+
 /**
  *  @brief Picks the first of @p kits_ this build compiled and @p caps_ runs, else @p floor_ - a
  *      ladder's one closing @c >::type, with no nested @c std::conditional_t pile.
  *
- *  Every kit states its own needs: @c capability_k, the capability it runs under, and
- *  @c compiled_k, whether this build carries its body. A kit whose target this build cannot carry
- *  is a stub of those two members alone, so naming it in a ladder never needs its body. @p caps_
- *  is a NumKong or a StringZilla capability set, whichever the kits state theirs in.
+ *  Every kit states @c capability_k, the capability it runs under. A kit whose target this build
+ *  cannot carry is a stub of that member and @c compiled_k set to false, so naming it in a ladder
+ *  never needs its body. @p caps_ is a NumKong or a StringZilla capability set, whichever the kits
+ *  state theirs in.
  */
 template <auto caps_, typename floor_, typename... kits_>
 struct highest_kit {
@@ -1682,7 +1687,7 @@ struct highest_kit {
 
 template <auto caps_, typename floor_, typename head_, typename... tail_>
 struct highest_kit<caps_, floor_, head_, tail_...> {
-    using type = std::conditional_t<head_::compiled_k && (caps_ & head_::capability_k) != 0, head_,
+    using type = std::conditional_t<kit_compiled<head_> && (caps_ & head_::capability_k) != 0, head_,
                                     typename highest_kit<caps_, floor_, tail_...>::type>;
 };
 

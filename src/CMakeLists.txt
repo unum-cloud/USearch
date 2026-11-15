@@ -1,8 +1,8 @@
 # The file runs top to bottom: the classes of every backend - the CPU classes, then one block per GPU vendor - the
 # variant libraries, one row per modality, residency and backend, and the dispatch unit over all of them. Every class
-# leaves the same three variables, read by the rows: `usearch_class_<class>_exists_`, `usearch_class_<class>_flags_`,
-# the ISA flags of a CPU class or the device codes of a GPU class, and `usearch_class_<class>_definitions_`. Every
-# backend leaves `usearch_<backend>_classes_`, the classes it declared, and `usearch_<backend>_definitions_`, which its
+# leaves the same three variables, read by the rows: `usearch_class_<class>_kept_`, `usearch_class_<class>_flags_`, the
+# ISA flags of a CPU class or the device codes of a GPU class, and `usearch_class_<class>_definitions_`. Every backend
+# leaves `usearch_<backend>_classes_`, the classes it declared, and `usearch_<backend>_definitions_`, which its
 # libraries compile with.
 
 # The RAM variants compile per CPU class. A variant inlines its class's kits and runs on nothing older, so its unit
@@ -82,13 +82,13 @@ function (usearch_cpu_class class_ target_macro_)
     set(exists_ ${usearch_class_${arg_OVER}_exists_})
     set(flags_ ${usearch_class_${arg_OVER}_flags_})
     foreach (entry_ IN LISTS arg_UNPARSED_ARGUMENTS)
-        if (numkong_target_${entry_}_enabled)
+        if (numkong_target_${entry_}_compiled)
             list(APPEND flags_ ${numkong_target_${entry_}_flags})
-        elseif (NOT forkunion_target_${entry_}_enabled AND NOT usearch_target_${entry_}_compiles_)
+        elseif (NOT forkunion_target_${entry_}_compiled AND NOT usearch_target_${entry_}_compiles_)
             set(exists_ FALSE)
         endif ()
         # StringZilla's kernels of the same generation inlined into the class may need more, like Haswell's `lzcnt`.
-        if (stringzilla_target_${entry_}_enabled)
+        if (stringzilla_target_${entry_}_compiled)
             list(APPEND flags_ ${stringzilla_target_${entry_}_flags})
         endif ()
     endforeach ()
@@ -188,7 +188,7 @@ usearch_cpu_class(
 usearch_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128)
 usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
 
-# A monoversioned build compiles one class: every CPU capability its libraries enabled, which is what `USEARCH_MARCH`
+# A monoversioned build compiles one class: every CPU capability its libraries compiled, which is what `USEARCH_MARCH`
 # implies plus what a preset vouches for, with the flags of the vouched ones alone, as an Arm `-march` would lower an
 # `-mcpu` floor. A GPU capability names its device codes instead.
 set(usearch_class_monoversioned_macro_ MONOVERSIONED)
@@ -196,8 +196,8 @@ set(usearch_monoversioned_capabilities_)
 if (NOT USEARCH_MULTIVERSIONED)
     set(flags_)
     foreach (library_ IN ITEMS numkong stringzilla forkunion)
-        get_property(enabled_ GLOBAL PROPERTY ${library_}_capabilities_enabled)
-        foreach (capability_ IN LISTS enabled_)
+        get_property(compiled_ GLOBAL PROPERTY ${library_}_capabilities_compiled)
+        foreach (capability_ IN LISTS compiled_)
             if (DEFINED ${library_}_target_${capability_}_architectures)
                 continue()
             endif ()
@@ -232,7 +232,8 @@ foreach (class_ IN LISTS usearch_cpu_rows_)
         list(APPEND usearch_cpu_gates_ "USEARCH_TARGET_${usearch_class_${class_}_macro_}=0")
     endif ()
 endforeach ()
-list(APPEND usearch_cpu_definitions_ "USEARCH_TARGET_MONOVERSIONED=$<BOOL:${usearch_class_monoversioned_kept_}>")
+set(usearch_monoversioned_definition_ "USEARCH_TARGET_MONOVERSIONED=$<BOOL:${usearch_class_monoversioned_kept_}>")
+list(APPEND usearch_cpu_definitions_ ${usearch_monoversioned_definition_})
 
 # Every NVIDIA or AMD unit with kernels compiles twice. Host-only, through Clang's CUDA or HIP mode, it names its
 # kernels from device code alone, so nothing registers with or links a GPU runtime, which opens at first use.
@@ -364,46 +365,6 @@ function (usearch_cuda_names output_)
     )
 endfunction ()
 
-# Sets @p output_ to `capability_macro_=1` where every one of the architectures is one of NumKong's cached
-# `numkong_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual" and an "a" or "f" suffix,
-# and to `capability_macro_=0` otherwise. A USearch class compiles a plain code where NumKong's row names a family one,
-# like Hopper's `90` for `90a`, as it uses none of the instructions the family code adds. NumKong's one-code units need
-# any of them; a unit here compiles every listed code, and a kit compiled into one pass is compiled into all.
-function (usearch_cuda_capability capability_name_ capability_macro_ architectures_ output_)
-    set(enabled_ 1)
-    foreach (architecture_ IN LISTS architectures_)
-        set(supported_ 0)
-        if (architecture_ MATCHES "^([0-9]+)[af]?(-real|-virtual)?$")
-            set(code_ ${CMAKE_MATCH_1})
-        endif ()
-        foreach (supported_architecture_ IN LISTS numkong_target_${capability_name_}_architectures)
-            if (supported_architecture_ MATCHES "^${code_}[af]?$")
-                set(supported_ 1)
-            endif ()
-        endforeach ()
-        if (NOT supported_)
-            set(enabled_ 0)
-        endif ()
-    endforeach ()
-    set(${output_}
-        ${capability_macro_}=${enabled_}
-        PARENT_SCOPE
-    )
-endfunction ()
-
-# The NumKong GPU capabilities the CUDA codes run, as the definitions a target compiles with.
-function (usearch_cuda_capabilities output_ architectures_)
-    usearch_cuda_capability(ampere NUMKONG_TARGET_AMPERE "${architectures_}" ampere_)
-    usearch_cuda_capability(ada NUMKONG_TARGET_ADA "${architectures_}" ada_)
-    usearch_cuda_capability(hopper NUMKONG_TARGET_HOPPER "${architectures_}" hopper_)
-    usearch_cuda_capability(blackwell NUMKONG_TARGET_BLACKWELL "${architectures_}" blackwell_)
-    usearch_cuda_capability(blackwellrtx NUMKONG_TARGET_BLACKWELLRTX "${architectures_}" blackwellrtx_)
-    set(${output_}
-        ${ampere_} ${ada_} ${hopper_} ${blackwell_} ${blackwellrtx_}
-        PARENT_SCOPE
-    )
-endfunction ()
-
 # Sets @p output_ to the `--offload-arch` codes of the processors after it that `USEARCH_ROCM_ARCH` resolves to.
 function (usearch_rocm_codes output_)
     set(codes_)
@@ -419,38 +380,57 @@ function (usearch_rocm_codes output_)
 endfunction ()
 
 # The NVIDIA classes: one per GPU generation, its fatbin compiled for its own codes alone - the device twin of the CPU
-# classes' per-unit ISA flags - so no cubin carries another generation's kernels. A class exists only once
+# classes' per-unit ISA flags - so no cubin carries another generation's kernels. A class is kept once
 # `USEARCH_CUDA_ARCH` resolves to one of its @p selectors_, and compiles the codes that name it: in the release set the
-# lowest its kernels need, as PTX where a plain code suffices, otherwise the one named code as SASS. Only an existing
-# class enters the dispatch units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`, 1
-# or 0. Each class sees only its own NumKong GPU target, as an AMD class does, since NumKong's own kernels compile under
-# every target a unit names. NVCC is only a device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either
-# way.
+# lowest its kernels need, as PTX where a plain code suffices, otherwise the one named code as SASS. The oldest class is
+# the vendor's floor: in a multiversioned build it is always kept and also compiles the forward-compatible PTX it lists,
+# which a GPU newer than every class runs. A monoversioned build keeps only the newest class its architecture names,
+# which carries every variant. Either build refuses an architecture no class runs. Only a kept class enters the dispatch
+# units' ladders, through its gate `USEARCH_TARGET_NVIDIA_<CLASS>` in `usearch_gpu_gates_`, 1 or 0. NVCC is only a
+# device compiler here; the dispatch unit sees `USEARCH_ARCH_CUDA_` either way.
 set(usearch_gpu_gates_)
 if (USEARCH_CUDA_ARCH)
     set(usearch_nvidia_classes_)
     set(usearch_nvidia_architectures_)
-    set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=1")
+    set(usearch_nvidia_kept_)
+    set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=1" ${usearch_monoversioned_definition_})
     function (usearch_nvidia_class class_ target_macro_)
-        usearch_cuda_names(architectures_ ${ARGN})
+        usearch_cuda_names(named_ ${ARGN})
+        set(architectures_ ${named_})
+        if (USEARCH_MULTIVERSIONED)
+            foreach (selector_ IN LISTS ARGN)
+                if (selector_ MATCHES "-virtual$" AND NOT selector_ IN_LIST architectures_)
+                    list(APPEND architectures_ ${selector_})
+                endif ()
+            endforeach ()
+        endif ()
+        set(kept_ FALSE)
         if (architectures_)
-            set(named_ TRUE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_NVIDIA_${target_macro_}=1")
-        else ()
-            set(named_ FALSE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_NVIDIA_${target_macro_}=0")
+            set(kept_ TRUE)
+        endif ()
+        if (named_ AND NOT USEARCH_MULTIVERSIONED)
+            foreach (older_ IN LISTS usearch_nvidia_classes_)
+                set(usearch_class_${older_}_kept_
+                    FALSE
+                    PARENT_SCOPE
+                )
+            endforeach ()
+            set(usearch_nvidia_kept_
+                ${class_}
+                PARENT_SCOPE
+            )
         endif ()
         usearch_cuda_codes(codes_ "${architectures_}")
-        set(usearch_class_${class_}_exists_
-            ${named_}
+        set(usearch_class_${class_}_kept_
+            ${kept_}
+            PARENT_SCOPE
+        )
+        set(usearch_class_${class_}_macro_
+            NVIDIA_${target_macro_}
             PARENT_SCOPE
         )
         set(usearch_class_${class_}_flags_
             "${codes_}"
-            PARENT_SCOPE
-        )
-        set(usearch_class_${class_}_definitions_
-            "NUMKONG_TARGET_${target_macro_}=1"
             PARENT_SCOPE
         )
         set(usearch_nvidia_classes_
@@ -458,15 +438,11 @@ if (USEARCH_CUDA_ARCH)
             PARENT_SCOPE
         )
         set(usearch_nvidia_architectures_
-            ${usearch_nvidia_architectures_} ${architectures_}
-            PARENT_SCOPE
-        )
-        set(usearch_gpu_gates_
-            ${usearch_gpu_gates_}
+            ${usearch_nvidia_architectures_} ${named_}
             PARENT_SCOPE
         )
     endfunction ()
-    usearch_nvidia_class(nvidia_ampere AMPERE 80 86)
+    usearch_nvidia_class(nvidia_ampere AMPERE 80 86 80-virtual)
     usearch_nvidia_class(nvidia_ada ADA 89)
     usearch_nvidia_class(nvidia_hopper HOPPER 90 90a)
     usearch_nvidia_class(
@@ -479,30 +455,16 @@ if (USEARCH_CUDA_ARCH)
         103f
     )
     usearch_nvidia_class(nvidia_blackwellrtx BLACKWELLRTX 120 120f 121 121f)
-
-    # The vendor-wide class `nvidia`, for kits that need nothing past the Ampere floor: one unit carrying the floor's
-    # PTX alone in the release set, which NumKong's Ampere target already raises to `compute_80` through the `bf16x2`
-    # conversions its cast kernels issue, otherwise each named code a generation above claims. It exists and gates its
-    # variants through its own `USEARCH_TARGET_NVIDIA` whenever it carries any code, so a build without the Ampere class
-    # never picks an empty Ampere rung.
-    if (USEARCH_CUDA_ARCH STREQUAL "all")
-        set(usearch_nvidia_architectures_ 80-virtual)
-    endif ()
-    usearch_cuda_codes(usearch_class_nvidia_flags_ "${usearch_nvidia_architectures_}")
-    if (usearch_nvidia_architectures_)
-        set(usearch_class_nvidia_exists_ TRUE)
-        list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_NVIDIA=1")
-    else ()
-        set(usearch_class_nvidia_exists_ FALSE)
-        list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_NVIDIA=0")
-    endif ()
-    set(usearch_class_nvidia_definitions_ "NUMKONG_TARGET_AMPERE=1")
+    foreach (architecture_ IN LISTS usearch_cuda_architectures_)
+        if (NOT architecture_ IN_LIST usearch_nvidia_architectures_)
+            message(FATAL_ERROR "USearch: no GPU class runs ${architecture_}; name an architecture a class claims")
+        endif ()
+    endforeach ()
 else ()
     set(usearch_nvidia_definitions_ "USEARCH_ARCH_CUDA_=0")
     list(
         APPEND
         usearch_gpu_gates_
-        USEARCH_TARGET_NVIDIA=0
         USEARCH_TARGET_NVIDIA_AMPERE=0
         USEARCH_TARGET_NVIDIA_ADA=0
         USEARCH_TARGET_NVIDIA_HOPPER=0
@@ -513,72 +475,96 @@ endif ()
 
 # The AMD classes, each embedding a code object for each of its processors `USEARCH_ROCM_ARCH` resolves to, through
 # ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`. A class none
-# of whose processors is resolved does not exist, and only an existing one enters the dispatch units' ladders through
-# `USEARCH_TARGET_AMD_<CLASS>`.
+# of whose processors is resolved is not kept, a monoversioned build keeps only the newest class its processor names,
+# and only a kept one enters the dispatch units' ladders through `USEARCH_TARGET_AMD_<CLASS>`. AMD has no
+# forward-compatible code, so CDNA3 is the floor, and a build refuses a processor no class runs.
 if (USEARCH_ROCM_ARCH)
     set(usearch_amd_classes_)
-    set(usearch_amd_definitions_ "USEARCH_ARCH_ROCM_=1")
+    set(usearch_amd_architectures_)
+    set(usearch_amd_definitions_ "USEARCH_ARCH_ROCM_=1" ${usearch_monoversioned_definition_})
     function (usearch_amd_class class_ target_macro_)
-        usearch_rocm_codes(codes_ ${ARGN})
+        set(processors_)
+        foreach (processor_ IN LISTS ARGN)
+            if (processor_ IN_LIST usearch_rocm_architectures_)
+                list(APPEND processors_ ${processor_})
+            endif ()
+        endforeach ()
+        usearch_rocm_codes(codes_ ${processors_})
+        set(named_ FALSE)
         if (codes_)
             set(named_ TRUE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_AMD_${target_macro_}=1")
-        else ()
-            set(named_ FALSE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_AMD_${target_macro_}=0")
         endif ()
-        set(usearch_class_${class_}_exists_
+        if (named_ AND NOT USEARCH_MULTIVERSIONED)
+            foreach (older_ IN LISTS usearch_amd_classes_)
+                set(usearch_class_${older_}_kept_
+                    FALSE
+                    PARENT_SCOPE
+                )
+            endforeach ()
+        endif ()
+        set(usearch_class_${class_}_kept_
             ${named_}
+            PARENT_SCOPE
+        )
+        set(usearch_class_${class_}_macro_
+            AMD_${target_macro_}
             PARENT_SCOPE
         )
         set(usearch_class_${class_}_flags_
             "${codes_}"
             PARENT_SCOPE
         )
-        set(usearch_class_${class_}_definitions_
-            "NUMKONG_TARGET_${target_macro_}=1"
-            PARENT_SCOPE
-        )
         set(usearch_amd_classes_
             ${usearch_amd_classes_} ${class_}
             PARENT_SCOPE
         )
-        set(usearch_gpu_gates_
-            ${usearch_gpu_gates_}
+        set(usearch_amd_architectures_
+            ${usearch_amd_architectures_} ${processors_}
             PARENT_SCOPE
         )
     endfunction ()
     usearch_amd_class(amd_cdna3 CDNA3 gfx942 gfx950)
     usearch_amd_class(amd_cdna4 CDNA4 gfx950)
     usearch_amd_class(amd_cdna5 CDNA5 gfx1250 gfx1251)
+    foreach (architecture_ IN LISTS usearch_rocm_architectures_)
+        if (NOT architecture_ IN_LIST usearch_amd_architectures_)
+            message(FATAL_ERROR "USearch: no GPU class runs ${architecture_}; name an architecture a class claims")
+        endif ()
+    endforeach ()
 else ()
     list(APPEND usearch_gpu_gates_ USEARCH_TARGET_AMD_CDNA3=0 USEARCH_TARGET_AMD_CDNA4=0 USEARCH_TARGET_AMD_CDNA5=0)
 endif ()
 
 # The Apple classes, one per Metal generation, whose kernels compile from embedded source at first use, one library per
-# dtype and class, so no Metal toolchain is needed to build them and a class carries no flags. A class exists for `all`
-# or its own @p family_. Nothing links Metal, Foundation or `libobjc`, which `metal_api` opens at first use.
+# dtype and class, so no Metal toolchain is needed to build them and a class carries no flags. A class is kept for `all`
+# or its own @p family_, and a monoversioned build keeps only the newest. Nothing links Metal, Foundation or `libobjc`,
+# which `metal_api` opens at first use.
 if (USEARCH_METAL_ARCH)
     set(usearch_apple_classes_)
-    set(usearch_apple_definitions_ "USEARCH_ARCH_METAL_=1")
+    set(usearch_apple_definitions_ "USEARCH_ARCH_METAL_=1" ${usearch_monoversioned_definition_})
     function (usearch_apple_class class_ target_macro_ family_)
+        set(named_ FALSE)
         if (USEARCH_METAL_ARCH STREQUAL "all" OR USEARCH_METAL_ARCH STREQUAL family_)
             set(named_ TRUE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_APPLE_${target_macro_}=1")
-        else ()
-            set(named_ FALSE)
-            list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_APPLE_${target_macro_}=0")
         endif ()
-        set(usearch_class_${class_}_exists_
+        if (named_ AND NOT USEARCH_MULTIVERSIONED)
+            foreach (older_ IN LISTS usearch_apple_classes_)
+                set(usearch_class_${older_}_kept_
+                    FALSE
+                    PARENT_SCOPE
+                )
+            endforeach ()
+        endif ()
+        set(usearch_class_${class_}_kept_
             ${named_}
+            PARENT_SCOPE
+        )
+        set(usearch_class_${class_}_macro_
+            APPLE_${target_macro_}
             PARENT_SCOPE
         )
         set(usearch_apple_classes_
             ${usearch_apple_classes_} ${class_}
-            PARENT_SCOPE
-        )
-        set(usearch_gpu_gates_
-            ${usearch_gpu_gates_}
             PARENT_SCOPE
         )
     endfunction ()
@@ -591,6 +577,40 @@ else ()
     )
 endif ()
 
+# The gates of every declared GPU class, 1 for a kept one.
+set(usearch_gpu_kept_)
+foreach (class_ IN LISTS usearch_nvidia_classes_ usearch_amd_classes_ usearch_apple_classes_)
+    if (usearch_class_${class_}_kept_)
+        list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_${usearch_class_${class_}_macro_}=1")
+        string(APPEND usearch_gpu_kept_ ", ${class_}")
+    else ()
+        list(APPEND usearch_gpu_gates_ "USEARCH_TARGET_${usearch_class_${class_}_macro_}=0")
+    endif ()
+endforeach ()
+
+# An NVIDIA or AMD class unit learns its class from its own `USEARCH_TARGET_<VENDOR>_<CLASS>`, 1 for itself and 0 for
+# its vendor's other classes, and defines no NumKong or StringZilla kernel: their GPU floors are off, while the building
+# blocks of every generation stay open wherever the vendor compiles, so a class bundle holds USearch's kernels alone.
+foreach (vendor_ IN ITEMS nvidia amd)
+    if (vendor_ STREQUAL "nvidia")
+        set(floors_ "NUMKONG_TARGET_CUDA=0" "STRINGZILLA_TARGET_CUDA=0")
+    else ()
+        set(floors_ "NUMKONG_TARGET_ROCM=0" "STRINGZILLA_TARGET_ROCM=0")
+    endif ()
+    foreach (class_ IN LISTS usearch_${vendor_}_classes_)
+        set(usearch_class_${class_}_definitions_ ${floors_})
+        foreach (sibling_ IN LISTS usearch_${vendor_}_classes_)
+            set(own_ 0)
+            if (sibling_ STREQUAL class_)
+                set(own_ 1)
+            endif ()
+            list(APPEND usearch_class_${class_}_definitions_
+                 "USEARCH_TARGET_${usearch_class_${sibling_}_macro_}=${own_}"
+            )
+        endforeach ()
+    endforeach ()
+endforeach ()
+
 if (USEARCH_MARCH)
     set(usearch_floor_ "${USEARCH_MARCH}")
 else ()
@@ -599,7 +619,9 @@ endif ()
 if (USEARCH_MULTIVERSIONED)
     message(STATUS "USearch: multiversioned above ${usearch_floor_}")
 else ()
-    message(STATUS "USearch: monoversioned for ${usearch_floor_}:${usearch_monoversioned_capabilities_}")
+    message(
+        STATUS "USearch: monoversioned for ${usearch_floor_}:${usearch_monoversioned_capabilities_}${usearch_gpu_kept_}"
+    )
 endif ()
 
 # Declares the object library @p target_ of the units after `SOURCES`, wired as every library here is: the shared setup,
@@ -621,13 +643,16 @@ function (usearch_object_library target_)
     target_link_libraries(${target_} PRIVATE yyjson forkunion::static ${arg_LIBRARIES})
 endfunction ()
 
-# Declares the @p modality_ variants resident in @p residency_ on @p backend_, over the classes after it that exist, and
-# adds the libraries to `usearch_<backend>_variants_`. Each class's unit is `<modality>/<residency>_variants_<class>`. A
-# CPU or Apple backend builds one library, `usearch_<modality>_<residency>_variants`, with `_apple` for Apple, of a unit
-# per class compiled with its class's flags. An NVIDIA or AMD backend builds one library per class,
-# `usearch_<modality>_<residency>_variants_<class>`, since each bundles its own device codes under its own NumKong
-# target, and links the dynamic loader its runtime opens through. A modality naming its `KERNELS`, the dtypes or metrics
-# its kernels specialize on, keeps the host variants in the class unit, `.cpp` on NVIDIA and `.hip` on AMD, and compiles
+# Declares the @p modality_ variants resident in @p residency_ on @p backend_, over the classes after it that are kept,
+# and adds the libraries to `usearch_<backend>_variants_`. Each class's unit is
+# `<modality>/<residency>_variants_<class>`, but for a GPU class of a modality with a vendor's unit
+# `<modality>/<residency>_variants_<backend>`: that unit serves the classes without a unit of their own, and the one
+# class of a monoversioned build, reading its class off the class's own target and finding its bundles in that class's
+# table. A CPU or Apple backend builds one library, `usearch_<modality>_<residency>_variants`, with `_apple` for Apple,
+# of a unit per class compiled with its class's flags. An NVIDIA or AMD backend builds one library per class,
+# `usearch_<modality>_<residency>_variants_<class>`, since each bundles its own device codes under its own class target,
+# and links the dynamic loader its runtime opens through. A modality naming its `KERNELS`, the dtypes or metrics its
+# kernels specialize on, keeps the host variants in the class unit, `.cpp` on NVIDIA and `.hip` on AMD, and compiles
 # each from `<modality>/<residency>_kernels_<backend>_<kernel>` into a bundle of its own, once per class, dense taking
 # only its first `USEARCH_DENSE_DTYPES`; the others compile their one `.cu` class unit both ways. A CPU row naming its
 # `GATE` tells its dispatch unit `<modality>_index.cpp` which listed classes it compiled, as
@@ -665,7 +690,7 @@ function (usearch_variants modality_ residency_ backend_)
         endif ()
     else ()
         foreach (class_ IN LISTS arg_UNPARSED_ARGUMENTS)
-            if (usearch_class_${class_}_exists_)
+            if (usearch_class_${class_}_kept_)
                 list(APPEND classes_ ${class_})
             endif ()
         endforeach ()
@@ -691,14 +716,22 @@ function (usearch_variants modality_ residency_ backend_)
         foreach (class_ IN LISTS classes_)
             set(target_ ${library_}_${class_})
             if (NOT arg_KERNELS)
-                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.cu)
+                set(unit_extension_ cu)
             elseif (backend_ STREQUAL "nvidia")
-                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.cpp)
+                set(unit_extension_ cpp)
                 set(extension_ cu)
             else ()
-                set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.hip)
+                set(unit_extension_ hip)
                 set(extension_ hip)
             endif ()
+            set(unit_suffix_ ${class_})
+            if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${backend_}.${unit_extension_}
+                AND (NOT USEARCH_MULTIVERSIONED OR NOT EXISTS
+                                                   ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${class_}.${unit_extension_})
+            )
+                set(unit_suffix_ ${backend_})
+            endif ()
+            set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/${unit_}_${unit_suffix_}.${unit_extension_})
             usearch_object_library(
                 ${target_}
                 SOURCES ${source_}
@@ -707,13 +740,14 @@ function (usearch_variants modality_ residency_ backend_)
                 LIBRARIES ${arg_LIBRARIES}
             )
             target_link_libraries(${target_} PUBLIC ${CMAKE_DL_LIBS})
+            set(rows_)
             if (NOT arg_KERNELS)
                 usearch_gpu_bundle(
                     ${target_} ${backend_} ${modality_}_${class_} ${source_} ${usearch_class_${class_}_flags_}
                 )
+                set(rows_ ".quad ${modality_}_${class_}_bundle_start, ${modality_}_${class_}_bundle_end\n")
             endif ()
             set(position_ 0)
-            set(rows_)
             foreach (kernel_ IN LISTS arg_KERNELS)
                 if (NOT modality_ STREQUAL "dense" OR position_ LESS USEARCH_DENSE_DTYPES)
                     usearch_gpu_bundle(
@@ -733,17 +767,14 @@ function (usearch_variants modality_ residency_ backend_)
                 endif ()
                 math(EXPR position_ "${position_} + 1")
             endforeach ()
-            # The dense class unit finds each dtype's bundle in one table of two addresses per dtype, in
-            # `dense_dtypes_t` order, under `<modality>_<class>_bundles`.
-            if (modality_ STREQUAL "dense")
-                set(table_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target_}/${modality_}_${class_}_bundles.S)
-                file(WRITE ${table_}
-                     ".section .data.rel.ro\n.balign 8\n.globl ${modality_}_${class_}_bundles\n"
-                     "${modality_}_${class_}_bundles:\n${rows_}.section .note.GNU-stack,\"\",@progbits\n"
-                )
-                set_source_files_properties(${table_} PROPERTIES LANGUAGE ASM)
-                target_sources(${target_} PRIVATE ${table_})
-            endif ()
+            # The class unit finds each bundle in one table of two addresses per bundle, in `KERNELS` order, under
+            # `<modality>_<class>_bundles`.
+            set(table_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target_}/${modality_}_${class_}_bundles.S)
+            file(WRITE ${table_} ".section .data.rel.ro\n.balign 8\n.globl ${modality_}_${class_}_bundles\n"
+                                 "${modality_}_${class_}_bundles:\n${rows_}.section .note.GNU-stack,\"\",@progbits\n"
+            )
+            set_source_files_properties(${table_} PROPERTIES LANGUAGE ASM)
+            target_sources(${target_} PRIVATE ${table_})
             list(APPEND libraries_ ${target_})
         endforeach ()
     endif ()
@@ -757,8 +788,8 @@ endfunction ()
 # carry no waiter or atomic reference, so alibaba_c930, which advances only by those, takes none, and a WebAssembly
 # module reads no storage directly. The sequence, shapes and geospatial variants compile for the CPU classes where any
 # of their StringZilla or NumKong kits advance, and a modality whose kits stay put at a class falls back down its kit
-# chain; on NVIDIA they need nothing past the Ampere floor, so they compile for the vendor-wide class, and shapes adds
-# datacenter Blackwell for its packed f16 kit.
+# chain; on NVIDIA they need nothing past the Ampere floor, so a multiversioned build compiles them for the Ampere
+# class, shapes adding datacenter Blackwell for its packed f16 kit, and a monoversioned build for its one kept class.
 set(usearch_dense_nvme_classes_
     serial
     intel_haswell
@@ -832,18 +863,30 @@ usearch_variants(
     DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
     LIBRARIES stringzilla::header
 )
-usearch_variants(
-    sequence vram nvidia nvidia
-    KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
-    DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
-    LIBRARIES stringzilla::header
-)
 usearch_variants(shapes cpu cpu ${usearch_basic_cpu_classes_} GATE BASIC LIBRARIES stringzilla::header)
-usearch_variants(shapes vram nvidia nvidia KERNELS f16 f32)
-usearch_variants(shapes vram nvidia nvidia_blackwell KERNELS f16)
 usearch_variants(geospatial cpu cpu ${usearch_basic_cpu_classes_} GATE BASIC LIBRARIES stringzilla::header)
-usearch_variants(geospatial vram nvidia nvidia)
-usearch_variants(basic vram nvidia nvidia)
+if (USEARCH_MULTIVERSIONED)
+    usearch_variants(
+        sequence vram nvidia nvidia_ampere
+        KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+        DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+        LIBRARIES stringzilla::header
+    )
+    usearch_variants(shapes vram nvidia nvidia_ampere KERNELS f16 f32)
+    usearch_variants(shapes vram nvidia nvidia_blackwell KERNELS f16)
+    usearch_variants(geospatial vram nvidia nvidia_ampere)
+    usearch_variants(basic vram nvidia nvidia_ampere)
+else ()
+    usearch_variants(
+        sequence vram nvidia ${usearch_nvidia_kept_}
+        KERNELS levenshtein_bytes levenshtein_utf8 overlap needleman_wunsch
+        DEFINITIONS "STRINGZILLA_HEADER_ONLY=1"
+        LIBRARIES stringzilla::header
+    )
+    usearch_variants(shapes vram nvidia ${usearch_nvidia_kept_} KERNELS f16 f32)
+    usearch_variants(geospatial vram nvidia ${usearch_nvidia_kept_})
+    usearch_variants(basic vram nvidia ${usearch_nvidia_kept_})
+endif ()
 
 # The type-erased implementations behind the C interface: the dispatch units visit the variants through their explicitly
 # instantiated views and compile at the baseline, since they inline no kernel, gated per CPU and GPU class and told
@@ -869,15 +912,17 @@ foreach (library_ IN LISTS USEARCH_PUNNED_LIBRARIES)
 endforeach ()
 # The behavior tests compile their class cells with the classes' own flags, so every class's variables reach the parent.
 set(usearch_class_variables_)
-foreach (
-    class_ IN
-    LISTS usearch_cpu_classes_ usearch_nvidia_classes_
-    ITEMS nvidia
-)
-    list(APPEND usearch_class_variables_ usearch_class_${class_}_exists_ usearch_class_${class_}_flags_
+foreach (class_ IN LISTS usearch_cpu_classes_ usearch_nvidia_classes_)
+    list(APPEND usearch_class_variables_ usearch_class_${class_}_kept_ usearch_class_${class_}_flags_
          usearch_class_${class_}_definitions_
     )
 endforeach ()
-return(PROPAGATE USEARCH_PUNNED_LIBRARIES USEARCH_PUNNED_OBJECTS usearch_cpu_classes_ usearch_nvidia_classes_
-       ${usearch_class_variables_}
+return(
+    PROPAGATE
+    USEARCH_PUNNED_LIBRARIES
+    USEARCH_PUNNED_OBJECTS
+    usearch_cpu_classes_
+    usearch_nvidia_classes_
+    usearch_gpu_gates_
+    ${usearch_class_variables_}
 )

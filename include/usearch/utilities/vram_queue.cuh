@@ -16,11 +16,12 @@
  *  Compiled by NVCC and HIP-Clang alike: every collective goes through a warp policy each vendor
  *  defines beside its device vocabulary, so lane masks, rank striping and the bitonic stages all
  *  derive from its @c width_k, 32 or 64 lanes. A policy names @c mask_t, @c width_k, the
- *  @c shuffle, @c shuffle_xor, @c shuffle_up and @c shuffle_down moves, the @c ballot, @c any,
- *  @c all and @c match_any votes, @c sync, the @c count, @c first and @c below mask arithmetic,
- *  the relaxed, acquire and release atomics, and the @c fence_release fence. Lanes are @c u32_t
- *  throughout. Staging candidate rows into shared memory is the vendor's schedule, not the warp
- *  policy, and no policy sleeps: contended rows are revisited after other work instead.
+ *  @c shuffle, @c shuffle_xor, @c shuffle_up and @c shuffle_down moves, the @c inclusive_sum
+ *  scan, the @c ballot, @c any, @c all and @c match_any votes, @c sync, the @c count, @c first
+ *  and @c below mask arithmetic, the relaxed, acquire and release atomics, and the
+ *  @c fence_release fence, and may name a one-step @c sum of 32-bit integers. Lanes are @c u32_t
+ *  throughout. Staging candidates into shared memory is the vendor's schedule, not the warp
+ *  policy, and no policy sleeps: contended nodes are revisited after other work instead.
  */
 #pragma once
 
@@ -643,12 +644,7 @@ struct vram_arena_frontier {
             bool found = false;
 #pragma unroll
             for (u32_t bin = 0; bin != bins_k; ++bin) {
-                u32_t inclusive = bins[bin];
-#pragma unroll
-                for (u32_t stride = 1; stride != warp_t::width_k; stride <<= 1) {
-                    u32_t const lower = warp_t::shuffle_up(inclusive, stride);
-                    if (lane >= stride) inclusive += lower;
-                }
+                u32_t const inclusive = warp_t::inclusive_sum(bins[bin], lane);
                 u32_t const total = warp_t::shuffle(inclusive, warp_t::width_k - 1);
                 if (!found && below + total >= rank) {
                     u32_t const owner = warp_t::first(warp_t::ballot(below + inclusive >= rank));
