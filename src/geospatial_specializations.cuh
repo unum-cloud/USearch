@@ -210,42 +210,33 @@ struct geospatial_ram_variant {
                                        progress_ticks_t& ticks) noexcept;
 
     /** Opens a refinement that first moves every shard of each of @p donors into this index, then
-     *  re-links across, its walks as wide as @p expansion or the 128 exact cone winners need, as an
-     *  insertion's; the cone selector keeps the connectivity, and the long links past it yield. */
+     *  runs one round per shard under the config's cache; the cone selector keeps the connectivity,
+     *  its longest links among them. */
     expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        std::size_t const breadth = config.expansion_factor
-                                        ? config.expansion_factor
-                                        : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_absorb(donors, {breadth, config.memory_limit},
-                                 us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
+        return index.plan_absorb(donors, {config.cache_bytes},
+                                 us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                 us::geospatial::earth_observation_codec_t {}, planning);
     }
 
-    /** Opens a refinement of every live shard in place, its walks as wide as @p expansion or the
-     *  exact cone winners need. */
+    /** Opens one round of every live shard in place under the config's cache. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        std::size_t const breadth = config.expansion_factor
-                                        ? config.expansion_factor
-                                        : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_refine({breadth, config.memory_limit},
-                                 us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
+        return index.plan_round({config.cache_bytes}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                us::geospatial::earth_observation_codec_t {}, planning);
     }
 
     /** Opens a split of every live shard into the same shard of each of @p receivers, its part
-     *  roots drawn from the config's seed, then re-links each receiver's picked nodes, its walks as
-     *  wide as those of @ref plan_refine. */
+     *  roots drawn from the config's seed, then one round per receiver shard. */
     expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        std::size_t const breadth = config.refine.expansion_factor
-                                        ? config.refine.expansion_factor
-                                        : us::geospatial::surface_keep_octants_t::exact_candidates_k;
-        return index.plan_split(receivers, {{breadth, config.refine.memory_limit}, config.seed},
-                                us::geospatial::surface_keep_octants_t {geometry.connectivity}, planning);
+        return index.plan_split(receivers, {{config.refine.cache_bytes}, config.seed},
+                                us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                us::geospatial::earth_observation_codec_t {}, planning);
     }
 
     /** Drives @p plan, then draws every node's long links again by the insertion's rule and seeds,
-     *  since the re-selection keeps only the cone selector's budget. */
+     *  since the cone selector keeps only the longest of the drawn and selected links together. */
     status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Widens the largest deviation to a consumed @p donor 's, whose nodes this index now holds. */
@@ -639,8 +630,8 @@ status_t geospatial_ram_variant<cpu_class_>::refine(refine_plan_t& plan, executo
             plan, scratch, us::geospatial::surface_keep_octants_t {geometry.connectivity}, ticks, executor);
         failed(refined))
         return refined;
-    // The re-selection kept the cone winners and the longest of the rest, so the drawn links of
-    // every node it rewrote are drawn again by the insertion's rule.
+    // The round kept the cone winners and the longest of the rest, so the drawn links of every
+    // node it rewrote are drawn again by the insertion's rule.
     status_t linked = status_t::success_k;
     plan.for_each_shard_range([&](shard_t& shard, iota_view<node_id_t> nodes) noexcept {
         keep_first_failure<atomic_ref>(linked, draw_long_links_(shard, nodes, scratch, executor));
@@ -686,6 +677,8 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::search(
                     value_t const query = us::geospatial::to_earth_observation(
                         geodetic_of(queries[query_index]), terrain.ground_metres(queries[query_index], sight));
                     traversal_context_t& context = scratch.traversals[thread];
+                    // Landmarks follow the query, not its thread, so walks repeat run to run.
+                    context.random_generator = seeded_stream(u64_t(query_index) + 1);
                     metric_t& metric = scratch.metrics[thread];
                     auto const relate = [&](shard_t const& shard) noexcept {
                         return relation_predicate_t {*this, shard, relation, tolerance, query, sight};
@@ -804,6 +797,8 @@ expected<traversal_stats_t> geospatial_ram_variant<cpu_class_>::within(
                     i64_t const reach = static_cast<i64_t>(
                         std::ceil((tolerance.metres + 3 * deviations) * us::geospatial::centimetres_per_metre_k));
                     traversal_context_t& context = scratch.traversals[thread];
+                    // Landmarks follow the query, not its thread, so walks repeat run to run.
+                    context.random_generator = seeded_stream(u64_t(query_index) + 1);
                     admits_t admits = admits_of(thread);
                     // Each shard's ball appends to the query's matches, ascending within the shard.
                     for (shard_t& one : index.live_shards()) {

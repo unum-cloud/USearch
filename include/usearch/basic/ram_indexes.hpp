@@ -1045,6 +1045,30 @@ struct ram_indexes {
         /** Whether any shard plan still copies a donor, which no stop skips. */
         bool moving() const noexcept { return moving_() != 0; }
 
+        /** The phase the shards' rounds are in, by the name a progress line prints: the first shard
+         *  still rounding names it. */
+        char const* phase_name() const noexcept {
+            for (shard_refine_plan_t const& shard_plan : shard_plans_)
+                if (shard_plan.rounding()) return shard_plan.phase_name();
+            return shard_plans_.empty() ? "health" : shard_plans_[0].phase_name();
+        }
+
+        /** Where that phase sits among a round's six; zero once every shard's round ended. */
+        std::size_t ordinal() const noexcept {
+            for (shard_refine_plan_t const& shard_plan : shard_plans_)
+                if (shard_plan.rounding()) return shard_plan.ordinal();
+            return 0;
+        }
+
+        /** Opens every shard's next round once each one's ended, from the roots their closing
+         *  health checks kept; a no-op while any shard is mid-round. The index stays sealed. */
+        void next_round() noexcept {
+            for (shard_refine_plan_t const& shard_plan : shard_plans_)
+                if (shard_plan.rounding()) return;
+            for (shard_refine_plan_t& shard_plan : shard_plans_) shard_plan.next_round();
+            taken = 0;
+        }
+
         /**
          *  @brief Invokes @p visit as <tt>visit(shard, nodes)</tt> for every node range the plan
          *      rewrote: every node of every shard a shard plan ran a round over, or every node of
@@ -1060,7 +1084,7 @@ struct ram_indexes {
                 visit(*receiver_shard, iota_view<node_id_t> {0, static_cast<node_id_t>(receiver_shard->size())});
             if (!receivers_.empty()) return;
             for (std::size_t shard = 0; shard != shard_plans_.size(); ++shard) {
-                // A shard no donor moved into, and a retired one, has no plan of its own.
+                // A shard a reshard keeps in place, and a retired one, has no plan of its own.
                 if (shard_plans_[shard].finish().status == status_t::uninitialized_k) continue;
                 index_t& one = *owner_->shards_[shard].index;
                 visit(one, iota_view<node_id_t> {0, static_cast<node_id_t>(one.size())});
@@ -1085,7 +1109,7 @@ struct ram_indexes {
             status_t status = owner_ ? status_t::success_k : status_t::uninitialized_k;
             for (shard_refine_plan_t const& shard_plan : shard_plans_) {
                 auto const [tally, tally_status] = shard_plan.finish();
-                // A shard no donor moved into has no plan of its own.
+                // A shard a reshard keeps in place, and a retired one, has no plan of its own.
                 if (tally_status == status_t::uninitialized_k) continue;
                 if (failed(tally_status) && succeeded(status)) status = tally_status;
                 total += tally;
@@ -1166,7 +1190,7 @@ struct ram_indexes {
             return true;
         }
 
-        /** One plan per shard of this index, unbound where no donor shard moves in. */
+        /** One plan per shard of this index, unbound where it runs no round. */
         growing_buffer<shard_refine_plan_t, forkunion_allocator_t> shard_plans_;
 
         /** Every donor shard grouped by the shard it moves into, each group a shard plan's donors,
@@ -1268,11 +1292,12 @@ struct ram_indexes {
             for (shard_move_t const& move : moves)
                 if (move.into == into) plan.donor_slots_.push_back_reserved(donor_shards[move.from]->index.get());
             index_t& one = *shards_[into].index;
-            if (plan.donor_slots_.size() == first) {
+            if (into < shards_.retired_shards()) {
                 plan.shard_plans_.push_back_reserved(shard_refine_plan_t {one.get_allocator()});
                 continue;
             }
             // The set closed every shard, and the shard's own plan closes it again for its life.
+            // One no donor moves into runs its round too, so the finish audits the whole index.
             one.reopen_();
             auto [shard_plan, status] = one.plan_absorb(
                 std::span<index_t*>(plan.donor_slots_.data() + first, plan.donor_slots_.size() - first), config,

@@ -52,7 +52,6 @@
 #include <algorithm>     // `std::stable_sort`, `std::find`
 #include <bit>           // `std::has_single_bit` - the connectivity init accepts
 #include <limits>        // `std::numeric_limits`
-#include <memory>        // `std::unique_ptr` - a finished refinement's handle
 #include <optional>      // `std::optional`
 #include <span>          // `std::span`
 #include <unordered_map> // `std::unordered_map`
@@ -398,6 +397,10 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcom
 struct usearch_dense_index_handle_t : dense_index_t {};
 struct usearch_dense_cursor_handle_t : dense_cursor_t {};
 struct usearch_dense_search_stream_handle_t : dense_search_stream_t {};
+struct usearch_dense_refine_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
+struct usearch_dense_absorb_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
+struct usearch_dense_split_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
+struct usearch_dense_reshard_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
 
 extern "C" {
 
@@ -513,6 +516,13 @@ void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
     *arguments->index = index;
 }
 
+void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments) {
+    if (through_executor<usearch_dense_load_nvme>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_unsupported_k, outcome, "The stand-in copies parts in and has none to replace");
+}
+
 void usearch_dense_free(usearch_dense_index_t handle) {
     wait_for_calls_using(handle);
     delete handle;
@@ -600,19 +610,12 @@ void usearch_dense_refine(usearch_dense_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-    std::shared_lock readers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    std::size_t const entries = index.entries.size();
-    // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
-    bool cancelled = false;
-    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
-        cancelled = !keep_going(arguments->progress, entry + 1, entries);
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    // An exact scan reaches every entry it holds in one level, as `usearch_dense_health` reports.
-    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+    refine_and_report<usearch_dense_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
+}
+
+void usearch_dense_refine_plan_finish(usearch_dense_refine_plan_finish_t* arguments) {
+    if (through_executor<usearch_dense_refine_plan_finish>(arguments)) return;
+    finish_plan<usearch_dense_refine_plan_handle_t>(*arguments);
 }
 
 void usearch_dense_health(usearch_dense_health_t* arguments) {
@@ -686,203 +689,44 @@ void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-
-    std::size_t const donors_count = arguments->count;
-    usearch_dense_index_t* const donors = arguments->donors;
-    for (std::size_t position = 0; position != donors_count; ++position)
-        if (reject_if(!donors[position], usearch_status_invalid_argument_k, "A donor must not be null", outcome) ||
-            reject_if(!same_kind(index.options, donors[position]->options), usearch_status_config_mismatch_k,
-                      "A donor of another kind or geometry is refused", outcome))
-            return;
-    bool accommodated = true;
-    std::unique_lock writers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    // Each donor moves in whole and is consumed at once, its slot nulled, so a failure leaves it
-    // and every later one live handles the caller still owns and must free.
-    for (std::size_t position = 0; accommodated && position != donors_count; ++position) {
-        usearch_dense_index_handle_t& donor = *donors[position];
-        accommodated = index.accommodate(index.entries.size() + donor.entries.size());
-        if (!accommodated) break;
-        for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        delete std::exchange(donors[position], nullptr);
-    }
-    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
-                  outcome))
-        return;
-    // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
-    // it.
-    std::size_t const entries = index.entries.size();
-    bool cancelled = false;
-    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
-        cancelled = !keep_going(arguments->progress, entry + 1, entries);
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+    absorb_and_report<usearch_dense_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
 }
 
-void usearch_dense_compact(usearch_dense_compact_t* arguments) {
+void usearch_dense_absorb_plan_finish(usearch_dense_absorb_plan_finish_t* arguments) {
+    if (through_executor<usearch_dense_absorb_plan_finish>(arguments)) return;
+    finish_plan<usearch_dense_absorb_plan_handle_t>(*arguments);
+}
+
+void usearch_dense_reshard(usearch_dense_reshard_t* arguments) {
+    if (through_executor<usearch_dense_reshard>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    if (reject_if(arguments->count && !arguments->sources, usearch_status_invalid_argument_k,
-                  "The sources must name handles", outcome))
+    if (arguments->phase) *arguments->phase = {};
+    usearch_dense_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments->plan, outcome)) return;
+    bool const opening = !arguments->plan || !*arguments->plan;
+    if (opening && (reject_if(arguments->vram || arguments->nvme, usearch_status_config_mismatch_k,
+                              "The placement names another residency than the handle's", outcome) ||
+                    reject_if(arguments->ram && arguments->ram->memory_domains_count, usearch_status_unsupported_k,
+                              "Resharding places no shard on a named domain yet", outcome)))
         return;
-    usearch_dense_index_handle_t& target = *arguments->target;
-    if (reject_read_only(target, outcome)) return;
-    std::size_t const sources_count = arguments->count;
-    usearch_dense_index_t* const sources = arguments->sources;
-    std::size_t merged_size = target.entries.size();
-    for (std::size_t position = 0; position != sources_count; ++position) {
-        if (reject_if(!sources[position], usearch_status_invalid_argument_k, "A source must not be null", outcome))
-            return;
-        for (std::size_t earlier = 0; earlier != position; ++earlier)
-            if (reject_if(sources[earlier] == sources[position], usearch_status_config_mismatch_k,
-                          "A source must not repeat", outcome))
-                return;
-        if (sources[position] != arguments->target) merged_size += sources[position]->entries.size();
+    std::unique_lock writers(index.mutex);
+    long_verb_plan<usearch_dense_index_handle_t> one_shot {.opened_on = &index};
+    long_verb_plan<usearch_dense_index_handle_t>* const resharding = plan_of_call<usearch_dense_reshard_plan_handle_t>(
+        index, arguments->plan, one_shot, outcome);
+    if (!resharding) return;
+    // One flat list holds no shards, so nothing moves and only the capacity counts them anew.
+    if (opening) {
+        if (arguments->ram && arguments->ram->shard_capacity) index.shard_capacity = arguments->ram->shard_capacity;
+        resharding->entries = index.entries.size();
     }
-    // One flat list holds no shards, so in place nothing moves and every other source appends.
-    std::unique_lock writers(target.mutex);
-    if (arguments->shard_capacity) target.shard_capacity = arguments->shard_capacity;
-    if (reject_if(!target.accommodate(merged_size), usearch_status_out_of_memory_k,
-                  "The sources' entries could not be accommodated", outcome))
-        return;
-    for (std::size_t position = 0; position != sources_count; ++position) {
-        if (sources[position] == arguments->target) continue;
-        for (dense_entry_t const& entry : sources[position]->entries) target.append(entry.key, entry.payload);
-    }
-    for (std::size_t position = 0; position != sources_count; ++position)
-        if (sources[position] != arguments->target) delete std::exchange(sources[position], nullptr);
-    std::size_t const entries = target.entries.size();
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
+    sweep_round(*arguments, *resharding, outcome);
 }
 
-/** The stand-in's refinement: the donors it still absorbs, and how far its sweep got. Its index
- *  admits no insertion, save or other refinement until it finishes. */
-struct usearch_dense_refinement_handle_t {
-
-    /** The handle the refinement was opened on, only ever compared with the one each call
-     *  passes. */
-    dense_index_t const* opened_on;
-
-    /** The caller's donor slots, each nulled once consumed. */
-    usearch_dense_index_t* donors;
-    std::size_t count;
-
-    /** Donors consumed so far, and entries the sweep visited so far. */
-    std::size_t consumed;
-    std::size_t swept;
-
-    /** The receivers a split fills, the seed picking its roots, and those split off so far. */
-    usearch_dense_index_t const* receivers;
-    std::size_t receivers_count;
-    us::utilities::u64_t seed;
-    std::size_t split_receivers_count;
-
-    /** Entries the absorbed donors moved in, each one a node whose links changed. */
-    std::size_t moved = 0;
-};
-
-void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments) {
-    if (through_executor<usearch_dense_refinement_init>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->refinement = nullptr;
-    usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-    if (reject_if(arguments->count && !arguments->donors, usearch_status_invalid_argument_k,
-                  "The donors must name handles", outcome))
-        return;
-    for (std::size_t position = 0; position != arguments->count; ++position) {
-        if (reject_if(!arguments->donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
-                      outcome) ||
-            reject_if(arguments->donors[position] == arguments->index, usearch_status_config_mismatch_k,
-                      "An index cannot absorb itself", outcome) ||
-            reject_if(!same_kind(index.options, arguments->donors[position]->options), usearch_status_config_mismatch_k,
-                      "A donor of another kind or geometry is refused", outcome))
-            return;
-    }
-    if (reject_receivers(*arguments, outcome)) return;
-    std::unique_lock writers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    usearch_dense_refinement_t const refinement = new (std::nothrow)
-        usearch_dense_refinement_handle_t {&index, arguments->donors,    arguments->count,           0,
-                                           0,      arguments->receivers, arguments->receivers_count, arguments->seed,
-                                           0};
-    if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
-        return;
-    index.refinement = refinement;
-    *arguments->refinement = refinement;
-}
-
-void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments) {
-    if (through_executor<usearch_dense_refinement_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->reselected) *arguments->reselected = 0;
-    if (arguments->changed) *arguments->changed = 0;
-    usearch_dense_refinement_handle_t& refinement = *arguments->refinement;
-    if (reject_if(arguments->index != refinement.opened_on, usearch_status_invalid_argument_k,
-                  "The refinement was opened on another index", outcome))
-        return;
-    usearch_dense_index_handle_t& index = *arguments->index;
-    std::unique_lock writers(index.mutex);
-    for (; refinement.consumed != refinement.count; ++refinement.consumed) {
-        usearch_dense_index_handle_t& donor = *refinement.donors[refinement.consumed];
-        if (reject_if(!index.accommodate(index.entries.size() + donor.entries.size()), usearch_status_out_of_memory_k,
-                      "The donor's entries could not be accommodated", outcome))
-            return;
-        for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        refinement.moved += donor.entries.size();
-        delete std::exchange(refinement.donors[refinement.consumed], nullptr);
-    }
-    if (refinement.split_receivers_count != refinement.receivers_count) {
-        auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
-            return distance(index.options.metric, first, second);
-        };
-        writers.unlock();
-        std::span<usearch_dense_index_handle_t* const> const receivers {refinement.receivers,
-                                                                        refinement.receivers_count};
-        if (!split_into(index, receivers, refinement.seed, score, same_kind, outcome)) return;
-        refinement.split_receivers_count = refinement.receivers_count;
-        writers.lock();
-    }
-    // Each call continues the sweep where the last one stopped.
-    std::size_t const entries = index.entries.size();
-    bool cancelled = false;
-    while (refinement.swept < entries && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
-    // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
-    if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
-    if (arguments->stats)
-        arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
-    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
-              "The caller's handler stopped the sweep", outcome);
-}
-
-void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments) {
-    if (through_executor<usearch_dense_refinement_finish>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    std::unique_ptr<usearch_dense_refinement_handle_t> const refinement {arguments->refinement};
-    if (reject_if(arguments->index != refinement->opened_on, usearch_status_invalid_argument_k,
-                  "The refinement was opened on another index", outcome))
-        return;
-    usearch_dense_index_handle_t& index = *arguments->index;
-    std::unique_lock writers(index.mutex);
-    index.refinement = nullptr;
-    std::size_t const entries = index.entries.size();
-    if (arguments->stats)
-        arguments->stats->visited_members = entries, arguments->stats->computed_distances = refinement->swept;
-    if (arguments->report) {
-        arguments->report->reselected = refinement->swept;
-        arguments->report->changed = refinement->moved;
-        arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    }
+void usearch_dense_reshard_plan_finish(usearch_dense_reshard_plan_finish_t* arguments) {
+    if (through_executor<usearch_dense_reshard_plan_finish>(arguments)) return;
+    finish_plan<usearch_dense_reshard_plan_handle_t>(*arguments);
 }
 
 void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
@@ -954,7 +798,12 @@ void usearch_dense_split(usearch_dense_split_t* arguments) {
     auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
         return distance(index.options.metric, first, second);
     };
-    split_and_report(*arguments, index, score, same_kind, outcome);
+    split_and_report<usearch_dense_split_plan_handle_t>(*arguments, index, score, same_kind, outcome);
+}
+
+void usearch_dense_split_plan_finish(usearch_dense_split_plan_finish_t* arguments) {
+    if (through_executor<usearch_dense_split_plan_finish>(arguments)) return;
+    finish_plan<usearch_dense_split_plan_handle_t>(*arguments);
 }
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {

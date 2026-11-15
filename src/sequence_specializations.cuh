@@ -118,27 +118,26 @@ struct sequence_ram_variant {
                                        progress_ticks_t& ticks) noexcept;
 
     /** Opens a refinement that first moves every shard of each of @p donors into this index, then
-     *  re-links across, its walks as wide as @p expansion or twice the connectivity. */
+     *  runs one round per shard under the config's cache. */
     expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, {config.expansion_factor, config.memory_limit},
-                                 basic::keep_diverse_t {geometry.connectivity}, planning);
+        return index.plan_absorb(donors, {config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
+                                 us::sequence::codec_t {}, planning);
     }
 
-    /** Opens a refinement of every live shard in place, its walks as wide as @p expansion. */
+    /** Opens one round of every live shard in place under the config's cache. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_refine({config.expansion_factor, config.memory_limit},
-                                 basic::keep_diverse_t {geometry.connectivity}, planning);
+        return index.plan_round({config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
+                                us::sequence::codec_t {}, planning);
     }
 
     /** Opens a split of every live shard into the same shard of each of @p receivers, its part
-     *  roots drawn from the config's seed, then re-links each receiver's picked nodes with walks as
-     *  wide as @p expansion. */
+     *  roots drawn from the config's seed, then one round per receiver shard. */
     expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_split(receivers, {{config.refine.expansion_factor, config.refine.memory_limit}, config.seed},
-                                basic::keep_diverse_t {geometry.connectivity}, planning);
+        return index.plan_split(receivers, {{config.refine.cache_bytes}, config.seed},
+                                basic::keep_diverse_t {geometry.connectivity}, us::sequence::codec_t {}, planning);
     }
     status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 

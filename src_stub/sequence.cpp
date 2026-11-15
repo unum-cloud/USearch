@@ -33,10 +33,8 @@
 
 #include <algorithm> // `std::stable_sort`
 #include <limits>    // `std::numeric_limits`
-#include <memory>    // `std::unique_ptr` - a finished refinement's handle
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
-#include <utility>   // `std::exchange` - a consumed donor's slot
 #include <vector>    // `std::vector`
 
 #include "usearch/types.h"
@@ -503,6 +501,9 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_sequence_weights_
 
 struct usearch_sequence_index_handle_t : sequence_index_t {};
 struct usearch_sequence_cursor_handle_t : sequence_cursor_t {};
+struct usearch_sequence_refine_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
+struct usearch_sequence_absorb_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
+struct usearch_sequence_split_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
 
 extern "C" {
 
@@ -731,19 +732,12 @@ void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-    std::shared_lock readers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    std::size_t const entries = index.entries.size();
-    // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
-    bool cancelled = false;
-    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
-        cancelled = !keep_going(arguments->progress, entry + 1, entries);
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    // An exact scan reaches every entry it holds in one level.
-    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+    refine_and_report<usearch_sequence_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
+}
+
+void usearch_sequence_refine_plan_finish(usearch_sequence_refine_plan_finish_t* arguments) {
+    if (through_executor<usearch_sequence_refine_plan_finish>(arguments)) return;
+    finish_plan<usearch_sequence_refine_plan_handle_t>(*arguments);
 }
 
 void usearch_sequence_health(usearch_sequence_health_t* arguments) {
@@ -816,166 +810,12 @@ void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-
-    std::size_t const donors_count = arguments->count;
-    usearch_sequence_index_t* const donors = arguments->donors;
-    for (std::size_t position = 0; position != donors_count; ++position)
-        if (reject_if(!donors[position], usearch_status_invalid_argument_k, "A donor must not be null", outcome) ||
-            reject_if(!same_kind(index.options, donors[position]->options), usearch_status_config_mismatch_k,
-                      "A donor of another kind or geometry is refused", outcome))
-            return;
-    bool accommodated = true;
-    std::unique_lock writers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    // Each donor moves in whole and is consumed at once, its slot nulled, so a failure leaves it
-    // and every later one live handles the caller still owns and must free.
-    for (std::size_t position = 0; accommodated && position != donors_count; ++position) {
-        usearch_sequence_index_handle_t& donor = *donors[position];
-        accommodated = index.accommodate(index.entries.size() + donor.entries.size());
-        if (!accommodated) break;
-        for (sequence_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        delete std::exchange(donors[position], nullptr);
-    }
-    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
-                  outcome))
-        return;
-    // An exact scan keeps no edges, so the closing refine re-selects nothing; a cancel stops only
-    // it.
-    std::size_t const entries = index.entries.size();
-    bool cancelled = false;
-    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
-        cancelled = !keep_going(arguments->progress, entry + 1, entries);
-    if (arguments->stats) arguments->stats->visited_members = entries;
-    if (arguments->report) arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+    absorb_and_report<usearch_sequence_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
 }
 
-/** The stand-in's refinement: the donors it still absorbs, and how far its sweep got. Its index
- *  admits no insertion, save or other refinement until it finishes. */
-struct usearch_sequence_refinement_handle_t {
-
-    /** The handle the refinement was opened on, only ever compared with the one each call
-     *  passes. */
-    usearch_sequence_index_handle_t const* opened_on;
-
-    /** The caller's donor slots, each nulled once consumed. */
-    usearch_sequence_index_t* donors;
-    std::size_t count;
-
-    /** Donors consumed so far, and entries the sweep visited so far. */
-    std::size_t consumed;
-    std::size_t swept;
-
-    /** The receivers a split fills, the seed picking its roots, and those split off so far. */
-    usearch_sequence_index_t const* receivers;
-    std::size_t receivers_count;
-    us::utilities::u64_t seed;
-    std::size_t split_receivers_count;
-
-    /** Entries the absorbed donors moved in, each one a node whose links changed. */
-    std::size_t moved = 0;
-};
-
-void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments) {
-    if (through_executor<usearch_sequence_refinement_init>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->refinement = nullptr;
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome)) return;
-    if (reject_if(arguments->count && !arguments->donors, usearch_status_invalid_argument_k,
-                  "The donors must name handles", outcome))
-        return;
-    for (std::size_t position = 0; position != arguments->count; ++position) {
-        if (reject_if(!arguments->donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
-                      outcome) ||
-            reject_if(arguments->donors[position] == arguments->index, usearch_status_config_mismatch_k,
-                      "An index cannot absorb itself", outcome) ||
-            reject_if(!same_kind(index.options, arguments->donors[position]->options), usearch_status_config_mismatch_k,
-                      "A donor of another kind or geometry is refused", outcome))
-            return;
-    }
-    if (reject_receivers(*arguments, outcome)) return;
-    std::unique_lock writers(index.mutex);
-    if (reject_refining(index, outcome)) return;
-    usearch_sequence_refinement_t const refinement = new (std::nothrow)
-        usearch_sequence_refinement_handle_t {&index, arguments->donors,    arguments->count,           0,
-                                              0,      arguments->receivers, arguments->receivers_count, arguments->seed,
-                                              0};
-    if (reject_if(!refinement, usearch_status_out_of_memory_k, "The refinement could not be allocated", outcome))
-        return;
-    index.refinement = refinement;
-    *arguments->refinement = refinement;
-}
-
-void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* arguments) {
-    if (through_executor<usearch_sequence_refinement_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->reselected) *arguments->reselected = 0;
-    if (arguments->changed) *arguments->changed = 0;
-    usearch_sequence_refinement_handle_t& refinement = *arguments->refinement;
-    if (reject_if(arguments->index != refinement.opened_on, usearch_status_invalid_argument_k,
-                  "The refinement was opened on another index", outcome))
-        return;
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    std::unique_lock writers(index.mutex);
-    for (; refinement.consumed != refinement.count; ++refinement.consumed) {
-        usearch_sequence_index_handle_t& donor = *refinement.donors[refinement.consumed];
-        if (reject_if(!index.accommodate(index.entries.size() + donor.entries.size()), usearch_status_out_of_memory_k,
-                      "The donor's entries could not be accommodated", outcome))
-            return;
-        for (sequence_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        refinement.moved += donor.entries.size();
-        delete std::exchange(refinement.donors[refinement.consumed], nullptr);
-    }
-    if (refinement.split_receivers_count != refinement.receivers_count) {
-        sequence_search_scratch_t scratch;
-        auto const score = [&](bytes_view_t first, bytes_view_t second) {
-            return distance(index, first, second, scratch);
-        };
-        writers.unlock();
-        std::span<usearch_sequence_index_handle_t* const> const receivers {refinement.receivers,
-                                                                           refinement.receivers_count};
-        if (!split_into(index, receivers, refinement.seed, score, same_kind, outcome)) return;
-        refinement.split_receivers_count = refinement.receivers_count;
-        writers.lock();
-    }
-    // Each call continues the sweep where the last one stopped.
-    std::size_t const entries = index.entries.size();
-    bool cancelled = false;
-    while (refinement.swept < entries && !cancelled)
-        cancelled = !keep_going(arguments->progress, ++refinement.swept, entries);
-    // The stand-in re-selects nothing, so its sweep visits every entry and changes none.
-    if (arguments->reselected) *arguments->reselected = refinement.swept;
-    if (arguments->changed) *arguments->changed = min_of(refinement.moved, refinement.swept);
-    if (arguments->stats)
-        arguments->stats->visited_members = refinement.swept, arguments->stats->computed_distances = refinement.swept;
-    reject_if(cancelled && refinement.swept != entries, usearch_status_cancelled_k,
-              "The caller's handler stopped the sweep", outcome);
-}
-
-void usearch_sequence_refinement_finish(usearch_sequence_refinement_finish_t* arguments) {
-    if (through_executor<usearch_sequence_refinement_finish>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    std::unique_ptr<usearch_sequence_refinement_handle_t> const refinement {arguments->refinement};
-    if (reject_if(arguments->index != refinement->opened_on, usearch_status_invalid_argument_k,
-                  "The refinement was opened on another index", outcome))
-        return;
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    std::unique_lock writers(index.mutex);
-    index.refinement = nullptr;
-    std::size_t const entries = index.entries.size();
-    if (arguments->stats)
-        arguments->stats->visited_members = entries, arguments->stats->computed_distances = refinement->swept;
-    if (arguments->report) {
-        arguments->report->reselected = refinement->swept;
-        arguments->report->changed = refinement->moved;
-        arguments->report->reachability = {entries, entries, entries ? 1u : 0u, 0};
-    }
+void usearch_sequence_absorb_plan_finish(usearch_sequence_absorb_plan_finish_t* arguments) {
+    if (through_executor<usearch_sequence_absorb_plan_finish>(arguments)) return;
+    finish_plan<usearch_sequence_absorb_plan_handle_t>(*arguments);
 }
 
 void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
@@ -1037,7 +877,12 @@ void usearch_sequence_split(usearch_sequence_split_t* arguments) {
     usearch_sequence_index_handle_t& index = *arguments->index;
     sequence_search_scratch_t scratch;
     auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
-    split_and_report(*arguments, index, score, same_kind, outcome);
+    split_and_report<usearch_sequence_split_plan_handle_t>(*arguments, index, score, same_kind, outcome);
+}
+
+void usearch_sequence_split_plan_finish(usearch_sequence_split_plan_finish_t* arguments) {
+    if (through_executor<usearch_sequence_split_plan_finish>(arguments)) return;
+    finish_plan<usearch_sequence_split_plan_handle_t>(*arguments);
 }
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {

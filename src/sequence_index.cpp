@@ -25,11 +25,22 @@ struct usearch_sequence_cursor_handle_t {
     u32_t named_calls = 0;
 };
 
-struct usearch_sequence_refinement_handle_t {
-    basic_refinement<usearch_sequence_index_handle_t> basic;
+struct usearch_sequence_refine_plan_handle_t {
+    basic_punned_plan<usearch_sequence_index_handle_t> punned;
+};
 
-    /** Executor calls naming the refinement that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+struct usearch_sequence_absorb_plan_handle_t {
+    basic_punned_plan<usearch_sequence_index_handle_t> punned;
+
+    /** The caller's donor slots, each nulled once the plan consumed its handle. */
+    std::span<usearch_sequence_index_t> donors;
+};
+
+struct usearch_sequence_split_plan_handle_t {
+    basic_punned_plan<usearch_sequence_index_handle_t> punned;
+
+    /** The caller's receivers, which the finish hands what each part counted. */
+    std::span<usearch_sequence_index_t const> receivers;
 };
 
 extern "C" {
@@ -104,14 +115,14 @@ USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments
 USEARCH_EXPORT void usearch_sequence_split(usearch_sequence_split_t* arguments) {
     basic_split<usearch_sequence_split>(arguments);
 }
-USEARCH_EXPORT void usearch_sequence_refinement_init(usearch_sequence_refinement_init_t* arguments) {
-    basic_refinement_init<usearch_sequence_refinement_init>(arguments);
+USEARCH_EXPORT void usearch_sequence_refine_plan_finish(usearch_sequence_refine_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_sequence_refine_plan_finish, usearch_sequence_refine_plan_handle_t>(arguments);
 }
-USEARCH_EXPORT void usearch_sequence_refinement_next(usearch_sequence_refinement_next_t* arguments) {
-    basic_refinement_next<usearch_sequence_refinement_next>(arguments);
+USEARCH_EXPORT void usearch_sequence_absorb_plan_finish(usearch_sequence_absorb_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_sequence_absorb_plan_finish, usearch_sequence_absorb_plan_handle_t>(arguments);
 }
-USEARCH_EXPORT void usearch_sequence_refinement_finish(usearch_sequence_refinement_finish_t* arguments) {
-    basic_refinement_finish<usearch_sequence_refinement_finish>(arguments);
+USEARCH_EXPORT void usearch_sequence_split_plan_finish(usearch_sequence_split_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_sequence_split_plan_finish, usearch_sequence_split_plan_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_sequence_save(usearch_sequence_save_t* arguments) {
     basic_save<usearch_sequence_save>(arguments);

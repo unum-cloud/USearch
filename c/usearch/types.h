@@ -870,34 +870,86 @@ typedef struct usearch_reachability_t {
      *  while it ran are not counted, so compare @c reachable against this, never a later size. */
     size_t audited;
 
-    /** Of those, the entries a search reaches from the landmarks; the rest no search finds until
-     *  a refinement re-links them. */
+    /** Of those, the entries a search reaches from the root; the rest no search finds until a
+     *  refinement re-links them. */
     size_t reachable;
 
-    /** Levels the sweep took to converge; the deepest shard's on a sharded handle. */
-    size_t sweeps;
+    /** Depths the sweep from the root took; on a sharded handle, the deepest shard's. */
+    size_t depth_from_root;
 
-    /** Levels the sweep back toward the entry point took, where an audit sweeps both ways; the
-     *  deepest shard's on a sharded handle. */
-    size_t back_sweeps;
+    /** Depths the sweep toward the root took; on a sharded handle, the deepest shard's. */
+    size_t depth_to_root;
+
+    /** Entries no reached entry links to. */
+    size_t unlinked;
+
+    /** Entries linked to by fewer entries than they link to. */
+    size_t underlinked;
+
+    /** Entries deeper than the depth holding the most entries. */
+    size_t beyond_most_populated_depth;
+
+    /** Islands no entry outside them links into, so no search from the root reaches them. */
+    size_t unreached_islands;
+
+    /** Islands that link to no entry outside them, so no search from inside them leaves. */
+    size_t stranded_islands;
+
+    /** Components when direction is ignored. */
+    size_t components;
 } usearch_reachability_t;
 
+/** Where a plan stands: its phase, and that phase's own count. */
+typedef struct usearch_phase_t {
+
+    /** Static name: "health", "heal", "hubs", "gather" or "restitch" inside a round, "partition" or
+     *  "scatter" while a split moves entries, and "done" once the round ended. */
+    char const* name;
+
+    /** This phase's position, and how many the round planned. */
+    size_t ordinal;
+    size_t count;
+
+    /** Units of this phase done and in all, and their name: "entries" or "islands". */
+    size_t completed;
+    size_t total;
+    char const* unit;
+} usearch_phase_t;
+
+/** What a round concluded, so no caller picks a change rate. */
+typedef enum usearch_refine_verdict_t {
+
+    /** The round changed some entry's link set, so another round can help. */
+    usearch_refine_improved_k = 0,
+
+    /** The round changed no entry's link set. */
+    usearch_refine_converged_k,
+
+    /** The round lowered nothing while something stands, as full entries leave no slot. */
+    usearch_refine_stalled_k,
+
+    /** The caller stopped the round; the phase names where. */
+    usearch_refine_stopped_k,
+} usearch_refine_verdict_t;
+
 /**
- *  @brief What one refinement-family call did to the graph, counted alike in every modality and
- *      residency: @c refine, @c absorb, @c compact, @c split and @c refinement_finish land it.
+ *  @brief What one refining call did to the graph, counted alike in every modality and residency:
+ *      @c refine, @c absorb, @c reshard and @c split land it, so far when their plan stays live,
+ *      and each operation's @c plan_finish lands the whole plan's.
  *
- *  @c changed never exceeds @c reselected, and a pass over a settled graph changes nothing. A call
- *  that fails before its closing audit reports zeros; one its progress handler stopped still heals,
- *  so its report stands beside the @c usearch_status_cancelled_k it answers.
+ *  Every one of those verbs ends in rounds, each a health check, a heal, a draw of hubs, a gather
+ *  and a restitch, closed by a second health check, and the report counts them. @c changed never
+ *  exceeds @c reselected, and a round over a settled graph changes nothing. A call that fails
+ *  before its closing health check reports zeros; one its progress handler stopped closes its round
+ *  as a stop does, so its report stands beside the @c usearch_status_cancelled_k it answers.
  */
 typedef struct usearch_refine_report_t {
 
-    /** Entries whose neighbors were selected again: the planned entries, then the fresh entries of
-     *  every later round, then the islands of every heal round. */
+    /** Entries the restitch selected neighbors for, every entry of each neighborhood it reached. */
     size_t reselected;
 
-    /** Of those, the entries whose neighbor set gained a member it lacked; order never counts, nor
-     *  does a back-link re-selecting an entry the pass did not. */
+    /** Of those, the entries whose neighbor set changed by any link added or dropped; order never
+     *  counts. */
     size_t changed;
 
     /** Entries the first audit found not reached both ways, counted once. */
@@ -907,17 +959,40 @@ typedef struct usearch_refine_report_t {
      *  the heal's audits. */
     size_t islands_reconnected;
 
-    /** The audit closing the heal, as a fresh @c health call right after would take it. */
+    /** Neighborhoods the round re-stitched, and the widest one's entries. */
+    size_t neighborhoods;
+    size_t widest_neighborhood;
+
+    /** Links the round added, and links it dropped. */
+    size_t added_links;
+    size_t dropped_links;
+
+    /** What the round concluded. */
+    usearch_refine_verdict_t verdict;
+
+    /** The health check opening the round. */
+    usearch_reachability_t opening;
+
+    /** The health check closing the heal, as a fresh @c health call right after would take it. */
     usearch_reachability_t reachability;
 } usearch_refine_report_t;
 
-/** How a pass over the graph may spend, shared by every verb that refines. */
+/**
+ *  @brief How a refining verb may spend, shared by every verb that refines.
+ *
+ *  A round sizes its hubs and its neighborhoods from the cache of each core it runs on: a CPU
+ *  core's share of its cache, a GPU multiprocessor's shared memory, an Apple core's threadgroup
+ *  memory. Nothing here tunes it; only what reaches past the round is named.
+ */
 typedef struct usearch_refine_options_t {
 
-    /** The @b optional breadth of the candidates a re-selection walk explores; zero derives. */
+    /** The @b optional breadth of any walk a refining verb takes beside its rounds; zero derives. A
+     *  round itself walks nothing. */
     size_t expansion_factor;
 
-    /** The @b optional bytes the pass may hold beyond the index; zero derives. */
+    /** The @b optional bytes a loaded NVMe handle holds for the one part it rewrites: zero derives
+     *  what rounds that part in RAM, and a smaller one streams the part's rounds from the drives.
+     *  RAM and VRAM rounds never read it. */
     size_t memory_limit;
 } usearch_refine_options_t;
 
@@ -1094,9 +1169,9 @@ typedef usearch_continuation_t (*usearch_progress_callback_t)( //
  *  @brief How a long call reports its advance: a handler, its state, and how many reports it hears.
  *
  *  A batch verb splits its units into @c steps nearly equal slices, hands each to its engine whole
- *  and reports after each; a verb whose engine counts its own units, a checkpoint's shards or a
- *  refinement's nodes, forwards only the ticks that cross into the next slice. Without a handler
- *  the call runs as one slice and reports nothing.
+ *  and reports after each; a verb whose engine counts its own units, a checkpoint's shards or each
+ *  phase of a round, reports at every barrier its engine reaches, so a long phase stays watchable.
+ *  Without a handler the call runs as one slice and reports nothing.
  */
 typedef struct usearch_progress_t {
 
@@ -1106,7 +1181,7 @@ typedef struct usearch_progress_t {
     /** Opaque pointer forwarded into every @c callback call. */
     void* state;
 
-    /** Reports a call makes at most, the last at completion; zero derives to ten. */
+    /** Slices a batch verb splits its units into, reporting after each; zero derives to ten. */
     size_t steps;
 } usearch_progress_t;
 

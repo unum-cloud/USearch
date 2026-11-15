@@ -18,6 +18,8 @@
  *      save: write a checkpoint         usearch_dense_save        usearch_dense_save         none
  *
  *  A viewed handle is read-only, and refuses every mutating verb with @c usearch_status_read_only_k.
+ *  @c usearch_dense_load_nvme opens a checkpoint in place too, as a handle that edits its parts
+ *  only by replacing whole parts.
  *
  *  @section dense_index_serialization Serialization
  *
@@ -25,15 +27,15 @@
  *  handle holding one shard writes one monolith at the path: a self-describing file holding its
  *  vectors, neighbor lists and keys. A handle holding several writes a manifest at the path, a
  *  small JSON catalog of one monolith per shard named by the stem and @c -00001-of-0000S.safegraphs
- *  beside it, each with its shard's own node IDs, so neighbors never cross files. Only compaction
- *  merges graphs. Loading reads the content, never the extension, and opens one shard per part:
- *  part @c p is written whole on shard @c p, beside any placed shards the parts leave empty, and
- *  the shards past the placed ones open over the call's memory domains or devices in turn. A
- *  manifest records where its parts were written, never where a reader must keep them, so a
- *  checkpoint written from a mounted bucket spreads across a handle's own memory domains as it
- *  loads. An in-memory buffer of several shards leads with the same manifest, listing each part by
- *  its offset inside the buffer. A cancelled or failed save leaves a file without its header, which
- *  every reader rejects, and a cancelled or failed load creates no handle.
+ *  beside it, each with its shard's own node IDs, so neighbors never cross files. Loading reads the
+ *  content, never the extension, and opens one shard per part: part @c p is written whole on shard
+ *  @c p, beside any placed shards the parts leave empty, and the shards past the placed ones open
+ *  over the call's memory domains or devices in turn. A manifest records where its parts were
+ *  written, never where a reader must keep them, so a checkpoint written from a mounted bucket
+ *  spreads across a handle's own memory domains as it loads. An in-memory buffer of several shards
+ *  leads with the same manifest, listing each part by its offset inside the buffer. A cancelled or
+ *  failed save leaves a file without its header, which every reader rejects, and a cancelled or
+ *  failed load creates no handle.
  *
  *  A file is read through a memory mapping, so a path and a buffer are the same bytes reached two
  *  ways. Loading copies them into the handle's own shards; viewing serves the mapping itself, so a
@@ -64,9 +66,11 @@
  *  An NVMe handle serves a checkpoint in place and walks it through whichever I/O engine can reach
  *  the devices its paths name - a filesystem path selects a kernel engine, a transport identifier
  *  a userspace one, and a FUSE mount over a bucket reads as an ordinary path.
- *  External-memory graphs are never modified in place, so the handle is a view, and every mutating
- *  verb fails on it. Bigger indexes come from merging, never mutating: shards build in RAM,
- *  serialize as monoliths, and enter a manifest - the compaction shape of LSM storage.
+ *  A view never modifies its parts, so every mutating verb fails on it. A handle that
+ *  @c usearch_dense_load_nvme opened owns its manifest instead, and its refine, absorb, split and
+ *  reshard rewrite it: each new part lands beside the old ones, the manifest is replaced durably to
+ *  name it, and only then do walks read it. Bigger indexes still come from merging, never
+ *  inserting: shards build in RAM, serialize as monoliths, and enter a manifest of their own.
  *
  *  @section dense_index_concurrency Concurrency & Thread Safety
  *
@@ -85,25 +89,25 @@
  *  many concurrent searches, having nothing to mutate. Per-call outputs - stats, counts, the
  *  outcome - belong to their call and must not be shared between calls that are not final.
  *
- *  Refinement, absorption and clearing hold the handle closed to insertions for their whole call,
- *  and so does a save of a VRAM handle. None of them waits: one meeting an insertion in flight
- *  reports @c usearch_status_contended_k and leaves the handle as it was, an insertion arriving
- *  while one runs reports the same and writes nothing, and so does a second VRAM insertion beside
- *  the first. The caller retries, typically once its own insertions drained. A RAM save settles
- *  optimistically instead, reporting @c usearch_status_contended_k when an insertion was in flight
- *  or published under it, and concurrent readers keep searching throughout every save.
+ *  Refinement, absorption, resharding and clearing hold the handle closed to insertions for their
+ *  whole call, and so does a save of a VRAM handle. None of them waits: one meeting an insertion in
+ *  flight reports @c usearch_status_contended_k and leaves the handle as it was, an insertion
+ *  arriving while one runs reports the same and writes nothing, and so does a second VRAM insertion
+ *  beside the first. The caller retries, typically once its own insertions drained. A RAM save
+ *  settles optimistically instead, reporting @c usearch_status_contended_k when an insertion was in
+ *  flight or published under it, and concurrent readers keep searching throughout every save.
  *
  *  Every verb is safe beside every other on the same handle, with no rule to keep any of them from
  *  starting. Each RAM or VRAM handle carries one gate: insertions hold its shared side for their
  *  own call, and the verbs that empty or move entries in place - a clear, an absorb consuming a
- *  donor, a compaction, a split emptying its source, and the closing step of every refinement,
- *  absorb, compaction, split, load and VRAM save - take it alone or report
+ *  donor, a reshard, a split emptying its source, and the closing step of every refinement,
+ *  absorb, reshard, split, load and VRAM save - take it alone or report
  *  @c usearch_status_contended_k, never waiting. Readers take no lock at all: a search, a product,
  *  an attention call, a lookup of vectors or a cursor pull reads one epoch word before and after
  *  its work, repeats once when a destructive step ran in between, and reports
  *  @c usearch_status_contended_k when another one did. Nothing a reader can reach is freed while
  *  the handle lives: an emptied shard keeps its memory until the handle is freed, and a count of a
- *  key stays exact throughout, as a compaction moves each key's entry with one atomic store.
+ *  key stays exact throughout, as a reshard moves each key's entry with one atomic store.
  *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
@@ -132,11 +136,15 @@
  *  on RAM, while VRAM vectors are read back by key or by search. @c usearch_dense_split answers on
  *  both, @c usearch_dense_sample on RAM and NVMe, and @c usearch_dense_search_stream_init on none.
  *
- *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor with its
- *  @c starts and @c links, @c usearch_dense_health and @c usearch_dense_sample included, its
- *  entries read through the executor's engines. Every mutating verb answers
+ *  An NVMe handle answers every read verb as a RAM handle does, the cursor with its @c starts and
+ *  @c links, @c usearch_dense_health and @c usearch_dense_sample included, its entries read
+ *  through the executor's engines. On a view every mutating verb answers
  *  @c usearch_status_read_only_k, and saving answers @c usearch_status_unsupported_k, since a view
- *  already is its checkpoint.
+ *  already is its checkpoint. A loaded NVMe handle answers @c usearch_dense_refine,
+ *  @c usearch_dense_absorb, @c usearch_dense_split and @c usearch_dense_reshard, each writing new
+ *  parts, and @c usearch_status_unsupported_k to every other mutating verb and to saving.
+ *  @c usearch_dense_reshard answers on RAM and on a loaded NVMe handle, and
+ *  @c usearch_status_unsupported_k on a VRAM one.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
@@ -208,15 +216,48 @@ typedef struct usearch_dense_cursor_handle_t* usearch_dense_cursor_t;
 typedef struct usearch_dense_search_stream_handle_t* usearch_dense_search_stream_t;
 
 /**
- *  @brief One refinement in flight, optionally absorbing donors or splitting into receivers first.
+ *  @brief One refine in flight on a RAM or VRAM handle: the round in hand, and the root every
+ *      round's health checks share.
  *
- *  It holds everything the pass needs between calls, so a cancelled
- *  @c usearch_dense_refinement_next continues where it stopped, and nothing about it stays in the
- *  index once it finishes. The index admits no insertion and no save while the handle lives;
- *  searches proceed as during @c usearch_dense_refine. Each call names the index and the executor
- *  it was opened with.
+ *  A @c usearch_dense_refine holding it continues the round a cancel stopped, or starts the next
+ *  round from the same root once the last one ended; @c usearch_dense_refine_plan_finish closes the
+ *  round in hand and frees it. The index admits no insertion and no save while the plan lives, and
+ *  each call names the index and executor the plan was opened with.
  */
-typedef struct usearch_dense_refinement_handle_t* usearch_dense_refinement_t;
+typedef struct usearch_dense_refine_plan_handle_t* usearch_dense_refine_plan_t;
+
+/**
+ *  @brief One absorb in flight on a RAM or VRAM handle: the donors still to move, then the rounds
+ *      that link them in.
+ *
+ *  A @c usearch_dense_absorb holding it moves the donors still pending and continues the rounds
+ *  where a cancel stopped them; @c usearch_dense_absorb_plan_finish closes them and frees it. The
+ *  plan keeps the donor array it was opened with, which must outlive it, and nulls each slot it
+ *  consumes. The index admits no insertion and no save while the plan lives, and each call names
+ *  the index and executor the plan was opened with.
+ */
+typedef struct usearch_dense_absorb_plan_handle_t* usearch_dense_absorb_plan_t;
+
+/**
+ *  @brief One split in flight on a RAM or VRAM handle: the partition and moves, then the rounds
+ *      each receiver runs.
+ *
+ *  A @c usearch_dense_split holding it continues the rounds where a cancel stopped them;
+ *  @c usearch_dense_split_plan_finish closes them and frees it. The plan keeps the receiver array
+ *  it was opened with, which must outlive it. The index and every receiver admit no insertion and
+ *  no save while the plan lives; each call names the index and executor it was opened with.
+ */
+typedef struct usearch_dense_split_plan_handle_t* usearch_dense_split_plan_t;
+
+/**
+ *  @brief One reshard in flight on a RAM handle: the moves, then the round of each target shard.
+ *
+ *  A @c usearch_dense_reshard holding it moves the shards still pending and continues the rounds
+ *  where a cancel stopped them; @c usearch_dense_reshard_plan_finish closes them and frees it. The
+ *  index admits no insertion and no save while the plan lives, and each call names the index and
+ *  executor the plan was opened with.
+ */
+typedef struct usearch_dense_reshard_plan_handle_t* usearch_dense_reshard_plan_t;
 
 /** The dense metric kinds supported out of the box, with SIMD kernels dispatched by the
  *  machine's capabilities. The last two read their vectors as @c usearch_scalar_u1x8_k bit sets
@@ -663,6 +704,77 @@ typedef struct usearch_dense_view_nvme_t {
  */
 USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments);
 
+/** The arguments of @c usearch_dense_load_nvme. */
+typedef struct usearch_dense_load_nvme_t {
+
+    /** Output for the new, writable index, written by the time the call is final. */
+    usearch_dense_index_t* index;
+
+    /** The NVMe executor the call is ordered on; the headers come through blocking reads. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The manifest of a sharded checkpoint on a filesystem, which the handle replaces as its parts
+     *  change. */
+    usearch_bytes_view_t path;
+
+    /** The class to dispatch as; the parts are served where the manifest points, since the handle
+     *  rewrites the manifest naming them, so @c paths must name none. */
+    usearch_nvme_options_t nvme;
+
+    /** The @b optional RAM the handle may hold beyond its headers, as @c usearch_dense_view_nvme_t
+     *  takes it. */
+    usearch_ram_options_t const* ram;
+} usearch_dense_load_nvme_t;
+
+/**
+ *  @brief Opens a checkpoint's manifest from NVMe drives as a writable index: it answers every read
+ *      verb a view answers, and its refine, absorb, split and reshard rewrite its parts.
+ *      @ref dense_index_nvme_walks
+ *
+ *  Opening reads what @c usearch_dense_view_nvme reads, opens every part for writing, and takes an
+ *  advisory lock on the manifest that the handle holds until it is freed, so a second load of the
+ *  same manifest is refused while views keep opening it.
+ *
+ *  A refine replaces one shard's part at a time. It writes the refined shard into a new part beside
+ *  the old one and flushes it, replaces the manifest durably to name it, and only then serves it,
+ *  so a crash or a cancel leaves a manifest naming whole parts, and searches read the old part
+ *  until its replacement commits. A superseded part is removed once the handle is freed, since a
+ *  search started before the swap may still be reading it; until then it costs its disk space.
+ *
+ *  @code{.c}
+ *  usearch_dense_index_t index = NULL;
+ *  usearch_outcome_t outcome = {0};
+ *  usearch_dense_load_nvme(&(usearch_dense_load_nvme_t){
+ *      .index = &index, .executor = executor, .outcome = &outcome,
+ *      .path = {"index.safegraphs.json", 21}});
+ *  usearch_dense_refine(&(usearch_dense_refine_t){
+ *      .index = index, .executor = executor, .outcome = &outcome});
+ *  @endcode
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_device_k @c executor is not an NVMe executor.
+ *  - @c usearch_status_invalid_argument_k An empty @c path, a path that does not parse, or @c ram
+ *    without an @c executor to scan the keys on.
+ *  - @c usearch_status_unsupported_k A lone monolith, which has no manifest to replace, so save it
+ *    as a one-part manifest first; @c nvme naming paths; a transport identifier; a quantization
+ *    this build leaves out, or a pinned class the CPU does not admit.
+ *  - @c usearch_status_contended_k Another writable handle holds the manifest's lock.
+ *  - @c usearch_status_io_k A part or the manifest that cannot be opened for writing.
+ *  - @c usearch_status_out_of_memory_k The key table passes @c ram->memory_limit.
+ *  - @c usearch_status_config_mismatch_k Parts disagreeing with each other or with the scalar.
+ *  - @c usearch_status_malformed_k The manifest names no part, or a manifest or header does not
+ *    parse.
+ *  - @c usearch_status_unknown_kind_k An unknown quantization, a metric its quantization does not
+ *    score, or a kernel the stored scalar's kits cannot finalize.
+ */
+USEARCH_EXPORT void usearch_dense_load_nvme(usearch_dense_load_nvme_t* arguments);
+
 /**
  *  @brief Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so
  *      takes no outcome.
@@ -692,11 +804,12 @@ typedef struct usearch_dense_reserve_t {
 } usearch_dense_reserve_t;
 
 /**
- *  Grows the shards ahead of a number of incoming vectors - a capacity hint, since insertions grow
- *  them on demand and init fixed the geometry already.
+ *  @brief Grows the shards ahead of a number of incoming vectors - a capacity hint, since
+ *      insertions grow them on demand and init fixed the geometry already.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_unsupported_k The handle is a loaded NVMe one.
  *  - @c usearch_status_uninitialized_k No shard is placed.
  *  - @c usearch_status_unknown_kind_k The stored scalar's kits cannot finalize the metric.
  *  - @c usearch_status_config_mismatch_k On VRAM, a shard's neighbors live on another device or no
@@ -724,11 +837,12 @@ typedef struct usearch_dense_clear_t {
 
 /**
  *  @brief Erases all entries, keeping the reserved capacity and frozen geometry. An insertion in
- *      flight, or a refinement, absorb, compaction, split or load holding the handle, refuses it
+ *      flight, or a refinement, absorb, reshard, split or load holding the handle, refuses it
  *      with @c usearch_status_contended_k; a search it reaches under repeats or reports the same.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
+ *  - @c usearch_status_unsupported_k The handle is a loaded NVMe one.
  *  - @c usearch_status_contended_k A call in flight, a batch or load holding claims, or a plan
  *    holding the handle closed.
  */
@@ -795,6 +909,7 @@ typedef struct usearch_dense_insert_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is a view.
+ *  - @c usearch_status_unsupported_k The handle is a loaded NVMe one.
  *  - @c usearch_status_contended_k A refinement, absorption or clear holds the handle, or on
  *    VRAM a save or another insertion does; nothing is inserted.
  */
@@ -819,44 +934,100 @@ typedef struct usearch_dense_refine_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth and bytes of the re-selection pass. */
+    /** The @b optional spending of the round, as @c usearch_refine_options_t names it. */
     usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with nodes re-selected; a cancel stops the re-selection,
-     *  still heals, and answers @c usearch_status_cancelled_k. */
+    /** The @b optional handler, called at every barrier of every phase with that phase's units; a
+     *  cancel stops at that barrier and answers @c usearch_status_cancelled_k. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL runs one round to its end, and a cancel closes it as
+     *  @c usearch_dense_refine_plan_finish does; a @c NULL pointee opens one that a cancel leaves
+     *  live; a live one continues its round where it stopped, or starts the next. */
+    usearch_dense_refine_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_dense_refine_t;
 
 /**
- *  @brief Re-selects the neighbors of every stored entry against the finished graph, improving
- *      neighbors chosen when the graph around them was still incomplete.
+ *  @brief Makes every stored entry findable: one round checks the whole graph's health without a
+ *      distance, gathers every entry into a neighborhood of near entries with one streamed pass,
+ *      and re-stitches each neighborhood in one core's cache.
+ *
+ *  Its principles:
+ *  - Arrival is the goal. A round is judged by one question: does a search, starting where searches
+ *    start, reach each entry?
+ *  - Diagnose all, re-stitch all. One sweep that computes no distance measures every entry; one
+ *    streamed pass then gathers every entry into a neighborhood of near entries.
+ *  - Scan, never guess. Neighborhoods come from streaming the stored entries past a pack of drawn
+ *    hubs, many at once. No walk decides what an entry may link to.
+ *  - Mend the neighborhood. A neighborhood is re-stitched as a unit, every entry against every
+ *    other, in one core's cache.
+ *  - Keep the diverse, leave the rest free. An entry keeps the links that lead somewhere new;
+ *    a slot no such link claims stays empty.
+ *  - Reach never shrinks. A link is dropped only while an entry of smaller depth still
+ *    links to its target.
+ *  - Chance, not position. Hubs are seeded draws, new each round, so no entry's fate rests
+ *    on where it is stored.
+ *  - Nothing to tune. Every size comes from the graph or the device: its connectivity,
+ *    the cache a core has.
+ *  - Says when it is done. Each round reports what it found and changed, and whether
+ *    another can help.
+ *  - Watchable, stoppable, resumable. Every phase reports its progress; a stop keeps the work done
+ *    and leaves a graph that saves; a plan resumes where it stopped.
+ *  - One writer, readers never wait. On NVMe a plan rewrites a private copy of a part and
+ *    publishes it whole.
+ *  - Move, then rounds. Absorbing, splitting and resharding move entries with their links and
+ *    rewrite links only within the parts they move, then run rounds; none walks.
+ *
+ *  A caller repeats rounds until the report answers converged; no change rate is theirs to pick.
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
- *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c refine.expansion_factor belongs here rather than in @c usearch_dense_insert.
+ *  reaches a better graph, in less total time, than a single expensive insertion pass - so a narrow
+ *  @c expansion_factor belongs in @c usearch_dense_insert, and the rounds do the rest.
  *
- *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting a node's
- *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
- *  merely less improved: nothing unwinds, and the call answers @c usearch_status_cancelled_k. The
- *  index keeps nothing of a stopped pass, so the next call starts at the first entry again; a
- *  caller wanting to continue where a cancel stopped holds a @c usearch_dense_refinement_t instead.
- *  A caller loops until the report's @c changed falls below whatever change rate they consider
- *  settled.
+ *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-stitching a
+ *  neighborhood is idempotent and claims no identity, so a stopped round leaves the graph correct
+ *  and merely less improved: nothing unwinds, and the call answers @c usearch_status_cancelled_k.
+ *  On every residency a round heals before it draws its hubs, and a stop skips what is left of the
+ *  phase in hand: in the opening health check, or before the heal ran, it ends the round with
+ *  nothing written; in the hubs or the gather it moves on to the closing health check with nothing
+ *  written past the heal's links; in the restitch it keeps the neighborhoods already re-stitched
+ *  and moves on to the closing health check; the closing health check runs to its end, and the
+ *  report's verdict reads stopped.
+ *  Without a @c plan the index keeps nothing of a stopped round. With one, a cancel stops nothing:
+ *  the plan stays live, the report holds the round so far, and the next call continues
+ *  where the cancel came.
  *
- *  Re-selection alone can leave an island, an entry no search reaches, so every call closes by
- *  re-linking them: unreachable entries re-select from scratch, and whatever the diversity judgment
- *  still drops is reconnected to a reachable one. A cancelled call skips the rest of the
- *  re-selection but still re-links, so it never leaves entries unreachable.
+ *  Every round heals the islands its opening health check names, linking each with the root's
+ *  component without a distance. A round stopped before its heal ran heals nothing, and no stop
+ *  leaves fewer entries reached than the round found.
  *
- *  On a RAM handle searches may run throughout: re-selection publishes one node at a time and never
- *  removes a node, so a concurrent walk sees either the old neighbors or the new ones. On a VRAM
- *  handle the merge writes neighbors in place, so searches may not overlap. Insertions never
- *  overlap: one in flight refuses the call with @c usearch_status_contended_k, and one arriving
- *  meanwhile is refused the same way, as is a VRAM save. A viewed handle refuses with
+ *  Every residency runs the same round with the same phases, report and verdicts. A RAM handle
+ *  runs it on the executor's cores. A VRAM handle runs it on each shard's device: the gather
+ *  streams the entries past hubs packed in on-chip shared memory, and each block or threadgroup
+ *  re-stitches one neighborhood. NVIDIA and AMD devices run every phase there, while an Apple
+ *  device gathers and re-stitches in Metal and leaves the health check and the heal to the host,
+ *  over the unified memory both share. A loaded NVMe handle runs it one part at a time, as below.
+ *
+ *  On a RAM handle searches may run throughout: a restitch publishes one entry's links at a time
+ *  and never removes an entry, so a concurrent walk sees either the old neighbors or the new ones.
+ *  On a VRAM handle the restitch writes neighbors in place, so searches may not overlap. Insertions
+ *  never overlap: one in flight refuses the call with @c usearch_status_contended_k, and one
+ *  arriving meanwhile is refused the same way, as is a VRAM save. A viewed handle refuses with
  *  @c usearch_status_read_only_k, like every other mutating verb.
+ *
+ *  A loaded NVMe handle refines one shard at a time by replacing its part, as
+ *  @c usearch_dense_load_nvme describes: searches read the old part until the new one commits, and
+ *  a cancel stops at the next task, leaving the shards before it refined and the rest untouched.
+ *  @c refine.memory_limit sizes the one shard's workspace, zero deriving what rounds that part in
+ *  RAM. A smaller one streams the part's rounds instead: the graph stays on the drives, RAM holds
+ *  a few bytes per entry, and each neighborhood's rows are read, re-stitched and written back.
  *
  *  @par Statuses:
  *  - @c usearch_status_device_k The executor's kind does not match the residency.
@@ -865,14 +1036,54 @@ typedef struct usearch_dense_refine_t {
  *    handle keeps such an earlier failure.
  *  - @c usearch_status_contended_k An insertion, load, save, refinement or absorption holds the
  *    handle, or another call holds the executor or its pool.
+ *  - @c usearch_status_out_of_memory_k On a loaded NVMe handle, @c refine.memory_limit cannot
+ *    hold what a round of one part keeps.
  *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's
  *    device, or a VRAM handle keeps such an earlier failure.
  *  - @c usearch_status_overflow_k A queue capacity wraps when rounded, or a VRAM handle keeps an
  *    earlier overflow.
  *  - @c usearch_status_unsupported_k or @c usearch_status_unsupported_layout_k A VRAM handle
  *    keeps such an earlier failure.
+ *  - @c usearch_status_unsupported_k A @c plan on a loaded NVMe handle, whose one call runs one
+ *    round per part.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments);
+
+/** The arguments of @c usearch_dense_refine_plan_finish. */
+typedef struct usearch_dense_refine_plan_finish_t {
+
+    /** The handle the plan was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the plan was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_dense_refine_plan_t plan;
+
+    /** The @b optional output for what the whole plan did to the graph. */
+    usearch_refine_report_t* report;
+} usearch_dense_refine_plan_finish_t;
+
+/**
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
+ *
+ *  A round a cancel stopped closes as a stop at that barrier would, as @c usearch_dense_refine
+ *  describes, its verdict reading stopped; a round that ended reports again.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
+ */
+USEARCH_EXPORT void usearch_dense_refine_plan_finish(usearch_dense_refine_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_dense_health. */
 typedef struct usearch_dense_health_t {
@@ -1147,37 +1358,55 @@ typedef struct usearch_dense_absorb_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth and bytes of the closing refine. */
+    /** The @b optional spending of the closing round, as @c usearch_refine_options_t names it. */
     usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with the donor rows stitched so far out of every donor's;
-     *  a cancel stops the stitching walks as it stops @c usearch_dense_refine, never a move. */
+    /** The @b optional handler, called at every barrier of the closing round's phases with that
+     *  phase's units; a cancel stops the round as @c usearch_dense_refine stops, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
+     *  cancel leaves live, a live one continues where it stopped. */
+    usearch_dense_absorb_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_dense_absorb_t;
 
 /**
  *  @brief Absorbs every handle in @c donors into @c index, one after another, keeping their graphs
- *      rather than re-inserting their vectors and linking each in by walks across. Donor handles
- *      are consumed and must not be used afterwards, not even for @c usearch_dense_free.
+ *      rather than re-inserting their vectors, then runs one round over the whole graph. Donor
+ *      handles are consumed and must not be used afterwards, not even for @c usearch_dense_free.
  *
  *  The donors land one after another, each all-or-nothing: its entries append to @c index shard by
  *  shard with their edges rebased, publish at once, and the donor is consumed, so at most one
- *  donor's entries are ever held twice. One refinement then walks every shard across the parts the
- *  donors appended, round by round, so a group of donors costs one refinement rather than one per
- *  donor. Readers of a RAM @c index may keep searching throughout, since unpublished entries hide
- *  behind the watermark, while a VRAM one rewrites neighbors in place and admits no overlapping
- *  search, as refinement does. Insertions into @c index or into a donor arriving meanwhile are
- *  refused with @c usearch_status_contended_k, while searches of a donor run throughout.
+ *  donor's entries are ever held twice. No walk links them in: each donor's graph arrives as an
+ *  island, and one round over every shard, as @c usearch_dense_refine runs it on the handle's
+ *  residency, heals it into the root's component without a distance and re-stitches the
+ *  neighborhoods it shares with the entries already there, so a group of donors costs one round
+ *  rather than one per donor. Readers of a RAM @c index may keep searching throughout, since
+ *  unpublished entries hide behind the watermark, while a VRAM one rewrites neighbors in place and
+ *  admits no overlapping search, as refinement does. Insertions into @c index or into a donor
+ *  arriving meanwhile are refused with @c usearch_status_contended_k, while searches of a donor
+ *  run throughout the call.
  *
  *  A failure leaves the donor it struck and every later one as live handles the caller still owns
  *  and must free, and @c index holding the donors before it; every consumed slot is nulled, so the
- *  array itself says which handles survived. The handler reports and cancels the closing
- *  refinement alone, exactly as in @c usearch_dense_refine: a cancel skips the rest of the walks
- *  across, still re-links, and answers @c usearch_status_cancelled_k with every donor consumed. A
- *  caller wanting to continue those walks later holds a @c usearch_dense_refinement_t instead.
+ *  array itself says which handles survived. The handler reports and cancels the closing round
+ *  alone, exactly as in @c usearch_dense_refine: a cancel stops the round at that barrier and
+ *  answers @c usearch_status_cancelled_k with every donor consumed. A caller wanting to continue
+ *  the round later passes a @c plan: a cancel then leaves it live, the next call naming it moves
+ *  any donor still pending and continues the round, and @c usearch_dense_absorb_plan_finish closes
+ *  it. A live plan reads its own donors, never the call's @c count and @c donors.
+ *
+ *  A loaded NVMe @c index packs its parts and the donors' into new parts beside its manifest, each
+ *  that took a part running one streamed round, then replaces the manifest to name them. Its donors
+ *  are read, never edited, and are consumed only once the manifest names the new parts, so a
+ *  failure or a cancel leaves every donor live and @c index serving its own parts.
  *
  *  @code{.c}
  *  usearch_dense_index_t shards[4] = {built_on_socket_0, built_on_socket_1, built_on_socket_2, built_on_socket_3};
@@ -1196,14 +1425,53 @@ typedef struct usearch_dense_absorb_t {
  *    geometry, a donor on a device the executor does not drive, or @c index itself.
  *  - @c usearch_status_contended_k An insertion in flight on @c index or on the next donor, or
  *    on VRAM a save of either; that donor and every later one stay live handles.
+ *  - @c usearch_status_unsupported_k A @c plan on a loaded NVMe handle, which packs its parts in
+ *    one call.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments);
 
-/** The arguments of @c usearch_dense_compact. */
-typedef struct usearch_dense_compact_t {
+/** The arguments of @c usearch_dense_absorb_plan_finish. */
+typedef struct usearch_dense_absorb_plan_finish_t {
 
-    /** The handle the sources compact into, possibly one of them. */
-    usearch_dense_index_t target;
+    /** The handle the plan was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the plan was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_dense_absorb_plan_t plan;
+
+    /** The @b optional output for what the whole plan did to the graph. */
+    usearch_refine_report_t* report;
+} usearch_dense_absorb_plan_finish_t;
+
+/**
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
+ *
+ *  Donors still pending stay live handles the caller owns. The round a cancel stopped closes as a
+ *  stop at that barrier would, its verdict reading stopped; a plan whose donors have not all moved
+ *  runs no round and reports zeros.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
+ */
+USEARCH_EXPORT void usearch_dense_absorb_plan_finish(usearch_dense_absorb_plan_finish_t* arguments);
+
+/** The arguments of @c usearch_dense_reshard. */
+typedef struct usearch_dense_reshard_t {
+
+    /** The handle whose shards are recut and placed, in place. */
+    usearch_dense_index_t index;
 
     /** The executor every move and the closing refinement fan out over. */
     usearch_executor_t executor;
@@ -1214,58 +1482,119 @@ typedef struct usearch_dense_compact_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Source handles to compact. */
-    size_t count;
+    /** The @b optional placement of a RAM handle, one shard per named domain at least; @c NULL
+     *  keeps it. */
+    usearch_ram_options_t const* ram;
 
-    /** Array of @c count distinct handles; each but @c target is freed and nulled once every
-     *  source moved. */
-    usearch_dense_index_t* sources;
+    /** The @b optional placement of a VRAM handle, one shard per named device at least; @c NULL
+     *  keeps it. */
+    usearch_vram_options_t const* vram;
 
-    /** The @b optional most entries one target shard holds; zero, or more than the target's own
-     *  bound, means that bound. */
-    size_t shard_capacity;
-
-    /** The @b optional breadth and bytes of the closing refine. */
-    usearch_refine_options_t refine;
+    /** The @b optional placement of an NVMe handle, one shard per named drive at least; @c NULL
+     *  keeps it. */
+    usearch_nvme_options_t const* nvme;
 
     /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional handler, called with nodes the closing refine re-selected; a cancel stops it
-     *  as it stops @c usearch_dense_refine, never a move. */
+    /** The @b optional spending of the closing rounds, as @c usearch_refine_options_t names it. */
+    usearch_refine_options_t refine;
+
+    /** The @b optional handler, called at every barrier of the closing rounds' phases with that
+     *  phase's units; a cancel stops them as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
-} usearch_dense_compact_t;
+
+    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
+     *  cancel leaves live, a live one continues where it stopped. */
+    usearch_dense_reshard_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
+} usearch_dense_reshard_t;
 
 /**
- *  @brief Compacts every shard of the handles in @c sources into @c target under @c shard_capacity
- *      entries per shard, largest first, each into the first shard with room, so it ends with as
- *      few shards as fit; in place when @c target is among @c sources.
+ *  @brief Recuts the shards of @c index in place: as few shards as fit its placement's
+ *      @c shard_capacity, keeping every entry the handle holds and its residency.
  *
- *  The shard a bin keeps stays resident with its IDs, every other source shard follows it with
- *  its edges rebased and its keys beside it, and only the appended entries walk the target across
- *  the parts and link in, then each target shard re-links the islands that leaves, as
- *  @c usearch_dense_refine does. In place, a moved entry's key moves with one atomic store, so
- *  lookups and searches of @c target run throughout and emptied shards stay as idle slots for its
- *  next generation. Once the call moved every source, each one but @c target is freed and nulled,
- *  as @c usearch_dense_absorb frees its donors; a failure frees none, those it consumed left empty
- *  and refusing insertions, so every handle in @c sources stays the caller's to free.
+ *  On RAM the shards pack largest first, each into the first shard with room under
+ *  @c ram->shard_capacity entries, or the handle's own bound when @c ram is @c NULL or names no
+ *  capacity. The shard a bin keeps stays resident with its IDs, every other shard follows it with
+ *  its edges rebased and its keys beside it, and no walk links it in: each shard then runs a round,
+ *  as @c usearch_dense_refine does, healing the moved entries into its root's component without a
+ *  distance and re-stitching their neighborhoods. A moved entry's key moves with one atomic store,
+ *  so lookups and searches run throughout, and an emptied shard stays idle until the next shard
+ *  generation takes it.
+ *
+ *  The handler reports and cancels the closing rounds alone, as in @c usearch_dense_refine, never a
+ *  move. A caller wanting to continue those rounds later passes a @c plan on a RAM handle: a cancel
+ *  then leaves it live, the next call naming it moves any shard still pending and continues the
+ *  rounds, and @c usearch_dense_reshard_plan_finish closes it. A live plan reads its own placement,
+ *  never the call's.
+ *
+ *  A loaded NVMe handle repacks its parts into as few as address their entries, each part that took
+ *  another running one streamed round, then replaces its manifest to name them; a failure or a
+ *  cancel leaves it serving its own parts.
+ *
+ *  @code{.c}
+ *  usearch_outcome_t outcome = {0};
+ *  usearch_dense_reshard(&(usearch_dense_reshard_t){
+ *      .index = index, .executor = executor, .outcome = &outcome,
+ *      .ram = &(usearch_ram_options_t){.shard_capacity = 100000000}});
+ *  @endcode
  *
  *  @par Statuses:
- *  - @c usearch_status_read_only_k @c target is an NVMe view.
- *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c sources, or @c NULL @c sources
- *    for a nonzero @c count.
- *  - @c usearch_status_config_mismatch_k A repeated source, or one of another residency, scalar,
- *    class, metric or geometry.
- *  - @c usearch_status_contended_k An insertion in flight on @c target or a source, or another
- *    call holding either; nothing moves.
- *  - @c usearch_status_unsupported_k A source shard past @c shard_capacity, which would have to
- *    be cut first, or a target outside RAM.
+ *  - @c usearch_status_read_only_k @c index is an NVMe view.
+ *  - @c usearch_status_unsupported_k A VRAM @c index; on RAM, named memory domains, which would
+ *    place shards anew, or a shard past @c ram->shard_capacity, which would have to be cut first;
+ *    on NVMe, named paths, which would place parts anew.
+ *  - @c usearch_status_config_mismatch_k A placement of another residency than the handle's.
+ *  - @c usearch_status_contended_k An insertion in flight on @c index, or another call holding it,
+ *    in which case no entry moves.
+ *  - @c usearch_status_unsupported_k A @c plan on a VRAM or loaded NVMe handle, whose reshard runs
+ *    in one call.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
-USEARCH_EXPORT void usearch_dense_compact(usearch_dense_compact_t* arguments);
+USEARCH_EXPORT void usearch_dense_reshard(usearch_dense_reshard_t* arguments);
+
+/** The arguments of @c usearch_dense_reshard_plan_finish. */
+typedef struct usearch_dense_reshard_plan_finish_t {
+
+    /** The handle the plan was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the plan was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_dense_reshard_plan_t plan;
+
+    /** The @b optional output for what the whole plan did to the graph. */
+    usearch_refine_report_t* report;
+} usearch_dense_reshard_plan_finish_t;
+
+/**
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
+ *
+ *  The rounds a cancel stopped close as a stop at that barrier would, their verdict reading
+ *  stopped; a plan whose shards have not all moved runs no round and reports zeros.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
+ */
+USEARCH_EXPORT void usearch_dense_reshard_plan_finish(usearch_dense_reshard_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_dense_split. */
 typedef struct usearch_dense_split_t {
@@ -1293,18 +1622,26 @@ typedef struct usearch_dense_split_t {
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth and bytes of the closing refines. */
+    /** The @b optional spending of the closing rounds, as @c usearch_refine_options_t names it. */
     usearch_refine_options_t refine;
 
     /** Picks the part roots: equal seeds over an unchanged index split equally. */
     uint64_t seed;
 
-    /** The @b optional handler, called with nodes the closing refines re-selected; a cancel stops
-     *  them as it stops @c usearch_dense_refine, never a move. */
+    /** The @b optional handler, called at every barrier of the closing rounds' phases with that
+     *  phase's units; a cancel stops them as it stops @c usearch_dense_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
+     *  cancel leaves live, a live one continues where it stopped. */
+    usearch_dense_split_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_dense_split_t;
 
 /**
@@ -1318,15 +1655,23 @@ typedef struct usearch_dense_split_t {
  *  enter the smallest part. A sharded handle splits shard by shard, part @c p of shard @c s moving
  *  into shard @c s of receiver @c p. Each part then enters its receiver all-or-nothing, its edges
  *  rebased, its edges into other parts dropped, and the entries that lost one placed first;
- *  @c index clears once every part moved. Each receiver closes by re-selecting the entries that
- *  lost an edge and re-linking the islands that leaves, as @c usearch_dense_refine does. Meanwhile,
- *  insertions into @c index or a receiver are refused with @c usearch_status_contended_k, while
- *  searches of either run throughout.
+ *  @c index clears once every part moved. Each receiver then runs a round, as
+ *  @c usearch_dense_refine does, healing what the cut left unreached without a distance and
+ *  re-stitching its neighborhoods, so no walk mends the cut. Meanwhile, insertions into @c index
+ *  or a receiver are refused with @c usearch_status_contended_k, while searches of either run
+ *  throughout the call.
  *
- *  The handler reports and cancels the closing refinements alone, exactly as in
- *  @c usearch_dense_refine: a cancel skips the rest of the re-selection, still re-links, and
- *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue that
- *  re-selection later holds a @c usearch_dense_refinement_t opened with @c receivers instead.
+ *  The handler reports and cancels the closing rounds alone, exactly as in
+ *  @c usearch_dense_refine: a cancel stops them at that barrier and answers
+ *  @c usearch_status_cancelled_k with every part moved. A caller wanting to continue those rounds
+ *  later passes a @c plan: a cancel then leaves it live, the next call naming it continues the
+ *  rounds, and @c usearch_dense_split_plan_finish closes it. A live plan reads its own receivers,
+ *  never the call's @c count and @c receivers.
+ *
+ *  A loaded NVMe @c index splits into empty NVMe receivers by ID rather than over the links: every
+ *  part is cut into one contiguous range per receiver, the edges the cuts cross dropped, range
+ *  @c r of part @c s arriving as part @c s of receiver @c r and running one streamed round, and
+ *  each receiver loads a manifest of its own beside the source's.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k @c index is an NVMe view.
@@ -1337,17 +1682,22 @@ typedef struct usearch_dense_split_t {
  *    named twice, or @c index itself.
  *  - @c usearch_status_contended_k An insertion in flight on @c index or on a receiver, or on
  *    VRAM a save of either; nothing moves.
- *  - @c usearch_status_overflow_k A part passes a receiver's capacity or its node IDs.
+ *  - @c usearch_status_overflow_k A part passes a receiver's capacity or its node IDs, or on NVMe
+ *    holds too few entries to give every receiver one.
+ *  - @c usearch_status_unsupported_k A @c plan on a loaded NVMe handle, which cuts its parts in one
+ *    call.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_dense_split(usearch_dense_split_t* arguments);
 
-/** The arguments of @c usearch_dense_refinement_init. */
-typedef struct usearch_dense_refinement_init_t {
+/** The arguments of @c usearch_dense_split_plan_finish. */
+typedef struct usearch_dense_split_plan_finish_t {
 
-    /** The handle to be refined. */
+    /** The handle the plan was opened on. */
     usearch_dense_index_t index;
 
-    /** The executor every call on the refinement runs on; its kind must match the residency. */
+    /** The executor the plan was opened with. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1356,135 +1706,24 @@ typedef struct usearch_dense_refinement_init_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional donors to absorb first, each consumed and nulled once its entries land; the
-     *  array must outlive the refinement. */
-    usearch_dense_index_t* donors;
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_dense_split_plan_t plan;
 
-    /** Donor handles in @c donors. */
-    size_t count;
-
-    /** The @b optional receivers to split @c index into first, as @c usearch_dense_split fills
-     *  them, each refined in turn; the array must outlive the refinement. */
-    usearch_dense_index_t const* receivers;
-
-    /** Receiver handles in @c receivers, zero or at least two. */
-    size_t receivers_count;
-
-    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
-     *  @c usearch_dense_refinement_finish frees it. */
-    usearch_dense_refinement_t* refinement;
-
-    /** The @b optional breadth and bytes of every pass the refinement steps. */
-    usearch_refine_options_t refine;
-
-    /** Picks the part roots when @c receivers are named, as in @c usearch_dense_split. */
-    uint64_t seed;
-} usearch_dense_refinement_init_t;
-
-/**
- *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
- *      @c usearch_dense_absorb moves them, or splitting it into @c receivers, as
- *      @c usearch_dense_split fills them. Every allocation the refinement needs happens here or in
- *      a move, never in a step.
- *
- *  @par Statuses:
- *  - @c usearch_status_read_only_k @c index is an NVMe view.
- *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors or @c receivers, @c NULL
- *    @c donors for a nonzero @c count, one receiver alone, or donors and receivers both named.
- *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, scalar,
- *    class, metric or geometry, a receiver holding entries, or @c index itself.
- *  - @c usearch_status_contended_k An insertion, save or another refinement in flight on
- *    @c index, or an insertion on a receiver.
- *  - @c usearch_status_unsupported_k @c receivers on an Apple GPU handle, whose index does
- *    not split anything yet.
- */
-USEARCH_EXPORT void usearch_dense_refinement_init(usearch_dense_refinement_init_t* arguments);
-
-/** The arguments of @c usearch_dense_refinement_next. */
-typedef struct usearch_dense_refinement_next_t {
-
-    /** The handle the refinement was opened on. */
-    usearch_dense_index_t index;
-
-    /** The executor the refinement was opened with. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** The refinement to continue. */
-    usearch_dense_refinement_t refinement;
-
-    /** The @b optional handler, called with nodes re-selected across every call so far. */
-    usearch_progress_t progress;
-
-    /** The @b optional outputs for the nodes re-selected so far and, of those, the ones whose
-     *  neighbors changed; their ratio falling is what says another call buys little. */
-    size_t* reselected;
-    size_t* changed;
-
-    /** The @b optional traversal telemetry of every call on the refinement so far; @c NULL skips
-     *  reporting. */
-    usearch_traversal_stats_t* stats;
-} usearch_dense_refinement_next_t;
-
-/**
- *  @brief Continues the refinement until it ends or @c progress cancels, moving any donors still
- *      pending first. Answers @c usearch_status_cancelled_k when a later call has more to do; that
- *      call continues exactly where this one stopped. The executor is held only for the call.
- *
- *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
- *  they only grow from one call to the next and @c changed never exceeds @c reselected; all stay
- *  zero while donors are pending.
- *
- *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
- *    on.
- *  - @c usearch_status_contended_k An insertion in flight on the next donor; that donor and
- *    every later one stay live handles, and a later call retries them.
- */
-USEARCH_EXPORT void usearch_dense_refinement_next(usearch_dense_refinement_next_t* arguments);
-
-/** The arguments of @c usearch_dense_refinement_finish. */
-typedef struct usearch_dense_refinement_finish_t {
-
-    /** The handle the refinement was opened on. */
-    usearch_dense_index_t index;
-
-    /** The executor the refinement was opened with. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** The refinement to finish; freed by the call, whatever it answers. */
-    usearch_dense_refinement_t refinement;
-
-    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
-     *  counts it; @c NULL skips reporting. */
+    /** The @b optional output for what the whole plan did to the graph. */
     usearch_refine_report_t* report;
-
-    /** The @b optional traversal telemetry of every call on the refinement; @c NULL skips
-     *  reporting. */
-    usearch_traversal_stats_t* stats;
-} usearch_dense_refinement_finish_t;
+} usearch_dense_split_plan_finish_t;
 
 /**
- *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
- *      @c usearch_dense_refine does, reports, reopens the index, and frees the handle. A
- *      refinement whose donors have not all moved re-links nothing and reports zeros.
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index and receivers.
+ *
+ *  The rounds a cancel stopped close as a stop at that barrier would, their verdict reading
+ *  stopped; a plan whose parts have not all moved runs no round and reports zeros.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c index is not the handle the refinement was opened
- *    on; the handle is still freed.
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
  */
-USEARCH_EXPORT void usearch_dense_refinement_finish(usearch_dense_refinement_finish_t* arguments);
+USEARCH_EXPORT void usearch_dense_split_plan_finish(usearch_dense_split_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_dense_cursor_init. */
 typedef struct usearch_dense_cursor_init_t {
@@ -1827,7 +2066,8 @@ typedef struct usearch_dense_save_buffer_t {
  *  - @c usearch_status_contended_k The arena serves another call, another call holds the
  *    executor or its pool, a dispensed batch has yet to publish, or a call, batch, load or plan
  *    holds the handle.
- *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint.
+ *  - @c usearch_status_unsupported_k The handle is an NVMe view, which already is its checkpoint,
+ *    or a loaded NVMe one, which commits through @c usearch_dense_refine.
  *  - @c usearch_status_uninitialized_k No shard is placed, or the executor holds no pool workers.
  *  - @c usearch_status_unknown_kind_k The stored scalar has no interchange dtype.
  *  - @c usearch_status_config_mismatch_k The executor drives no stream on some VRAM shard's

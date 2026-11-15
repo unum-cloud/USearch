@@ -95,15 +95,35 @@ typedef struct usearch_geospatial_index_handle_t* usearch_geospatial_index_t;
 typedef struct usearch_geospatial_cursor_handle_t* usearch_geospatial_cursor_t;
 
 /**
- *  @brief One refinement in flight, optionally absorbing donors or splitting into receivers first.
+ *  @brief One refine in flight: the round in hand, and the root every round's health checks share.
  *
- *  It holds everything the pass needs between calls, so a cancelled
- *  @c usearch_geospatial_refinement_next continues where it stopped, and nothing about it stays in
- *  the index once it finishes. The index admits no insertion and no save while the handle lives;
- *  searches proceed as during @c usearch_geospatial_refine. Each call names the index and the
- *  executor it was opened with.
+ *  A @c usearch_geospatial_refine holding it continues the round a cancel stopped, or starts the
+ *  next round from the same root once the last one ended; @c usearch_geospatial_refine_plan_finish
+ *  closes the round in hand and frees it. The index admits no insertion and no save while the plan
+ *  lives, and each call names the index and executor the plan was opened with.
  */
-typedef struct usearch_geospatial_refinement_handle_t* usearch_geospatial_refinement_t;
+typedef struct usearch_geospatial_refine_plan_handle_t* usearch_geospatial_refine_plan_t;
+
+/**
+ *  @brief One absorb in flight: the donors still to move, then the rounds that link them in.
+ *
+ *  A @c usearch_geospatial_absorb holding it moves the donors still pending and continues the
+ *  rounds where a cancel stopped them; @c usearch_geospatial_absorb_plan_finish closes them and
+ *  frees it. The plan keeps the donor array it was opened with, which must outlive it, and nulls
+ *  each slot it consumes. The index admits no insertion and no save while the plan lives, and each
+ *  call names the index and executor the plan was opened with.
+ */
+typedef struct usearch_geospatial_absorb_plan_handle_t* usearch_geospatial_absorb_plan_t;
+
+/**
+ *  @brief One split in flight: the partition and moves, then the rounds each receiver runs.
+ *
+ *  A @c usearch_geospatial_split holding it continues the rounds where a cancel stopped them;
+ *  @c usearch_geospatial_split_plan_finish closes them and frees it. The plan keeps the receiver
+ *  array it was opened with, which must outlive it. The index and every receiver admit no insertion
+ *  and no save while the plan lives; each call names the index and executor it was opened with.
+ */
+typedef struct usearch_geospatial_split_plan_handle_t* usearch_geospatial_split_plan_t;
 
 /**
  *  @brief One observation as devices record it: every field in its natural unit, and NaN wherever
@@ -780,6 +800,15 @@ typedef struct usearch_geospatial_refine_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL runs one round to its end, and a cancel closes it as
+     *  @c usearch_geospatial_refine_plan_finish does; a @c NULL pointee opens one that a cancel
+     *  leaves live; a live one continues its round where it stopped, or starts the next. */
+    usearch_geospatial_refine_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_geospatial_refine_t;
 
 /**
@@ -795,9 +824,9 @@ typedef struct usearch_geospatial_refine_t {
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
  *  merely less improved: nothing unwinds, and the call answers @c usearch_status_cancelled_k. The
- *  index keeps nothing of a stopped pass, so the next call starts at the first entry again; a
- *  caller wanting to continue where a cancel stopped holds a @c usearch_geospatial_refinement_t
- *  instead.
+ *  index keeps nothing of a stopped pass without a @c plan, so the next call starts again; with
+ *  one, a cancel leaves the plan live, the next call naming it continues where the cancel came, and
+ *  @c usearch_geospatial_refine_plan_finish closes it.
  *
  *  Re-selection alone can leave an island, an entry no search reaches, so every call closes by
  *  re-linking them: unreachable entries re-select from scratch, and whatever the selection still
@@ -811,10 +840,46 @@ typedef struct usearch_geospatial_refine_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
- *  - @c usearch_status_unsupported_k The handle lives on a GPU, whose index refines nothing yet.
+ *  - @c usearch_status_unsupported_k An AMD or Apple GPU handle, which no basic tower serves.
  *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments);
+
+/** The arguments of @c usearch_geospatial_refine_plan_finish. */
+typedef struct usearch_geospatial_refine_plan_finish_t {
+
+    /** The handle the plan was opened on. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the plan was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_geospatial_refine_plan_t plan;
+
+    /** The @b optional output for what the whole plan did to the graph. */
+    usearch_refine_report_t* report;
+} usearch_geospatial_refine_plan_finish_t;
+
+/**
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
+ *
+ *  A round a cancel stopped closes as a stop at that barrier would, as @c usearch_geospatial_refine
+ *  describes, its verdict reading stopped; a round that ended reports again.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
+ */
+USEARCH_EXPORT void usearch_geospatial_refine_plan_finish(usearch_geospatial_refine_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_geospatial_health. */
 typedef struct usearch_geospatial_health_t {
@@ -841,7 +906,7 @@ typedef struct usearch_geospatial_health_t {
  *      entries out of the audit.
  *
  *  An NVMe view sweeps forward alone, from entries spaced through each part, so its
- *  @c back_sweeps stays zero.
+ *  @c depth_to_root stays zero.
  *
  *  @par Statuses:
  *  - @c usearch_status_device_k The executor's kind does not match the residency.
@@ -1135,6 +1200,14 @@ typedef struct usearch_geospatial_absorb_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
+     *  cancel leaves live, a live one continues where it stopped. */
+    usearch_geospatial_absorb_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_geospatial_absorb_t;
 
 /**
@@ -1156,19 +1229,58 @@ typedef struct usearch_geospatial_absorb_t {
  *  The handler reports and cancels the closing refinement alone, exactly as in
  *  @c usearch_geospatial_refine: a cancel skips the rest of the walks across, still re-links, and
  *  answers @c usearch_status_cancelled_k with every donor consumed. A caller wanting to continue
- *  those walks later holds a @c usearch_geospatial_refinement_t instead.
+ *  later passes a @c plan: a cancel then leaves it live, the next call naming it moves any donor
+ *  still pending and continues, and @c usearch_geospatial_absorb_plan_finish closes it. A live plan
+ *  reads its own donors, never the call's @c count and @c donors.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k @c index is an NVMe view.
- *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index absorbs nothing yet.
+ *  - @c usearch_status_unsupported_k @c index on an AMD or Apple GPU, which no basic tower serves.
  *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
  *    for a nonzero @c count.
  *  - @c usearch_status_config_mismatch_k A donor of another residency, class or connectivity,
  *    or @c index itself.
  *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
  *    donor; every donor stays a live handle.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments);
+
+/** The arguments of @c usearch_geospatial_absorb_plan_finish. */
+typedef struct usearch_geospatial_absorb_plan_finish_t {
+
+    /** The handle the plan was opened on. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the plan was opened with. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_geospatial_absorb_plan_t plan;
+
+    /** The @b optional output for what the whole plan did to the graph. */
+    usearch_refine_report_t* report;
+} usearch_geospatial_absorb_plan_finish_t;
+
+/**
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
+ *
+ *  Donors still pending stay live handles the caller owns. The round a cancel stopped closes as a
+ *  stop at that barrier would, its verdict reading stopped; a plan whose donors have not all moved
+ *  runs no round and reports zeros.
+ *
+ *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
+ */
+USEARCH_EXPORT void usearch_geospatial_absorb_plan_finish(usearch_geospatial_absorb_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_geospatial_split. */
 typedef struct usearch_geospatial_split_t {
@@ -1208,6 +1320,14 @@ typedef struct usearch_geospatial_split_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_traversal_stats_t* stats;
+
+    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
+     *  cancel leaves live, a live one continues where it stopped. */
+    usearch_geospatial_split_plan_t* plan;
+
+    /** The @b optional output for the phase this call stopped in, or the closing one; a call
+     *  without a @c plan writes zeros. */
+    usearch_phase_t* phase;
 } usearch_geospatial_split_t;
 
 /**
@@ -1228,8 +1348,10 @@ typedef struct usearch_geospatial_split_t {
  *
  *  The handler reports and cancels the closing refinements alone, exactly as in
  *  @c usearch_geospatial_refine: a cancel skips the rest of the re-selection, still re-links, and
- *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue that
- *  re-selection later holds a @c usearch_geospatial_refinement_t opened with @c receivers instead.
+ *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue later
+ *  passes a @c plan: a cancel then leaves it live, the next call naming it continues, and
+ *  @c usearch_geospatial_split_plan_finish closes it. A live plan reads its own receivers, never
+ *  the call's @c count and @c receivers.
  *
  *  @par Statuses:
  *  - @c usearch_status_read_only_k @c index is a view.
@@ -1241,17 +1363,19 @@ typedef struct usearch_geospatial_split_t {
  *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
  *    receiver; nothing moves.
  *  - @c usearch_status_overflow_k A part passes a receiver shard's ceiling.
- *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index splits nothing yet.
+ *  - @c usearch_status_unsupported_k @c index on an AMD or Apple GPU, which no basic tower serves.
+ *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
+ *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_geospatial_split(usearch_geospatial_split_t* arguments);
 
-/** The arguments of @c usearch_geospatial_refinement_init. */
-typedef struct usearch_geospatial_refinement_init_t {
+/** The arguments of @c usearch_geospatial_split_plan_finish. */
+typedef struct usearch_geospatial_split_plan_finish_t {
 
-    /** The handle to be refined. */
+    /** The handle the plan was opened on. */
     usearch_geospatial_index_t index;
 
-    /** The executor every call on the refinement runs on; its kind must match the residency. */
+    /** The executor the plan was opened with. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1260,133 +1384,24 @@ typedef struct usearch_geospatial_refinement_init_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** The @b optional donors to absorb first, each consumed and nulled once its entries land; the
-     *  array must outlive the refinement. */
-    usearch_geospatial_index_t* donors;
+    /** The plan to close; freed by the call, whatever it answers. */
+    usearch_geospatial_split_plan_t plan;
 
-    /** Donor handles in @c donors. */
-    size_t count;
-
-    /** The @b optional receivers to split @c index into first, as @c usearch_geospatial_split fills
-     *  them, each refined in turn; the array must outlive the refinement. */
-    usearch_geospatial_index_t const* receivers;
-
-    /** Receiver handles in @c receivers, zero or at least two. */
-    size_t receivers_count;
-
-    /** Output for the new handle; @c NULL on failure. The index admits no insertion or save until
-     *  @c usearch_geospatial_refinement_finish frees it. */
-    usearch_geospatial_refinement_t* refinement;
-
-    /** The @b optional breadth and bytes of every pass the refinement steps. */
-    usearch_refine_options_t refine;
-
-    /** Picks the part roots when @c receivers are named, as in @c usearch_geospatial_split. */
-    uint64_t seed;
-} usearch_geospatial_refinement_init_t;
-
-/**
- *  @brief Opens a refinement of @c index, absorbing @c donors first when any are named, as
- *      @c usearch_geospatial_absorb moves them, or splitting it into @c receivers, as
- *      @c usearch_geospatial_split fills them. Every allocation the refinement needs in the index
- *      happens here, never in a step.
- *
- *  @par Statuses:
- *  - @c usearch_status_read_only_k @c index is an NVMe view.
- *  - @c usearch_status_unsupported_k @c index lives on a GPU, whose index refines nothing yet.
- *  - @c usearch_status_invalid_argument_k No executor, a @c NULL slot in @c donors or
- *    @c receivers, @c NULL @c donors for a nonzero @c count, one receiver alone, or donors and
- *    receivers both named.
- *  - @c usearch_status_config_mismatch_k A donor or receiver of another residency, class or
- *    connectivity, a receiver holding entries, or @c index itself.
- *  - @c usearch_status_contended_k An insertion or another refinement in flight on @c index, on
- *    a donor or on a receiver.
- */
-USEARCH_EXPORT void usearch_geospatial_refinement_init(usearch_geospatial_refinement_init_t* arguments);
-
-/** The arguments of @c usearch_geospatial_refinement_next. */
-typedef struct usearch_geospatial_refinement_next_t {
-
-    /** The handle the refinement was opened on. */
-    usearch_geospatial_index_t index;
-
-    /** The executor the refinement was opened with. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** The refinement to continue. */
-    usearch_geospatial_refinement_t refinement;
-
-    /** The @b optional handler, called with entries re-selected across every call so far. */
-    usearch_progress_t progress;
-
-    /** The @b optional outputs for the entries re-selected so far and, of those, the ones whose
-     *  neighbors changed; their ratio falling is what says another call buys little. */
-    size_t* reselected;
-    size_t* changed;
-
-    /** The @b optional traversal telemetry of every call on the refinement so far; @c NULL skips
-     *  reporting. */
-    usearch_traversal_stats_t* stats;
-} usearch_geospatial_refinement_next_t;
-
-/**
- *  @brief Continues the refinement until it ends or @c progress cancels, moving any donors still
- *      pending first. Answers @c usearch_status_cancelled_k when a later call has more to do; that
- *      call continues exactly where this one stopped. The executor is held only for the call.
- *
- *  Every call reaching the refinement writes the running totals, a cancelled or failed one too, so
- *  they only grow from one call to the next and @c changed never exceeds @c reselected; all stay
- *  zero while donors are pending.
- *
- *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
- *    was opened with.
- */
-USEARCH_EXPORT void usearch_geospatial_refinement_next(usearch_geospatial_refinement_next_t* arguments);
-
-/** The arguments of @c usearch_geospatial_refinement_finish. */
-typedef struct usearch_geospatial_refinement_finish_t {
-
-    /** The handle the refinement was opened on. */
-    usearch_geospatial_index_t index;
-
-    /** The executor the refinement was opened with. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** The refinement to finish; freed by the call, whatever it answers. */
-    usearch_geospatial_refinement_t refinement;
-
-    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
-     *  counts it; @c NULL skips reporting. */
+    /** The @b optional output for what the whole plan did to the graph. */
     usearch_refine_report_t* report;
-
-    /** The @b optional traversal telemetry of every call on the refinement; @c NULL skips
-     *  reporting. */
-    usearch_traversal_stats_t* stats;
-} usearch_geospatial_refinement_finish_t;
+} usearch_geospatial_split_plan_finish_t;
 
 /**
- *  @brief Skips whatever re-selection a stopped refinement left, re-links the islands it leaves as
- *      @c usearch_geospatial_refine does, reports, reopens the index, and frees the handle. A
- *      refinement whose donors have not all moved re-links nothing and reports zeros.
+ *  @brief Closes and frees @c plan whatever the call answers, reopening the index and receivers.
+ *
+ *  The rounds a cancel stopped close as a stop at that barrier would, their verdict reading
+ *  stopped; a plan whose parts have not all moved runs no round and reports zeros.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k @c index or @c executor is not the one the refinement
- *    was opened with; the handle is still freed.
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
+ *    executor; the plan is still freed.
  */
-USEARCH_EXPORT void usearch_geospatial_refinement_finish(usearch_geospatial_refinement_finish_t* arguments);
+USEARCH_EXPORT void usearch_geospatial_split_plan_finish(usearch_geospatial_split_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_geospatial_cursor_init. */
 typedef struct usearch_geospatial_cursor_init_t {

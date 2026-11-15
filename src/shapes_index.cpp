@@ -25,11 +25,22 @@ struct usearch_shapes_cursor_handle_t {
     u32_t named_calls = 0;
 };
 
-struct usearch_shapes_refinement_handle_t {
-    basic_refinement<usearch_shapes_index_handle_t> basic;
+struct usearch_shapes_refine_plan_handle_t {
+    basic_punned_plan<usearch_shapes_index_handle_t> punned;
+};
 
-    /** Executor calls naming the refinement that have not ended, which its free waits out. */
-    u32_t named_calls = 0;
+struct usearch_shapes_absorb_plan_handle_t {
+    basic_punned_plan<usearch_shapes_index_handle_t> punned;
+
+    /** The caller's donor slots, each nulled once the plan consumed its handle. */
+    std::span<usearch_shapes_index_t> donors;
+};
+
+struct usearch_shapes_split_plan_handle_t {
+    basic_punned_plan<usearch_shapes_index_handle_t> punned;
+
+    /** The caller's receivers, which the finish hands what each part counted. */
+    std::span<usearch_shapes_index_t const> receivers;
 };
 
 extern "C" {
@@ -102,14 +113,14 @@ USEARCH_EXPORT void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
 USEARCH_EXPORT void usearch_shapes_split(usearch_shapes_split_t* arguments) {
     basic_split<usearch_shapes_split>(arguments);
 }
-USEARCH_EXPORT void usearch_shapes_refinement_init(usearch_shapes_refinement_init_t* arguments) {
-    basic_refinement_init<usearch_shapes_refinement_init>(arguments);
+USEARCH_EXPORT void usearch_shapes_refine_plan_finish(usearch_shapes_refine_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_shapes_refine_plan_finish, usearch_shapes_refine_plan_handle_t>(arguments);
 }
-USEARCH_EXPORT void usearch_shapes_refinement_next(usearch_shapes_refinement_next_t* arguments) {
-    basic_refinement_next<usearch_shapes_refinement_next>(arguments);
+USEARCH_EXPORT void usearch_shapes_absorb_plan_finish(usearch_shapes_absorb_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_shapes_absorb_plan_finish, usearch_shapes_absorb_plan_handle_t>(arguments);
 }
-USEARCH_EXPORT void usearch_shapes_refinement_finish(usearch_shapes_refinement_finish_t* arguments) {
-    basic_refinement_finish<usearch_shapes_refinement_finish>(arguments);
+USEARCH_EXPORT void usearch_shapes_split_plan_finish(usearch_shapes_split_plan_finish_t* arguments) {
+    finish_basic_plan<usearch_shapes_split_plan_finish, usearch_shapes_split_plan_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_save(usearch_shapes_save_t* arguments) {
     basic_save<usearch_shapes_save>(arguments);

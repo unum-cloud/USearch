@@ -19,6 +19,7 @@
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <memory>           // `std::unique_ptr` - the executor's topology
 #include <mutex>            // `std::lock_guard` over the ticks' lock
+#include <new>              // `std::nothrow` - the plan handle a long verb opens
 #include <span>             // `std::span` - key batches crossing the ABI
 #include <string_view>      // `std::string_view` - checkpoint paths
 #include <thread>           // `std::this_thread::get_id` - the thread running the holding call's body
@@ -383,13 +384,20 @@ struct expensive_predicates {
 };
 
 /** One call's reports: the C handler, serialized for the executor's threads, which the contract
- *  promises it never sees concurrently, thinned to the caller's steps, and the slice a batch verb
- *  hands its engine whole. */
+ *  promises it never sees concurrently; per-unit ticks thinned to the caller's steps, every barrier
+ *  a self-counting verb reaches forwarded, and the slice a batch verb hands its engine whole. */
 struct progress_ticks_t {
     usearch_progress_t progress;
     std::size_t total;
-    std::size_t done = 0;   // Counted under the mutex that already serializes the handler.
-    std::size_t closed = 0; // The last step a forwarded tick closed.
+
+    /** Units finished as last counted or reported, under the mutex that serializes the handler. */
+    std::size_t done = 0;
+
+    /** The last step a forwarded per-unit tick closed. */
+    std::size_t closed = 0;
+
+    /** The population the last forwarded barrier tick named. */
+    std::size_t reported_population = 0;
     fu::spin_mutex_t mutex;
 
     progress_ticks_t(usearch_progress_t progress, std::size_t total) noexcept : progress(progress), total(total) {}
@@ -400,29 +408,35 @@ struct progress_ticks_t {
         return progress.callback ? divide_round_up<std::size_t>(total, steps_()) : total;
     }
 
+    /** One unit finished; a tick per entry or query reaches the handler only when it closes a new
+     *  step, or the last one. */
     continuation_t operator()(std::size_t) noexcept {
         if (!progress.callback) return continuation_t::continue_k;
         std::lock_guard guard {mutex};
-        return forward_(++done, total);
+        std::size_t const finished = ++done;
+        std::size_t const step = finished >= total ? steps_() : finished / divide_round_up(total, steps_());
+        if (step <= closed) return continuation_t::continue_k;
+        closed = step;
+        return forward_(finished, total);
     }
 
     /** The sibling for verbs that count their own units and know their own population - a
-     *  refinement ticks the nodes visited so far, which no counter here could derive. */
+     *  refinement ticks each barrier with its phase's units, which no counter here could derive,
+     *  and the handler hears every barrier that finished more or some of another population. */
     continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
         if (!progress.callback) return continuation_t::continue_k;
         std::lock_guard guard {mutex};
+        if (finished == done && (population == reported_population || !finished)) return continuation_t::continue_k;
+        done = finished;
+        reported_population = population;
         return forward_(finished, population);
     }
 
   private:
     std::size_t steps_() const noexcept { return progress.steps ? progress.steps : default_progress_steps_k; }
 
-    /** Hands the C handler a tick that closes a new step, or the last one; the caller holds the
-     *  mutex. */
+    /** Hands the C handler a tick; the caller holds the mutex. */
     continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
-        std::size_t const step = finished >= population ? steps_() : finished / divide_round_up(population, steps_());
-        if (step <= closed) return continuation_t::continue_k;
-        closed = step;
         return progress.callback(finished, population, progress.state) == usearch_cancel_k ? continuation_t::cancel_k
                                                                                            : continuation_t::continue_k;
     }
@@ -448,7 +462,7 @@ inline refine_config_t refine_config_of(usearch_refine_options_t options) noexce
     return {static_cast<candidates_count_t>(options.expansion_factor), options.memory_limit};
 }
 
-/** The variants behind a call's other handles, a split's receivers or a refinement's donors, read
+/** The variants behind a call's other handles, a split's receivers or an absorb's donors, read
  *  through the caller's own array, so a verb builds its one typed list straight from them. */
 struct variants_view_t {
     void const* handles = nullptr;
@@ -486,6 +500,22 @@ inline constexpr arena_residency_t vram_residency(std::size_t device) noexcept {
     return {usearch_residency_vram_k, static_cast<u32_t>(device)};
 }
 
+/** The C spelling of an engine's reachability @p audit. */
+template <typename audit_type_>
+inline usearch_reachability_t reachability_of(audit_type_ const& audit) noexcept {
+    usearch_reachability_t reachability {audit.audited_nodes, audit.reachable_nodes, audit.depth_from_root,
+                                         audit.depth_to_root};
+    if constexpr (requires { audit.unlinked; }) {
+        reachability.unlinked = audit.unlinked;
+        reachability.underlinked = audit.underlinked;
+        reachability.beyond_most_populated_depth = audit.beyond_most_populated_depth;
+        reachability.unreached_islands = audit.unreached_islands;
+        reachability.stranded_islands = audit.stranded_islands;
+        reachability.components = audit.components;
+    }
+    return reachability;
+}
+
 /** Writes what a refinement @p refined counts into the caller's @p report, if it names one. */
 template <typename refined_type_>
 inline void write_refine_report(usearch_refine_report_t* report, refined_type_ const& refined) noexcept {
@@ -494,8 +524,15 @@ inline void write_refine_report(usearch_refine_report_t* report, refined_type_ c
     report->changed = refined.changed_nodes;
     report->islands_found = refined.islands_found;
     report->islands_reconnected = refined.islands_reconnected;
-    report->reachability = {refined.reachability.audited_nodes, refined.reachability.reachable_nodes,
-                            refined.reachability.sweeps, refined.reachability.back_sweeps};
+    if constexpr (requires { refined.verdict; }) {
+        report->neighborhoods = refined.neighborhoods;
+        report->widest_neighborhood = refined.widest_neighborhood;
+        report->added_links = refined.added_links;
+        report->dropped_links = refined.dropped_links;
+        report->verdict = static_cast<usearch_refine_verdict_t>(refined.verdict);
+        report->opening = reachability_of(refined.opening);
+    }
+    report->reachability = reachability_of(refined.reachability);
 }
 
 #pragma endregion Composites
@@ -1752,7 +1789,7 @@ using deferred_arguments_t = std::variant< //
 
     /* Loading */
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_dense_load_nvme_t, usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,              //
     usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
     usearch_sequence_load_vram_t, usearch_sequence_load_vram_buffer_t,                                   //
     usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
@@ -1771,14 +1808,16 @@ using deferred_arguments_t = std::variant< //
     usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
     usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
     usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
-    usearch_geospatial_split_t, usearch_dense_compact_t,                                                       //
+    usearch_geospatial_split_t, usearch_dense_reshard_t,                                                       //
 
-    /* Refinements */
-    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t,          //
-    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t, usearch_sequence_refinement_finish_t, //
-    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t, usearch_shapes_refinement_finish_t,       //
-    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                                   //
-    usearch_geospatial_refinement_finish_t,                                                                       //
+    /* Plans */
+    usearch_dense_refine_plan_finish_t, usearch_dense_absorb_plan_finish_t, usearch_dense_split_plan_finish_t,    //
+    usearch_dense_reshard_plan_finish_t,                                                                          //
+    usearch_sequence_refine_plan_finish_t, usearch_sequence_absorb_plan_finish_t,                                 //
+    usearch_sequence_split_plan_finish_t,                                                                         //
+    usearch_shapes_refine_plan_finish_t, usearch_shapes_absorb_plan_finish_t, usearch_shapes_split_plan_finish_t, //
+    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_absorb_plan_finish_t,                             //
+    usearch_geospatial_split_plan_finish_t,                                                                       //
 
     /* Reading */
     usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
@@ -1804,8 +1843,8 @@ using deferred_arguments_t = std::variant< //
     /* Products */
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
 
-/** The counts of the handles a call names - its index or target, cursor, refinement and arena -
- *  each raised at its entry and lowered at its end; null where it names none. */
+/** The counts of the handles a call names - its index or target, cursor, plan, and arena - each
+ *  raised at its entry and lowered at its end; null where it names none. */
 using named_calls_t = std::array<u32_t*, 5>;
 
 /** Raises the count of every handle @p arguments name and answers where they are, so @c end_call
@@ -1822,7 +1861,9 @@ inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcep
     if constexpr (requires { arguments.index->named_calls; }) name(arguments.index);
     if constexpr (requires { arguments.target->named_calls; }) name(arguments.target);
     if constexpr (requires { arguments.cursor->named_calls; }) name(arguments.cursor);
-    if constexpr (requires { arguments.refinement->named_calls; }) name(arguments.refinement);
+    // A finish frees its plan mid-call, so only a verb continuing a live one names it.
+    if constexpr (requires { (*arguments.plan)->punned.named_calls; })
+        if (arguments.plan && *arguments.plan) name(&(*arguments.plan)->punned);
     if constexpr (requires { arguments.arena->named_calls; }) name(arguments.arena);
     return named;
 }
@@ -2616,3 +2657,131 @@ inline void wait_while_claimed(usearch_executor_handle_t& executor) noexcept {
 }
 
 #pragma endregion Holding Calls
+
+#pragma region Plans
+
+/** The unit each phase of a round counts, by its ordinal: none past the round, then the opening
+ *  health check, the heal, hubs, gather, restitch and the closing health check. */
+inline constexpr std::array<char const*, 7> round_phase_units_k {"",        "entries", "islands", "entries",
+                                                                 "entries", "entries", "entries"};
+
+/** Where an engine's resumable @p plan stands; one that names no phase of a round reports none. */
+template <typename plan_type_>
+usearch_phase_t phase_of(plan_type_ const& plan) noexcept {
+    if constexpr (!requires { plan.ordinal(); }) return {};
+    else {
+        std::size_t const ordinal = plan.ordinal();
+        return {plan.phase_name(), ordinal,      round_phase_units_k.size() - 1,
+                plan.completed(),  plan.total(), round_phase_units_k[ordinal]};
+    }
+}
+
+/** Whether @p phase names a plan whose round ended, and nothing more is pending. */
+inline bool round_ended(usearch_phase_t const& phase) noexcept {
+    return phase.name && std::string_view {phase.name} == "done";
+}
+
+/**
+ *  @brief One variant's engine plan behind a C plan handle, the table whose entries step, read and
+ *      free it, and the index and executor it was opened with.
+ *
+ *  The engine plan keeps its index closed until it is freed, which waits out the executor calls
+ *  naming the handle first.
+ */
+template <typename index_handle_type_, typename tables_type_>
+struct punned_plan {
+    tables_type_ tables;
+
+    /** The variant's engine plan, opened by the call that made the handle and freed with it. */
+    void* engine_plan = nullptr;
+
+    /** The handle and executor the plan was opened with, only ever compared with the ones each call
+     *  passes. */
+    index_handle_type_ const* opened_on = nullptr;
+    usearch_executor_t opened_with = nullptr;
+
+    /** Executor calls naming the plan that have not ended. */
+    u32_t named_calls = 0;
+
+    punned_plan() noexcept = default;
+    punned_plan(punned_plan const&) = delete;
+    punned_plan& operator=(punned_plan const&) = delete;
+    ~punned_plan() noexcept {
+        wait_named_calls(named_calls);
+        if (engine_plan) std::visit([&](auto const* verbs) noexcept { verbs->plan_free(engine_plan); }, tables);
+    }
+};
+
+/** Whether the call @p arguments describe may take the plan it names: none, a null one with an
+ *  executor to outlive it, or a live one opened on the same index and executor; false once
+ *  @p outcome records why not. */
+template <typename arguments_type_>
+bool accepts_plan(arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
+    if (!arguments.plan) return true;
+    if (!arguments.executor)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A plan needs an executor that outlives it");
+    if (*arguments.plan && (arguments.index != (*arguments.plan)->punned.opened_on ||
+                            arguments.executor != (*arguments.plan)->punned.opened_with))
+        return propagate_error(usearch_status_invalid_argument_k, outcome,
+                               "The plan was opened on another index or executor");
+    return true;
+}
+
+/**
+ *  @brief Runs one call of a long verb on @p plan: opens one through @p open while it is null, or
+ *      starts a live one's next round once its last one ended, then runs it until it ends or
+ *      @p ticks cancels, and answers its report so far beside how the call ended.
+ *
+ *  @p open fills the handle it is handed with what its operation keeps beside the engine plan, and
+ *  answers that plan's state or why none opened, leaving @p plan null and nothing allocated. A plan
+ *  stays live whatever the call answers, until its operation's finish frees it. @p phase, when
+ *  named, hears where the plan stopped; a cancel heard at the barrier closing a round answers
+ *  success, since the round had ended.
+ */
+template <typename handle_type_, typename index_handle_type_, typename verbs_type_, typename executor_type_,
+          typename open_type_>
+expected<refine_report_t> drive_plan(handle_type_*& plan, usearch_phase_t* phase, index_handle_type_ const* index,
+                                     usearch_executor_t executor_handle, verbs_type_ const& verbs, void* variant,
+                                     executor_type_& executor, progress_ticks_t& ticks, open_type_&& open) noexcept {
+    if (!plan) {
+        handle_type_* const opened = new (std::nothrow) handle_type_ {};
+        if (!opened) return {{}, status_t::bad_alloc_k};
+        opened->punned.tables = &verbs;
+        opened->punned.opened_on = index;
+        opened->punned.opened_with = executor_handle;
+        expected<void*> const state = open(*opened);
+        if (failed(state.status)) return delete opened, expected<refine_report_t> {{}, state.status};
+        opened->punned.engine_plan = state.value;
+        plan = opened;
+    }
+    void* const state = plan->punned.engine_plan;
+    if (round_ended(verbs.plan_phase(state))) verbs.plan_next_round(state);
+    status_t ran = verbs.plan_next(variant, state, executor, ticks);
+    usearch_phase_t const reached = verbs.plan_phase(state);
+    if (ran == status_t::cancelled_k && round_ended(reached)) ran = status_t::success_k;
+    if (phase) *phase = reached;
+    return {verbs.plan_running(state), ran};
+}
+
+/** Writes what a long verb's @p refined result counts into the outputs @p arguments name, and
+ *  answers how the call ended: a stopped round's report stands beside the cancel. */
+template <typename arguments_type_>
+inline void publish_refined(arguments_type_ const& arguments, expected<refine_report_t> const& refined,
+                            usearch_outcome_t* outcome) noexcept {
+    accumulate_stats(arguments.stats, refined.value);
+    if (failed(refined.status) && refined.status != status_t::cancelled_k)
+        return propagate_error(refined.status, outcome), void();
+    write_refine_report(arguments.report, refined.value);
+    if (failed(refined.status)) return propagate_error(refined.status, outcome), void();
+    propagate_error(usearch_status_success_k, outcome, nullptr);
+}
+
+/** Clears the outputs of a long verb @p arguments name, before it runs. */
+template <typename arguments_type_>
+inline void reset_refined(arguments_type_ const& arguments) noexcept {
+    if (arguments.stats) *arguments.stats = {};
+    if (arguments.report) *arguments.report = {};
+    if (arguments.phase) *arguments.phase = {};
+}
+
+#pragma endregion Plans

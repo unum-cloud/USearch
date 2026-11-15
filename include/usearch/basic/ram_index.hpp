@@ -2287,6 +2287,16 @@ struct ram_index {
             }
         }
 
+        /** The position of the round's phase in hand among its six, from the opening health
+         *  check to the closing one; zero outside a round's phases. */
+        std::size_t ordinal() const noexcept {
+            std::size_t const opening = static_cast<std::size_t>(phase_t::opening_k);
+            std::size_t const closing = static_cast<std::size_t>(phase_t::restitch_k) - opening + 2;
+            // A check after a closing heal closes the round too, as the one after the restitch.
+            if (phase_ == phase_t::health_k) return swept_after_ == phase_t::opening_k ? 1 : closing;
+            return rounding() ? static_cast<std::size_t>(phase_) - opening + 1 : 0;
+        }
+
         /** Units of the round's phase in hand done so far, at a barrier before it advances: entries
          *  swept and marked by a health check, and otherwise all of the phase's, since each of its
          *  passes runs to its end. */
@@ -2311,6 +2321,18 @@ struct ram_index {
 
         /** The first failure the plan met, which ended it; success otherwise. */
         status_t status() const noexcept { return status_; }
+
+        /** Opens the next round once one ended, from the root the closing health check kept: the
+         *  count and the changed marks start over, the health check takes in the entries the moves
+         *  appended, and the opening health check sweeps again. A no-op mid-round and on a plan
+         *  bound to no index. Contexts then need @ref reserve again. */
+        void next_round() noexcept {
+            if (!index_ || phase_ != phase_t::done_k || failed(status_)) return;
+            tally_ = {};
+            health.widen(static_cast<node_id_t>(index_->size()));
+            if (failed(reserve_round_(health.visible))) return status_ = status_t::bad_alloc_k, void();
+            open_health_(phase_t::opening_k);
+        }
 
         /**
          *  @brief Grows @p context to what a gather or restitch task touches, which a driver calls

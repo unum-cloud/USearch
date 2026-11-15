@@ -256,26 +256,30 @@ struct basic_verbs {
     /** Audits the reachability of every shard. */
     expected<reachability_t> (*health)(void* variant, executor_t& executor) noexcept;
 
-    // Refinements
+    // Plans
 
-    /** Opens a refinement absorbing @p donors first, or splitting into @p receivers first, its part
-     *  roots drawn from the config's seed. */
-    expected<void*> (*refinement_init)(void* variant, variants_view_t donors, variants_view_t receivers,
-                                       split_config_t config, executor_t& executor) noexcept;
-    std::size_t (*refinement_population)(void const* refinement) noexcept;
-    status_t (*refinement_next)(void* variant, void* refinement, executor_t& executor,
-                                progress_ticks_t& ticks) noexcept;
+    /** Opens a refine plan absorbing @p donors first, or splitting into @p receivers first, its
+     *  part roots drawn from the config's seed. */
+    expected<void*> (*plan_open)(void* variant, variants_view_t donors, variants_view_t receivers,
+                                 split_config_t config, executor_t& executor) noexcept;
+    status_t (*plan_next)(void* variant, void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** Whether the refinement consumed its donor at @p donor, which its owner may then free. */
-    bool (*refinement_consumed)(void const* refinement, std::size_t donor) noexcept;
+    /** Whether the plan consumed its donor at @p donor, which its owner may then free. */
+    bool (*plan_consumed)(void const* plan, std::size_t donor) noexcept;
     void (*count_absorbed_donor)(void* variant, void const* donor) noexcept;
 
     /** Hands @p receiver what the variant counted of the part it took, once the split's parts
      *  are filled. */
-    void (*count_split_receiver)(void* variant, void const* refinement, void* receiver) noexcept;
-    refine_report_t (*refinement_running)(void* refinement) noexcept;
-    expected<refine_report_t> (*refinement_finish)(void* variant, void* refinement, executor_t& executor) noexcept;
-    void (*refinement_free)(void* refinement) noexcept;
+    void (*count_split_receiver)(void* variant, void const* plan, void* receiver) noexcept;
+    refine_report_t (*plan_running)(void* plan) noexcept;
+    expected<refine_report_t> (*plan_finish)(void* variant, void* plan, executor_t& executor) noexcept;
+    void (*plan_free)(void* plan) noexcept;
+
+    /** Where a plan's round stands; one that runs no round names no phase. */
+    usearch_phase_t (*plan_phase)(void const* plan) noexcept;
+
+    /** Opens a plan's next round, from the same root, once its last one ended. */
+    void (*plan_next_round)(void* plan) noexcept;
 
     // Lookups
     status_t (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,

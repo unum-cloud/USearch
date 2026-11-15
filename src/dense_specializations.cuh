@@ -12,10 +12,12 @@
  */
 #pragma once
 
-#include <array> // `std::array` - a class unit's variants
-#include <new>   // `std::nothrow`
+#include <array>       // `std::array` - a class unit's variants
+#include <new>         // `std::nothrow`
+#include <type_traits> // `std::conditional_t` - the engine plans a plan may hold
+#include <variant>     // `std::variant`, `std::in_place_type` - a reshard's plan beside a refine's
 
-#include "usearch/dense/nvme_indexes.hpp"
+#include "usearch/dense/nvme_compaction.hpp" // `refine_parts` - a loaded NVMe index's refine
 #include "usearch/dense/ram_compaction.hpp"
 #include "usearch/dense/ram_indexes.hpp"
 #if USEARCH_ARCH_CUDA_
@@ -187,20 +189,6 @@ struct dense_scratch<indexes_type_> {
     }
 };
 
-/** Bytes of cache each thread over @p topology keeps to itself: each core's share of the deepest
- *  cache a compute domain confines to its cores, at its smallest across domains, or zero where no
- *  platform source names one. */
-inline static std::size_t thread_cache_bytes(fu_topology_t topology) noexcept {
-    std::size_t domains = 0, smallest = 0;
-    if (fu_compute_domains_count(topology, &domains) != fu_success_k) return 0;
-    for (std::size_t domain = 0; domain != domains; ++domain) {
-        std::size_t bytes = 0;
-        if (fu_compute_cache_bytes_per_core_in(topology, domain, &bytes) != fu_success_k || !bytes) continue;
-        smallest = smallest ? min_of(smallest, bytes) : bytes;
-    }
-    return smallest;
-}
-
 /** Searches @p index under an expensive @p predicate through a family of per-thread predicates
  *  gathering what the traversal @p config names hands them; the engine opens the family and
  *  reserves it for the widest round it settles. */
@@ -223,21 +211,43 @@ inline static expected<typename index_type_::search_result_t> search_with_expens
     return search_if(walked);
 }
 
-/** A refinement in flight: the typed donors it absorbs, each nulled once consumed, which the plan
- *  reads in place. */
+/** A plan in flight: the typed donors it absorbs, each nulled once consumed, the receivers it
+ *  splits into, or the index a reshard packs in place, which the engine plan reads in place; a RAM
+ *  index's reshard holds a compaction plan, every other operation a refine plan. */
 template <typename index_type_>
-struct dense_refinement {
-    growing_buffer<index_type_*> donors;
-    typename index_type_::refine_plan_t plan;
+struct dense_plan {
+    using refine_plan_t = typename index_type_::refine_plan_t;
+    using engine_plan_t =
+        std::conditional_t<is_ram_index<index_type_>, std::variant<refine_plan_t, dense::ram_compact_plan<index_type_>>,
+                           std::variant<refine_plan_t>>;
+    growing_buffer<index_type_*> others;
+    engine_plan_t plan;
 };
+
+/** The refine plan whose rounds @p plan runs: its own, or the one a compaction moves into. */
+template <typename refine_plan_type_>
+refine_plan_type_& rounds_of(refine_plan_type_& plan) noexcept {
+    return plan;
+}
+template <typename indexes_type_>
+typename dense::ram_compact_plan<indexes_type_>::refine_plan_t& rounds_of(
+    dense::ram_compact_plan<indexes_type_>& plan) noexcept {
+    return plan.refining();
+}
+template <typename indexes_type_>
+typename dense::ram_compact_plan<indexes_type_>::refine_plan_t const& rounds_of(
+    dense::ram_compact_plan<indexes_type_> const& plan) noexcept {
+    return plan.refining();
+}
 
 /**
  *  @brief One variant's bodies, every one a static member its verb table points at, taking the
  *      index as @c void* and casting it back to @p index_type_.
  *
  *  An NVMe view serves its checkpoint in place, so its mutating bodies answer
- *  @c usearch_status_read_only_k; a device index answers @c unsupported_k for what only a host walk
- *  takes, as host predicates and cursors.
+ *  @c usearch_status_read_only_k, and a loaded NVMe index, whose parts change only by a refine,
+ *  @c unsupported_k; a device index answers @c unsupported_k for what only a host walk takes, as
+ *  host predicates and cursors.
  */
 template <typename index_type_>
 struct specialized_index {
@@ -260,19 +270,32 @@ struct specialized_index {
     static index_t& of(void* index) noexcept { return *static_cast<index_t*>(index); }
     static index_t const& of(void const* index) noexcept { return *static_cast<index_t const*>(index); }
 
+    /** What a write this index cannot take answers: an NVMe index's own refusal, which a view and a
+     *  loaded index spell apart, and @c unsupported_k elsewhere. */
+    static status_t refuses_writes(void const* index) noexcept {
+        if constexpr (requires { of(index).refuses_writes(); }) return of(index).refuses_writes();
+        else return status_t::unsupported_k;
+    }
+
+    /** Runs the reader @p read between the part swaps of an index that swaps parts, and once on
+     *  every other index. */
+    template <typename read_type_>
+    static std::invoke_result_t<read_type_&> between_swaps(void const* index, read_type_&& read) noexcept {
+        if constexpr (requires { of(index).read_between_swaps(read); }) return of(index).read_between_swaps(read);
+        else return read();
+    }
+
     /** The traversal stats of one engine result, or its failure. */
     template <typename result_type_>
     static expected<traversal_stats_t> stats_of(expected<result_type_> const& result) noexcept {
         return {traversal_stats_of(result.value), result.status};
     }
 
-    /** The engine's search config of the call's @p search, a RAM scan blocking its rows by each
-     *  thread's own cache. */
-    static search_config_t search_config_of(::search_config_t search, executor_t& executor) noexcept {
+    /** The engine's search config of the call's @p search. */
+    static search_config_t search_config_of(::search_config_t search) noexcept {
         search_config_t config {};
         config.expansion_factor = search.expansion_factor;
         config.traversal = search.traversal;
-        if constexpr (requires { config.cache_bytes; }) config.cache_bytes = thread_cache_bytes(executor.topology());
         return config;
     }
 
@@ -282,6 +305,7 @@ struct specialized_index {
         typename engine_type_::refine_config_t config {};
         config.expansion_factor = refine.expansion_factor;
         config.memory_limit = refine.memory_limit;
+        if constexpr (requires { config.cache_bytes; }) config.cache_bytes = refine.cache_bytes;
         return config;
     }
 
@@ -347,6 +371,18 @@ struct specialized_index {
         }
         else return status_t::unsupported_k;
     }
+    static status_t load_nvme(void* index, std::string_view path, usearch_ram_options_t const* ram,
+                              usearch_executor_t executor) noexcept
+        requires is_nvme_index<index_type_>
+    {
+        executor_t* const engines = executor ? std::get_if<executor_t>(&executor->executor) : nullptr;
+        if (ram && !engines) return status_t::invalid_argument_k;
+        if (status_t const loaded = of(index).load(path); failed(loaded) || !ram) return loaded;
+        return of(index).hold_keys(forkunion_allocator_t {tables_domain(*ram)}, ram->memory_limit, *engines);
+    }
+    static status_t load_nvme(void*, std::string_view, usearch_ram_options_t const*, usearch_executor_t) noexcept {
+        return status_t::unsupported_k;
+    }
 
     static nk_kernel_kind_t kernel(void const* index) noexcept { return of(index).kernel(); }
     static dense::geometry_t geometry(void const* index) noexcept {
@@ -372,23 +408,24 @@ struct specialized_index {
         else return of(index).storage_requirements(save_config_of());
     }
 
-    static status_t serves_writes(void const*) noexcept {
-        return viewed_k ? status_t::read_only_k : status_t::success_k;
+    static status_t serves_writes(void const* index) noexcept {
+        if constexpr (viewed_k) return refuses_writes(index);
+        else return status_t::success_k;
     }
     static status_t reserve(void* index, std::size_t capacity) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
+        if constexpr (viewed_k) return refuses_writes(index);
         else return of(index).reserve({capacity}).status;
     }
     static status_t clear(void* index) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
+        if constexpr (viewed_k) return refuses_writes(index);
         else return of(index).clear();
     }
 
-    /** Writes @p rows under @p keys through one plan, a step per chunk, and publishes them all at
+    /** Writes @p rows under @p keys through one plan, a task per chunk, and publishes them all at
      *  once. */
     static expected<traversal_stats_t> insert(void* index, keys_view_t keys, rows_view_t rows, insert_config_t insert,
                                               executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        if constexpr (viewed_k) return {{}, refuses_writes(index)};
         else {
             typename index_t::insert_config_t config {};
             config.expansion_factor = insert.expansion_factor;
@@ -410,7 +447,7 @@ struct specialized_index {
                                            rows.slice(inserted, taking));
                 }();
                 if (failed(stepped)) {
-                    // A refused RAM step dispensed nothing, so the dropped plan releases every
+                    // A refused RAM task dispensed nothing, so the dropped plan releases every
                     // claim.
                     if constexpr (is_ram_index<index_type_>) return {{}, stepped};
                     else break;
@@ -420,25 +457,46 @@ struct specialized_index {
                 // cancel goes unheard.
                 ticks(inserted, count);
             }
-            // After a failed device step, `finish` publishes nothing and reports the failure the
+            // After a failed device task, `finish` publishes nothing and reports the failure the
             // plan kept.
             return stats_of(plan.finish());
         }
     }
 
+    /** Refines a loaded NVMe index part by part, replacing each; a view holds no writer, so it
+     *  answers @c read_only_k. */
+    static expected<refine_report_t> refine(void* index, ::refine_config_t config, executor_t& executor,
+                                            progress_ticks_t& ticks) noexcept
+        requires is_nvme_index<index_type_>
+    {
+        return dense::refine_parts(of(index), refine_config_of(config), executor, ticks);
+    }
     static expected<refine_report_t> refine(void* index, ::refine_config_t config, executor_t& executor,
                                             progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
-        else if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
-        else
-            return of(index).refine(
-                refine_config_of(config), executor,
-                [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+        if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
+        return of(index).refine(
+            refine_config_of(config), executor,
+            [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
     }
 
+    /** Absorbs NVMe donors into a loaded NVMe index, their parts and its own repacked beside its
+     *  manifest, every donor consumed once the manifest names the new parts; a view refuses. */
+    static expected<refine_report_t> absorb(void* index, std::span<void*> donors, ::refine_config_t config,
+                                            executor_t& executor, progress_ticks_t& ticks) noexcept
+        requires is_nvme_index<index_type_>
+    {
+        growing_buffer<index_t*> typed {global_allocator};
+        if (failed(typed.reserve_exactly(donors.size()))) return {{}, status_t::bad_alloc_k};
+        for (void* const donor : donors) typed.push_back_reserved(static_cast<index_t*>(donor));
+        expected<refine_report_t> const absorbed = dense::absorb_parts(of(index), to_span(typed),
+                                                                       refine_config_of(config), executor, ticks);
+        if (succeeded(absorbed.status))
+            for (void*& donor : donors) donor = nullptr;
+        return absorbed;
+    }
     static expected<refine_report_t> absorb(void* index, std::span<void*> donors, ::refine_config_t config,
                                             executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        if constexpr (viewed_k) return {{}, refuses_writes(index)};
         else if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
         else {
             growing_buffer<index_t*> typed {global_allocator};
@@ -453,19 +511,53 @@ struct specialized_index {
         }
     }
 
-    static expected<dense::compact_result_t> compact(void* index, std::span<void* const> sources,
-                                                     dense::compact_config_t config, executor_t& executor,
-                                                     progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
-        else if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-        else {
-            growing_buffer<index_t*> typed {global_allocator};
-            if (failed(typed.reserve_exactly(sources.size()))) return {{}, status_t::bad_alloc_k};
-            for (void* const source : sources) typed.push_back_reserved(static_cast<index_t*>(source));
-            return dense::compact(
-                to_span(typed), of(index), executor, config,
-                [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
-        }
+    /** Packs a RAM index's own shards in place under its RAM placement's capacity, the index being
+     *  its only source; a placement of another residency names nothing it holds, and named domains
+     *  would place shards anew, which no RAM reshard does yet. */
+    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t placements, executor_t& executor,
+                                                     progress_ticks_t& ticks) noexcept
+        requires is_ram_index<index_type_>
+    {
+        if (status_t const refused = refuses_placements(placements); failed(refused)) return {{}, refused};
+        std::array<index_t*, 1> const sources {&of(index)};
+        return dense::compact(
+            std::span<index_t* const> {sources}, of(index), executor, compact_config_of(placements),
+            [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+    }
+
+    /** What a RAM reshard refuses of @p placements: another residency's, which names nothing the
+     *  index holds, or named domains, which would place shards anew. */
+    static status_t refuses_placements(reshard_placements_t placements) noexcept {
+        if (placements.vram || placements.nvme) return status_t::config_mismatch_k;
+        if (placements.ram && placements.ram->memory_domains_count) return status_t::unsupported_k;
+        return status_t::success_k;
+    }
+
+    /** The compaction a RAM reshard under @p placements runs. */
+    static dense::compact_config_t compact_config_of(reshard_placements_t placements) noexcept {
+        dense::compact_config_t config;
+        config.shard_capacity = placements.ram ? placements.ram->shard_capacity : 0;
+        config.expansion_factor = static_cast<u32_t>(placements.refine.expansion_factor);
+        config.memory_limit = placements.refine.memory_limit;
+        return config;
+    }
+
+    /** Repacks a loaded NVMe index's parts in place into as few parts as address their entries; a
+     *  placement of another residency names nothing it holds, and named drives would place parts
+     *  anew, which no NVMe reshard does yet. A view answers @c read_only_k. */
+    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t placements, executor_t& executor,
+                                                     progress_ticks_t& ticks) noexcept
+        requires is_nvme_index<index_type_>
+    {
+        if (placements.ram || placements.vram) return {{}, status_t::config_mismatch_k};
+        if (placements.nvme && placements.nvme->paths_count) return {{}, status_t::unsupported_k};
+        return dense::reshard_parts(of(index), 0, refine_config_of(placements.refine), executor, ticks);
+    }
+
+    /** Every other index refuses a reshard as it refuses a write. */
+    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t, executor_t&,
+                                                     progress_ticks_t&) noexcept {
+        return {{}, refuses_writes(index)};
     }
 
     /** The typed indexes behind @p indexes, or an empty buffer when it found no memory. */
@@ -477,9 +569,19 @@ struct specialized_index {
         return typed;
     }
 
+    /** Splits a loaded NVMe index into empty NVMe receivers, each loading a manifest of its own
+     *  beside the source's; a view answers @c read_only_k. */
+    static expected<refine_report_t> split(void* index, variants_view_t receivers, ::split_config_t config,
+                                           executor_t& executor, progress_ticks_t& ticks) noexcept
+        requires is_nvme_index<index_type_>
+    {
+        growing_buffer<index_t*> typed = indexes_of(receivers);
+        if (typed.size() != receivers.size()) return {{}, status_t::bad_alloc_k};
+        return dense::split_parts(of(index), to_span(typed), refine_config_of(config.refine), executor, ticks);
+    }
     static expected<refine_report_t> split(void* index, variants_view_t receivers, ::split_config_t config,
                                            executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
+        if constexpr (viewed_k) return {{}, refuses_writes(index)};
         else if (!limits_memory_k && config.refine.memory_limit) return {{}, status_t::unsupported_k};
         else {
             growing_buffer<index_t*> typed = indexes_of(receivers);
@@ -490,11 +592,13 @@ struct specialized_index {
         }
     }
 
-    static expected<void*> refinement_init(void* index, variants_view_t donors, variants_view_t receivers,
-                                           ::split_config_t config, executor_t& executor) noexcept {
-        if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
+    static expected<void*> plan_open(void* index, variants_view_t donors, variants_view_t receivers,
+                                     ::split_config_t config, executor_t& executor) noexcept {
+        if constexpr (viewed_k) return {nullptr, refuses_writes(index)};
         else if (!limits_memory_k && config.refine.memory_limit) return {nullptr, status_t::unsupported_k};
         else {
+            using plan_t = dense_plan<index_t>;
+            using refine_plan_t = typename index_t::refine_plan_t;
             variants_view_t const others = receivers.empty() ? donors : receivers;
             growing_buffer<index_t*> typed = indexes_of(others);
             if (typed.size() != others.size()) return {nullptr, status_t::bad_alloc_k};
@@ -504,62 +608,121 @@ struct specialized_index {
                     ? of(index).plan_absorb(to_writable_span(typed), refine_config_of(config.refine), executor)
                     : of(index).plan_split(to_writable_span(typed), split_config_of(config), executor);
             if (failed(status)) return {nullptr, status};
-            dense_refinement<index_t>* const opened = new (std::nothrow)
-                dense_refinement<index_t> {std::move(typed), std::move(plan)};
+            plan_t* const opened = new (std::nothrow) plan_t {
+                std::move(typed), typename plan_t::engine_plan_t {std::in_place_type<refine_plan_t>, std::move(plan)}};
             if (!opened) return {nullptr, status_t::bad_alloc_k};
             return {opened, status_t::success_k};
         }
     }
-    static status_t refinement_next(void*, void* refinement, executor_t& executor, progress_ticks_t& ticks) noexcept {
+
+    /** Opens a RAM index's reshard in place under its placement's capacity, as @ref reshard runs
+     *  it; every other index refuses as it refuses a write. */
+    static expected<void*> reshard_plan_open(void* index, reshard_placements_t placements,
+                                             executor_t& executor) noexcept
+        requires is_ram_index<index_type_>
+    {
+        using plan_t = dense_plan<index_t>;
+        using compact_plan_t = dense::ram_compact_plan<index_t>;
+        if (status_t const refused = refuses_placements(placements); failed(refused)) return {nullptr, refused};
+        growing_buffer<index_t*> sources {global_allocator};
+        if (failed(sources.reserve_exactly(1))) return {nullptr, status_t::bad_alloc_k};
+        sources.push_back_reserved(&of(index));
+        // The plan borrows the source slot, whose storage moves along with the buffer.
+        auto [plan, status] = dense::plan_compact(to_span(sources), of(index), executor, compact_config_of(placements));
+        if (failed(status)) return {nullptr, status};
+        plan_t* const opened = new (std::nothrow) plan_t {
+            std::move(sources), typename plan_t::engine_plan_t {std::in_place_type<compact_plan_t>, std::move(plan)}};
+        if (!opened) return {nullptr, status_t::bad_alloc_k};
+        return {opened, status_t::success_k};
+    }
+    static expected<void*> reshard_plan_open(void* index, reshard_placements_t, executor_t&) noexcept {
+        return {nullptr, refuses_writes(index)};
+    }
+
+    static status_t plan_next(void*, void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
         else {
-            dense_refinement<index_t>& opened = *static_cast<dense_refinement<index_t>*>(refinement);
+            dense_plan<index_t>& opened = *static_cast<dense_plan<index_t>*>(plan);
             scratch_t scratch {executor};
             if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return prepared;
             auto const report = [&](std::size_t swept, std::size_t population) noexcept {
                 return ticks(swept, population);
             };
-            if constexpr (is_ram_index<index_type_>)
-                return opened.plan.run(executor, to_writable_span(scratch.traversals), report);
-            else return opened.plan.run(executor, report);
+            return std::visit(
+                [&](auto& engine_plan) noexcept -> status_t {
+                    if constexpr (is_ram_index<index_type_>)
+                        return engine_plan.run(executor, to_writable_span(scratch.traversals), report);
+                    else return engine_plan.run(executor, report);
+                },
+                opened.plan);
         }
     }
-    static refine_report_t refinement_running(void const* refinement) noexcept {
+    static refine_report_t plan_running(void const* plan) noexcept {
         if constexpr (viewed_k) return {};
-        else return static_cast<dense_refinement<index_t> const*>(refinement)->plan.running();
+        else
+            return std::visit([](auto const& engine_plan) noexcept { return rounds_of(engine_plan).running(); },
+                              static_cast<dense_plan<index_t> const*>(plan)->plan);
     }
-    static bool refinement_consumed(void const* refinement, std::size_t donor) noexcept {
+    static bool plan_consumed(void const* plan, std::size_t donor) noexcept {
         if constexpr (viewed_k) return false;
-        else return !static_cast<dense_refinement<index_t> const*>(refinement)->donors[donor];
+        else return !static_cast<dense_plan<index_t> const*>(plan)->others[donor];
     }
-    static expected<refine_report_t> refinement_finish(void*, void* refinement, executor_t& executor) noexcept {
+    static expected<refine_report_t> plan_finish(void*, void* plan, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
         else {
-            dense_refinement<index_t>& opened = *static_cast<dense_refinement<index_t>*>(refinement);
+            dense_plan<index_t>& opened = *static_cast<dense_plan<index_t>*>(plan);
             scratch_t scratch {executor};
             if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-            if constexpr (is_ram_index<index_type_>)
-                return opened.plan.finish(executor, to_writable_span(scratch.traversals));
-            else return opened.plan.finish(executor);
+            if constexpr (!is_ram_index<index_type_>)
+                return std::visit([&](auto& engine_plan) noexcept { return engine_plan.finish(executor); },
+                                  opened.plan);
+            else {
+                std::span<typename scratch_t::traversal_context_t> const traversals = to_writable_span(
+                    scratch.traversals);
+                return std::visit(
+                    [&](auto& engine_plan) noexcept -> expected<refine_report_t> {
+                        if constexpr (requires { engine_plan.refining(); }) {
+                            auto const [compacted, status] = engine_plan.finish(executor, traversals);
+                            return {compacted.graph, status};
+                        }
+                        else return engine_plan.finish(executor, traversals);
+                    },
+                    opened.plan);
+            }
         }
     }
-    static void refinement_free(void* refinement) noexcept {
-        if constexpr (!viewed_k) delete static_cast<dense_refinement<index_t>*>(refinement);
+    static void plan_free(void* plan) noexcept {
+        if constexpr (!viewed_k) delete static_cast<dense_plan<index_t>*>(plan);
+    }
+    static usearch_phase_t plan_phase(void const* plan) noexcept {
+        if constexpr (viewed_k) return {};
+        else
+            return std::visit([](auto const& engine_plan) noexcept { return phase_of(rounds_of(engine_plan)); },
+                              static_cast<dense_plan<index_t> const*>(plan)->plan);
+    }
+    static void plan_next_round(void* plan) noexcept {
+        if constexpr (!viewed_k)
+            std::visit(
+                [](auto& engine_plan) noexcept {
+                    if constexpr (requires { rounds_of(engine_plan).next_round(); })
+                        rounds_of(engine_plan).next_round();
+                },
+                static_cast<dense_plan<index_t>*>(plan)->plan);
     }
 
     static expected<reachability_t> health(void* index, executor_t& executor) noexcept {
-        return of(index).health(executor);
+        return between_swaps(index, [&]() noexcept { return of(index).health(executor); });
     }
     static status_t count(void* index, std::span<key_t const> keys, std::span<std::size_t> entries,
                           executor_t& executor) noexcept {
-        return of(index).count(keys, entries, executor);
+        return between_swaps(index, [&]() noexcept { return of(index).count(keys, entries, executor); });
     }
 
     /** Every tower casts the stored scalar into the rows' on its own side, a GPU one on the device;
      *  Apple's reads the stored scalar alone. */
     static status_t get(void* index, std::span<key_t const> keys, rows_span_t outputs, std::span<std::size_t> entries,
                         std::size_t wanted, executor_t& executor) noexcept {
-        return of(index).get(keys, outputs, entries, wanted, executor);
+        return between_swaps(index, [&]() noexcept { return of(index).get(keys, outputs, entries, wanted, executor); });
     }
 
     /** Ranks each query's nearest entries, every walk seeded by its query's @p hints; a cheap
@@ -572,23 +735,25 @@ struct specialized_index {
             if (!hints.counts.empty()) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-        search_config_t const config = search_config_of(search, executor);
-        return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
-            if constexpr (is_vram_index<index_type_>)
-                return stats_of(of(index).search(queries, matches, config, executor));
-            else if constexpr (std::is_same_v<narrowing_type_, expensive_predicate_t>)
-                return stats_of(search_with_expensive_predicate(of(index), queries, hints, matches, config,
-                                                                narrowing.predicate, executor, scratch));
-            else if constexpr (std::is_same_v<narrowing_type_, cheap_predicate_t>) {
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).search_if(queries, matches, config, narrowing, executor,
-                                                        to_writable_span(scratch.traversals), hints));
-                else return stats_of(of(index).search_if(queries, matches, config, narrowing, executor, {}, hints));
-            }
-            else if constexpr (is_ram_index<index_type_>)
-                return stats_of(
-                    of(index).search(queries, matches, config, executor, to_writable_span(scratch.traversals), hints));
-            else return stats_of(of(index).search(queries, matches, config, executor, {}, hints));
+        search_config_t const config = search_config_of(search);
+        return between_swaps(index, [&]() noexcept {
+            return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
+                if constexpr (is_vram_index<index_type_>)
+                    return stats_of(of(index).search(queries, matches, config, executor));
+                else if constexpr (std::is_same_v<narrowing_type_, expensive_predicate_t>)
+                    return stats_of(search_with_expensive_predicate(of(index), queries, hints, matches, config,
+                                                                    narrowing.predicate, executor, scratch));
+                else if constexpr (std::is_same_v<narrowing_type_, cheap_predicate_t>) {
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).search_if(queries, matches, config, narrowing, executor,
+                                                            to_writable_span(scratch.traversals), hints));
+                    else return stats_of(of(index).search_if(queries, matches, config, narrowing, executor, {}, hints));
+                }
+                else if constexpr (is_ram_index<index_type_>)
+                    return stats_of(of(index).search(queries, matches, config, executor,
+                                                     to_writable_span(scratch.traversals), hints));
+                else return stats_of(of(index).search(queries, matches, config, executor, {}, hints));
+            });
         });
     }
 
@@ -601,23 +766,25 @@ struct specialized_index {
             if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-        search_config_t const config = search_config_of(search, executor);
-        return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
-            if constexpr (is_vram_index<index_type_>)
-                return stats_of(of(index).multiply(left, products, scored, config, executor));
-            else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).multiply(left, products, scored, config, executor,
-                                                       to_writable_span(scratch.traversals)));
-                else return stats_of(of(index).multiply(left, products, scored, config, executor));
-            }
-            else {
-                cheap_predicate_t cheap {narrowing.predicate};
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).multiply_if(left, products, scored, config, cheap, executor,
-                                                          to_writable_span(scratch.traversals)));
-                else return stats_of(of(index).multiply_if(left, products, scored, config, cheap, executor));
-            }
+        search_config_t const config = search_config_of(search);
+        return between_swaps(index, [&]() noexcept {
+            return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
+                if constexpr (is_vram_index<index_type_>)
+                    return stats_of(of(index).multiply(left, products, scored, config, executor));
+                else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).multiply(left, products, scored, config, executor,
+                                                           to_writable_span(scratch.traversals)));
+                    else return stats_of(of(index).multiply(left, products, scored, config, executor));
+                }
+                else {
+                    cheap_predicate_t cheap {narrowing.predicate};
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).multiply_if(left, products, scored, config, cheap, executor,
+                                                              to_writable_span(scratch.traversals)));
+                    else return stats_of(of(index).multiply_if(left, products, scored, config, cheap, executor));
+                }
+            });
         });
     }
 
@@ -632,29 +799,31 @@ struct specialized_index {
             if (!queries.hints.counts.empty()) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-        typename index_t::maxsim_config_t const config {search_config_of(search, executor), wanted};
+        typename index_t::maxsim_config_t const config {search_config_of(search), wanted};
         std::span<std::size_t const> const query_offsets = queries.offsets;
         ranked_hints_view_t const hints = queries.hints;
-        return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
-            if constexpr (is_vram_index<index_type_>)
-                return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor));
-            else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor,
-                                                     to_writable_span(scratch.traversals), hints));
-                else
-                    return stats_of(
-                        of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor, {}, hints));
-            }
-            else {
-                cheap_predicate_t cheap {narrowing.predicate};
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
-                                                        executor, to_writable_span(scratch.traversals), hints));
-                else
-                    return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
-                                                        executor, {}, hints));
-            }
+        return between_swaps(index, [&]() noexcept {
+            return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
+                if constexpr (is_vram_index<index_type_>)
+                    return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor));
+                else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor,
+                                                         to_writable_span(scratch.traversals), hints));
+                    else
+                        return stats_of(of(index).maxsim(queries.rows, query_offsets, scored, matches, config, executor,
+                                                         {}, hints));
+                }
+                else {
+                    cheap_predicate_t cheap {narrowing.predicate};
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
+                                                            executor, to_writable_span(scratch.traversals), hints));
+                    else
+                        return stats_of(of(index).maxsim_if(queries.rows, query_offsets, scored, matches, config, cheap,
+                                                            executor, {}, hints));
+                }
+            });
         });
     }
 
@@ -667,33 +836,35 @@ struct specialized_index {
             if (search.traversal == traversal_t::scan_k) return {{}, status_t::unsupported_k};
         scratch_t scratch {executor};
         if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-        search_config_t const config = search_config_of(search, executor);
-        return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
-            if constexpr (is_vram_index<index_type_>)
-                return stats_of(of(index).attend(queries, attention.heads, attention.value_lookup,
-                                                 attention.score_scale, attention.outputs, attention.carry, config,
-                                                 executor));
-            else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).attend(queries, attention.heads, attention.value_lookup,
-                                                     attention.score_scale, attention.outputs, attention.carry, config,
-                                                     executor, to_writable_span(scratch.traversals)));
-                else
+        search_config_t const config = search_config_of(search);
+        return between_swaps(index, [&]() noexcept {
+            return with_predicate(predicate, [&]<typename narrowing_type_>(narrowing_type_& narrowing) noexcept {
+                if constexpr (is_vram_index<index_type_>)
                     return stats_of(of(index).attend(queries, attention.heads, attention.value_lookup,
                                                      attention.score_scale, attention.outputs, attention.carry, config,
                                                      executor));
-            }
-            else {
-                cheap_predicate_t cheap {narrowing.predicate};
-                if constexpr (is_ram_index<index_type_>)
-                    return stats_of(of(index).attend_if(queries, attention.heads, attention.value_lookup,
-                                                        attention.score_scale, attention.outputs, attention.carry,
-                                                        config, cheap, executor, to_writable_span(scratch.traversals)));
-                else
-                    return stats_of(of(index).attend_if(queries, attention.heads, attention.value_lookup,
-                                                        attention.score_scale, attention.outputs, attention.carry,
-                                                        config, cheap, executor));
-            }
+                else if constexpr (std::is_same_v<narrowing_type_, no_predicate_t>) {
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).attend(queries, attention.heads, attention.value_lookup,
+                                                         attention.score_scale, attention.outputs, attention.carry,
+                                                         config, executor, to_writable_span(scratch.traversals)));
+                    else
+                        return stats_of(of(index).attend(queries, attention.heads, attention.value_lookup,
+                                                         attention.score_scale, attention.outputs, attention.carry,
+                                                         config, executor));
+                }
+                else {
+                    cheap_predicate_t cheap {narrowing.predicate};
+                    if constexpr (is_ram_index<index_type_>)
+                        return stats_of(of(index).attend_if(
+                            queries, attention.heads, attention.value_lookup, attention.score_scale, attention.outputs,
+                            attention.carry, config, cheap, executor, to_writable_span(scratch.traversals)));
+                    else
+                        return stats_of(of(index).attend_if(queries, attention.heads, attention.value_lookup,
+                                                            attention.score_scale, attention.outputs, attention.carry,
+                                                            config, cheap, executor));
+                }
+            });
         });
     }
 
@@ -716,8 +887,10 @@ struct specialized_index {
         else {
             typename index_t::cursor_t& walk = *static_cast<typename index_t::cursor_t*>(cursor);
             if constexpr (viewed_k)
-                return walk.pull(of(index), keys, links ? &links->keys : nullptr, links ? &links->offsets : nullptr,
-                                 executor);
+                return between_swaps(index, [&]() noexcept {
+                    return walk.pull(of(index), keys, links ? &links->keys : nullptr, links ? &links->offsets : nullptr,
+                                     executor);
+                });
             else return walk.pull(of(index), keys, links ? &links->keys : nullptr, links ? &links->offsets : nullptr);
         }
     }
@@ -729,7 +902,8 @@ struct specialized_index {
     static expected<sample_result_t> sample(void* index, sample_inputs<key_t> inputs, sample_outputs<key_t> outputs,
                                             sample_config_t config, executor_t& executor) noexcept {
         if constexpr (is_vram_index<index_type_>) return {{}, status_t::unsupported_k};
-        else return of(index).sample(inputs, outputs, config, executor);
+        else
+            return between_swaps(index, [&]() noexcept { return of(index).sample(inputs, outputs, config, executor); });
     }
 
     static status_t save(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
@@ -742,7 +916,7 @@ struct specialized_index {
         else return of(index).save(buffer, save_config_of(), executor, ticks);
     }
     static status_t load(void* index, std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
+        if constexpr (viewed_k) return refuses_writes(index);
         else return of(index).load(path, load_config_t {}, executor, ticks);
     }
 
@@ -750,7 +924,7 @@ struct specialized_index {
      *  whose shard plans copy it device to device. */
     static status_t load_buffer(void* index, checkpoint_source_t source, executor_t& executor,
                                 progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
+        if constexpr (viewed_k) return refuses_writes(index);
         else if constexpr (requires { of(index).load(source, load_config_t {}, executor, ticks); })
             return of(index).load(source, load_config_t {}, executor, ticks);
         else if (source.device != host_device_k) return status_t::unsupported_k;
@@ -769,6 +943,7 @@ struct specialized_index {
             .bound_shards = &bound_shards,
             .emplace = &emplace,
             .view = &view,
+            .load_nvme = &load_nvme,
             // Shape
             .kernel = &kernel,
             .geometry = &geometry,
@@ -787,16 +962,19 @@ struct specialized_index {
             // Refining
             .refine = &refine,
             .absorb = &absorb,
-            .compact = &compact,
+            .reshard = &reshard,
             .split = &split,
             .health = &health,
-            // Refinements
-            .refinement_init = &refinement_init,
-            .refinement_next = &refinement_next,
-            .refinement_running = &refinement_running,
-            .refinement_consumed = &refinement_consumed,
-            .refinement_finish = &refinement_finish,
-            .refinement_free = &refinement_free,
+            // Plans
+            .plan_open = &plan_open,
+            .reshard_plan_open = &reshard_plan_open,
+            .plan_next = &plan_next,
+            .plan_running = &plan_running,
+            .plan_consumed = &plan_consumed,
+            .plan_finish = &plan_finish,
+            .plan_free = &plan_free,
+            .plan_phase = &plan_phase,
+            .plan_next_round = &plan_next_round,
             // Lookups
             .count = &count,
             .get = &get,

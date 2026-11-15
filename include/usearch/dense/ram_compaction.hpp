@@ -99,6 +99,11 @@ struct [[nodiscard]] ram_compact_plan {
     /** Reopens every source still pending; the refine plan reopens the target. */
     ~ram_compact_plan() noexcept { release_sources_(); }
 
+    /** The absorb plan whose rounds link the moved shards in, which a driver reads, and steps to
+     *  its next round, between calls. */
+    refine_plan_t& refining() noexcept { return refining_; }
+    refine_plan_t const& refining() const noexcept { return refining_; }
+
     /**
      *  @brief Moves in the pending sources on @p executor, then runs the rounds until they end or
      *      @p on_visited cancels; @c cancelled_k means a later call continues exactly there.

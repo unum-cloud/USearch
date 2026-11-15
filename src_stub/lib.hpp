@@ -35,6 +35,7 @@
 #include <functional>       // `std::function`
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <limits>           // `std::numeric_limits`
+#include <memory>           // `std::unique_ptr` - a finished plan
 #include <mutex>            // `std::unique_lock`
 #include <new>              // `std::bad_alloc`
 #include <numbers>          // `std::numbers::pi` - the sample projection's angles
@@ -46,6 +47,7 @@
 #include <type_traits>      // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
 #include <unordered_map>    // `std::unordered_map`, `std::unordered_multimap`
 #include <unordered_set>    // `std::unordered_set` - a sample region's visits
+#include <utility>          // `std::exchange` - a consumed donor's slot
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
 
@@ -248,7 +250,7 @@ using call_arguments_t = std::variant< //
 
     /* Loading */
     usearch_dense_load_ram_t, usearch_dense_load_ram_buffer_t, usearch_dense_view_nvme_t,                //
-    usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,                                         //
+    usearch_dense_load_nvme_t, usearch_dense_load_vram_t, usearch_dense_load_vram_buffer_t,              //
     usearch_sequence_load_ram_t, usearch_sequence_load_ram_buffer_t, usearch_sequence_view_nvme_t,       //
     usearch_sequence_load_vram_t, usearch_sequence_load_vram_buffer_t,                                   //
     usearch_shapes_load_ram_t, usearch_shapes_load_ram_buffer_t, usearch_shapes_view_nvme_t,             //
@@ -264,17 +266,20 @@ using call_arguments_t = std::variant< //
 
     /* Refining */
     usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,             //
+    usearch_dense_reshard_t,                                                                                   //
     usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
     usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
     usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
     usearch_geospatial_split_t,                                                                                //
 
-    /* Refinements */
-    usearch_dense_refinement_init_t, usearch_dense_refinement_next_t, usearch_dense_refinement_finish_t,          //
-    usearch_sequence_refinement_init_t, usearch_sequence_refinement_next_t, usearch_sequence_refinement_finish_t, //
-    usearch_shapes_refinement_init_t, usearch_shapes_refinement_next_t, usearch_shapes_refinement_finish_t,       //
-    usearch_geospatial_refinement_init_t, usearch_geospatial_refinement_next_t,                                   //
-    usearch_geospatial_refinement_finish_t,                                                                       //
+    /* Plans */
+    usearch_dense_refine_plan_finish_t, usearch_dense_absorb_plan_finish_t, usearch_dense_split_plan_finish_t,    //
+    usearch_dense_reshard_plan_finish_t,                                                                          //
+    usearch_sequence_refine_plan_finish_t, usearch_sequence_absorb_plan_finish_t,                                 //
+    usearch_sequence_split_plan_finish_t,                                                                         //
+    usearch_shapes_refine_plan_finish_t, usearch_shapes_absorb_plan_finish_t, usearch_shapes_split_plan_finish_t, //
+    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_absorb_plan_finish_t,                             //
+    usearch_geospatial_split_plan_finish_t,                                                                       //
 
     /* Reading */
     usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
@@ -318,7 +323,7 @@ struct call_t {
     call_arguments_t arguments;
     void (*verb)(void*);
 
-    /** The call's outcome, its executor, and every index, cursor, refinement, stream and arena it
+    /** The call's outcome, its executor, and every index, cursor, plan, stream and arena it
      *  reads or writes: the addresses a wait or a free looks for before it returns. */
     std::vector<void const*> handles;
 };
@@ -340,7 +345,7 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
     };
     if constexpr (requires { arguments.index; }) add(arguments.index);
     if constexpr (requires { arguments.cursor; }) add(arguments.cursor);
-    if constexpr (requires { arguments.refinement; }) add(arguments.refinement);
+    if constexpr (requires { arguments.plan; }) add(arguments.plan);
     if constexpr (requires { arguments.stream; }) add(arguments.stream);
     if constexpr (requires { arguments.arena; }) add(arguments.arena);
     return handles;
@@ -759,9 +764,9 @@ struct handle {
     /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
     usearch_residency_t residency = usearch_residency_ram_k;
 
-    /** The refinement holding the handle closed to insertions, saves and other refinements until it
+    /** The plan holding the handle closed to insertions, saves and other long verbs until it
      *  finishes, or null; read and written under @c mutex. */
-    void const* refinement = nullptr;
+    void const* plan = nullptr;
 
     /** Entries one shard holds before the next opens; zero means the engine's 2^32 - 2. */
     std::size_t shard_capacity = 0;
@@ -795,6 +800,14 @@ struct handle {
     void append(usearch_key_t key, payload_ payload) {
         by_key.emplace(uuid_of(key), entries.size());
         entries.push_back({key, std::move(payload)});
+    }
+
+    /** Appends a copy of every entry of @p donor, answering whether the memory came; nothing lands
+     *  when it did not. */
+    bool append_entries_of(handle const& donor) {
+        if (!accommodate(entries.size() + donor.entries.size())) return false;
+        for (entry<payload_> const& moved : donor.entries) append(moved.key, moved.payload);
+        return true;
     }
 
     /** Drops every entry published past @p watermark, which an unwound batch reverts to. */
@@ -840,12 +853,11 @@ bool reject_read_only(handle_ const& index, usearch_outcome_t* outcome) {
                      outcome);
 }
 
-/** Refuses an insertion, a save or another refinement while a refinement holds the handle closed;
- *  the caller holds the handle's mutex. */
+/** Refuses an insertion, a save or another long verb while a plan holds the handle closed; the
+ *  caller holds the handle's mutex. */
 template <typename handle_>
 bool reject_refining(handle_ const& index, usearch_outcome_t* outcome) {
-    return reject_if(index.refinement != nullptr, usearch_status_contended_k, "A refinement holds the handle closed",
-                     outcome);
+    return reject_if(index.plan != nullptr, usearch_status_contended_k, "A plan holds the handle closed", outcome);
 }
 
 /** Entry positions under @p key, ascending - the insertion order every @c get promises.
@@ -1676,6 +1688,174 @@ void draw_sample(arguments_ const& arguments, handle_& index, score_ const& scor
 
 #pragma endregion Sampling
 
+#pragma region Plans
+
+/**
+ *  @brief The stand-in's plan of one long verb: the donors it still moves or the receivers it
+ *      moved into, and how far its round got.
+ *
+ *  Its index, and a split's receivers, admit no insertion, save or other long verb until it
+ *  finishes. The stand-in's round is one sweep over every entry, standing in the gather, the fourth
+ *  of six phases, until it ends. An exact scan keeps no edges, so the round re-stitches nothing and
+ *  the graph is always settled.
+ */
+template <typename handle_>
+struct long_verb_plan {
+
+    /** The handle the plan was opened on, which a finish reopens. */
+    handle_* opened_on = nullptr;
+
+    /** The caller's donor slots, each nulled once consumed, and how many of them were. */
+    handle_** donors = nullptr;
+    std::size_t donors_count = 0;
+    std::size_t consumed = 0;
+
+    /** The receivers a split moved into, which a finish reopens. */
+    handle_* const* receivers = nullptr;
+    std::size_t receivers_count = 0;
+
+    /** Entries the round's sweep visited so far, and the entries it sweeps. */
+    std::size_t swept = 0;
+    std::size_t entries = 0;
+
+    /** Entries the moves carried, each one whose links changed. */
+    std::size_t moved = 0;
+};
+
+/** Reports the stand-in's round over @p entries, which re-stitches the @p swept it reached as one
+ *  neighborhood, @p changed of them with links that moved; a round short of every entry stopped.
+ *  An exact scan reaches every entry in one level, before a round as after it. */
+inline void report_round(usearch_refine_report_t* report, std::size_t entries, std::size_t swept,
+                         std::size_t changed) noexcept {
+    if (!report) return;
+    report->opening = report->reachability = {entries, entries, entries ? 1u : 0u, 0};
+    report->reselected = swept;
+    report->changed = changed;
+    report->neighborhoods = swept ? 1u : 0u;
+    report->widest_neighborhood = swept;
+    report->verdict = swept != entries ? usearch_refine_stopped_k
+                      : changed        ? usearch_refine_improved_k
+                                       : usearch_refine_converged_k;
+}
+
+/** Refuses a call naming a live @p plan opened on another index than @p index. */
+template <typename handle_, typename plan_handle_>
+bool reject_foreign_plan(handle_ const& index, plan_handle_* const* plan, usearch_outcome_t* outcome) {
+    return plan && *plan &&
+           reject_if((*plan)->opened_on != &index, usearch_status_invalid_argument_k,
+                     "The plan was opened on another index", outcome);
+}
+
+/** The plan a long verb's call drives on @p index, the caller holding its mutex: the live one
+ *  @p plan names, a copy of @p one_shot opened into its null pointee and holding @p index closed,
+ *  or @p one_shot itself without a @p plan; null after refusing, as while a plan holds the index
+ *  closed to a call opening one or running without one, or when the memory did not come. */
+template <typename plan_handle_, typename handle_>
+long_verb_plan<handle_>* plan_of_call(handle_& index, plan_handle_** plan, long_verb_plan<handle_>& one_shot,
+                                      usearch_outcome_t* outcome) {
+    if (plan && *plan) return *plan;
+    if (reject_refining(index, outcome)) return nullptr;
+    if (!plan) return &one_shot;
+    plan_handle_* const opened = new (std::nothrow) plan_handle_ {one_shot};
+    if (reject_if(!opened, usearch_status_out_of_memory_k, "The plan could not be allocated", outcome)) return nullptr;
+    index.plan = opened;
+    return *plan = opened;
+}
+
+/** Sweeps the round of @p plan on from where its last call stopped, then reports it, and for a
+ *  call naming a plan writes the phase it stopped in. The handler stops a plan's round only short
+ *  of its end, while a one-shot round answers any cancel. */
+template <typename arguments_, typename handle_>
+void sweep_round(arguments_ const& arguments, long_verb_plan<handle_>& plan, usearch_outcome_t* outcome) {
+    bool cancelled = false;
+    while (plan.swept != plan.entries && !cancelled)
+        cancelled = !keep_going(arguments.progress, ++plan.swept, plan.entries);
+    bool const ended = plan.swept == plan.entries;
+    if (arguments.stats) arguments.stats->visited_members = plan.entries;
+    if (arguments.plan && arguments.phase)
+        *arguments.phase = {ended ? "done" : "gather", ended ? 0u : 4u, 6, plan.swept, plan.entries, "entries"};
+    report_round(arguments.report, plan.entries, plan.swept, min_of(plan.moved, plan.swept));
+    reject_if(cancelled && (!arguments.plan || !ended), usearch_status_cancelled_k,
+              "The caller's handler stopped the round", outcome);
+}
+
+/** The body of every modality's @c refine: a round over every entry, run to its end without a
+ *  plan, opened into a null pointee, or continued where a live plan's last call stopped, the next
+ *  round starting once the last one ended. */
+template <typename plan_handle_, typename arguments_, typename handle_>
+void refine_and_report(arguments_ const& arguments, handle_& index, usearch_outcome_t* outcome) {
+    if (arguments.phase) *arguments.phase = {};
+    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments.plan, outcome)) return;
+    std::unique_lock writers(index.mutex);
+    long_verb_plan<handle_> one_shot {.opened_on = &index};
+    long_verb_plan<handle_>* const refining = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
+    if (!refining) return;
+    if (refining->swept == refining->entries) refining->swept = 0, refining->entries = index.entries.size();
+    sweep_round(arguments, *refining, outcome);
+}
+
+/** The body of every modality's @c absorb: moves each donor still pending in whole, consuming its
+ *  slot, then sweeps the closing round, each moved entry one whose links changed. A live plan reads
+ *  its own donors, never the call's. */
+template <typename plan_handle_, typename arguments_, typename handle_, typename same_kind_>
+void absorb_and_report(arguments_ const& arguments, handle_& index, same_kind_ const& same_kind,
+                       usearch_outcome_t* outcome) {
+    if (arguments.phase) *arguments.phase = {};
+    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments.plan, outcome)) return;
+    bool const opening = !arguments.plan || !*arguments.plan;
+    if (opening && reject_if(arguments.count && !arguments.donors, usearch_status_invalid_argument_k,
+                             "The donors must name handles", outcome))
+        return;
+    for (std::size_t position = 0; opening && position != arguments.count; ++position)
+        if (reject_if(!arguments.donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
+                      outcome) ||
+            reject_if(arguments.donors[position] == &index, usearch_status_config_mismatch_k,
+                      "An index cannot absorb itself", outcome) ||
+            reject_if(!same_kind(index.options, arguments.donors[position]->options), usearch_status_config_mismatch_k,
+                      "A donor of another kind or geometry is refused", outcome))
+            return;
+    std::unique_lock writers(index.mutex);
+    long_verb_plan<handle_> one_shot {.opened_on = &index, .donors = arguments.donors, .donors_count = arguments.count};
+    long_verb_plan<handle_>* const absorbing = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
+    if (!absorbing) return;
+    // Each donor moves in whole and is consumed at once, its slot nulled, so a failure leaves it
+    // and every later one live handles the caller still owns and must free.
+    for (; absorbing->consumed != absorbing->donors_count; ++absorbing->consumed) {
+        handle_& donor = *absorbing->donors[absorbing->consumed];
+        if (reject_if(!index.append_entries_of(donor), usearch_status_out_of_memory_k,
+                      "The donor's entries could not be accommodated", outcome))
+            return;
+        absorbing->moved += donor.entries.size();
+        delete std::exchange(absorbing->donors[absorbing->consumed], nullptr);
+    }
+    absorbing->entries = index.entries.size();
+    sweep_round(arguments, *absorbing, outcome);
+}
+
+/** The body of every @c <operation>_plan_finish: reopens the plan's index and receivers and
+ *  reports its round as it stands, or zeros while donors are still pending; the plan is freed
+ *  whatever the call answers. */
+template <typename plan_handle_, typename arguments_>
+void finish_plan(arguments_ const& arguments) {
+    deferred_outcome_t outcome(arguments.outcome);
+    if (arguments.report) *arguments.report = {};
+    std::unique_ptr<plan_handle_> const plan {arguments.plan};
+    if (reject_if(!plan, usearch_status_invalid_argument_k, "The plan must not be null", outcome)) return;
+    for (std::size_t position = 0; position != plan->receivers_count; ++position) {
+        std::unique_lock receiving(plan->receivers[position]->mutex);
+        if (plan->receivers[position]->plan == plan.get()) plan->receivers[position]->plan = nullptr;
+    }
+    std::unique_lock writers(plan->opened_on->mutex);
+    plan->opened_on->plan = nullptr;
+    if (reject_if(arguments.index != plan->opened_on, usearch_status_invalid_argument_k,
+                  "The plan was opened on another index", outcome) ||
+        plan->consumed != plan->donors_count)
+        return;
+    report_round(arguments.report, plan->entries, plan->swept, min_of(plan->moved, plan->swept));
+}
+
+#pragma endregion Plans
+
 #pragma region Splitting
 
 /** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
@@ -1760,9 +1940,11 @@ bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t see
             return false;
     }
     std::unique_lock source(index.mutex);
+    if (reject_refining(index, outcome)) return false;
     std::vector<std::unique_lock<std::shared_mutex>> held;
     for (receiver_* receiver : receivers) {
         held.emplace_back(receiver->mutex);
+        if (reject_refining(*receiver, outcome)) return false;
         if (reject_if(!receiver->entries.empty() || static_cast<bool>(receiver->served),
                       usearch_status_config_mismatch_k, "A receiver must be an empty, mutable handle", outcome) ||
             reject_if(!same_kind(index.options, receiver->options), usearch_status_config_mismatch_k,
@@ -1782,45 +1964,35 @@ bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t see
     return true;
 }
 
-/** Refuses a refinement naming donors and receivers both, or receivers no split can fill: fewer
- *  than two, a null slot, or the index itself. */
-template <typename arguments_>
-bool reject_receivers(arguments_ const& arguments, usearch_outcome_t* outcome) {
-    if (reject_if(arguments.count && arguments.receivers_count, usearch_status_invalid_argument_k,
-                  "A refinement absorbs donors or splits into receivers, never both", outcome))
-        return true;
-    if (!arguments.receivers_count) return false;
-    if (reject_if(arguments.receivers_count < 2 || !arguments.receivers, usearch_status_invalid_argument_k,
-                  "A split needs two receivers or more", outcome))
-        return true;
-    for (std::size_t position = 0; position != arguments.receivers_count; ++position)
-        if (reject_if(!arguments.receivers[position], usearch_status_invalid_argument_k, "A receiver must not be null",
-                      outcome) ||
-            reject_if(arguments.receivers[position] == arguments.index, usearch_status_config_mismatch_k,
-                      "An index cannot split into itself", outcome))
-            return true;
-    return false;
-}
-
-/** The body of every modality's @c split: moves the entries as @ref split_into does, then reports a
- *  closing sweep over every receiver, which re-selects nothing in a stand-in keeping no edges. */
-template <typename arguments_, typename handle_, typename score_, typename same_kind_>
+/** The body of every modality's @c split: moves the entries as @ref split_into does, then sweeps
+ *  the closing round over every receiver, each entry one whose links moved; a live plan moves
+ *  nothing more and sweeps on where its last call stopped. */
+template <typename plan_handle_, typename arguments_, typename handle_, typename score_, typename same_kind_>
 void split_and_report(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
                       usearch_outcome_t* outcome) {
-    using receiver_t = std::remove_pointer_t<std::remove_cvref_t<decltype(*arguments.receivers)>>;
-    if (reject_if(arguments.count && !arguments.receivers, usearch_status_invalid_argument_k,
-                  "The receivers must name handles", outcome))
+    if (arguments.phase) *arguments.phase = {};
+    if (reject_foreign_plan(index, arguments.plan, outcome)) return;
+    bool const opening = !arguments.plan || !*arguments.plan;
+    std::span<handle_* const> const receivers {arguments.receivers, arguments.receivers ? arguments.count : 0};
+    if (opening && (reject_if(arguments.count && !arguments.receivers, usearch_status_invalid_argument_k,
+                              "The receivers must name handles", outcome) ||
+                    !split_into(index, receivers, arguments.seed, score, same_kind, outcome)))
         return;
-    std::span<receiver_t* const> const receivers {arguments.receivers, arguments.receivers ? arguments.count : 0};
-    if (!split_into(index, receivers, arguments.seed, score, same_kind, outcome)) return;
-    std::size_t entries = 0, reached = 0;
-    for (receiver_t* receiver : receivers) entries += receiver->entries.size(), reached += !receiver->entries.empty();
-    bool cancelled = false;
-    for (std::size_t entry = 0; entry != entries && !cancelled; ++entry)
-        cancelled = !keep_going(arguments.progress, entry + 1, entries);
-    if (arguments.stats) arguments.stats->visited_members = entries;
-    if (arguments.report) arguments.report->reachability = {entries, entries, reached ? 1u : 0u, 0};
-    reject_if(cancelled, usearch_status_cancelled_k, "The caller's handler stopped the sweep", outcome);
+    std::unique_lock writers(index.mutex);
+    long_verb_plan<handle_> one_shot {.opened_on = &index,
+                                      .receivers = receivers.data(),
+                                      .receivers_count = receivers.size()};
+    long_verb_plan<handle_>* const splitting = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
+    if (!splitting) return;
+    if (opening) {
+        for (handle_* receiver : receivers) {
+            std::unique_lock receiving(receiver->mutex);
+            splitting->entries += receiver->entries.size();
+            if (arguments.plan) receiver->plan = splitting;
+        }
+        splitting->moved = splitting->entries;
+    }
+    sweep_round(arguments, *splitting, outcome);
 }
 
 #pragma endregion Splitting
@@ -1973,8 +2145,9 @@ handle_* open_parts(bytes_view_t blob, usearch_bytes_view_t path, open_ const& o
     return index;
 }
 
-/** @p path without its @c .safegraphs suffix, the stem the engine names parts under. */
+/** @p path without its @c .json and @c .safegraphs suffixes: the stem the engine names parts by. */
 inline std::string stem_of(std::string_view path) {
+    if (path.ends_with(".json")) path.remove_suffix(std::string_view {".json"}.size());
     if (path.ends_with(".safegraphs")) path.remove_suffix(std::string_view {".safegraphs"}.size());
     return std::string(path);
 }

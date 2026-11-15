@@ -13,7 +13,7 @@
  */
 #pragma once
 
-#include <memory>      // `std::unique_ptr` - a finished refinement's handle and state
+#include <memory>      // `std::unique_ptr` - a finished plan's handle
 #include <new>         // `std::nothrow`
 #include <span>        // `std::span` - the listed devices, a view's paths and entries
 #include <string_view> // `std::string_view` - checkpoint paths
@@ -75,30 +75,9 @@ struct basic_cursor {
     }
 };
 
-/** What a modality's refinement handle owns: one variant's plan with the donors it absorbs, which
- *  keeps its index closed until it dies, and the caller's donor slots it nulls. */
-template <typename handle_type_>
-struct basic_refinement {
-    basic_variant_tables<typename handle_type_::traits_t> tables;
-    void* refinement = nullptr;
-
-    /** The handle and executor the refinement was opened with, only ever compared with the ones
-     *  each call passes. */
-    handle_type_ const* opened_on = nullptr;
-    usearch_executor_t opened_with = nullptr;
-
-    /** The caller's donor array, @c count slots. */
-    handle_type_** donors = nullptr;
-    std::size_t count = 0;
-
-    /** The caller's receiver array, @c receivers_count slots. */
-    handle_type_* const* receivers = nullptr;
-    std::size_t receivers_count = 0;
-
-    ~basic_refinement() noexcept {
-        if (refinement) std::visit([&](auto const* verbs) noexcept { verbs->refinement_free(refinement); }, tables);
-    }
-};
+/** The engine plan every plan handle of the modality @p index_handle_type_ serves owns. */
+template <typename index_handle_type_>
+using basic_punned_plan = punned_plan<index_handle_type_, basic_variant_tables<typename index_handle_type_::traits_t>>;
 
 /** The handle a call's arguments name, as the index they act on or the slot a new one fills. */
 template <typename arguments_type_>
@@ -466,7 +445,7 @@ void basic_view_nvme(arguments_type_* arguments) noexcept {
     if (index) *arguments->index = index;
 }
 
-/** Frees an index, a cursor or a refinement once no executor call names it. */
+/** Frees an index or a cursor once no executor call names it. */
 template <typename handle_type_>
 void basic_free(handle_type_* handle) noexcept {
     if (!handle) return;
@@ -495,7 +474,7 @@ void basic_clear(arguments_type_* arguments) noexcept {
 
 #pragma endregion Lifetime
 
-#pragma region Refinement
+#pragma region Plans
 
 /** Whether each of the @p count handles of @p others shares @p punned 's variant and geometry,
  *  waiting out the calls naming it first; false once @p outcome records why not. */
@@ -516,230 +495,137 @@ bool accepts_basic_variants(handle_type_ const* index, punned_basic_index<traits
     return true;
 }
 
-/** The variants behind the @p count handles @p others names, read in place. */
+/** The variants behind the handles @p others names, read in place. */
 template <typename handle_type_>
-variants_view_t view_basic_variants(handle_type_* const* others, std::size_t count) noexcept {
-    return {others, others ? count : 0, [](void const* handles, std::size_t position) noexcept -> void* {
+variants_view_t view_basic_variants(std::span<handle_type_* const> others) noexcept {
+    return {others.data(), others.size(), [](void const* handles, std::size_t position) noexcept -> void* {
                 handle_type_* const* const typed = static_cast<handle_type_* const*>(handles);
                 return typed[position]->basic.variant;
             }};
 }
 
-/** Opens @p punned 's refinement of @p index after it absorbs the @p count @p donors, or after it
- *  splits into the @p receivers_count @p receivers as @p config seeds, with null once @p outcome
- *  records why not. */
-template <typename handle_type_, typename traits_type_, vendored_residency_t residency_>
-void* basic_open_refinement(handle_type_ const* index, punned_basic_index<traits_type_, residency_> const& punned,
-                            handle_type_** donors, std::size_t count, handle_type_* const* receivers,
-                            std::size_t receivers_count, split_config_t config,
-                            typename punned_basic_index<traits_type_, residency_>::executor_t& executor,
-                            usearch_outcome_t* outcome) noexcept {
-    if (status_t const served = punned.verbs.serves_writes(punned.variant); failed(served))
-        return propagate_error(served, outcome), nullptr;
-    if (!accepts_basic_variants(index, punned, donors, count, "An index cannot absorb itself", outcome) ||
-        !accepts_basic_variants(index, punned, receivers, receivers_count, "An index cannot split into itself",
-                                outcome))
-        return nullptr;
-    auto const [refinement, status] = punned.verbs.refinement_init(punned.variant, view_basic_variants(donors, count),
-                                                                   view_basic_variants(receivers, receivers_count),
-                                                                   config, executor);
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    return refinement;
+/** Hands each of @p receivers what @p punned 's variant counted of the part it took, once the split
+ *  @p plan planned filled its parts. */
+template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
+void basic_count_split_receivers(punned_basic_index<traits_type_, residency_> const& punned, void const* plan,
+                                 std::span<handle_type_* const> receivers) noexcept {
+    for (handle_type_* const receiver : receivers)
+        punned.verbs.count_split_receiver(punned.variant, plan, receiver->basic.variant);
 }
 
-/** Hands each of the @p count @p receivers what @p punned 's variant counted of the part it took,
- *  once the split @p refinement planned filled its parts. */
+/** Frees the handles of the donors @p plan consumed, folding what their variants count into the
+ *  variant's first, and nulls the caller's slots; the plan dropped its hold on each already. */
 template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
-void basic_count_split_receivers(punned_basic_index<traits_type_, residency_> const& punned, void const* refinement,
-                                 handle_type_* const* receivers, std::size_t count) noexcept {
-    for (std::size_t position = 0; position != count; ++position)
-        punned.verbs.count_split_receiver(punned.variant, refinement, receivers[position]->basic.variant);
-}
-
-/** Frees the handles of the donors @p refinement consumed, folding what their variants count into
- *  the variant's first, and nulls the caller's slots; the plan dropped its hold on each already. */
-template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
-void basic_free_consumed(punned_basic_index<traits_type_, residency_> const& punned, void const* refinement,
-                         handle_type_** donors, std::size_t count) noexcept {
-    for (std::size_t position = 0; position != count; ++position) {
-        if (!donors[position] || !punned.verbs.refinement_consumed(refinement, position)) continue;
+void basic_free_consumed(punned_basic_index<traits_type_, residency_> const& punned, void const* plan,
+                         std::span<handle_type_*> donors) noexcept {
+    for (std::size_t position = 0; position != donors.size(); ++position) {
+        if (!donors[position] || !punned.verbs.plan_consumed(plan, position)) continue;
         punned.verbs.count_absorbed_donor(punned.variant, donors[position]->basic.variant);
         delete std::exchange(donors[position], nullptr);
     }
 }
 
-/** Writes what a refinement's @p refined result reports into the outputs @p arguments name: the
- *  report, or the running totals of a step. */
-template <typename arguments_type_>
-void write_refine_outputs(refine_report_t const& refined, arguments_type_ const& arguments) noexcept {
-    accumulate_stats(arguments.stats, refined);
-    if constexpr (requires { arguments.report; }) write_refine_report(arguments.report, refined);
-    else {
-        if (arguments.reselected) *arguments.reselected = refined.reselected_nodes;
-        if (arguments.changed) *arguments.changed = refined.changed_nodes;
-    }
-}
-
-/** Skips the re-selection @p refinement left, heals the islands it leaves, and reports. */
-template <typename traits_type_, vendored_residency_t residency_, typename arguments_type_>
-status_t basic_finish_refinement(punned_basic_index<traits_type_, residency_> const& punned, void* refinement,
-                                 arguments_type_ const& arguments,
-                                 typename punned_basic_index<traits_type_, residency_>::executor_t& executor) noexcept {
-    auto const [refined, status] = punned.verbs.refinement_finish(punned.variant, refinement, executor);
-    if (succeeded(status)) write_refine_outputs(refined, arguments);
-    return status;
-}
-
-/** The one-shot over a refinement, for @c refine, @c absorb and @c split alike: opens it with the
- *  call's donors or receivers, runs it once under the call's handler, then heals and reports; a
- *  cancel still heals and answers @c cancelled_k. */
-template <auto verb_, typename arguments_type_>
-void basic_refine_once(arguments_type_* arguments, handle_of<arguments_type_>** donors, std::size_t count,
-                       handle_of<arguments_type_>* const* receivers, std::size_t receivers_count, u64_t seed) noexcept {
+/**
+ *  @brief One call of @c refine, @c absorb or @c split through the plan slot @p planned: opens a
+ *      plan with the call's @p donors or @p receivers, or continues a live one, then reports.
+ *
+ *  A call naming no plan closes the one it opened, so a cancel still heals, reports and answers
+ *  @c cancelled_k; a call naming one leaves it live for its operation's finish.
+ */
+template <auto verb_, typename arguments_type_, typename plan_handle_type_>
+void basic_refine_once(arguments_type_* arguments, plan_handle_type_** planned,
+                       std::span<handle_of<arguments_type_>*> donors,
+                       std::span<handle_of<arguments_type_>* const> receivers, u64_t seed) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    if (arguments->stats) *arguments->stats = {};
-    if (arguments->report) *arguments->report = {};
-    if (count && !donors)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    reset_refined(*arguments);
+    if (!accepts_plan(*arguments, outcome)) return;
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        split_config_t const config {refine_config_of(arguments->refine), seed};
-        void* const refinement = basic_open_refinement(arguments->index, punned, donors, count, receivers,
-                                                       receivers_count, config, *executor, outcome);
-        if (!refinement) return;
-        std::unique_ptr<void, void (*)(void*) noexcept> const owned {refinement, punned.verbs.refinement_free};
-        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refinement)};
-        status_t const ran = punned.verbs.refinement_next(punned.variant, refinement, *executor, ticks);
-        if (failed(ran) && ran != status_t::cancelled_k) {
-            basic_free_consumed(punned, refinement, donors, count);
-            basic_count_split_receivers(punned, refinement, receivers, receivers_count);
-            return propagate_error(ran, outcome), void();
+        plan_handle_type_* one_shot = nullptr;
+        plan_handle_type_*& plan = planned ? *planned : one_shot;
+        if (!plan) {
+            if (status_t const served = punned.verbs.serves_writes(punned.variant); failed(served))
+                return propagate_error(served, outcome), void();
+            if (!accepts_basic_variants(arguments->index, punned, donors.data(), donors.size(),
+                                        "An index cannot absorb itself", outcome) ||
+                !accepts_basic_variants(arguments->index, punned, receivers.data(), receivers.size(),
+                                        "An index cannot split into itself", outcome))
+                return;
         }
-        // A stopped pass still moves every donor in and heals, so it reports alongside the cancel.
-        status_t const finished = basic_finish_refinement(punned, refinement, *arguments, *executor);
-        basic_free_consumed(punned, refinement, donors, count);
-        basic_count_split_receivers(punned, refinement, receivers, receivers_count);
-        if (failed(finished)) return propagate_error(finished, outcome), void();
-        propagate_error(ran, outcome);
+        split_config_t const config {refine_config_of(arguments->refine), seed};
+        progress_ticks_t ticks {arguments->progress, 0};
+        expected<refine_report_t> refined = drive_plan(
+            plan, planned ? arguments->phase : nullptr, arguments->index, arguments->executor, punned.verbs,
+            punned.variant, *executor, ticks, [&](plan_handle_type_& opened) noexcept {
+                if constexpr (requires { opened.donors; }) opened.donors = donors;
+                if constexpr (requires { opened.receivers; }) opened.receivers = receivers;
+                return punned.verbs.plan_open(punned.variant, view_basic_variants<handle_of<arguments_type_>>(donors),
+                                              view_basic_variants(receivers), config, *executor);
+            });
+        if (!plan) return propagate_error(refined.status, outcome), void();
+        std::unique_ptr<plan_handle_type_> const closing {one_shot};
+        if constexpr (requires { plan->donors; }) basic_free_consumed(punned, plan->punned.engine_plan, plan->donors);
+        if (closing && (succeeded(refined.status) || refined.status == status_t::cancelled_k)) {
+            // A stopped round still closes and heals, so it reports alongside the cancel.
+            expected<refine_report_t> const finished = punned.verbs.plan_finish(punned.variant,
+                                                                                plan->punned.engine_plan, *executor);
+            refined = {finished.value, failed(finished.status) ? finished.status : refined.status};
+        }
+        if constexpr (requires { plan->receivers; })
+            if (closing) basic_count_split_receivers(punned, plan->punned.engine_plan, plan->receivers);
+        publish_refined(*arguments, refined, outcome);
     });
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_refine(arguments_type_* arguments) noexcept {
-    basic_refine_once<verb_>(arguments, nullptr, 0, nullptr, 0, 0);
+    basic_refine_once<verb_>(arguments, arguments->plan, {}, {}, 0);
 }
 
 template <auto verb_, typename arguments_type_>
 void basic_absorb(arguments_type_* arguments) noexcept {
-    basic_refine_once<verb_>(arguments, arguments->donors, arguments->count, nullptr, 0, 0);
+    if (arguments->count && !arguments->donors) {
+        if (submitted<verb_>(arguments)) return;
+        call_outcome_t outcome(*arguments);
+        reset_refined(*arguments);
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    }
+    basic_refine_once<verb_>(arguments, arguments->plan, {arguments->donors, arguments->count}, {}, 0);
 }
 
-template <auto verb_, typename arguments_type_>
-void basic_refinement_init(arguments_type_* arguments) noexcept {
-    using refinement_t = std::remove_pointer_t<std::remove_pointer_t<decltype(arguments->refinement)>>;
+/** Closes the plan @p arguments name and frees it, whatever the call answers, reporting what the
+ *  whole plan did; a split's receivers then hear what each part counted. */
+template <auto verb_, typename plan_handle_type_, typename arguments_type_>
+void finish_basic_plan(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    *arguments->refinement = nullptr;
-    if (!arguments->executor)
+    if (arguments->report) *arguments->report = {};
+    // A plan dying unfinished reopens its index.
+    std::unique_ptr<plan_handle_type_> const plan {arguments->plan};
+    if (!plan) return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan must not be null"), void();
+    if (arguments->index != plan->punned.opened_on || arguments->executor != plan->punned.opened_with)
         return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "A refinement needs an executor that outlives it"),
-               void();
-    if (arguments->count && !arguments->donors)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    if (arguments->count && arguments->receivers_count)
-        return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "A refinement absorbs donors or splits into receivers, never both"),
-               void();
-    if (arguments->receivers_count && (arguments->receivers_count < 2 || !arguments->receivers))
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more"),
+                               "The plan was opened on another index or executor"),
                void();
     visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
         usearch_executor_handle_t call_executor;
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        split_config_t const config {refine_config_of(arguments->refine), arguments->seed};
-        void* const refinement = basic_open_refinement(arguments->index, punned, arguments->donors, arguments->count,
-                                                       arguments->receivers, arguments->receivers_count, config,
-                                                       *executor, outcome);
-        if (!refinement) return;
-        refinement_t* const opened = new (std::nothrow) refinement_t {};
-        if (!opened)
-            return punned.verbs.refinement_free(refinement),
-                   propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the refinement"),
-                   void();
-        opened->basic.tables = arguments->index->basic.tables;
-        opened->basic.refinement = refinement;
-        opened->basic.opened_on = arguments->index;
-        opened->basic.opened_with = arguments->executor;
-        opened->basic.donors = arguments->donors;
-        opened->basic.count = arguments->count;
-        opened->basic.receivers = arguments->receivers;
-        opened->basic.receivers_count = arguments->receivers_count;
-        *arguments->refinement = opened;
+        auto const [refined, status] = punned.verbs.plan_finish(punned.variant, plan->punned.engine_plan, *executor);
+        if constexpr (requires { plan->receivers; })
+            basic_count_split_receivers(punned, plan->punned.engine_plan, plan->receivers);
+        if (failed(status)) return propagate_error(status, outcome), void();
+        write_refine_report(arguments->report, refined);
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
 
-/** Visits the variant the refinement @p arguments name was opened on with its state, refusing a
- *  call naming another index or executor, as <tt>visitor(variant, refinement, executor)</tt>. */
-template <typename arguments_type_, typename visitor_type_>
-void visit_refinement(arguments_type_ const& arguments, usearch_outcome_t* outcome, visitor_type_&& visitor) noexcept {
-    auto* const refinement = arguments.refinement;
-    if (!refinement)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The refinement must not be null"), void();
-    if (arguments.index != refinement->basic.opened_on || arguments.executor != refinement->basic.opened_with)
-        return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "The refinement was opened on another index or executor"),
-               void();
-    visit_basic(*arguments.index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_type_::executor_t* const executor = executor_of(punned, arguments.executor, call_executor,
-                                                                        outcome);
-        if (!executor) return;
-        visitor(punned, refinement->basic.refinement, *executor);
-    });
-}
-
-template <auto verb_, typename arguments_type_>
-void basic_refinement_next(arguments_type_* arguments) noexcept {
-    if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(*arguments);
-    if (arguments->reselected) *arguments->reselected = 0;
-    if (arguments->changed) *arguments->changed = 0;
-    if (arguments->stats) *arguments->stats = {};
-    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refinement, auto& executor) noexcept {
-        progress_ticks_t ticks {arguments->progress, punned.verbs.refinement_population(refinement)};
-        status_t const ran = punned.verbs.refinement_next(punned.variant, refinement, executor, ticks);
-        basic_free_consumed(punned, refinement, arguments->refinement->basic.donors,
-                            arguments->refinement->basic.count);
-        // Running totals, so a cancelled or failed call still says how far the pass got.
-        write_refine_outputs(punned.verbs.refinement_running(refinement), *arguments);
-        propagate_error(ran, outcome);
-    });
-}
-
-template <auto verb_, typename arguments_type_>
-void basic_refinement_finish(arguments_type_* arguments) noexcept {
-    using refinement_t = std::remove_pointer_t<decltype(arguments->refinement)>;
-    if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(*arguments);
-    if (arguments->stats) *arguments->stats = {};
-    if (arguments->report) *arguments->report = {};
-    // Freed whatever the call answers; a plan dying unfinished reopens its index.
-    std::unique_ptr<refinement_t> const owned {arguments->refinement};
-    visit_refinement(*arguments, outcome, [&](auto const& punned, void* refinement, auto& executor) noexcept {
-        status_t const finished = basic_finish_refinement(punned, refinement, *arguments, executor);
-        basic_count_split_receivers(punned, refinement, owned->basic.receivers, owned->basic.receivers_count);
-        propagate_error(finished, outcome);
-    });
-}
-
-#pragma endregion Refinement
+#pragma endregion Plans
 
 #pragma region Introspection and Search
 
@@ -769,7 +655,8 @@ void basic_health(arguments_type_* arguments) noexcept {
         if (!executor) return;
         auto const [audit, status] = punned.verbs.health(punned.variant, *executor);
         if (failed(status)) return propagate_error(status, outcome), void();
-        *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps, audit.back_sweeps};
+        *arguments->reachability = {audit.audited_nodes, audit.reachable_nodes, audit.depth_from_root,
+                                    audit.depth_to_root};
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -1084,12 +971,13 @@ void basic_sample(arguments_type_* arguments) noexcept {
  *  nodes. */
 template <auto verb_, typename arguments_type_>
 void basic_split(arguments_type_* arguments) noexcept {
-    if (arguments->count >= 2 && arguments->receivers)
-        return basic_refine_once<verb_>(arguments, nullptr, 0, arguments->receivers, arguments->count, arguments->seed);
+    if ((arguments->plan && *arguments->plan) || (arguments->count >= 2 && arguments->receivers))
+        return basic_refine_once<verb_>(arguments, arguments->plan, {},
+                                        {arguments->receivers, arguments->receivers ? arguments->count : 0},
+                                        arguments->seed);
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    if (arguments->report) *arguments->report = {};
-    if (arguments->stats) *arguments->stats = {};
+    reset_refined(*arguments);
     propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more");
 }
 

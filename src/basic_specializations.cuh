@@ -277,58 +277,55 @@ expected<traversal_stats_t> insert_entries(indexes_type_& index, usearch_keys_vi
 }
 
 /** The scratch of one call driving a sharded index's @p plan over shards of @p shard_type_, a
- *  metric from
- *  @p make_metric per thread, sized for @p widest_list, the widest neighbor list a walk copies, or
- *  the plan's connectivity when that is wider. */
+ *  metric from @p make_metric per thread, each context grown to what the plan's tasks touch beside
+ *  @p widest_list, the widest neighbor list a restitch copies. */
 template <typename shard_type_, typename plan_type_, typename make_metric_type_>
 expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_refinement(
     plan_type_ const& plan, std::size_t widest_list, make_metric_type_&& make_metric,
     forkunion_executor_t& executor) noexcept {
     thread_scratch<shard_type_, made_metric<make_metric_type_>> scratch {executor};
-    status_t const prepared = scratch.prepare(executor, executor.size(), max_of(widest_list, plan.connectivity()),
-                                              plan.walk().expansion_factor, plan.audit().visible + plan.ticked,
-                                              make_metric);
+    std::size_t const connectivity = max_of(widest_list, plan.connectivity());
+    status_t prepared = scratch.prepare(executor, executor.size(), connectivity, connectivity, plan.health().visible,
+                                        make_metric);
+    for (std::size_t thread = 0; succeeded(prepared) && thread != scratch.traversals.size(); ++thread)
+        prepared = plan.reserve(scratch.traversals[thread]);
     return {std::move(scratch), prepared};
 }
 
 /**
- *  @brief Runs @p plan 's pending phases on the executor's threads, each with its metric and walk
+ *  @brief Runs @p plan 's pending phases on the executor's threads, each with its metric and
  *      context from @p scratch, until no phase follows or @p ticks cancels; @c cancelled_k means a
  *      later call has more to do.
  *
- *  Every step of a phase runs before the barrier, and the ticks move once per re-selected tile
- *  after it, so a cancel leaves the plan at the next phase, where the next call starts. The scratch
- *  is this call's, from @ref prepare_refinement, and the plan holds what later calls need.
+ *  Every task of a phase runs before the barrier, and every barrier of a round hears the phase it
+ *  closed in that phase's own units, so a cancel leaves the plan at the next phase, where the next
+ *  call starts; a move no stop skips runs to its end first, and a task's failure ends the call. The
+ *  scratch is this call's, from @ref prepare_refinement, and the plan holds what later calls need.
  */
 template <typename plan_type_, typename shard_type_, typename metric_type_, typename selector_type_>
 status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
                           selector_type_ const& selector, progress_ticks_t& ticks,
                           forkunion_executor_t& executor) noexcept {
     using count_ref_t = typename shard_type_::template atomic_ref<std::size_t>;
-    std::size_t const population = plan.planned_nodes();
-    // Every step bumps it, so it takes its own line, away from the locals every thread reads.
+    // Every task bumps it, so it takes its own line, away from the locals every thread reads.
     alignas(default_alignment_k) std::size_t taken = plan.taken;
-    bool cancelling = false;
     while (true) {
-        std::size_t const walked = plan.tile_nodes();
-        auto const steps = plan.steps();
+        auto const tasks = plan.tasks();
+        status_t refusal = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
             count_ref_t const next {taken};
-            for (std::size_t position = next.fetch_add(1, std::memory_order_relaxed); position < steps.size();
-                 position = next.fetch_add(1, std::memory_order_relaxed)) [[maybe_unused]]
-                status_t const ran = plan.run(steps[position], scratch.metrics[thread], scratch.traversals[thread],
-                                              selector);
+            for (std::size_t position = next.fetch_add(1, std::memory_order_relaxed); position < tasks.size();
+                 position = next.fetch_add(1, std::memory_order_relaxed))
+                keep_first_failure<shard_type_::template atomic_ref>(
+                    refusal, plan.run(tasks[position], scratch.metrics[thread], scratch.traversals[thread], selector));
         };
         if (status_t const forked = executor.for_threads(drain); failed(forked)) return forked;
+        if (failed(refusal)) return refusal;
         plan.taken = taken = 0;
+        std::size_t const completed = plan.completed(), total = plan.total();
         bool const following = plan.advance();
-        // Progress moves once per tile, past the barrier, so a cancel resumes at the tile's merge;
-        // a copy no stop skips runs to its end first.
-        if (walked) {
-            plan.ticked += walked;
-            cancelling = cancelling || ticks(plan.ticked, population) == continuation_t::cancel_k;
-        }
-        if (cancelling && !plan.moving()) return status_t::cancelled_k;
+        if (total && ticks(completed, total) == continuation_t::cancel_k && !plan.moving())
+            return status_t::cancelled_k;
         if (!following) return status_t::success_k;
     }
 }
@@ -428,6 +425,8 @@ expected<traversal_stats_t> search_entries(indexes_type_& indexes, std::size_t c
                             std::memory_order_relaxed)))
                         return;
                     traversal_context_t& context = scratch.traversals[thread];
+                    // Landmarks follow the query, not its thread, so walks repeat run to run.
+                    context.random_generator = seeded_stream(u64_t(query_index) + 1);
                     metric_t& metric = scratch.metrics[thread];
                     admits_t admits = admits_of(thread);
                     std::span<key_t> const keys {reinterpret_cast<key_t*>(outputs.keys) + query_index * wanted, wanted};
@@ -995,10 +994,10 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
 
 #pragma region Variant Bodies
 
-/** A refinement in flight: each donor's or receiver's index, which the plan nulls as it consumes
- *  it whole, and the plan itself, which also says where the calls stand. */
+/** A plan in flight: each donor's or receiver's index, which the engine plan nulls as it consumes
+ *  it whole, and the engine plan itself, which also says where the calls stand. */
 template <typename variant_type_>
-struct basic_refinement_state {
+struct basic_plan {
     growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> others;
     typename variant_type_::refine_plan_t plan;
 };
@@ -1183,13 +1182,13 @@ struct specialized_variant {
         return bodies_t::matches(of(variant), of(donor));
     }
 
-    /** Opens a refinement of the variant, an absorb of @p donors or a split into @p receivers: a
+    /** Opens a refine plan of the variant, an absorb of @p donors or a split into @p receivers: a
      *  RAM variant's own plan, or a GPU one's sharded index's on the streams of @p executor. */
-    static expected<void*> refinement_init(void* variant, variants_view_t donors, variants_view_t receivers,
-                                           split_config_t config, executor_t& executor) noexcept {
+    static expected<void*> plan_open(void* variant, variants_view_t donors, variants_view_t receivers,
+                                     split_config_t config, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
         else {
-            using refining_t = basic_refinement_state<variant_t>;
+            using refining_t = basic_plan<variant_t>;
             using index_t = typename variant_t::index_t;
             using refine_plan_t = typename variant_t::refine_plan_t;
             variants_view_t const others = receivers.empty() ? donors : receivers;
@@ -1210,9 +1209,12 @@ struct specialized_variant {
                     return refined.index.plan_refine(refine_config, executor);
                 }
                 else {
-                    if (!receivers.empty()) return refined.plan_split(typed, config);
-                    if (!donors.empty()) return refined.plan_absorb(typed, config.refine);
-                    return refined.plan_refine(config.refine);
+                    // A round's tiles follow the cores it runs on unless the caller overrides them.
+                    split_config_t sized = config;
+                    if (!sized.refine.cache_bytes) sized.refine.cache_bytes = executor.cache_bytes_per_core();
+                    if (!receivers.empty()) return refined.plan_split(typed, sized);
+                    if (!donors.empty()) return refined.plan_absorb(typed, sized.refine);
+                    return refined.plan_refine(sized.refine);
                 }
             }();
             if (failed(status)) return {nullptr, status};
@@ -1221,24 +1223,17 @@ struct specialized_variant {
             return {opened, status_t::success_k};
         }
     }
-    static std::size_t refinement_population(void const* refinement) noexcept {
-        if constexpr (viewed_k) return 0;
-        else if constexpr (is_vram_index<variant_t>)
-            return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.population();
-        else return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.audit().visible;
-    }
-    static status_t refinement_next(void* variant, void* refinement, executor_t& executor,
-                                    progress_ticks_t& ticks) noexcept {
+    static status_t plan_next(void* variant, void* opened, executor_t& executor, progress_ticks_t& ticks) noexcept {
         if constexpr (viewed_k) return status_t::read_only_k;
         else {
-            typename variant_t::refine_plan_t& plan = static_cast<basic_refinement_state<variant_t>*>(refinement)->plan;
+            typename variant_t::refine_plan_t& plan = static_cast<basic_plan<variant_t>*>(opened)->plan;
             if constexpr (is_vram_index<variant_t>) return plan.run(executor, ticks);
             else return of(variant).refine(plan, executor, ticks);
         }
     }
-    static bool refinement_consumed(void const* refinement, std::size_t donor) noexcept {
+    static bool plan_consumed(void const* opened, std::size_t donor) noexcept {
         if constexpr (viewed_k) return false;
-        else return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.consumed(donor);
+        else return static_cast<basic_plan<variant_t> const*>(opened)->plan.consumed(donor);
     }
 
     /** Folds what a consumed @p donor counts into the variant, as the points of the clouds it
@@ -1247,38 +1242,45 @@ struct specialized_variant {
         if constexpr (requires(variant_t& typed) { typed.count_absorbed_donor(typed); })
             of(variant).count_absorbed_donor(of(donor));
     }
-    static void count_split_receiver(void* variant, void const* refinement, void* receiver) noexcept {
+    static void count_split_receiver(void* variant, void const* opened, void* receiver) noexcept {
         if constexpr (requires(variant_t& typed) { typed.count_split_receiver(typed); })
-            if (!static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.moving())
+            if (!static_cast<basic_plan<variant_t> const*>(opened)->plan.moving())
                 of(variant).count_split_receiver(of(receiver));
     }
-    static refine_report_t refinement_running(void* refinement) noexcept {
+    static refine_report_t plan_running(void* opened) noexcept {
         if constexpr (viewed_k) return {};
         else if constexpr (is_vram_index<variant_t>)
-            return static_cast<basic_refinement_state<variant_t> const*>(refinement)->plan.running();
-        else return static_cast<basic_refinement_state<variant_t>*>(refinement)->plan.finish().value;
+            return static_cast<basic_plan<variant_t> const*>(opened)->plan.running();
+        else return static_cast<basic_plan<variant_t>*>(opened)->plan.finish().value;
     }
 
-    /** Skips the re-selection the refinement left, heals the islands it leaves, and reports; one
-     *  whose donors have not all moved in heals nothing and reports zeros. */
-    static expected<refine_report_t> refinement_finish(void* variant, void* refinement, executor_t& executor) noexcept {
+    /** Stops a refine's round at the barrier it stands at, runs the closing health check, or a
+     *  round after moves to its end, and reports; a refine whose donors have not all moved in
+     *  reports zero in every count. */
+    static expected<refine_report_t> plan_finish(void* variant, void* opened, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {{}, status_t::read_only_k};
         else {
-            typename variant_t::refine_plan_t& plan = static_cast<basic_refinement_state<variant_t>*>(refinement)->plan;
+            typename variant_t::refine_plan_t& plan = static_cast<basic_plan<variant_t>*>(opened)->plan;
             if (plan.moving()) return {{}, status_t::success_k};
             if constexpr (is_vram_index<variant_t>) return plan.finish(executor);
             else {
-                // The re-selection a cancel left is skipped rather than finished.
                 plan.stop();
-                progress_ticks_t heal_alone {{}, 0};
-                if (status_t const healed = of(variant).refine(plan, executor, heal_alone); failed(healed))
-                    return {{}, healed};
-                return plan.finish();
+                progress_ticks_t closing_alone {{}, 0};
+                status_t const closed = of(variant).refine(plan, executor, closing_alone);
+                return {plan.finish().value, closed};
             }
         }
     }
-    static void refinement_free(void* refinement) noexcept {
-        if constexpr (!viewed_k) delete static_cast<basic_refinement_state<variant_t>*>(refinement);
+    static void plan_free(void* opened) noexcept {
+        if constexpr (!viewed_k) delete static_cast<basic_plan<variant_t>*>(opened);
+    }
+    static usearch_phase_t plan_phase(void const* opened) noexcept {
+        if constexpr (viewed_k) return {};
+        else return phase_of(static_cast<basic_plan<variant_t> const*>(opened)->plan);
+    }
+    static void plan_next_round(void* opened) noexcept {
+        if constexpr (requires(typename variant_t::refine_plan_t& plan) { plan.next_round(); })
+            static_cast<basic_plan<variant_t>*>(opened)->plan.next_round();
     }
 
     /** Audits every shard of the variant: a RAM one on the calling thread, a GPU one on its
@@ -1347,16 +1349,17 @@ struct specialized_variant {
             .insert = &insert,
             // Refining
             .health = &health,
-            // Refinements
-            .refinement_init = &refinement_init,
-            .refinement_population = &refinement_population,
-            .refinement_next = &refinement_next,
-            .refinement_consumed = &refinement_consumed,
+            // Plans
+            .plan_open = &plan_open,
+            .plan_next = &plan_next,
+            .plan_consumed = &plan_consumed,
             .count_absorbed_donor = &count_absorbed_donor,
             .count_split_receiver = &count_split_receiver,
-            .refinement_running = &refinement_running,
-            .refinement_finish = &refinement_finish,
-            .refinement_free = &refinement_free,
+            .plan_running = &plan_running,
+            .plan_finish = &plan_finish,
+            .plan_free = &plan_free,
+            .plan_phase = &plan_phase,
+            .plan_next_round = &plan_next_round,
             // Lookups
             .count = &count,
             .get = &get,
