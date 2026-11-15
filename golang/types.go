@@ -634,6 +634,8 @@ const (
 	CPUClassUnknown CPUClass = C.usearch_cpu_class_unknown_k
 	// CPUClassSerial is the portable floor, with no SIMD assumptions.
 	CPUClassSerial CPUClass = C.usearch_cpu_class_serial_k
+	// CPUClassMonoversioned is the one class of a monoversioned build.
+	CPUClassMonoversioned CPUClass = C.usearch_cpu_class_monoversioned_k
 	// CPUClassIntelHaswell is Haswell-class x86: AVX2 and FMA.
 	CPUClassIntelHaswell CPUClass = C.usearch_cpu_class_intel_haswell_k
 	// CPUClassIntelSierra is Sierra Forest-class x86: AVX-VNNI without AVX-512.
@@ -642,32 +644,32 @@ const (
 	CPUClassIntelSkylake CPUClass = C.usearch_cpu_class_intel_skylake_k
 	// CPUClassIntelIcelake is Icelake-class x86: AVX-512 VNNI and VPOPCNT.
 	CPUClassIntelIcelake CPUClass = C.usearch_cpu_class_intel_icelake_k
-	// CPUClassAmdGenoa is Genoa-class x86: native bf16 dot products over AVX-512.
-	CPUClassAmdGenoa CPUClass = C.usearch_cpu_class_amd_genoa_k
+	// CPUClassAMDGenoa is Genoa-class x86: native bf16 dot products over AVX-512.
+	CPUClassAMDGenoa CPUClass = C.usearch_cpu_class_amd_genoa_k
 	// CPUClassIntelSapphire is Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.
 	CPUClassIntelSapphire CPUClass = C.usearch_cpu_class_intel_sapphire_k
 	// CPUClassIntelGranite is Granite Rapids-class x86: the AMX-FP16 tiles.
 	CPUClassIntelGranite CPUClass = C.usearch_cpu_class_intel_granite_k
 	// CPUClassIntelDiamond is Diamond Rapids-class x86: AVX10.2's FP8 conversions.
 	CPUClassIntelDiamond CPUClass = C.usearch_cpu_class_intel_diamond_k
-	// CPUClassAwsG2 is Graviton2-class Arm: the bare NEON floor.
-	CPUClassAwsG2 CPUClass = C.usearch_cpu_class_aws_g2_k
+	// CPUClassAWSG2 is Graviton2-class Arm: the bare NEON floor.
+	CPUClassAWSG2 CPUClass = C.usearch_cpu_class_aws_g2_k
 	// CPUClassAppleM2 is Armv8.6 NEON with dot products and bf16.
 	CPUClassAppleM2 CPUClass = C.usearch_cpu_class_apple_m2_k
 	// CPUClassAppleM4 is Apple M4-class Arm: the SME outer-product tiles.
 	CPUClassAppleM4 CPUClass = C.usearch_cpu_class_apple_m4_k
-	// CPUClassAwsG5 is Graviton5-class Arm: Armv9.2.
-	CPUClassAwsG5 CPUClass = C.usearch_cpu_class_aws_g5_k
-	// CPUClassNvidiaVera is Vera-class Arm: FP8 dot products.
-	CPUClassNvidiaVera CPUClass = C.usearch_cpu_class_nvidia_vera_k
+	// CPUClassAWSG5 is Graviton5-class Arm: Armv9.2.
+	CPUClassAWSG5 CPUClass = C.usearch_cpu_class_aws_g5_k
+	// CPUClassNVIDIAVera is Vera-class Arm: FP8 dot products.
+	CPUClassNVIDIAVera CPUClass = C.usearch_cpu_class_nvidia_vera_k
 	// CPUClassAlibabaC930 is Alibaba C930-class RISC-V: RVA23 vectors.
 	CPUClassAlibabaC930 CPUClass = C.usearch_cpu_class_alibaba_c930_k
+	// CPUClassIBMPower10 is IBM POWER10-class Power: VSX vectors and MMA accumulators.
+	CPUClassIBMPower10 CPUClass = C.usearch_cpu_class_ibm_power10_k
 	// CPUClassWasm32V128 is WebAssembly with fixed-width simd128.
 	CPUClassWasm32V128 CPUClass = C.usearch_cpu_class_wasm32_v128_k
 	// CPUClassWasm64Extended is WebAssembly with relaxed SIMD, threads and 64-bit addressing.
 	CPUClassWasm64Extended CPUClass = C.usearch_cpu_class_wasm64_extended_k
-	// CPUClassMonoversioned is the one class of a monoversioned build.
-	CPUClassMonoversioned CPUClass = C.usearch_cpu_class_monoversioned_k
 )
 
 // String renders the class as the library spells it.
@@ -682,24 +684,24 @@ type GPUClass int32
 const (
 	// GPUClassUnknown pins nothing, so dispatch derives the devices' own class.
 	GPUClassUnknown GPUClass = C.usearch_gpu_class_unknown_k
-	// GPUClassNvidiaAmpere is Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
-	GPUClassNvidiaAmpere GPUClass = C.usearch_gpu_class_nvidia_ampere_k
-	// GPUClassNvidiaAda is Ada-class NVIDIA: the fp8 conversions.
-	GPUClassNvidiaAda GPUClass = C.usearch_gpu_class_nvidia_ada_k
-	// GPUClassNvidiaHopper is Hopper-class NVIDIA.
-	GPUClassNvidiaHopper GPUClass = C.usearch_gpu_class_nvidia_hopper_k
-	// GPUClassNvidiaBlackwell is Blackwell-class NVIDIA.
-	GPUClassNvidiaBlackwell GPUClass = C.usearch_gpu_class_nvidia_blackwell_k
-	// GPUClassNvidiaBlackwellRTX is Consumer Blackwell NVIDIA.
-	GPUClassNvidiaBlackwellRTX GPUClass = C.usearch_gpu_class_nvidia_blackwellrtx_k
-	// GPUClassNvidiaRubin is Rubin-class NVIDIA.
-	GPUClassNvidiaRubin GPUClass = C.usearch_gpu_class_nvidia_rubin_k
-	// GPUClassAmdCDNA3 is CDNA3 AMD: gfx942.
-	GPUClassAmdCDNA3 GPUClass = C.usearch_gpu_class_amd_cdna3_k
-	// GPUClassAmdCDNA4 is CDNA4 AMD: gfx950.
-	GPUClassAmdCDNA4 GPUClass = C.usearch_gpu_class_amd_cdna4_k
-	// GPUClassAmdCDNA5 is CDNA5 AMD: gfx1250.
-	GPUClassAmdCDNA5 GPUClass = C.usearch_gpu_class_amd_cdna5_k
+	// GPUClassNVIDIAAmpere is Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
+	GPUClassNVIDIAAmpere GPUClass = C.usearch_gpu_class_nvidia_ampere_k
+	// GPUClassNVIDIAAda is Ada-class NVIDIA: the fp8 conversions.
+	GPUClassNVIDIAAda GPUClass = C.usearch_gpu_class_nvidia_ada_k
+	// GPUClassNVIDIAHopper is Hopper-class NVIDIA.
+	GPUClassNVIDIAHopper GPUClass = C.usearch_gpu_class_nvidia_hopper_k
+	// GPUClassNVIDIABlackwell is Blackwell-class NVIDIA.
+	GPUClassNVIDIABlackwell GPUClass = C.usearch_gpu_class_nvidia_blackwell_k
+	// GPUClassNVIDIABlackwellRTX is Consumer Blackwell NVIDIA.
+	GPUClassNVIDIABlackwellRTX GPUClass = C.usearch_gpu_class_nvidia_blackwellrtx_k
+	// GPUClassNVIDIARubin is Rubin-class NVIDIA.
+	GPUClassNVIDIARubin GPUClass = C.usearch_gpu_class_nvidia_rubin_k
+	// GPUClassAMDCDNA3 is CDNA3 AMD: gfx942.
+	GPUClassAMDCDNA3 GPUClass = C.usearch_gpu_class_amd_cdna3_k
+	// GPUClassAMDCDNA4 is CDNA4 AMD: gfx950.
+	GPUClassAMDCDNA4 GPUClass = C.usearch_gpu_class_amd_cdna4_k
+	// GPUClassAMDCDNA5 is CDNA5 AMD: gfx1250.
+	GPUClassAMDCDNA5 GPUClass = C.usearch_gpu_class_amd_cdna5_k
 	// GPUClassAppleMetal7 is Apple7-family GPUs, and every Apple GPU without a class of its own.
 	GPUClassAppleMetal7 GPUClass = C.usearch_gpu_class_apple_metal7_k
 	// GPUClassAppleMetal9 is Apple9-family GPUs.

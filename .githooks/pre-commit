@@ -41,7 +41,7 @@ project_include_prefix="usearch"
 sibling_projects='numkong|stringzilla|forkunion|smashtable|ucall|ustore|uform'
 abbreviations_refused="hi lo bot acc accum tmp temp res bcast ext idx cnt buf len str val obj elem iter"
 # Name prefixes of third-party APIs the code calls, whose abbreviations are not this project's to spell out.
-third_party_identifier_prefixes=''
+third_party_identifier_prefixes='vec_'
 identifier_words_refused="landing landed lander join seat deal pool home plane dirty met seen"
 member_names_refused="bits current state data flags tmp scratch bitset buffer"
 width_free_directories="include/usearch/utilities include/usearch/basic"

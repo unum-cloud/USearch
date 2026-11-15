@@ -822,6 +822,8 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     public static let nvidiaVera = CPUClass(raw: usearch_cpu_class_nvidia_vera_k)
     /// Alibaba C930-class RISC-V: RVA23 vectors.
     public static let alibabaC930 = CPUClass(raw: usearch_cpu_class_alibaba_c930_k)
+    /// IBM POWER10-class Power: VSX vectors and MMA accumulators.
+    public static let ibmPower10 = CPUClass(raw: usearch_cpu_class_ibm_power10_k)
     /// WebAssembly with fixed-width simd128.
     public static let wasm32V128 = CPUClass(raw: usearch_cpu_class_wasm32_v128_k)
     /// WebAssembly with relaxed SIMD, threads and 64-bit addressing.

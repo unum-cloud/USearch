@@ -239,40 +239,42 @@ class CPUClass(IntEnum):
 
     SERIAL = 1
     """The portable floor: no SIMD assumptions."""
-    INTEL_HASWELL = 2
-    """Haswell-class x86: AVX2 and FMA, the 256-bit floor."""
-    INTEL_SIERRA = 3
-    """Sierra Forest-class x86, the E-core Xeons: AVX-VNNI without AVX-512."""
-    INTEL_SKYLAKE = 4
-    """Skylake-class x86: the AVX-512 foundation tier."""
-    INTEL_ICELAKE = 5
-    """Icelake-class x86: AVX-512 VNNI and VPOPCNT."""
-    AMD_GENOA = 6
-    """Genoa-class x86, Zen 4 and newer: native bf16 dot products over AVX-512."""
-    INTEL_SAPPHIRE = 7
-    """Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and AMX tiles."""
-    INTEL_GRANITE = 8
-    """Granite Rapids-class x86: the Sapphire Rapids bundle plus AMX-FP16 tiles."""
-    INTEL_DIAMOND = 9
-    """Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2 FP8 conversions."""
-    AWS_G2 = 10
-    """Graviton2-class Arm, Neoverse N1: the bare NEON floor."""
-    APPLE_M2 = 11
-    """Armv8.6 NEON with dot products and bf16 and f16 fused multiplies, as in Apple M2."""
-    APPLE_M4 = 12
-    """Apple M4-class Arm: the Armv8.6 NEON bundle plus SME outer-product tiles."""
-    AWS_G5 = 13
-    """Graviton5-class Arm, Neoverse V3 and Armv9.2: monitored waits."""
-    NVIDIA_VERA = 14
-    """Vera-class Arm: NVIDIA's Armv9.2-generation cores with FP8 dot products."""
-    ALIBABA_C930 = 15
-    """Alibaba C930-class RISC-V, RVA23: vectors with Zvbb, monitored waits."""
-    WASM32_V128 = 16
-    """WebAssembly every engine loads: 32-bit, single-threaded, simd128."""
-    WASM64_EXTENDED = 17
-    """WebAssembly with relaxed SIMD, shared memory and 64-bit addressing."""
-    MONOVERSIONED = 18
+    MONOVERSIONED = 2
     """The one class of a monoversioned build, carrying every capability its floor implies."""
+    INTEL_HASWELL = 3
+    """Haswell-class x86: AVX2 and FMA, the 256-bit floor."""
+    INTEL_SIERRA = 4
+    """Sierra Forest-class x86, the E-core Xeons: AVX-VNNI without AVX-512."""
+    INTEL_SKYLAKE = 5
+    """Skylake-class x86: the AVX-512 foundation tier."""
+    INTEL_ICELAKE = 6
+    """Icelake-class x86: AVX-512 VNNI and VPOPCNT."""
+    AMD_GENOA = 7
+    """Genoa-class x86, Zen 4 and newer: native bf16 dot products over AVX-512."""
+    INTEL_SAPPHIRE = 8
+    """Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and AMX tiles."""
+    INTEL_GRANITE = 9
+    """Granite Rapids-class x86: the Sapphire Rapids bundle plus AMX-FP16 tiles."""
+    INTEL_DIAMOND = 10
+    """Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2 FP8 conversions."""
+    AWS_G2 = 12
+    """Graviton2-class Arm, Neoverse N1: the bare NEON floor."""
+    APPLE_M2 = 13
+    """Armv8.6 NEON with dot products and bf16 and f16 fused multiplies, as in Apple M2."""
+    APPLE_M4 = 14
+    """Apple M4-class Arm: the Armv8.6 NEON bundle plus SME outer-product tiles."""
+    AWS_G5 = 15
+    """Graviton5-class Arm, Neoverse V3 and Armv9.2: monitored waits."""
+    NVIDIA_VERA = 16
+    """Vera-class Arm: NVIDIA's Armv9.2-generation cores with FP8 dot products."""
+    ALIBABA_C930 = 17
+    """Alibaba C930-class RISC-V, RVA23: vectors with Zvbb, monitored waits."""
+    IBM_POWER10 = 18
+    """IBM POWER10-class Power, ISA 3.1: VSX vectors, MMA accumulators and pause_short waits."""
+    WASM32_V128 = 19
+    """WebAssembly every engine loads: 32-bit, single-threaded, simd128."""
+    WASM64_EXTENDED = 20
+    """WebAssembly with relaxed SIMD, shared memory and 64-bit addressing."""
 
 class GPUClass(IntEnum):
     """The GPU families dispatch picks from; a placement may pin one."""

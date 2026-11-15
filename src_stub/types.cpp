@@ -12,7 +12,7 @@
  *  completion, and one that meets a running call on its executor finishes contended. Only the RAM
  *  constructors succeed.
  */
-#include <algorithm> // `std::find`, `std::any_of`
+#include <algorithm> // `std::find`, `std::any_of`, `std::ranges::count`
 #include <mutex>     // `std::mutex`, `std::lock_guard`, `std::unique_lock`
 #include <variant>   // `std::visit`
 #include <vector>    // `std::vector`
@@ -27,6 +27,32 @@ using namespace unum::usearch::stub;
 namespace unum {
 namespace usearch {
 namespace stub {
+
+/** Every CPU class the C enum names, in value order, as @c src/lib.hpp lists them. */
+constexpr usearch_cpu_class_t cpu_classes_k[] {
+    usearch_cpu_class_serial_k,          usearch_cpu_class_monoversioned_k,  usearch_cpu_class_intel_haswell_k,
+    usearch_cpu_class_intel_sierra_k,    usearch_cpu_class_intel_skylake_k,  usearch_cpu_class_intel_icelake_k,
+    usearch_cpu_class_amd_genoa_k,       usearch_cpu_class_intel_sapphire_k, usearch_cpu_class_intel_granite_k,
+    usearch_cpu_class_intel_diamond_k,   usearch_cpu_class_aws_g2_k,         usearch_cpu_class_apple_m2_k,
+    usearch_cpu_class_apple_m4_k,        usearch_cpu_class_aws_g5_k,         usearch_cpu_class_nvidia_vera_k,
+    usearch_cpu_class_alibaba_c930_k,    usearch_cpu_class_ibm_power10_k,    usearch_cpu_class_wasm32_v128_k,
+    usearch_cpu_class_wasm64_extended_k,
+};
+
+/** Every GPU class the C enum names, in value order. */
+constexpr usearch_gpu_class_t gpu_classes_k[] {
+    usearch_gpu_class_nvidia_ampere_k,    usearch_gpu_class_nvidia_ada_k,          usearch_gpu_class_nvidia_hopper_k,
+    usearch_gpu_class_nvidia_blackwell_k, usearch_gpu_class_nvidia_blackwellrtx_k, usearch_gpu_class_nvidia_rubin_k,
+    usearch_gpu_class_amd_cdna3_k,        usearch_gpu_class_amd_cdna4_k,           usearch_gpu_class_amd_cdna5_k,
+    usearch_gpu_class_apple_metal7_k,     usearch_gpu_class_apple_metal9_k,        usearch_gpu_class_apple_metal10_k,
+};
+
+/** Every NVMe class the C enum names, in value order. */
+constexpr usearch_nvme_class_t nvme_classes_k[] {
+    usearch_nvme_class_posix_k,       usearch_nvme_class_linux_aio_k,
+    usearch_nvme_class_linux_uring_k, usearch_nvme_class_linux_uring_passthrough_k,
+    usearch_nvme_class_linux_spdk_k,  usearch_nvme_class_windows_ioring_k,
+};
 
 #pragma region Calls
 
@@ -159,7 +185,8 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
     if (reject_if(arguments->nvme.paths_count && !arguments->nvme.paths, usearch_status_invalid_argument_k,
                   "The paths must name storage", outcome))
         return;
-    if (reject_if(static_cast<unsigned>(arguments->nvme_class) > usearch_nvme_class_windows_ioring_k,
+    if (reject_if(arguments->nvme_class != usearch_nvme_class_unknown_k &&
+                      std::ranges::count(nvme_classes_k, arguments->nvme_class) == 0,
                   usearch_status_invalid_argument_k, "The NVMe class is unknown", outcome))
         return;
     if (reject_if(arguments->nvme_class == usearch_nvme_class_linux_spdk_k, usearch_status_unsupported_k,
@@ -330,6 +357,7 @@ char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
     case usearch_cpu_class_aws_g5_k: return "aws-g5";
     case usearch_cpu_class_nvidia_vera_k: return "nvidia-vera";
     case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case usearch_cpu_class_ibm_power10_k: return "ibm-power10";
     case usearch_cpu_class_wasm32_v128_k: return "wasm32-v128";
     case usearch_cpu_class_wasm64_extended_k: return "wasm64-extended";
     case usearch_cpu_class_monoversioned_k: return "monoversioned";
@@ -338,8 +366,7 @@ char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
 }
 
 usearch_cpu_class_t usearch_cpu_class_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_monoversioned_k; ++code) {
-        usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
+    for (usearch_cpu_class_t const cpu_class : cpu_classes_k) {
         if (named(name, usearch_cpu_class_name(cpu_class))) return cpu_class;
     }
     return usearch_cpu_class_unknown_k;
@@ -364,8 +391,7 @@ char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class) {
 }
 
 usearch_gpu_class_t usearch_gpu_class_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_gpu_class_nvidia_ampere_k; code <= usearch_gpu_class_apple_metal10_k; ++code) {
-        usearch_gpu_class_t const gpu_class = static_cast<usearch_gpu_class_t>(code);
+    for (usearch_gpu_class_t const gpu_class : gpu_classes_k) {
         if (named(name, usearch_gpu_class_name(gpu_class))) return gpu_class;
     }
     return usearch_gpu_class_unknown_k;
@@ -384,8 +410,7 @@ char const* usearch_nvme_class_name(usearch_nvme_class_t nvme_class) {
 }
 
 usearch_nvme_class_t usearch_nvme_class_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_nvme_class_posix_k; code <= usearch_nvme_class_windows_ioring_k; ++code) {
-        usearch_nvme_class_t const nvme_class = static_cast<usearch_nvme_class_t>(code);
+    for (usearch_nvme_class_t const nvme_class : nvme_classes_k) {
         if (named(name, usearch_nvme_class_name(nvme_class))) return nvme_class;
     }
     return usearch_nvme_class_unknown_k;

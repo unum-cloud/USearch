@@ -29,11 +29,13 @@ static std::size_t check_ram_bf16(settings_t const& settings, gpu_device_t const
                                                                                      settings.seed);
     failures_count += test_ram_indexes_configuration<nk_bf16_k, nk_kernel_angular_k, flaky_waiter_t>(
         "ram_bf16 sharded angular+flaky", settings.seed);
-    // The tiled scans: Arm SME and Intel AMX, each skipped where the build or the host lacks it.
+    // The tiled scans: Arm SME, Intel AMX and IBM MMA, each skipped where build or host lacks it.
     failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m4_k>(
         "ram_bf16 sharded angular+sme", settings.seed);
     failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_sapphire_k>(
         "ram_bf16 sharded angular+amx", settings.seed);
+    failures_count += test_ram_scan_configuration<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::ibm_power10_k>(
+        "ram_bf16 sharded angular+mma", settings.seed);
     return failures_count;
 }
 

@@ -644,72 +644,82 @@ typedef enum usearch_cpu_class_t {
     usearch_cpu_class_unknown_k = 0,
 
     // Portable
+
     /** The portable floor: no SIMD assumptions, standard yields. */
-    usearch_cpu_class_serial_k,
+    usearch_cpu_class_serial_k = 1,
+
+    /** The one class of a monoversioned build: every capability its floor implies or its preset
+     *  vouches for, as the kernel libraries compiled them. */
+    usearch_cpu_class_monoversioned_k = 2,
 
     // x86
+
     /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
-    usearch_cpu_class_intel_haswell_k,
+    usearch_cpu_class_intel_haswell_k = 3,
 
     /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without
      *  AVX-512, TPAUSE waits, CMPCCXADD conditional adds. */
-    usearch_cpu_class_intel_sierra_k,
+    usearch_cpu_class_intel_sierra_k = 4,
 
     /** Skylake-class x86: the AVX-512 foundation tier. */
-    usearch_cpu_class_intel_skylake_k,
+    usearch_cpu_class_intel_skylake_k = 5,
 
     /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
-    usearch_cpu_class_intel_icelake_k,
+    usearch_cpu_class_intel_icelake_k = 6,
 
     /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
-    usearch_cpu_class_amd_genoa_k,
+    usearch_cpu_class_amd_genoa_k = 7,
 
     /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
      *  AMX-INT8 tiles. */
-    usearch_cpu_class_intel_sapphire_k,
+    usearch_cpu_class_intel_sapphire_k = 8,
 
     /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
-    usearch_cpu_class_intel_granite_k,
+    usearch_cpu_class_intel_granite_k = 9,
 
     /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions,
      *  TPAUSE waits, CMPCCXADD conditional adds. */
-    usearch_cpu_class_intel_diamond_k,
+    usearch_cpu_class_intel_diamond_k = 10,
 
     // Arm
+
     /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating
      *  Armv8.6 land here too. */
-    usearch_cpu_class_aws_g2_k,
+    usearch_cpu_class_aws_g2_k = 12,
 
     /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
      *  Cortex-A710 & X2 class silicon. */
-    usearch_cpu_class_apple_m2_k,
+    usearch_cpu_class_apple_m2_k = 13,
 
     /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
-    usearch_cpu_class_apple_m4_k,
+    usearch_cpu_class_apple_m4_k = 14,
 
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits; no build compiles it yet. */
-    usearch_cpu_class_aws_g5_k,
+    usearch_cpu_class_aws_g5_k = 15,
 
     /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
-    usearch_cpu_class_nvidia_vera_k,
+    usearch_cpu_class_nvidia_vera_k = 16,
 
     // RISC-V
+
     /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: vectors with Zvbb, Zawrs
      *  monitored waits, Zacas single-instruction compare-and-swap. */
-    usearch_cpu_class_alibaba_c930_k,
+    usearch_cpu_class_alibaba_c930_k = 17,
+
+    // Power
+
+    /** IBM POWER10-class Power, ISA 3.1: VSX vectors, the MMA outer-product accumulators and
+     *  pause_short waits. */
+    usearch_cpu_class_ibm_power10_k = 18,
 
     // WebAssembly
+
     /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
-    usearch_cpu_class_wasm32_v128_k,
+    usearch_cpu_class_wasm32_v128_k = 19,
 
     /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
      *  addressing that alone lets one module's memory pass 4 GB. */
-    usearch_cpu_class_wasm64_extended_k,
-
-    // One class
-    /** The one class of a monoversioned build: every capability its floor implies or its preset
-     *  vouches for, as the kernel libraries compiled them. */
-    usearch_cpu_class_monoversioned_k,
+    usearch_cpu_class_wasm64_extended_k = 20,
 } usearch_cpu_class_t;
 
 /** The GPU families USearch ships tuned variants for, the device twin of
@@ -720,43 +730,45 @@ typedef enum usearch_gpu_class_t {
     usearch_gpu_class_unknown_k = 0,
 
     // NVIDIA
+
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
-    usearch_gpu_class_nvidia_ampere_k,
+    usearch_gpu_class_nvidia_ampere_k = 1,
 
     /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
-    usearch_gpu_class_nvidia_ada_k,
+    usearch_gpu_class_nvidia_ada_k = 2,
 
     /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
-    usearch_gpu_class_nvidia_hopper_k,
+    usearch_gpu_class_nvidia_hopper_k = 3,
 
     /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA gather4 scattered fetches. */
-    usearch_gpu_class_nvidia_blackwell_k,
+    usearch_gpu_class_nvidia_blackwell_k = 4,
 
     /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark. */
-    usearch_gpu_class_nvidia_blackwellrtx_k,
+    usearch_gpu_class_nvidia_blackwellrtx_k = 5,
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
-    usearch_gpu_class_nvidia_rubin_k,
+    usearch_gpu_class_nvidia_rubin_k = 6,
 
     // AMD
+
     /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
-    usearch_gpu_class_amd_cdna3_k,
+    usearch_gpu_class_amd_cdna3_k = 7,
 
     /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
-    usearch_gpu_class_amd_cdna4_k,
+    usearch_gpu_class_amd_cdna4_k = 8,
 
     /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
-    usearch_gpu_class_amd_cdna5_k,
+    usearch_gpu_class_amd_cdna5_k = 9,
 
     // Apple
     /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
-    usearch_gpu_class_apple_metal7_k,
+    usearch_gpu_class_apple_metal7_k = 10,
 
     /** Apple9-family GPUs - M3 & M4. */
-    usearch_gpu_class_apple_metal9_k,
+    usearch_gpu_class_apple_metal9_k = 11,
 
     /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
-    usearch_gpu_class_apple_metal10_k,
+    usearch_gpu_class_apple_metal10_k = 12,
 } usearch_gpu_class_t;
 
 /** The GPU vendors one binary drives at once, each through a runtime loaded on first use. */
@@ -1303,23 +1315,23 @@ typedef enum usearch_nvme_class_t {
     usearch_nvme_class_unknown_k = 0,
 
     /** @c pread or @c ReadFile on the calling thread. */
-    usearch_nvme_class_posix_k,
+    usearch_nvme_class_posix_k = 1,
 
     /** Linux AIO over @c io_submit and @c io_getevents, with @c O_DIRECT. */
-    usearch_nvme_class_linux_aio_k,
+    usearch_nvme_class_linux_aio_k = 2,
 
     /** io_uring reads on files and block devices. */
-    usearch_nvme_class_linux_uring_k,
+    usearch_nvme_class_linux_uring_k = 3,
 
     /** io_uring NVMe passthrough on namespace character devices, such as @c /dev/ng0n1, over the
      *  128-byte entries Linux 5.19 introduced. */
-    usearch_nvme_class_linux_uring_passthrough_k,
+    usearch_nvme_class_linux_uring_passthrough_k = 4,
 
     /** The SPDK user-space driver, over namespaces named by transport identifiers. */
-    usearch_nvme_class_linux_spdk_k,
+    usearch_nvme_class_linux_spdk_k = 5,
 
     /** I/O Rings, on Windows 11 22H2 and newer. */
-    usearch_nvme_class_windows_ioring_k,
+    usearch_nvme_class_windows_ioring_k = 6,
 } usearch_nvme_class_t;
 
 /** The arguments of @c usearch_executor_for_nvme. */

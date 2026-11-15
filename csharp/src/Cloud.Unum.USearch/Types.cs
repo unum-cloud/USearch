@@ -912,63 +912,65 @@ public enum CPUClass : int
 {
     /// <summary>The portable floor, with no SIMD assumptions.</summary>
     Serial = 1,
-    /// <summary>Haswell-class x86: AVX2 and FMA.</summary>
-    IntelHaswell = 2,
-    /// <summary>Sierra Forest-class x86: AVX-VNNI without AVX-512.</summary>
-    IntelSierra = 3,
-    /// <summary>Skylake-class x86: the AVX-512 foundation.</summary>
-    IntelSkylake = 4,
-    /// <summary>Icelake-class x86: AVX-512 VNNI and VPOPCNT.</summary>
-    IntelIcelake = 5,
-    /// <summary>Genoa-class x86: native bf16 dot products over AVX-512.</summary>
-    AmdGenoa = 6,
-    /// <summary>Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.</summary>
-    IntelSapphire = 7,
-    /// <summary>Granite Rapids-class x86: the AMX-FP16 tiles.</summary>
-    IntelGranite = 8,
-    /// <summary>Diamond Rapids-class x86: AVX10.2's FP8 conversions.</summary>
-    IntelDiamond = 9,
-    /// <summary>Graviton2-class Arm: the bare NEON floor.</summary>
-    AwsG2 = 10,
-    /// <summary>Armv8.6 NEON with dot products and bf16.</summary>
-    AppleM2 = 11,
-    /// <summary>Apple M4-class Arm: the SME outer-product tiles.</summary>
-    AppleM4 = 12,
-    /// <summary>Graviton5-class Arm: Armv9.2.</summary>
-    AwsG5 = 13,
-    /// <summary>Vera-class Arm: FP8 dot products.</summary>
-    NvidiaVera = 14,
-    /// <summary>Alibaba C930-class RISC-V: RVA23 vectors.</summary>
-    AlibabaC930 = 15,
-    /// <summary>WebAssembly with fixed-width simd128.</summary>
-    Wasm32V128 = 16,
-    /// <summary>WebAssembly with relaxed SIMD, threads and 64-bit addressing.</summary>
-    Wasm64Extended = 17,
     /// <summary>The one class of a monoversioned build.</summary>
-    Monoversioned = 18,
+    Monoversioned = 2,
+    /// <summary>Haswell-class x86: AVX2 and FMA.</summary>
+    IntelHaswell = 3,
+    /// <summary>Sierra Forest-class x86: AVX-VNNI without AVX-512.</summary>
+    IntelSierra = 4,
+    /// <summary>Skylake-class x86: the AVX-512 foundation.</summary>
+    IntelSkylake = 5,
+    /// <summary>Icelake-class x86: AVX-512 VNNI and VPOPCNT.</summary>
+    IntelIcelake = 6,
+    /// <summary>Genoa-class x86: native bf16 dot products over AVX-512.</summary>
+    AMDGenoa = 7,
+    /// <summary>Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.</summary>
+    IntelSapphire = 8,
+    /// <summary>Granite Rapids-class x86: the AMX-FP16 tiles.</summary>
+    IntelGranite = 9,
+    /// <summary>Diamond Rapids-class x86: AVX10.2's FP8 conversions.</summary>
+    IntelDiamond = 10,
+    /// <summary>Graviton2-class Arm: the bare NEON floor.</summary>
+    AWSG2 = 12,
+    /// <summary>Armv8.6 NEON with dot products and bf16.</summary>
+    AppleM2 = 13,
+    /// <summary>Apple M4-class Arm: the SME outer-product tiles.</summary>
+    AppleM4 = 14,
+    /// <summary>Graviton5-class Arm: Armv9.2.</summary>
+    AWSG5 = 15,
+    /// <summary>Vera-class Arm: FP8 dot products.</summary>
+    NVIDIAVera = 16,
+    /// <summary>Alibaba C930-class RISC-V: RVA23 vectors.</summary>
+    AlibabaC930 = 17,
+    /// <summary>IBM POWER10-class Power: VSX vectors and MMA accumulators.</summary>
+    IBMPower10 = 18,
+    /// <summary>WebAssembly with fixed-width simd128.</summary>
+    Wasm32V128 = 19,
+    /// <summary>WebAssembly with relaxed SIMD, threads and 64-bit addressing.</summary>
+    Wasm64Extended = 20,
 }
 
 /// <summary>A GPU family USearch ships tuned variants for, which a VRAM placement or executor may pin.</summary>
 public enum GPUClass : int
 {
     /// <summary>Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.</summary>
-    NvidiaAmpere = 1,
+    NVIDIAAmpere = 1,
     /// <summary>Ada-class NVIDIA: the fp8 conversions.</summary>
-    NvidiaAda = 2,
+    NVIDIAAda = 2,
     /// <summary>Hopper-class NVIDIA.</summary>
-    NvidiaHopper = 3,
+    NVIDIAHopper = 3,
     /// <summary>Blackwell-class NVIDIA.</summary>
-    NvidiaBlackwell = 4,
+    NVIDIABlackwell = 4,
     /// <summary>Consumer Blackwell NVIDIA.</summary>
-    NvidiaBlackwellRTX = 5,
+    NVIDIABlackwellRTX = 5,
     /// <summary>Rubin-class NVIDIA.</summary>
-    NvidiaRubin = 6,
+    NVIDIARubin = 6,
     /// <summary>CDNA3 AMD: gfx942.</summary>
-    AmdCDNA3 = 7,
+    AMDCDNA3 = 7,
     /// <summary>CDNA4 AMD: gfx950.</summary>
-    AmdCDNA4 = 8,
+    AMDCDNA4 = 8,
     /// <summary>CDNA5 AMD: gfx1250.</summary>
-    AmdCDNA5 = 9,
+    AMDCDNA5 = 9,
     /// <summary>Apple7-family GPUs, and every Apple GPU without a class of its own.</summary>
     AppleMetal7 = 10,
     /// <summary>Apple9-family GPUs.</summary>

@@ -565,82 +565,86 @@ enum class cpu_class_t : u32_t {
     /** No class detected yet, or none of the classes below. */
     unknown_k = 0,
 
-    // Portable floor
+    // Portable classes
 
     /** The portable floor: no SIMD assumptions, standard yields. */
-    serial_k,
+    serial_k = usearch_cpu_class_serial_k,
+
+    /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
+     *  preset vouches for, as the libraries compiled them. */
+    monoversioned_k = usearch_cpu_class_monoversioned_k,
 
     // x86 classes
 
     /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
-    intel_haswell_k,
+    intel_haswell_k = usearch_cpu_class_intel_haswell_k,
 
     /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI & its INT8 / IFMA / NE-CONVERT
      *  successors without AVX-512, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
-    intel_sierra_k,
+    intel_sierra_k = usearch_cpu_class_intel_sierra_k,
 
     /** Skylake-class x86: the AVX-512 foundation tier. */
-    intel_skylake_k,
+    intel_skylake_k = usearch_cpu_class_intel_skylake_k,
 
     /** Icelake-class x86: AVX-512 VNNI & VPOPCNT - the integer & bit workhorse. */
-    intel_icelake_k,
+    intel_icelake_k = usearch_cpu_class_intel_icelake_k,
 
     /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
-    amd_genoa_k,
+    amd_genoa_k = usearch_cpu_class_amd_genoa_k,
 
     /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
      *  AMX-INT8 tiles. */
-    intel_sapphire_k,
+    intel_sapphire_k = usearch_cpu_class_intel_sapphire_k,
 
     /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
-    intel_granite_k,
+    intel_granite_k = usearch_cpu_class_intel_granite_k,
 
     /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions and
      *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
-    intel_diamond_k,
+    intel_diamond_k = usearch_cpu_class_intel_diamond_k,
 
     // Arm classes
 
     /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; pre-Armv8.6 phones fall
      *  here too. */
-    aws_g2_k,
+    aws_g2_k = usearch_cpu_class_aws_g2_k,
 
     /** Armv8.6+ NEON: dot products, @c bf16 & @c f16 fused multiplies. Named for Apple M2;
      *  Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
-    apple_m2_k,
+    apple_m2_k = usearch_cpu_class_apple_m2_k,
 
     /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
      *  @c BMOPA among them, without plain SVE. */
-    apple_m4_k,
+    apple_m4_k = usearch_cpu_class_apple_m4_k,
 
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with waits that
      *  monitor through @c WFE instead of spinning; no build compiles it yet. */
-    aws_g5_k,
+    aws_g5_k = usearch_cpu_class_aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
-    nvidia_vera_k,
+    nvidia_vera_k = usearch_cpu_class_nvidia_vera_k,
 
     // RISC-V classes
 
     /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23: the vector extension with
      *  @c Zvbb, @c Zawrs monitored waits, @c Zacas single-instruction compare-and-swap. */
-    alibaba_c930_k,
+    alibaba_c930_k = usearch_cpu_class_alibaba_c930_k,
+
+    // Power classes
+
+    /** IBM POWER10-class Power, ISA 3.1: VSX vectors, the MMA outer-product accumulators and
+     *  @c pause_short waits. */
+    ibm_power10_k = usearch_cpu_class_ibm_power10_k,
 
     // WebAssembly classes
 
     /** WebAssembly every engine loads: 32-bit, one caller-inclusive thread, the fixed-width
      *  @c simd128 tier, so it runs on WebKit and in pages served without cross-origin isolation. */
-    wasm32_v128_k,
+    wasm32_v128_k = usearch_cpu_class_wasm32_v128_k,
 
     /** WebAssembly with relaxed SIMD, a shared memory for Web Worker pools and 64-bit addressing,
      *  bundled because every engine that ships one ships the other two. */
-    wasm64_extended_k,
-
-    // Monoversioned builds
-
-    /** The one class of a monoversioned build: every capability @c USEARCH_MARCH implies or a
-     *  preset vouches for, as the libraries compiled them. */
-    monoversioned_k,
+    wasm64_extended_k = usearch_cpu_class_wasm64_extended_k,
 };
 
 /** The GPU families USearch ships tuned variants for, the device twin of @c cpu_class_t: one
@@ -655,47 +659,85 @@ enum class gpu_class_t : u32_t {
     // NVIDIA classes
 
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
-    nvidia_ampere_k,
+    nvidia_ampere_k = usearch_gpu_class_nvidia_ampere_k,
 
     /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
-    nvidia_ada_k,
+    nvidia_ada_k = usearch_gpu_class_nvidia_ada_k,
 
     /** Hopper-class NVIDIA - H100 & H200: no TMA gather, DPX instructions. */
-    nvidia_hopper_k,
+    nvidia_hopper_k = usearch_gpu_class_nvidia_hopper_k,
 
     /** Blackwell-class NVIDIA - B200, B300 & GB300: TMA @c gather4 scattered fetches
      *  and @c tcgen05 tensor-core GEMMs. */
-    nvidia_blackwell_k,
+    nvidia_blackwell_k = usearch_gpu_class_nvidia_blackwell_k,
 
     /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark: Blackwell's conversions
      *  without @c tcgen05. */
-    nvidia_blackwellrtx_k,
+    nvidia_blackwellrtx_k = usearch_gpu_class_nvidia_blackwellrtx_k,
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
-    nvidia_rubin_k,
+    nvidia_rubin_k = usearch_gpu_class_nvidia_rubin_k,
 
     // AMD classes
 
     /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
-    amd_cdna3_k,
+    amd_cdna3_k = usearch_gpu_class_amd_cdna3_k,
 
     /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
-    amd_cdna4_k,
+    amd_cdna4_k = usearch_gpu_class_amd_cdna4_k,
 
     /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
-    amd_cdna5_k,
+    amd_cdna5_k = usearch_gpu_class_amd_cdna5_k,
 
     // Apple classes
 
     /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
-    apple_metal7_k,
+    apple_metal7_k = usearch_gpu_class_apple_metal7_k,
 
     /** Apple9-family GPUs - M3 & M4. */
-    apple_metal9_k,
+    apple_metal9_k = usearch_gpu_class_apple_metal9_k,
 
     /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
-    apple_metal10_k,
+    apple_metal10_k = usearch_gpu_class_apple_metal10_k,
 };
+
+static_assert(usearch_cpu_class_serial_k == 1 && usearch_cpu_class_monoversioned_k == 2 &&
+              usearch_cpu_class_ibm_power10_k == 18);
+
+/** Every CPU class the C enum names, in value order: the one table pins are checked against and
+ *  names are read back from, so a value naming no class this build has is never one. */
+constexpr usearch_cpu_class_t cpu_classes_k[] {
+    usearch_cpu_class_serial_k,          usearch_cpu_class_monoversioned_k,  usearch_cpu_class_intel_haswell_k,
+    usearch_cpu_class_intel_sierra_k,    usearch_cpu_class_intel_skylake_k,  usearch_cpu_class_intel_icelake_k,
+    usearch_cpu_class_amd_genoa_k,       usearch_cpu_class_intel_sapphire_k, usearch_cpu_class_intel_granite_k,
+    usearch_cpu_class_intel_diamond_k,   usearch_cpu_class_aws_g2_k,         usearch_cpu_class_apple_m2_k,
+    usearch_cpu_class_apple_m4_k,        usearch_cpu_class_aws_g5_k,         usearch_cpu_class_nvidia_vera_k,
+    usearch_cpu_class_alibaba_c930_k,    usearch_cpu_class_ibm_power10_k,    usearch_cpu_class_wasm32_v128_k,
+    usearch_cpu_class_wasm64_extended_k,
+};
+
+/** Every GPU class the C enum names, in value order. */
+constexpr usearch_gpu_class_t gpu_classes_k[] {
+    usearch_gpu_class_nvidia_ampere_k,    usearch_gpu_class_nvidia_ada_k,          usearch_gpu_class_nvidia_hopper_k,
+    usearch_gpu_class_nvidia_blackwell_k, usearch_gpu_class_nvidia_blackwellrtx_k, usearch_gpu_class_nvidia_rubin_k,
+    usearch_gpu_class_amd_cdna3_k,        usearch_gpu_class_amd_cdna4_k,           usearch_gpu_class_amd_cdna5_k,
+    usearch_gpu_class_apple_metal7_k,     usearch_gpu_class_apple_metal9_k,        usearch_gpu_class_apple_metal10_k,
+};
+
+/** Every NVMe class the C enum names, in value order. */
+constexpr usearch_nvme_class_t nvme_classes_k[] {
+    usearch_nvme_class_posix_k,       usearch_nvme_class_linux_aio_k,
+    usearch_nvme_class_linux_uring_k, usearch_nvme_class_linux_uring_passthrough_k,
+    usearch_nvme_class_linux_spdk_k,  usearch_nvme_class_windows_ioring_k,
+};
+
+/** Whether @p value is one of the entries of @p table. */
+template <typename value_type_, std::size_t count_>
+constexpr bool listed(value_type_ const (&table)[count_], value_type_ value) noexcept {
+    for (value_type_ const entry : table)
+        if (entry == value) return true;
+    return false;
+}
 
 /** Lowers one CPU class onto NumKong's compute mask - cumulative within a platform, so the chains
  *  pick their best row per dtype under it. */
@@ -724,6 +766,7 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_neonfp8_k;
     case cpu_class_t::monoversioned_k: return nk_cpu_capabilities_compiled_();
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
+    case cpu_class_t::ibm_power10_k: return nk_cap_serial_k | nk_cap_powervsx_k | nk_cap_powermma_k;
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
     case cpu_class_t::wasm64_extended_k:
         return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
@@ -766,6 +809,7 @@ constexpr sz_capability_t stringzilla_capabilities_of(cpu_class_t cpu_class) noe
         return stringzilla_capabilities_of(cpu_class_t::intel_haswell_k) | sz_cap_goldmont_k;
     case cpu_class_t::aws_g2_k:
     case cpu_class_t::apple_m2_k: return sz_cap_serial_k | sz_cap_neon_k | sz_cap_neonaes_k | sz_cap_neonsha_k;
+    case cpu_class_t::ibm_power10_k: return sz_cap_serial_k | sz_cap_powervsx_k;
     case cpu_class_t::monoversioned_k: return sz_capabilities_compiled_cpu_mask();
     default: return stringzilla_capabilities_of(parent_class_of(cpu_class));
     }
@@ -844,6 +888,12 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::riscv64_wrs_t;
+};
+#endif
+#if FORKUNION_TARGET_PPC64_PAUSE
+template <>
+struct waiter_for_cpu_class<cpu_class_t::ibm_power10_k> {
+    using type = fu::ppc64_pause_t;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -931,6 +981,13 @@ template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>
     using type = fu::riscv64_zacas_atomic_ref<value_type_>;
+};
+#endif
+#if FORKUNION_TARGET_PPC64_AMO
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::ibm_power10_k> {
+    template <typename value_type_>
+    using type = fu::ppc64_amo_atomic_ref<value_type_>;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -1033,10 +1090,11 @@ inline std::size_t machine_cache_line_bytes() noexcept {
     return machine_line_bytes ? machine_line_bytes : default_alignment_k;
 }
 
-/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
- *  confirms nothing about them, and a class differing by one alone earns no rung. */
+/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause and Power's
+ *  priority nops: the runtime confirms nothing about them, and a class that differs from another by
+ *  one of them alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
-                                                       fu::capability_riscv64_pause_k;
+                                                       fu::capability_riscv64_pause_k | fu::capability_ppc64_yield_k;
 
 /** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
  *  class's waiter and atomic reference are trusted, read off the two types themselves. */
@@ -1096,6 +1154,9 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
 #if USEARCH_TARGET_ALIBABA_C930
     case cpu_class_t::alibaba_c930_k: return true;
 #endif
+#if USEARCH_TARGET_IBM_POWER10
+    case cpu_class_t::ibm_power10_k: return true;
+#endif
 #if USEARCH_TARGET_WASM32_V128
     case cpu_class_t::wasm32_v128_k: return true;
 #endif
@@ -1126,6 +1187,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     case cpu_class_t::aws_g5_k: return forkunion_capabilities_of<cpu_class_t::aws_g5_k>();
     case cpu_class_t::nvidia_vera_k: return forkunion_capabilities_of<cpu_class_t::nvidia_vera_k>();
     case cpu_class_t::alibaba_c930_k: return forkunion_capabilities_of<cpu_class_t::alibaba_c930_k>();
+    case cpu_class_t::ibm_power10_k: return forkunion_capabilities_of<cpu_class_t::ibm_power10_k>();
     case cpu_class_t::wasm32_v128_k: return forkunion_capabilities_of<cpu_class_t::wasm32_v128_k>();
     case cpu_class_t::wasm64_extended_k: return forkunion_capabilities_of<cpu_class_t::wasm64_extended_k>();
     case cpu_class_t::monoversioned_k: return forkunion_capabilities_of<cpu_class_t::monoversioned_k>();
@@ -1136,8 +1198,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
 /** The C enum's class as the engines name it; @c usearch_cpu_class_unknown_k derives nothing, so
  *  it names the serial floor. */
 constexpr cpu_class_t cpu_class_of(usearch_cpu_class_t cpu_class) noexcept {
-    if (cpu_class == usearch_cpu_class_unknown_k || cpu_class > usearch_cpu_class_monoversioned_k)
-        return cpu_class_t::serial_k;
+    if (!listed(cpu_classes_k, cpu_class)) return cpu_class_t::serial_k;
     return static_cast<cpu_class_t>(cpu_class);
 }
 
@@ -1185,6 +1246,8 @@ using cpu_ladder_t = cpu_ladder<cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m
                                 cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k, cpu_class_t::serial_k>;
 #elif NUMKONG_ARCH_RISCV64_
 using cpu_ladder_t = cpu_ladder<cpu_class_t::alibaba_c930_k, cpu_class_t::serial_k>;
+#elif NUMKONG_ARCH_PPC64_
+using cpu_ladder_t = cpu_ladder<cpu_class_t::ibm_power10_k, cpu_class_t::serial_k>;
 #elif NUMKONG_ARCH_WASM_
 using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
 #else
@@ -1200,7 +1263,8 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noex
     if (nk_cpu_capabilities_enabled(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
     if (sz_capabilities_enabled_cpu(&ceiling.strings) != sz_success_k) ceiling.strings = sz_cap_serial_k;
     ceiling.sync = fu::cpu_capabilities();
-    if (pinned > usearch_cpu_class_monoversioned_k) return {ceiling, status_t::unsupported_k};
+    if (pinned != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, pinned))
+        return {ceiling, status_t::unsupported_k};
     bool runs = true;
     if (pinned != usearch_cpu_class_unknown_k) {
         cpu_class_t const pinned_class = cpu_class_of(pinned);
@@ -1323,6 +1387,9 @@ constexpr bool nvme_class_compiled(cpu_class_t cpu_class) noexcept {
 #if USEARCH_TARGET_NVME_NVIDIA_VERA
     case cpu_class_t::nvidia_vera_k: return true;
 #endif
+#if USEARCH_TARGET_NVME_IBM_POWER10
+    case cpu_class_t::ibm_power10_k: return true;
+#endif
 #if USEARCH_TARGET_NVME_MONOVERSIONED
     case cpu_class_t::monoversioned_k: return true;
 #endif
@@ -1353,6 +1420,9 @@ constexpr bool basic_class_compiled(cpu_class_t cpu_class) noexcept {
 #endif
 #if USEARCH_TARGET_BASIC_ALIBABA_C930
     case cpu_class_t::alibaba_c930_k: return true;
+#endif
+#if USEARCH_TARGET_BASIC_IBM_POWER10
+    case cpu_class_t::ibm_power10_k: return true;
 #endif
 #if USEARCH_TARGET_BASIC_WASM64_EXTENDED
     case cpu_class_t::wasm64_extended_k: return true;
@@ -1608,7 +1678,7 @@ constexpr bool numkong_admits(nk_capability_t available, gpu_class_t gpu_class) 
 constexpr nk_capability_t gpu_pin_capabilities(gpu_class_t device_class, usearch_gpu_class_t pinned) noexcept {
     nk_capability_t const device = numkong_capabilities_of(device_class);
     if (pinned == usearch_gpu_class_unknown_k) return device;
-    if (pinned > usearch_gpu_class_apple_metal10_k) return 0;
+    if (!listed(gpu_classes_k, pinned)) return 0;
     gpu_class_t const pinned_class = static_cast<gpu_class_t>(pinned);
     return numkong_admits(device, pinned_class) ? numkong_capabilities_of(pinned_class) : 0;
 }

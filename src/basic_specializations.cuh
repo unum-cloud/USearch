@@ -114,6 +114,12 @@ struct row_kit_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = st::rvv_row_kit_t;
 };
 #endif
+#if SMASHTABLE_TARGET_POWERVSX
+template <>
+struct row_kit_for_cpu_class<cpu_class_t::ibm_power10_k> {
+    using type = st::powervsx_row_kit_t;
+};
+#endif
 #if SMASHTABLE_TARGET_V128
 template <>
 struct row_kit_for_cpu_class<cpu_class_t::wasm32_v128_k> {

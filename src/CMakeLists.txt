@@ -21,13 +21,15 @@ set(usearch_cpu_rows_ serial)
 set(usearch_cpu_definitions_ "USEARCH_ARCH_CUDA_=0")
 
 # Unions the kits' flags: x86 `-m<feature>` flags collect, an Arm or RISC-V `-march=` string merges to the newest base
-# with every extension once, and MSVC's `/arch:` keeps the last, which the lineage lists highest.
+# with every extension once, a Power `-mcpu=` keeps the newest generation, and MSVC's `/arch:` keeps the last, which the
+# lineage lists highest.
 function (usearch_union_isa_flags out_)
     set(collected_)
     set(arm_base_)
     set(arm_extensions_)
     set(riscv_base_)
     set(riscv_extensions_)
+    set(power_generation_)
     set(msvc_arch_)
     foreach (flag_ IN LISTS ARGN)
         if (flag_ MATCHES "^-march=(armv[0-9.]+-a)(.*)$")
@@ -42,6 +44,10 @@ function (usearch_union_isa_flags out_)
             endif ()
             string(REPLACE "_" ";" parts_ "${CMAKE_MATCH_2}")
             list(APPEND riscv_extensions_ ${parts_})
+        elseif (flag_ MATCHES "^-mcpu=power([0-9]+)$")
+            if (NOT power_generation_ OR CMAKE_MATCH_1 GREATER power_generation_)
+                set(power_generation_ ${CMAKE_MATCH_1})
+            endif ()
         elseif (flag_ MATCHES "^/arch:")
             set(msvc_arch_ ${flag_})
         else ()
@@ -57,6 +63,9 @@ function (usearch_union_isa_flags out_)
         list(REMOVE_DUPLICATES riscv_extensions_)
         list(JOIN riscv_extensions_ "_" joined_)
         list(APPEND collected_ "-march=${riscv_base_}_${joined_}")
+    endif ()
+    if (power_generation_)
+        list(APPEND collected_ "-mcpu=power${power_generation_}")
     endif ()
     list(APPEND collected_ ${msvc_arch_})
     list(REMOVE_DUPLICATES collected_)
@@ -166,6 +175,15 @@ usearch_cpu_class(
     rvvbb
     riscv64_wrs
     riscv64_zacas
+)
+usearch_cpu_class(
+    ibm_power10
+    IBM_POWER10
+    OVER
+    serial
+    powervsx
+    powermma
+    ppc64_pause
 )
 usearch_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128)
 usearch_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed)
@@ -755,6 +773,7 @@ set(usearch_dense_nvme_classes_
     apple_m2
     apple_m4
     nvidia_vera
+    ibm_power10
 )
 set(usearch_basic_cpu_classes_
     serial
@@ -763,6 +782,7 @@ set(usearch_basic_cpu_classes_
     aws_g2
     apple_m2
     alibaba_c930
+    ibm_power10
     wasm64_extended
 )
 if (NOT USEARCH_MULTIVERSIONED)

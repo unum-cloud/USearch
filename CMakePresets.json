@@ -506,6 +506,18 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake"
     },
     {
+      "name": "linux_riscv64",
+      "inherits": "library",
+      "displayName": "Linux RISC-V 64 Library - the C 99 library through GCC",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-gnu.cmake"
+    },
+    {
+      "name": "linux_ppc64le",
+      "inherits": "library",
+      "displayName": "Linux POWER Library - the C 99 library through GCC",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ppc64le-gnu.cmake"
+    },
+    {
       "name": "android_arm64",
       "inherits": "library",
       "toolchainFile": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
@@ -705,6 +717,16 @@
     {
       "name": "linux_arm64",
       "configurePreset": "linux_arm64",
+      "jobs": 0
+    },
+    {
+      "name": "linux_riscv64",
+      "configurePreset": "linux_riscv64",
+      "jobs": 0
+    },
+    {
+      "name": "linux_ppc64le",
+      "configurePreset": "linux_ppc64le",
       "jobs": 0
     },
     {

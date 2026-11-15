@@ -1424,43 +1424,45 @@ impl ArrowExport<'_> {
 pub enum CPUClass {
     /// The portable floor: no SIMD assumptions.
     Serial = 1,
-    /// Haswell-class x86: AVX2 & FMA, the 256-bit floor.
-    IntelHaswell = 2,
-    /// Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512.
-    IntelSierra = 3,
-    /// Skylake-class x86: the AVX-512 foundation tier.
-    IntelSkylake = 4,
-    /// Icelake-class x86: AVX-512 VNNI & VPOPCNT.
-    IntelIcelake = 5,
-    /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
-    AmdGenoa = 6,
-    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 & AMX-INT8
-    /// tiles.
-    IntelSapphire = 7,
-    /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
-    IntelGranite = 8,
-    /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
-    IntelDiamond = 9,
-    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor.
-    AwsG2 = 10,
-    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2 class silicon.
-    AppleM2 = 11,
-    /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
-    AppleM4 = 12,
-    /// Graviton5-class Arm - Neoverse V3, Armv9.2.
-    AwsG5 = 13,
-    /// Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products.
-    NvidiaVera = 14,
-    /// Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors.
-    AlibabaC930 = 15,
-    /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
-    Wasm32V128 = 16,
-    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
-    /// addressing.
-    Wasm64Extended = 17,
     /// The one class of a monoversioned build, with every capability its floor implies or its
     /// preset vouches for.
-    Monoversioned = 18,
+    Monoversioned = 2,
+    /// Haswell-class x86: AVX2 & FMA, the 256-bit floor.
+    IntelHaswell = 3,
+    /// Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512.
+    IntelSierra = 4,
+    /// Skylake-class x86: the AVX-512 foundation tier.
+    IntelSkylake = 5,
+    /// Icelake-class x86: AVX-512 VNNI & VPOPCNT.
+    IntelIcelake = 6,
+    /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
+    AMDGenoa = 7,
+    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 & AMX-INT8
+    /// tiles.
+    IntelSapphire = 8,
+    /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
+    IntelGranite = 9,
+    /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
+    IntelDiamond = 10,
+    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor.
+    AWSG2 = 12,
+    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2 class silicon.
+    AppleM2 = 13,
+    /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
+    AppleM4 = 14,
+    /// Graviton5-class Arm - Neoverse V3, Armv9.2.
+    AWSG5 = 15,
+    /// Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products.
+    NVIDIAVera = 16,
+    /// Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors.
+    AlibabaC930 = 17,
+    /// IBM POWER10-class Power, ISA 3.1: VSX vectors, MMA accumulators and `pause_short` waits.
+    IBMPower10 = 18,
+    /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
+    Wasm32V128 = 19,
+    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
+    /// addressing.
+    Wasm64Extended = 20,
 }
 
 impl fmt::Display for CPUClass {
@@ -1477,23 +1479,23 @@ impl fmt::Display for CPUClass {
 #[non_exhaustive]
 pub enum GPUClass {
     /// Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30.
-    NvidiaAmpere = 1,
+    NVIDIAAmpere = 1,
     /// Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions.
-    NvidiaAda = 2,
+    NVIDIAAda = 2,
     /// Hopper-class NVIDIA - H100 & H200.
-    NvidiaHopper = 3,
+    NVIDIAHopper = 3,
     /// Blackwell-class NVIDIA - B200, B300 & GB300.
-    NvidiaBlackwell = 4,
+    NVIDIABlackwell = 4,
     /// Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark.
-    NvidiaBlackwellRtx = 5,
+    NVIDIABlackwellRTX = 5,
     /// Rubin-class NVIDIA - the Vera-Rubin platform's device half.
-    NvidiaRubin = 6,
+    NVIDIARubin = 6,
     /// CDNA3 AMD - MI300X & MI325X: gfx942, FNUZ fp8.
-    AmdCdna3 = 7,
+    AMDCDNA3 = 7,
     /// CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8.
-    AmdCdna4 = 8,
+    AMDCDNA4 = 8,
     /// CDNA5 AMD - MI400: gfx1250.
-    AmdCdna5 = 9,
+    AMDCDNA5 = 9,
     /// Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2.
     AppleMetal7 = 10,
     /// Apple9-family GPUs - M3 & M4.
@@ -2314,18 +2316,22 @@ mod tests {
     fn class_names_read_back() {
         type FromName = unsafe extern "C" fn(usearch_bytes_view_t) -> c_int;
         type Name = unsafe extern "C" fn(c_int) -> *const c_char;
-        let classes: [(FromName, Name, c_int); 3] = [
-            (usearch_cpu_class_from_name, usearch_cpu_class_name, 18),
-            (usearch_gpu_class_from_name, usearch_gpu_class_name, 12),
-            (usearch_nvme_class_from_name, usearch_nvme_class_name, 6),
+        let classes: [(FromName, Name); 3] = [
+            (usearch_cpu_class_from_name, usearch_cpu_class_name),
+            (usearch_gpu_class_from_name, usearch_gpu_class_name),
+            (usearch_nvme_class_from_name, usearch_nvme_class_name),
         ];
-        for (from_name, name, last) in classes {
-            for code in 1..=last {
+        // Classes keep their registry values forever; a class this build lacks spells "unknown".
+        for (from_name, name) in classes {
+            for code in (1..=c_int::from(u8::MAX)).filter(|&code| spelling(name, code) != "unknown") {
                 let spelled = spelling(name, code);
                 assert_eq!(read_spelling(spelled, from_name, name, Some), Ok(code), "{spelled}");
             }
-            assert_eq!(spelling(name, last + 1), "unknown");
         }
+        assert_eq!(CPUClass::Serial.to_string(), "serial");
+        assert_eq!(CPUClass::Monoversioned.to_string(), "monoversioned");
+        assert_eq!(CPUClass::IBMPower10.to_string(), "ibm-power10");
+        assert_eq!(GPUClass::AppleMetal10.to_string(), "apple-metal10");
     }
 
     #[test]
@@ -2530,7 +2536,7 @@ mod tests {
         assert_eq!(derived.cpu_class, 0, "no pin dispatches as the machine");
 
         let devices = [0, 1, 2, 3];
-        let pinned = vram_options(&devices, Some(GPUClass::NvidiaHopper));
+        let pinned = vram_options(&devices, Some(GPUClass::NVIDIAHopper));
         assert_eq!(pinned.devices_count, 4);
         assert_eq!(unsafe { *pinned.devices.add(3) }, 3);
         assert_eq!(pinned.gpu_class, 3, "a pin crosses as its C value");

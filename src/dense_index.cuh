@@ -1850,7 +1850,7 @@ USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* argum
                                "Kernel paths and transport identifiers need different engines"),
                void();
     usearch_nvme_class_t const nvme_class = arguments->nvme_class;
-    if (nvme_class > usearch_nvme_class_windows_ioring_k)
+    if (nvme_class != usearch_nvme_class_unknown_k && !listed(nvme_classes_k, nvme_class))
         return propagate_error(usearch_status_invalid_argument_k, outcome, "Unknown NVMe class"), void();
     if (nvme_class != usearch_nvme_class_unknown_k &&
         (nvme_class == usearch_nvme_class_linux_spdk_k) != (transport_ids != 0))

@@ -194,17 +194,19 @@ def test_drain_takes_a_mood():
 
 
 def test_class_enums_carry_the_library_spellings():
-    """Every class member is named by the library's spelling of its value, in value order, from one up."""
+    """Every class member is named by the library's spelling of its value, in value order, and the values keep
+    their registry numbers forever, so a new class renumbers none of its neighbours."""
     spellings = {
-        CPUClass: "serial intel-haswell intel-sierra intel-skylake intel-icelake amd-genoa intel-sapphire intel-granite"
-        " intel-diamond aws-g2 apple-m2 apple-m4 aws-g5 nvidia-vera alibaba-c930 wasm32-v128 wasm64-extended monoversioned",
+        CPUClass: "serial monoversioned intel-haswell intel-sierra intel-skylake intel-icelake amd-genoa intel-sapphire"
+        " intel-granite intel-diamond aws-g2 apple-m2 apple-m4 aws-g5 nvidia-vera alibaba-c930 ibm-power10 wasm32-v128"
+        " wasm64-extended",
         GPUClass: "nvidia-ampere nvidia-ada nvidia-hopper nvidia-blackwell nvidia-blackwellrtx nvidia-rubin amd-cdna3"
         " amd-cdna4 amd-cdna5 apple-metal7 apple-metal9 apple-metal10",
         NVMeClass: "posix linux-aio linux-uring linux-uring-passthrough linux-spdk windows-ioring",
     }
     for enum, spelled in spellings.items():
-        expected = [(code, name.upper().replace("-", "_")) for code, name in enumerate(spelled.split(), start=1)]
-        assert [(member.value, member.name) for member in enum] == expected
+        assert [member.name for member in enum] == [name.upper().replace("-", "_") for name in spelled.split()]
+    assert (CPUClass.SERIAL, CPUClass.MONOVERSIONED, CPUClass.IBM_POWER10) == (1, 2, 18)
 
 
 def test_nvme_executor_takes_an_nvme_class():

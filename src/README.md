@@ -65,7 +65,7 @@ A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unles
 2. `make_index` picks the class for the residency:
    - RAM walks `cpu_ladder_t` newest first, asking each compiled rung whose NumKong, StringZilla and ForkUnion capabilities the machine reports for its variant of the dtype, and ending on the serial floor.
      A monoversioned build's ladder holds its one `monoversioned` class, whose masks are the ones the libraries compiled.
-     On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V and `wasm64_extended` → `wasm32_v128` on WebAssembly.
+     On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V, `ibm_power10` on Power, and `wasm64_extended` → `wasm32_v128` on WebAssembly.
    - A class pinned in `usearch_ram_options_t::cpu_class` admits every rung whose NumKong, StringZilla and ForkUnion masks are subsets of its own, so pinning a class behaves as deriving on a machine of it.
    - NVMe walks the same ladder over the classes that compiled an NVMe unit; a storage walk shares a few counters and never waits, so a class advancing only by its waiter or reference compiles no NVMe unit and its parent serves.
    - VRAM reads the named USearch ordinals off the process device listing and takes the class every device shares, `nvidia-ampere` through `apple-metal10`; mixed vendors refuse with `config_mismatch_k`, mixed generations with `device_k`.
@@ -92,7 +92,7 @@ Each class unit compiles its variants with the class's own flags into a table of
   Nothing links `libamdhip64`: `hip_api_t::load` opens it through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple variants as plain C++, one unit per Apple class, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api_t::load` opens them.
-- `usearch_sequence_cpu_variants`, `usearch_shapes_cpu_variants` and `usearch_geospatial_cpu_variants` collect each modality's class units, `<modality>/cpu_variants_<class>.cpp`, each instantiating its RAM and NVMe tables, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
+- `usearch_sequence_cpu_variants`, `usearch_shapes_cpu_variants` and `usearch_geospatial_cpu_variants` collect each modality's class units, `<modality>/cpu_variants_<class>.cpp`, each instantiating its RAM and NVMe tables, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930`, `ibm_power10` and `wasm64_extended`.
 - `usearch_<modality>_vram_variants_nvidia` embeds a basic modality's NVIDIA fatbins, one per sequence metric or shapes dtype and one for geospatial, every kit compiled past the Ampere floor.
 - `usearch_punned` - `types.cpp`, `arrow.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp`, `shapes_index.cpp` and `geospatial_index.cpp`.
 

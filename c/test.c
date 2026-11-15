@@ -3929,6 +3929,7 @@ void test_names(void) {
     named_value_t const moods[] = {{usearch_mood_parked_k, "parked"}, {usearch_mood_spinning_k, "spinning"}};
     named_value_t const cpu_classes[] = {
         {usearch_cpu_class_serial_k, "serial"},
+        {usearch_cpu_class_monoversioned_k, "monoversioned"},
         {usearch_cpu_class_intel_haswell_k, "intel-haswell"},
         {usearch_cpu_class_intel_sierra_k, "intel-sierra"},
         {usearch_cpu_class_intel_skylake_k, "intel-skylake"},
@@ -3943,9 +3944,9 @@ void test_names(void) {
         {usearch_cpu_class_aws_g5_k, "aws-g5"},
         {usearch_cpu_class_nvidia_vera_k, "nvidia-vera"},
         {usearch_cpu_class_alibaba_c930_k, "alibaba-c930"},
+        {usearch_cpu_class_ibm_power10_k, "ibm-power10"},
         {usearch_cpu_class_wasm32_v128_k, "wasm32-v128"},
         {usearch_cpu_class_wasm64_extended_k, "wasm64-extended"},
-        {usearch_cpu_class_monoversioned_k, "monoversioned"},
     };
     named_value_t const gpu_classes[] = {
         {usearch_gpu_class_nvidia_ampere_k, "nvidia-ampere"},

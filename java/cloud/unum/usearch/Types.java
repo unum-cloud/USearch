@@ -469,40 +469,42 @@ public final class Types {
 
         /** The portable floor, with no SIMD assumptions. */
         SERIAL(1),
-        /** Haswell-class x86: AVX2 and FMA. */
-        INTEL_HASWELL(2),
-        /** Sierra Forest-class x86: AVX-VNNI without AVX-512. */
-        INTEL_SIERRA(3),
-        /** Skylake-class x86: the AVX-512 foundation. */
-        INTEL_SKYLAKE(4),
-        /** Icelake-class x86: AVX-512 VNNI and VPOPCNT. */
-        INTEL_ICELAKE(5),
-        /** Genoa-class x86: native bf16 dot products over AVX-512. */
-        AMD_GENOA(6),
-        /** Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles. */
-        INTEL_SAPPHIRE(7),
-        /** Granite Rapids-class x86: the AMX-FP16 tiles. */
-        INTEL_GRANITE(8),
-        /** Diamond Rapids-class x86: AVX10.2's FP8 conversions. */
-        INTEL_DIAMOND(9),
-        /** Graviton2-class Arm: the bare NEON floor. */
-        AWS_G2(10),
-        /** Armv8.6 NEON with dot products and bf16. */
-        APPLE_M2(11),
-        /** Apple M4-class Arm: the SME outer-product tiles. */
-        APPLE_M4(12),
-        /** Graviton5-class Arm: Armv9.2. */
-        AWS_G5(13),
-        /** Vera-class Arm: FP8 dot products. */
-        NVIDIA_VERA(14),
-        /** Alibaba C930-class RISC-V: RVA23 vectors. */
-        ALIBABA_C930(15),
-        /** WebAssembly with fixed-width simd128. */
-        WASM32_V128(16),
-        /** WebAssembly with relaxed SIMD, threads and 64-bit addressing. */
-        WASM64_EXTENDED(17),
         /** The one class of a monoversioned build. */
-        MONOVERSIONED(18);
+        MONOVERSIONED(2),
+        /** Haswell-class x86: AVX2 and FMA. */
+        INTEL_HASWELL(3),
+        /** Sierra Forest-class x86: AVX-VNNI without AVX-512. */
+        INTEL_SIERRA(4),
+        /** Skylake-class x86: the AVX-512 foundation. */
+        INTEL_SKYLAKE(5),
+        /** Icelake-class x86: AVX-512 VNNI and VPOPCNT. */
+        INTEL_ICELAKE(6),
+        /** Genoa-class x86: native bf16 dot products over AVX-512. */
+        AMD_GENOA(7),
+        /** Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles. */
+        INTEL_SAPPHIRE(8),
+        /** Granite Rapids-class x86: the AMX-FP16 tiles. */
+        INTEL_GRANITE(9),
+        /** Diamond Rapids-class x86: AVX10.2's FP8 conversions. */
+        INTEL_DIAMOND(10),
+        /** Graviton2-class Arm: the bare NEON floor. */
+        AWS_G2(12),
+        /** Armv8.6 NEON with dot products and bf16. */
+        APPLE_M2(13),
+        /** Apple M4-class Arm: the SME outer-product tiles. */
+        APPLE_M4(14),
+        /** Graviton5-class Arm: Armv9.2. */
+        AWS_G5(15),
+        /** Vera-class Arm: FP8 dot products. */
+        NVIDIA_VERA(16),
+        /** Alibaba C930-class RISC-V: RVA23 vectors. */
+        ALIBABA_C930(17),
+        /** IBM POWER10-class Power: VSX vectors and MMA accumulators. */
+        IBM_POWER10(18),
+        /** WebAssembly with fixed-width simd128. */
+        WASM32_V128(19),
+        /** WebAssembly with relaxed SIMD, threads and 64-bit addressing. */
+        WASM64_EXTENDED(20);
 
         private final int code;
 

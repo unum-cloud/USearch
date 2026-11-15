@@ -184,18 +184,23 @@ public sealed class DenseIndexTests : IDisposable
     [Fact]
     public void EveryClassNameReadsBackThroughTheLibrary()
     {
-        (Func<NativeBytesView, int> Parse, Func<int, IntPtr> Spell, int Last)[] classes =
+        (Func<NativeBytesView, int> Parse, Func<int, IntPtr> Spell)[] classes =
         [
-            (NativeMethods.usearch_cpu_class_from_name, NativeMethods.usearch_cpu_class_name, 18),
-            (NativeMethods.usearch_gpu_class_from_name, NativeMethods.usearch_gpu_class_name, 12),
-            (NativeMethods.usearch_nvme_class_from_name, NativeMethods.usearch_nvme_class_name, 6),
+            (NativeMethods.usearch_cpu_class_from_name, NativeMethods.usearch_cpu_class_name),
+            (NativeMethods.usearch_gpu_class_from_name, NativeMethods.usearch_gpu_class_name),
+            (NativeMethods.usearch_nvme_class_from_name, NativeMethods.usearch_nvme_class_name),
         ];
-        foreach ((Func<NativeBytesView, int> parse, Func<int, IntPtr> spell, int last) in classes)
-        {
-            for (int code = 1; code <= last; ++code)
-                Assert.Equal(code, ReadBack(Marshal.PtrToStringUTF8(spell(code)) ?? string.Empty, parse));
-            Assert.Equal("unknown", Marshal.PtrToStringUTF8(spell(last + 1)));
-        }
+        // Classes keep their registry values forever, and a class this build lacks spells "unknown".
+        foreach ((Func<NativeBytesView, int> parse, Func<int, IntPtr> spell) in classes)
+            for (int code = 1; code <= byte.MaxValue; ++code)
+            {
+                string spelled = Marshal.PtrToStringUTF8(spell(code)) ?? string.Empty;
+                if (spelled != "unknown") Assert.Equal(code, ReadBack(spelled, parse));
+            }
+        foreach (CPUClass cpuClass in Enum.GetValues<CPUClass>())
+            Assert.NotEqual("unknown", Marshal.PtrToStringUTF8(NativeMethods.usearch_cpu_class_name((int)cpuClass)));
+        foreach (GPUClass gpuClass in Enum.GetValues<GPUClass>())
+            Assert.NotEqual("unknown", Marshal.PtrToStringUTF8(NativeMethods.usearch_gpu_class_name((int)gpuClass)));
     }
 
     #endregion Names
