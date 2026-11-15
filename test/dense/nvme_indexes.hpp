@@ -33,7 +33,7 @@
 
 #include <fmt/format.h>
 
-#include "usearch/dense/nvme_compaction.hpp"
+#include "usearch/dense/nvme_reshard.hpp"
 #include "usearch/dense/ram_indexes.hpp"
 
 #include "dense.cuh"

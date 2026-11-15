@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense/ram_compaction.hpp
+ *  @file include/usearch/dense/ram_reshard.hpp
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief The freestanding compaction of @c ram_indexes sources into a RAM target under a shard

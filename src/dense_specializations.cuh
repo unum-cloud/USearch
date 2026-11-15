@@ -17,8 +17,8 @@
 #include <type_traits> // `std::conditional_t` - the engine plans a plan may hold
 #include <variant>     // `std::variant`, `std::in_place_type` - a reshard's plan beside a refine's
 
-#include "usearch/dense/nvme_compaction.hpp" // `refine_parts` - a loaded NVMe index's refine
-#include "usearch/dense/ram_compaction.hpp"
+#include "usearch/dense/nvme_reshard.hpp" // `refine_parts` - a loaded NVMe index's refine
+#include "usearch/dense/ram_reshard.hpp"
 #include "usearch/dense/ram_indexes.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/dense/vram_nvidia_indexes.hpp"

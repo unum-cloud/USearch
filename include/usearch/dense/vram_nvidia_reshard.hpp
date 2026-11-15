@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense/vram_nvidia_compaction.hpp
+ *  @file include/usearch/dense/vram_nvidia_reshard.hpp
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief The freestanding compaction of @c vram_nvidia_indexes sources into a RAM target under a

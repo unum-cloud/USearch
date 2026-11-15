@@ -10,8 +10,8 @@
  */
 #pragma once
 
-#include "usearch/dense/vram_amd_compaction.hpp"    // `plan_compact` of AMD shards into RAM
-#include "usearch/dense/vram_nvidia_compaction.hpp" // `plan_compact` of NVIDIA shards into RAM
+#include "usearch/dense/vram_amd_reshard.hpp"    // `plan_compact` of AMD shards into RAM
+#include "usearch/dense/vram_nvidia_reshard.hpp" // `plan_compact` of NVIDIA shards into RAM
 
 #include "dense.cuh"
 #include "nvme_indexes.hpp" // `nvme_reference`, `nvme_checkpoint_t` - the round trip through storage

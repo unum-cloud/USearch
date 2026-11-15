@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense/vram_amd_compaction.hpp
+ *  @file include/usearch/dense/vram_amd_reshard.hpp
  *  @author Ash Vardanian
  *  @date October 22, 2026
  *  @brief The freestanding compaction of @c vram_amd_indexes sources into a RAM target under a

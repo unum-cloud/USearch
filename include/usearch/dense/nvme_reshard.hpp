@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense/nvme_compaction.hpp
+ *  @file include/usearch/dense/nvme_reshard.hpp
  *  @author Ash Vardanian
  *  @date October 10, 2026
  *  @brief The freestanding compaction, refine and build that write new SafeGraphs parts from the

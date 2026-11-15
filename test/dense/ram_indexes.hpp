@@ -24,7 +24,7 @@
 #include <numkong/numkong.hpp>
 
 #include "usearch/dense/ram_indexes.hpp"
-#include "usearch/dense/ram_compaction.hpp"
+#include "usearch/dense/ram_reshard.hpp"
 
 #include "dense.cuh"
 #include "dense_specializations.cuh" // `quads_kit_of` & kin - the kits a CPU class runs a dtype on
