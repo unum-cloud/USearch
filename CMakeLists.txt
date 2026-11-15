@@ -127,6 +127,10 @@ set(usearch_include_build_dirs_ "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR
 add_library(usearch_core INTERFACE)
 add_library(${PROJECT_NAME}::core ALIAS usearch_core)
 set_target_properties(usearch_core PROPERTIES EXPORT_NAME core)
+# MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
+target_compile_options(
+    usearch_core INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
+)
 target_sources(
     usearch_core
     INTERFACE FILE_SET

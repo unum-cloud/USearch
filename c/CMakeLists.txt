@@ -54,6 +54,9 @@ add_library(${PROJECT_NAME}::static ALIAS usearch_static)
 set_target_properties(usearch_shared usearch_static PROPERTIES LINKER_LANGUAGE CXX)
 # Consumers of the shared flavor import its entry points on Windows; the archive needs no decoration.
 target_compile_definitions(usearch_shared INTERFACE USEARCH_SHARED=1)
+# MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
+target_compile_options(usearch_shared INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>")
+target_compile_options(usearch_static INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>")
 
 # Set the compile options for the static library
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
