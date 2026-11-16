@@ -11,7 +11,6 @@
  *  types are the scalars a caller builds rows out of, and this file only tags them by `Scalar`.
  */
 
-import Dispatch
 import NumKong
 
 import USearchC
@@ -755,19 +754,17 @@ public final class Deferred<Value> {
 extension Deferred: @unchecked Sendable where Value: Sendable {}
 
 extension Deferred {
-    /// Waits for the call on a Dispatch thread, so an `async` caller suspends rather than blocks,
-    /// and the cooperative pool keeps every thread; the result is read back in the caller's
-    /// isolation. Binding-only: runs `wait`.
+    /// Suspends until the call is final, polling its status between sleeps that double from 1 µs
+    /// to 1 ms, so no thread is parked on it; a cancelled task falls through to the blocking wait.
+    /// The result is read back in the caller's isolation. Binding-only: polls `status`, runs
+    /// `wait`.
     nonisolated(nonsending) public var value: Value {
         get async throws(USearchError) {
-            if case .pending(let callState, _) = submission {
-                nonisolated(unsafe) let outcome = callState.outcome
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.global().async {
-                        _ = usearch_outcome_wait(outcome)
-                        continuation.resume()
-                    }
-                }
+            var pause = Duration.microseconds(1)
+            while status == .deferred {
+                do { try await Task.sleep(for: pause) }
+                catch { break }
+                pause = min(pause * 2, .milliseconds(1))
             }
             return try wait()
         }

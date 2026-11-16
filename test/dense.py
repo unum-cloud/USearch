@@ -379,7 +379,7 @@ def test_deferred_call_raises_at_wait(executor):
 
 
 def test_deferred_call_awaits(executor):
-    """`await` runs `wait()` on the event loop's own executor, so a coroutine suspends rather than blocks."""
+    """`await` polls the status between short sleeps, so a coroutine suspends and no thread blocks."""
     index, vectors = build_index(32, 8, executor)
 
     async def search() -> Matches:

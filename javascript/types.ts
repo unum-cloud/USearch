@@ -579,14 +579,17 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
   if (call.status() === Status.Deferred) unfinished.register({}, call);
 });
 
+/** Polls a deferred call makes on the event loop's next turns before falling back to a timer. */
+const immediatePolls = 16;
+
 /**
  *  A call submitted by a deferred receiver, final once its executor finishes it.
  *
  *  It keeps everything the library reads or writes alive until then - the outcome, the inputs,
  *  the outputs and every handle it names - so none of them is collected under the call, and it
  *  borrows its arena as a blocking call does. `status` polls without blocking, `wait` blocks and
- *  answers, and `await` runs that wait on the libuv pool; both answer the same cached result, or
- *  throw the same failure, however often they are asked.
+ *  answers, and `await` polls the status between turns of the event loop; both answer the same
+ *  cached result, or throw the same failure, however often they are asked.
  *
  *  ```js
  *  const matches = await call; // or: call.wait()
@@ -620,14 +623,15 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     return this.#unwrap();
   }
 
-  /** Waits on the libuv pool rather than the calling thread, which is what `await` reaches for. */
+  /** Polls the status between turns of the event loop, then every millisecond, so `await` parks
+   *  no thread on the call. */
   then<Fulfilled = T, Rejected = never>(
     onFulfilled?: ((value: T) => Fulfilled | PromiseLike<Fulfilled>) | null,
     onRejected?: ((reason: unknown) => Rejected | PromiseLike<Rejected>) | null,
   ): Promise<Fulfilled | Rejected> {
     this.#settling ??= this.#outcome
       ? Promise.resolve().then(() => this.#unwrap())
-      : this.#call.settled().then(() => {
+      : this.#polled().then(() => {
           this.#settle();
           return this.#unwrap();
         });
@@ -639,6 +643,13 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     if (this.#outcome) return;
     this.#call.wait();
     this.#settle();
+  }
+
+  /** Resolves once the call is final: the first polls ride `setImmediate`, later ones a 1 ms timer,
+   *  the finest a timer waits. */
+  async #polled(): Promise<void> {
+    for (let polls = 0; this.#call.status() === Status.Deferred; polls++)
+      await new Promise<void>((resume) => (polls < immediatePolls ? setImmediate(resume) : setTimeout(resume, 1)));
   }
 
   #settle(): void {

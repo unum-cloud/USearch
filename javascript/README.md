@@ -70,7 +70,7 @@ if (call.status === usearch.Status.Deferred) {
 const matches = await call; // or: call.wait()
 ```
 
-`await` waits on the libuv pool, so the event loop keeps turning, while `wait()` blocks the calling thread.
+`await` polls the status between turns of the event loop, then every millisecond, so no thread waits, while `wait()` blocks the calling thread.
 Both answer the same cached result, or throw the same failure, however often they are asked, and `status` reads the outcome without blocking.
 `using call = ...` waits for the call before its block ends, and one dropped unfinished is handed back to the collector until it is final, so nothing it borrowed is freed under the library.
 Refusals this binding catches before the call crosses, like keys that do not match the rows, throw at submission.
@@ -508,7 +508,7 @@ The same reasoning excludes the progress handlers every long verb takes.
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
   Each verb has one body that fills the C structure, and every receiver calls it with its own completion, so no receiver derives from another.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `await` hands that same wait to the libuv pool through `napi_async_work`, since the library has no wake-up to register.
+  `status` polls through `usearch_outcome_status`, `wait()` blocks through `usearch_outcome_wait`, and `await` polls `status` on the event loop, `setImmediate` first and a 1 ms timer after, since the library has no wake-up to register and a parked libuv worker would starve file I/O.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides `using` and `Symbol.dispose`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__

@@ -1084,68 +1084,12 @@ static napi_value usearch_js_deferred_status(napi_env env, napi_callback_info in
     return usearch_js_static_string(env, usearch_status_name(usearch_outcome_status(&call->outcome)));
 }
 
-/** An outcome wait handed to the libuv pool, which a promise resolves once it returns. */
-typedef struct usearch_js_settling_t {
-
-    /** The work item the pool runs. */
-    napi_async_work work;
-
-    /** The promise the loop resolves once the wait returns. */
-    napi_deferred promise;
-
-    /** A strong reference keeping the call alive through the wait. */
-    napi_ref wrapper;
-
-    /** The outcome the pool waits on. */
-    usearch_outcome_t* outcome;
-} usearch_js_settling_t;
-
-static void usearch_js_settling_execute(napi_env env, void* data) {
-    (void)env;
-    usearch_outcome_wait(((usearch_js_settling_t*)data)->outcome);
-}
-
-static void usearch_js_settling_complete(napi_env env, napi_status status, void* data) {
-    usearch_js_settling_t* const settling = (usearch_js_settling_t*)data;
-    (void)status;
-    napi_resolve_deferred(env, settling->promise, usearch_js_undefined(env));
-    napi_delete_reference(env, settling->wrapper);
-    napi_delete_async_work(env, settling->work);
-    free(settling);
-}
-
 /** @c wait() - blocks the calling thread until the call is final. */
 static napi_value usearch_js_deferred_wait(napi_env env, napi_callback_info info) {
     usearch_js_call_t* const call = (usearch_js_call_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!call) return NULL;
     usearch_outcome_wait(&call->outcome);
     return usearch_js_undefined(env);
-}
-
-/** @c settled() → a promise resolved once the call is final, its wait run on the libuv pool. */
-static napi_value usearch_js_deferred_settled(napi_env env, napi_callback_info info) {
-    napi_value self = NULL, promise = NULL, name = NULL;
-    usearch_js_call_t* const call = (usearch_js_call_t*)usearch_js_self(env, info, NULL, NULL, &self);
-    if (!call) return NULL;
-    usearch_js_settling_t* const settling = (usearch_js_settling_t*)calloc(1, sizeof(usearch_js_settling_t));
-    if (!settling) {
-        usearch_js_throw(env, usearch_status_out_of_memory_k, "Could not allocate the wait");
-        return NULL;
-    }
-    settling->outcome = &call->outcome;
-    if (napi_create_string_utf8(env, "usearch:deferred", NAPI_AUTO_LENGTH, &name) != napi_ok ||
-        napi_create_reference(env, self, 1, &settling->wrapper) != napi_ok ||
-        napi_create_async_work(env, NULL, name, usearch_js_settling_execute, usearch_js_settling_complete, settling,
-                               &settling->work) != napi_ok ||
-        napi_create_promise(env, &settling->promise, &promise) != napi_ok ||
-        napi_queue_async_work(env, settling->work) != napi_ok) {
-        if (settling->work) napi_delete_async_work(env, settling->work);
-        if (settling->wrapper) napi_delete_reference(env, settling->wrapper);
-        free(settling);
-        usearch_js_throw(env, usearch_status_internal_k, "Could not queue the wait");
-        return NULL;
-    }
-    return promise;
 }
 
 /** Builds a final call's answer after publishing its telemetry, or throws its failure. */
@@ -1181,7 +1125,6 @@ napi_value usearch_js_deferred_define(napi_env env) {
     static napi_property_descriptor const properties[] = {
         {"status", NULL, usearch_js_deferred_status, NULL, NULL, NULL, napi_default_method, NULL},
         {"wait", NULL, usearch_js_deferred_wait, NULL, NULL, NULL, napi_default_method, NULL},
-        {"settled", NULL, usearch_js_deferred_settled, NULL, NULL, NULL, napi_default_method, NULL},
         {"result", NULL, usearch_js_deferred_result, NULL, NULL, NULL, napi_default_method, NULL},
     };
     napi_value deferred_class = NULL;

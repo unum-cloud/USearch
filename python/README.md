@@ -76,7 +76,7 @@ async def nearest(pool):
 matches = asyncio.run(nearest(pool))
 ```
 
-`await` runs `wait()` on the running event loop's default executor, so the thread it blocks belongs to asyncio.
+`await` polls the status between sleeps that double from 1 µs to 1 ms, so the coroutine suspends and no thread blocks.
 A `Deferred` holds the outcome and every input buffer the library reads, so nothing the call reads ever moves.
 It holds its arena as a blocking call does, until it is waited on or dropped: meanwhile another call naming that arena raises `ContendedError`, and its result views the arena like the blocking verb's.
 Dropping an unfinished one waits for its call, which is the C contract rather than binding logic.
@@ -453,7 +453,7 @@ print(stats.mean_recall, stats.mean_efficiency)
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and `await` hands `wait()` to the running event loop's default executor.
+  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and `await` polls `status` between doubling sleeps on the running loop.
 - __No life of its own.__
   The binding starts no threads and keeps no queues; releasing a `Deferred` rides reference counting, which waits for the call first.
 - __Arenas are lent and reused, never shared.__

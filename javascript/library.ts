@@ -36,7 +36,6 @@ export type CompiledRows = [data: ArrayBufferView, rows: number, columns: number
 export interface CompiledDeferred {
   status(): string;
   wait(): void;
-  settled(): Promise<void>;
   result(): unknown;
 }
 

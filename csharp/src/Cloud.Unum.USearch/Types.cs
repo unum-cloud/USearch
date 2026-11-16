@@ -1479,10 +1479,37 @@ public class Deferred : IDisposable
         this._call.Finish(this.Pinned);
     }
 
-    /// <summary>Waits on the thread pool, so <c>await</c> suspends the caller rather than blocking it.
+    /// <summary>Polls the status, so <c>await</c> suspends the caller and parks no thread on the call.
     /// Binding-only.</summary>
-    /// <returns>The awaiter of that wait.</returns>
-    public TaskAwaiter GetAwaiter() => Task.Run(this.Wait).GetAwaiter();
+    /// <returns>The awaiter of that poll, which then runs <see cref="Wait()"/>.</returns>
+    public TaskAwaiter GetAwaiter() => this.Finished().GetAwaiter();
+
+    private async Task Finished()
+    {
+        await this.Settled().ConfigureAwait(false);
+        this.Wait();
+    }
+
+    /// <summary>Yields while the call stays deferred, then sleeps a millisecond at a time, since a
+    /// timer cannot wait less.</summary>
+    /// <returns>A task final once the call is.</returns>
+    private protected async Task Settled()
+    {
+        for (int yields = 0; this.Status == Status.Deferred; yields++)
+        {
+            if (yields < YieldsBeforeSleeping)
+            {
+                await Task.Yield();
+            }
+            else
+            {
+                await Task.Delay(1).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Yields to the scheduler before the poll falls back to millisecond sleeps.</summary>
+    private const int YieldsBeforeSleeping = 16;
 
     /// <summary>Waits for an unfinished call and discards what it produced; a call already waited for
     /// is left as it is. Calls <c>usearch_outcome_wait</c>.</summary>
@@ -1548,10 +1575,16 @@ public sealed class Deferred<TResult> : Deferred
         return this._call.Result;
     }
 
-    /// <summary>Waits on the thread pool, so <c>await</c> suspends the caller rather than blocking it.
+    /// <summary>Polls the status, so <c>await</c> suspends the caller and parks no thread on the call.
     /// Binding-only.</summary>
-    /// <returns>The awaiter of that wait.</returns>
-    public new TaskAwaiter<TResult> GetAwaiter() => Task.Run(this.Wait).GetAwaiter();
+    /// <returns>The awaiter of that poll, which then answers <see cref="Wait()"/>.</returns>
+    public new TaskAwaiter<TResult> GetAwaiter() => this.Answered().GetAwaiter();
+
+    private async Task<TResult> Answered()
+    {
+        await this.Settled().ConfigureAwait(false);
+        return this.Wait();
+    }
 }
 
 /// <summary>Whether a call returns with its final status, or once submitted to its executor.</summary>

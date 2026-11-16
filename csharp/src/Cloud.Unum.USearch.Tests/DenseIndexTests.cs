@@ -13,7 +13,7 @@ public sealed class DenseIndexTests : IDisposable
     private const int Dimensions = 4;
 
     /// <summary>Bounds every wait in these tests; a passing case never reaches it.</summary>
-    private static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(120);
+    private const int WaitLimitSeconds = 120;
 
     private readonly Executor _pool = Executor.ForRam(threads: 1);
     private readonly Arena _arena = new();
@@ -347,7 +347,7 @@ public sealed class DenseIndexTests : IDisposable
             });
         try
         {
-            Assert.True(entered.Wait(WaitLimit), "A deferred call reaches its progress handler");
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(WaitLimitSeconds)), "A deferred call reaches its progress handler");
             Assert.Equal(Status.Contended, Assert.Throws<USearchException>(() => index.Get<F32>(1UL, arena)).Status);
             using Deferred<DenseVectors> refused = index.Deferred(this._pool).Get<F32>(1UL, arena);
             Assert.Equal(Status.Contended, refused.Status);

@@ -2243,17 +2243,16 @@ static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     return deferred_answer(self);
 }
 
-/** Answers the iterator of an `asyncio.Future` that `wait()` resolves on the running loop's default executor. */
+/** Answers the iterator of <tt>usearch._settled(self)</tt>, which polls the status between doubling
+ *  sleeps on the running loop, so no thread is parked on the call. */
 static PyObject* Deferred_await(PyObject* self) {
-    PyObject* const asyncio = PyImport_ImportModule("asyncio");
-    PyObject* const loop = asyncio ? method_call(asyncio, "get_running_loop", NULL, NULL) : NULL;
-    Py_XDECREF(asyncio);
-    PyObject* const wait = loop ? PyObject_GetAttrString(self, "wait") : NULL;
-    PyObject* const future = wait ? method_call(loop, "run_in_executor", Py_None, wait) : NULL;
-    Py_XDECREF(wait);
-    Py_XDECREF(loop);
-    PyObject* const awaiting = future ? method_call(future, "__await__", NULL, NULL) : NULL;
-    Py_XDECREF(future);
+    PyObject* const package = PyImport_ImportModule("usearch");
+    PyObject* const settled = package ? PyObject_GetAttrString(package, "_settled") : NULL;
+    Py_XDECREF(package);
+    PyObject* const coroutine = settled ? PyObject_CallOneArg(settled, self) : NULL;
+    Py_XDECREF(settled);
+    PyObject* const awaiting = coroutine ? method_call(coroutine, "__await__", NULL, NULL) : NULL;
+    Py_XDECREF(coroutine);
     return awaiting;
 }
 
