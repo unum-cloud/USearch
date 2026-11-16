@@ -16,7 +16,7 @@
 #include <utility>  // `std::index_sequence` - every shared kernel
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t`
 #include "usearch/dense/vram_index.cuh"             // `vram_rebase_links`, the audits' & splits' bodies
 #include "usearch/basic/vram_nvidia_index.hpp"
 
@@ -110,8 +110,9 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32, cuda_resident_blo
         dense::vram_split_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.nodes_count, graph.node_parts,
                                             graph.part_capacity, graph.part_values, graph.part_offsets);
     else if constexpr (kernel_ == vram_kernel_t::gather_tape_k)
-        dense::vram_gather_tape<cuda_warp_t>(graph.values, graph.value_offsets, graph.listed, graph.listed_count,
-                                             graph.gathered_values, graph.gathered_offsets);
+        dense::vram_gather_tape<cuda_warp_t, ampere_scan_t>(graph.values, graph.value_offsets, graph.listed,
+                                                            graph.listed_count, graph.gathered_values,
+                                                            graph.gathered_offsets);
 }
 
 template <typename node_id_type_, std::size_t... kernels_>

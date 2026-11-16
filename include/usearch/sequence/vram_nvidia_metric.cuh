@@ -39,7 +39,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t` - the NVIDIA warp and scans
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/sequence/ram_metric.hpp"     // `levenshtein_ladder`, `overlap_ladder`
@@ -258,6 +258,7 @@ struct u8_ampere_levenshtein_kit_t {
     inline static constexpr char name_k[] = "u8_ampere_levenshtein_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -321,6 +322,7 @@ struct utf8_ampere_levenshtein_kit_t {
     inline static constexpr char name_k[] = "utf8_ampere_levenshtein_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_levenshtein_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -423,6 +425,7 @@ struct u8_ampere_overlap_kit_t {
     inline static constexpr char name_k[] = "u8_ampere_overlap_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = sz_overlap_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -671,6 +674,7 @@ struct packed_ampere_needleman_wunsch_kit_t {
     inline static constexpr char name_k[] = "packed_ampere_needleman_wunsch_kit_t";
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = cuda_needleman_wunsch_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 

@@ -1982,6 +1982,7 @@ __device__ __forceinline__ u32_t cuda_keep_diverse( //
 struct ampere_cp_async_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 1;
 
@@ -2258,6 +2259,7 @@ __device__ __forceinline__ vram_scored_node<node_id_t> cuda_tma_gather_quads( //
 struct hopper_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_hopper_k;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 1;
 
@@ -2335,6 +2337,7 @@ struct hopper_tma_schedule_t {
 struct blackwell_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
 
@@ -2455,6 +2458,7 @@ struct blackwell_tma_schedule_t {
 struct blackwellrtx_tma_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwellrtx_k;
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     inline static constexpr u32_t stages_k = 2;
     inline static constexpr u32_t fragments_per_load_k = 2;
 

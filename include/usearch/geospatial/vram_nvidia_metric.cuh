@@ -24,7 +24,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t` - the NVIDIA warp and scans
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/geospatial/ram_index.hpp"
@@ -144,6 +144,7 @@ struct i32_ampere_geospatial_kit_t {
     inline static constexpr u32_t lanes_per_entry_k = 1;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = earth_fixed_t;
     using selector_t = vram_keep_octants_t;
 

@@ -278,9 +278,6 @@ inline int hip_device_of(hip_api_t const& api, void const* pointer) noexcept {
     return ordinal;
 }
 
-/** Lanes of a wavefront under the ceiling @p capability: 32 once it reaches CDNA5, 64 below. */
-constexpr u32_t hip_wave_lanes(nk_capability_t capability) noexcept { return capability & nk_cap_cdna5_k ? 32u : 64u; }
-
 /** One AMD GPU's hardware specification - the facts runtime dispatch consults; hardware only, never
  *  derived policy. */
 struct hip_device_specs_t {

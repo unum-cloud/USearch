@@ -34,7 +34,7 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"        // `vram_kernel_symbol` - a kernel's symbol
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t` - the NVIDIA warp policy
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t` - the NVIDIA warp and scans
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.cuh" // `basic::cuda_kernel_body`
 #include "usearch/shapes/ram_metric.hpp"       // `shapes_ladder`
@@ -86,6 +86,7 @@ struct f16_ampere_shapes_kit_t {
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -131,6 +132,7 @@ struct f16_blackwell_shapes_kit_t {
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 
@@ -169,6 +171,7 @@ struct f32_ampere_shapes_kit_t {
     inline static constexpr u32_t lanes_per_entry_k = 32;
 
     using warp_t = cuda_warp_t;
+    using scan_t = ampere_scan_t;
     using query_t = vram_pack_query_t;
     using selector_t = basic::vram_keep_diverse_t;
 

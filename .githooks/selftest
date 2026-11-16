@@ -1783,6 +1783,29 @@ inline static constexpr bool compiled_k = true;
 #endif
 FIXTURE
 
+assert_rejects "library GPU generation target raised" "sets a library GPU generation target" CMakeLists.txt <<'FIXTURE'
+target_compile_definitions(probe PRIVATE NUMKONG_TARGET_CDNA3=1)
+FIXTURE
+
+assert_accepts "library GPU floor target lowered" CMakeLists.txt <<'FIXTURE'
+target_compile_definitions(probe PRIVATE NUMKONG_TARGET_ROCM=0 STRINGZILLA_TARGET_ROCM=0)
+FIXTURE
+
+assert_rejects "warp calling a generation's step" "StringZilla step inside a warp type" include/$project_directory/vram_probe_device.cuh <<'FIXTURE'
+struct probe_warp_t {
+    static __device__ unsigned sum(unsigned value) { return sz_u32_lanes_sum_ampere_(value); }
+};
+FIXTURE
+
+assert_accepts "scan kit beside a generation-free warp" include/$project_directory/vram_probe_device.cuh <<'FIXTURE'
+struct probe_warp_t {
+    static __device__ unsigned shuffle(unsigned value, unsigned lane) { return __shfl_sync(~0u, value, lane); }
+};
+struct ampere_probe_scan_t {
+    static __device__ unsigned warp_sum(unsigned value) { return sz_u32_lanes_sum_ampere_(value); }
+};
+FIXTURE
+
 assert_rejects "std::max call" "which <windows.h> defines as macros" include/$project_directory/probe.hpp <<'FIXTURE'
 static inline int probe(int count, int size) { return std::max(count, size); }
 FIXTURE

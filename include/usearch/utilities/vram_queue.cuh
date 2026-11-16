@@ -16,12 +16,13 @@
  *  Compiled by NVCC and HIP-Clang alike: every collective goes through a warp policy each vendor
  *  defines beside its device vocabulary, so lane masks, rank striping and the bitonic stages all
  *  derive from its @c width_k, 32 or 64 lanes. A policy names @c mask_t, @c width_k, the
- *  @c shuffle, @c shuffle_xor, @c shuffle_up and @c shuffle_down moves, the @c inclusive_sum
- *  scan, the @c ballot, @c any, @c all and @c match_any votes, @c sync, the @c count, @c first
- *  and @c below mask arithmetic, the relaxed, acquire and release atomics, and the
- *  @c fence_release fence, and may name a one-step @c sum of 32-bit integers. Lanes are @c u32_t
- *  throughout. Staging candidates into shared memory is the vendor's schedule, not the warp
- *  policy, and no policy sleeps: contended nodes are revisited after other work instead.
+ *  @c shuffle, @c shuffle_xor, @c shuffle_up and @c shuffle_down moves, the @c ballot, @c any,
+ *  @c all and @c match_any votes, @c sync, the @c count, @c first and @c below mask arithmetic,
+ *  the relaxed, acquire and release atomics, and the @c fence_release fence. Scans belong to a
+ *  scan kit per GPU generation beside it, which names the @c warp_inclusive_sum scan and may name
+ *  a one-step @c warp_sum of 32-bit integers. Lanes are @c u32_t throughout. Staging candidates
+ *  into shared memory is the vendor's schedule, not the warp policy, and no policy sleeps:
+ *  contended nodes are revisited after other work instead.
  */
 #pragma once
 
@@ -492,9 +493,10 @@ struct vram_register_frontier {
  *  entries drain, so expansion follows discovery order past the head's width, and
  *  the walk retires after @c expansion_target_ expansions instead of on a radius test - the
  *  expansion budget IS the ef semantic and the horizon. */
-template <typename warp_type_, typename node_id_type_>
+template <typename warp_type_, typename scan_type_, typename node_id_type_>
 struct vram_arena_frontier {
     using warp_t = warp_type_;
+    using scan_t = scan_type_;
     using scored_node_t = vram_scored_node<node_id_type_>;
     vram_sorted_candidates<2, warp_t, node_id_type_> head_;
     vram_tail_candidates<warp_t, node_id_type_> tail_;
@@ -644,7 +646,7 @@ struct vram_arena_frontier {
             bool found = false;
 #pragma unroll
             for (u32_t bin = 0; bin != bins_k; ++bin) {
-                u32_t const inclusive = warp_t::inclusive_sum(bins[bin], lane);
+                u32_t const inclusive = scan_t::warp_inclusive_sum(bins[bin], lane);
                 u32_t const total = warp_t::shuffle(inclusive, warp_t::width_k - 1);
                 if (!found && below + total >= rank) {
                     u32_t const owner = warp_t::first(warp_t::ballot(below + inclusive >= rank));

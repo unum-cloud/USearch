@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 15, 2026
  *  @brief Device-side vocabulary every NVIDIA index's kernels share: the warp policy the walks
- *      are written against and the arena slice's device twin.
+ *      are written against, the Ampere scan kit and the arena slice's device twin.
  */
 #pragma once
 
@@ -62,22 +62,6 @@ struct cuda_warp_t {
         return __shfl_down_sync(all_k, value, delta, width);
     }
 
-    /** The sum of @p value over @p lane and every lane below it. */
-    template <typename value_type_>
-    static __device__ __forceinline__ value_type_ inclusive_sum(value_type_ value, u32_t lane) noexcept {
-        for (u32_t delta = 1; delta != width_k; delta <<= 1) {
-            value_type_ const below = shuffle_up(value, delta);
-            if (lane >= delta) value += below;
-        }
-        return value;
-    }
-
-    /** The sum of a 32-bit integer @p value over the warp, in every lane, in one @c redux.sync . */
-    template <typename value_type_>
-        requires(std::is_integral_v<value_type_> && sizeof(value_type_) == 4)
-    static __device__ __forceinline__ value_type_ sum(value_type_ value) noexcept {
-        return static_cast<value_type_>(sz_u32_lanes_sum_ampere_(static_cast<u32_t>(value)));
-    }
     // The predicates are `int`, as the warp intrinsics take them, so any nonzero lane votes.
     static __device__ __forceinline__ mask_t ballot(int predicate) noexcept { return __ballot_sync(all_k, predicate); }
     static __device__ __forceinline__ bool any(int predicate) noexcept { return __any_sync(all_k, predicate); }
@@ -154,6 +138,28 @@ struct cuda_warp_t {
     /** Copies @p bytes from @p source into @p target on the calling lane. */
     static __device__ __forceinline__ void copy_bytes(void* target, void const* source, std::size_t bytes) noexcept {
         std::memcpy(target, source, bytes);
+    }
+};
+
+/** The Ampere scans every NVIDIA class runs: shuffles for the prefix, one @c redux.sync for the
+ *  sum. */
+struct ampere_scan_t {
+
+    /** The sum of @p value over @p lane and every lane below it. */
+    template <typename value_type_>
+    static __device__ __forceinline__ value_type_ warp_inclusive_sum(value_type_ value, u32_t lane) noexcept {
+        for (u32_t delta = 1; delta != cuda_warp_t::width_k; delta <<= 1) {
+            value_type_ const below = cuda_warp_t::shuffle_up(value, delta);
+            if (lane >= delta) value += below;
+        }
+        return value;
+    }
+
+    /** The sum of a 32-bit integer @p value over the warp, in every lane. */
+    template <typename value_type_>
+        requires(std::is_integral_v<value_type_> && sizeof(value_type_) == 4)
+    static __device__ __forceinline__ value_type_ warp_sum(value_type_ value) noexcept {
+        return static_cast<value_type_>(sz_u32_lanes_sum_ampere_(static_cast<u32_t>(value)));
     }
 };
 

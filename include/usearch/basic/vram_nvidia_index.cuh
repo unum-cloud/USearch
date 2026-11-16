@@ -23,7 +23,7 @@
 #include <type_traits> // `std::conditional_t` - a walk's frontier and schedule
 
 #include "usearch/utilities/types.hpp"
-#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`
+#include "usearch/utilities/vram_nvidia_device.cuh" // `cuda_warp_t`, `ampere_scan_t`
 #include "usearch/basic/vram_index.cuh"
 #include "usearch/basic/vram_nvidia_index.hpp"
 
@@ -190,8 +190,9 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<node_id_type_> const
     u32_t const warp = slice.warp, lane = slice.lane;
     vram_selection_scratch<node_id_type_> const selection = vram_selection_scratch<node_id_type_>::carve(
         slice.scratch + 2 * view.span_bytes, view.selection_nodes);
-    using frontier_t = std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
-                                          vram_register_frontier<candidate_slots_, cuda_warp_t, node_id_type_>>;
+    using frontier_t =
+        std::conditional_t<candidate_slots_ == 0, vram_arena_frontier<cuda_warp_t, ampere_scan_t, node_id_type_>,
+                           vram_register_frontier<candidate_slots_, cuda_warp_t, node_id_type_>>;
     schedule_t schedule {schedule_state};
     cuda_for_each_assigned( //
         schedule, view.storage, view.assigned_nodes, view.first_id, view.end_id, slice, [&](node_id_type_ node_id) {
@@ -287,7 +288,7 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<node_id_type_> const&
     __shared__ typename schedule_t::shared_t schedule_state;
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t, node_id_type_>(view, dynamic_scratch);
-    std::conditional_t<slots_ == 0, vram_arena_frontier<cuda_warp_t, node_id_type_>,
+    std::conditional_t<slots_ == 0, vram_arena_frontier<cuda_warp_t, ampere_scan_t, node_id_type_>,
                        vram_register_frontier<slots_, cuda_warp_t, node_id_type_>>
         frontier;
     if constexpr (slots_ == 0) {

@@ -262,7 +262,7 @@ __device__ __forceinline__ void cuda_scan(vram_search_view<kit_> const& view, vr
             typename kit_::norms_accumulator_t accumulator {};
             for (u32_t fragment = lane; fragment < storage.geometry.row_fragments; fragment += width_k)
                 accumulator = kit_::accumulate_norms(query_row[fragment], accumulator);
-            accumulator = vram_reduce_norms<cuda_warp_t>(accumulator);
+            accumulator = vram_reduce_norms<cuda_warp_t, ampere_scan_t>(accumulator);
             if (lane == 0) query_norms[local] = kit_::partials_to_norms(accumulator);
         }
         __syncthreads();
@@ -590,8 +590,9 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     }
     else if constexpr (kernel_ == vram_kernel_t::compact_products_k) {
         vram_multiply_t const& products = arguments.products;
-        vram_compact_products<cuda_warp_t>(vram_view(products.ranking), products.block_bytes, products.shards_count,
-                                           products.queries_count, products.tape, products.totals);
+        vram_compact_products<cuda_warp_t, ampere_scan_t>(vram_view(products.ranking), products.block_bytes,
+                                                          products.shards_count, products.queries_count, products.tape,
+                                                          products.totals);
     }
     else if constexpr (kernel_ == vram_kernel_t::nominate_keys_k) {
         vram_maxsim_t const& maxsim = arguments.maxsim;
@@ -679,7 +680,8 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     else if constexpr (kernel_ == vram_dense_kernel_t::fold_k)
         vram_fold<kit_t, schedule_t, resident_blocks>(vram_view<kit_t>(arguments.fold));
     else if constexpr (kernel_ == vram_dense_kernel_t::derive_norms_k)
-        vram_derive_norms<kit_t, warp_t>(vram_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
+        vram_derive_norms<kit_t, warp_t, typename schedule_t::scan_t>(vram_view<kit_t>(graph.storage), graph.first_id,
+                                                                      graph.rows_count);
     else if constexpr (kernel_ == vram_dense_kernel_t::cast_k) {
         nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
         for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;

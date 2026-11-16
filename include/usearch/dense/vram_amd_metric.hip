@@ -17,14 +17,14 @@
  *  software, through NumKong's converters.
  *
  *  Fragments are 16 bytes, rows and the metric are runtime state of the flat view, and the
- *  cross-lane reductions live in @c vram_index.cuh over the schedule's @ref hip_warp, exactly as on
- *  NVIDIA. The arithmetic lives in named device primitives, and a kit binds them. Only HIP units
- *  include it: the host classes take their scalar layouts from the dtype alone.
+ *  cross-lane reductions live in @c vram_index.cuh over the schedule's @ref hip_warp and scan kit,
+ *  exactly as on NVIDIA. The arithmetic lives in named device primitives, and a kit binds them.
+ *  Only HIP units include it: the host classes take their scalar layouts from the dtype alone.
  *
  *  How a wavefront's candidate rows reach shared memory is a separate @b schedule, picked by
  *  @c schedule_ladder the same way: LDS DMA on CDNA3 and CDNA4, register copies elsewhere. Each
- *  schedule names the warp policy of its capability, @c hip_wave_lanes, so the same kit runs
- *  64-lane wavefronts on CDNA3 and CDNA4 and 32-lane ones on CDNA5.
+ *  schedule names its wavefront's width in its warp and its generation's scan kit beside it, so the
+ *  same kit runs 64-lane wavefronts on CDNA3 and CDNA4 and 32-lane ones on CDNA5.
  */
 #pragma once
 
@@ -43,7 +43,7 @@
 #include <numkong/cast/simt.cuh> // `nk_e4m3_to_f32_simt_` & the other software widenings
 #include <numkong/dots/rocm.cuh> // `nk_dot_i8x4_rocm_` - the portable signed byte dot
 
-#include "usearch/utilities/vram_amd_device.hip" // `hip_warp`, each schedule's warp policy
+#include "usearch/utilities/vram_amd_device.hip" // `hip_warp` and the scan kits each schedule names
 
 namespace unum::usearch::dense {
 
@@ -1482,7 +1482,8 @@ __device__ __forceinline__ void hip_copy_rows(storage_ const& storage, cache_ ca
  *  registers, and one wavefront barrier publishes them before the staging returns. */
 struct rocm_registers_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using warp_t = hip_warp<capability_k>;
+    using warp_t = hip_warp<64>;
+    using scan_t = rocm_scan_t;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies are plain stores. */
@@ -1526,7 +1527,8 @@ struct rocm_registers_schedule_t {
  *  are wired. */
 struct cdna5_registers_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
-    using warp_t = hip_warp<capability_k>;
+    using warp_t = hip_warp<32>;
+    using scan_t = cdna5_scan_t;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies are plain stores. */
@@ -1586,7 +1588,8 @@ __device__ __forceinline__ __attribute__((address_space(3))) void* hip_shared_po
 /** The CDNA3 staging: LDS DMA of one 32-bit word per lane. */
 struct cdna3_lds_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
-    using warp_t = hip_warp<capability_k>;
+    using warp_t = hip_warp<64>;
+    using scan_t = cdna3_scan_t;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
@@ -1641,7 +1644,8 @@ struct cdna3_lds_schedule_t {
 /** The CDNA4 staging: LDS DMA of a whole fragment per lane. */
 struct cdna4_lds_schedule_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
-    using warp_t = hip_warp<capability_k>;
+    using warp_t = hip_warp<64>;
+    using scan_t = cdna3_scan_t;
     inline static constexpr u32_t stages_k = 1;
 
     /** Nothing shared: the copies count on the wavefront's own @c vmcnt. */
