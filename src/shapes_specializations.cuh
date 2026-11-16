@@ -68,6 +68,7 @@ struct shapes_ram_variant {
     using codec_t = us::shapes::codec<kit_t>;
     using metric_t = us::shapes::shapes_metric<kit_t, thread_allocator_t>;
     using refine_plan_t = typename index_t::refine_plan_t;
+    using reshard_plan_t = typename index_t::reshard_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr nk_dtype_t dtype_k = scalar_type_::dtype();
 
@@ -96,42 +97,41 @@ struct shapes_ram_variant {
                                        matches_outputs_t& outputs, search_config_t config, predicate_t const& predicate,
                                        executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** Opens a refinement that first moves every shard of each of @p donors into this index, then
-     *  runs one round per shard under the config's cache. */
-    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
-        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, {config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
-                                 codec_t {}, planning);
-    }
-
     /** Opens one round of every live shard in place under the config's cache. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_round({config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity}, codec_t {},
-                                planning);
+        return index.plan_refine({config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity}, codec_t {},
+                                 planning);
     }
 
-    /** Opens a split of every live shard into the same shard of each of @p receivers, its part
-     *  roots drawn from the config's seed, then one round per receiver shard. */
-    expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
+    /** Opens a reshard of @p sources into @p targets driven by this index, the one target of a
+     *  pack or the one source of a split, a split's part roots drawn from @p seed, then one round
+     *  per shard that took entries. */
+    expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
+                                          refine_config_t config, u64_t seed) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_split(receivers, {{config.refine.cache_bytes}, config.seed},
-                                basic::keep_diverse_t {geometry.connectivity}, codec_t {}, planning);
-    }
-    status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
-
-    /** Adds the points of a consumed @p donor, whose nodes this index now holds. */
-    void count_absorbed_donor(shapes_ram_variant const& donor) noexcept {
-        atomic_ref<std::size_t>(total_points).store_add(donor.total_points, std::memory_order_relaxed);
+        return index.plan_reshard(sources, targets, {{config.cache_bytes}, 0, seed},
+                                  basic::keep_diverse_t {geometry.connectivity}, codec_t {}, planning);
     }
 
-    /** Counts the points of the part @p receiver now holds, once a split emptied this index. */
-    void count_split_receiver(shapes_ram_variant& receiver) noexcept {
+    /** Drives @p plan 's pending phases on the executor's threads until its round ends or @p ticks
+     *  cancels. */
+    template <typename plan_type_>
+    status_t drive(plan_type_& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Takes over the points of an emptied @p source, whose nodes this index now holds. */
+    void count_packed_source(shapes_ram_variant& source) noexcept {
+        std::size_t const points = atomic_ref<std::size_t>(source.total_points).exchange(0, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(total_points).store_add(points, std::memory_order_relaxed);
+    }
+
+    /** Counts the points of the part @p target now holds, once a split emptied this index. */
+    void count_split_target(shapes_ram_variant& target) noexcept {
         std::size_t points = 0;
-        for (shard_t const& one : receiver.index.live_shards())
+        for (shard_t const& one : target.index.live_shards())
             for (std::size_t node = 0; node != one.size(); ++node)
                 points += points_of(one.published_value_of(static_cast<typename shard_t::node_id_t>(node)));
-        atomic_ref<std::size_t>(receiver.total_points).store(points, std::memory_order_relaxed);
+        atomic_ref<std::size_t>(target.total_points).store(points, std::memory_order_relaxed);
         atomic_ref<std::size_t>(total_points).store(0, std::memory_order_relaxed);
     }
 
@@ -240,8 +240,9 @@ expected<sample_result_t> shapes_ram_variant<scalar_type_, cpu_class_>::sample(b
 }
 
 template <nk::shapes_dtype scalar_type_, cpu_class_t cpu_class_>
-status_t shapes_ram_variant<scalar_type_, cpu_class_>::refine(refine_plan_t& plan, executor_t& executor,
-                                                              progress_ticks_t& ticks) noexcept {
+template <typename plan_type_>
+status_t shapes_ram_variant<scalar_type_, cpu_class_>::drive(plan_type_& plan, executor_t& executor,
+                                                             progress_ticks_t& ticks) noexcept {
     auto [scratch, prepare_status] = prepare_refinement<shard_t>(
         plan, geometry.connectivity, shapes_metric_factory<metric_t>(geometry.metric), executor);
     if (failed(prepare_status)) return prepare_status;
@@ -511,9 +512,11 @@ struct shapes_vram_nvidia_variant {
         return cleared;
     }
 
-    /** Adds the points of a consumed @p donor, whose nodes this index now holds. */
-    void count_absorbed_donor(shapes_vram_nvidia_variant const& donor) noexcept {
-        fu::standard_atomic_ref<std::size_t>(total_points).store_add(donor.total_points, std::memory_order_relaxed);
+    /** Takes over the points of an emptied @p source, whose nodes this index now holds. */
+    void count_packed_source(shapes_vram_nvidia_variant& source) noexcept {
+        std::size_t const points =
+            fu::standard_atomic_ref<std::size_t>(source.total_points).exchange(0, std::memory_order_relaxed);
+        fu::standard_atomic_ref<std::size_t>(total_points).store_add(points, std::memory_order_relaxed);
     }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
@@ -662,11 +665,10 @@ struct variant_bodies<shapes_traits_t> {
     /** What a view keeps of a cloud it read: its points as saved, in its thread's arena. */
     using kept_t = bytes_view_t;
 
-    /** Whether @p donor enters @p variant: the same kind, scalar, point count and
-     *  connectivity. */
-    template <typename variant_type_, typename donor_type_>
-    static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
-        geometry_t const &index = variant.geometry, &other = donor.geometry;
+    /** Whether @p source enters @p variant: the same kind, scalar, point count and connectivity. */
+    template <typename variant_type_, typename source_type_>
+    static bool matches(variant_type_ const& variant, source_type_ const& source) noexcept {
+        geometry_t const &index = variant.geometry, &other = source.geometry;
         return index.metric == other.metric && index.quantization == other.quantization &&
                index.points == other.points && index.connectivity == other.connectivity;
     }

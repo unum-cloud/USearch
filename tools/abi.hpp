@@ -814,7 +814,7 @@ struct dense_verbs_t {
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome, std::size_t expansion = 0, std::size_t memory_limit = 0,
                        usearch_traversal_stats_t* stats = nullptr, usearch_progress_t progress = {},
-                       refine_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
+                       refine_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
         usearch_dense_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         arguments.refine = {expansion, memory_limit};
@@ -828,25 +828,6 @@ struct dense_verbs_t {
         arguments.plan = plan, arguments.report = report;
         usearch_dense_refine_plan_finish(&arguments);
     }
-    using absorb_plan_t = usearch_dense_absorb_plan_t;
-    static void absorb(index_t index, usearch_executor_t executor, std::span<index_t> donors,
-                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr, std::size_t expansion = 0,
-                       std::size_t memory_limit = 0, usearch_progress_t progress = {}, absorb_plan_t* plan = nullptr,
-                       usearch_phase_t* phase = nullptr) noexcept {
-        usearch_dense_absorb_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = donors.size(), arguments.donors = donors.data();
-        arguments.report = report, arguments.progress = progress, arguments.plan = plan, arguments.phase = phase;
-        arguments.refine = {expansion, memory_limit};
-        usearch_dense_absorb(&arguments);
-    }
-    static void absorb_plan_finish(index_t index, usearch_executor_t executor, absorb_plan_t plan,
-                                   usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_dense_absorb_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.plan = plan, arguments.report = report;
-        usearch_dense_absorb_plan_finish(&arguments);
-    }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
                        usearch_outcome_t* outcome) noexcept {
         usearch_dense_health_t arguments {};
@@ -854,24 +835,27 @@ struct dense_verbs_t {
         arguments.reachability = reachability;
         usearch_dense_health(&arguments);
     }
-    using split_plan_t = usearch_dense_split_plan_t;
-    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
-                      std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
-                      split_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
-        usearch_dense_split_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+    using reshard_plan_t = usearch_dense_reshard_plan_t;
+    static void reshard(std::span<index_t const> sources, std::span<index_t const> targets, usearch_executor_t executor,
+                        std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                        std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
+                        reshard_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr,
+                        usearch_ram_options_t const* ram = nullptr) noexcept {
+        usearch_dense_reshard_t arguments {};
+        arguments.sources_count = sources.size(), arguments.sources = sources.data();
+        arguments.targets_count = targets.size(), arguments.targets = targets.data();
+        arguments.executor = executor, arguments.outcome = outcome, arguments.seed = seed, arguments.report = report;
         arguments.refine = {expansion, memory_limit}, arguments.progress = progress;
         arguments.plan = plan, arguments.phase = phase;
-        usearch_dense_split(&arguments);
+        arguments.ram = ram;
+        usearch_dense_reshard(&arguments);
     }
-    static void split_plan_finish(index_t index, usearch_executor_t executor, split_plan_t plan,
-                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_dense_split_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+    static void reshard_plan_finish(usearch_executor_t executor, reshard_plan_t plan, usearch_refine_report_t* report,
+                                    usearch_outcome_t* outcome) noexcept {
+        usearch_dense_reshard_plan_finish_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome;
         arguments.plan = plan, arguments.report = report;
-        usearch_dense_split_plan_finish(&arguments);
+        usearch_dense_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_dense_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1077,7 +1061,7 @@ struct sequence_verbs_t {
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome, std::size_t expansion = 0, std::size_t memory_limit = 0,
                        usearch_traversal_stats_t* stats = nullptr, usearch_progress_t progress = {},
-                       refine_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
+                       refine_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
         usearch_sequence_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         arguments.refine = {expansion, memory_limit};
@@ -1091,25 +1075,6 @@ struct sequence_verbs_t {
         arguments.plan = plan, arguments.report = report;
         usearch_sequence_refine_plan_finish(&arguments);
     }
-    using absorb_plan_t = usearch_sequence_absorb_plan_t;
-    static void absorb(index_t index, usearch_executor_t executor, std::span<index_t> donors,
-                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr, std::size_t expansion = 0,
-                       std::size_t memory_limit = 0, usearch_progress_t progress = {}, absorb_plan_t* plan = nullptr,
-                       usearch_phase_t* phase = nullptr) noexcept {
-        usearch_sequence_absorb_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = donors.size(), arguments.donors = donors.data();
-        arguments.report = report, arguments.progress = progress, arguments.plan = plan, arguments.phase = phase;
-        arguments.refine = {expansion, memory_limit};
-        usearch_sequence_absorb(&arguments);
-    }
-    static void absorb_plan_finish(index_t index, usearch_executor_t executor, absorb_plan_t plan,
-                                   usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_sequence_absorb_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.plan = plan, arguments.report = report;
-        usearch_sequence_absorb_plan_finish(&arguments);
-    }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
                        usearch_outcome_t* outcome) noexcept {
         usearch_sequence_health_t arguments {};
@@ -1117,24 +1082,25 @@ struct sequence_verbs_t {
         arguments.reachability = reachability;
         usearch_sequence_health(&arguments);
     }
-    using split_plan_t = usearch_sequence_split_plan_t;
-    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
-                      std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
-                      split_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
-        usearch_sequence_split_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+    using reshard_plan_t = usearch_sequence_reshard_plan_t;
+    static void reshard(std::span<index_t const> sources, std::span<index_t const> targets, usearch_executor_t executor,
+                        std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                        std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
+                        reshard_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
+        usearch_sequence_reshard_t arguments {};
+        arguments.sources_count = sources.size(), arguments.sources = sources.data();
+        arguments.targets_count = targets.size(), arguments.targets = targets.data();
+        arguments.executor = executor, arguments.outcome = outcome, arguments.seed = seed, arguments.report = report;
         arguments.refine = {expansion, memory_limit}, arguments.progress = progress;
         arguments.plan = plan, arguments.phase = phase;
-        usearch_sequence_split(&arguments);
+        usearch_sequence_reshard(&arguments);
     }
-    static void split_plan_finish(index_t index, usearch_executor_t executor, split_plan_t plan,
-                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_sequence_split_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+    static void reshard_plan_finish(usearch_executor_t executor, reshard_plan_t plan, usearch_refine_report_t* report,
+                                    usearch_outcome_t* outcome) noexcept {
+        usearch_sequence_reshard_plan_finish_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome;
         arguments.plan = plan, arguments.report = report;
-        usearch_sequence_split_plan_finish(&arguments);
+        usearch_sequence_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_sequence_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1293,7 +1259,7 @@ struct shapes_verbs_t {
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome, std::size_t expansion = 0, std::size_t memory_limit = 0,
                        usearch_traversal_stats_t* stats = nullptr, usearch_progress_t progress = {},
-                       refine_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
+                       refine_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
         usearch_shapes_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         arguments.refine = {expansion, memory_limit};
@@ -1307,25 +1273,6 @@ struct shapes_verbs_t {
         arguments.plan = plan, arguments.report = report;
         usearch_shapes_refine_plan_finish(&arguments);
     }
-    using absorb_plan_t = usearch_shapes_absorb_plan_t;
-    static void absorb(index_t index, usearch_executor_t executor, std::span<index_t> donors,
-                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr, std::size_t expansion = 0,
-                       std::size_t memory_limit = 0, usearch_progress_t progress = {}, absorb_plan_t* plan = nullptr,
-                       usearch_phase_t* phase = nullptr) noexcept {
-        usearch_shapes_absorb_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = donors.size(), arguments.donors = donors.data();
-        arguments.report = report, arguments.progress = progress, arguments.plan = plan, arguments.phase = phase;
-        arguments.refine = {expansion, memory_limit};
-        usearch_shapes_absorb(&arguments);
-    }
-    static void absorb_plan_finish(index_t index, usearch_executor_t executor, absorb_plan_t plan,
-                                   usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_shapes_absorb_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.plan = plan, arguments.report = report;
-        usearch_shapes_absorb_plan_finish(&arguments);
-    }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
                        usearch_outcome_t* outcome) noexcept {
         usearch_shapes_health_t arguments {};
@@ -1333,24 +1280,25 @@ struct shapes_verbs_t {
         arguments.reachability = reachability;
         usearch_shapes_health(&arguments);
     }
-    using split_plan_t = usearch_shapes_split_plan_t;
-    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
-                      std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
-                      split_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
-        usearch_shapes_split_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+    using reshard_plan_t = usearch_shapes_reshard_plan_t;
+    static void reshard(std::span<index_t const> sources, std::span<index_t const> targets, usearch_executor_t executor,
+                        std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                        std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
+                        reshard_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
+        usearch_shapes_reshard_t arguments {};
+        arguments.sources_count = sources.size(), arguments.sources = sources.data();
+        arguments.targets_count = targets.size(), arguments.targets = targets.data();
+        arguments.executor = executor, arguments.outcome = outcome, arguments.seed = seed, arguments.report = report;
         arguments.refine = {expansion, memory_limit}, arguments.progress = progress;
         arguments.plan = plan, arguments.phase = phase;
-        usearch_shapes_split(&arguments);
+        usearch_shapes_reshard(&arguments);
     }
-    static void split_plan_finish(index_t index, usearch_executor_t executor, split_plan_t plan,
-                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_shapes_split_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+    static void reshard_plan_finish(usearch_executor_t executor, reshard_plan_t plan, usearch_refine_report_t* report,
+                                    usearch_outcome_t* outcome) noexcept {
+        usearch_shapes_reshard_plan_finish_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome;
         arguments.plan = plan, arguments.report = report;
-        usearch_shapes_split_plan_finish(&arguments);
+        usearch_shapes_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_shapes_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -1526,7 +1474,7 @@ struct geospatial_verbs_t {
     static void refine(index_t index, usearch_executor_t executor, usearch_refine_report_t* report,
                        usearch_outcome_t* outcome, std::size_t expansion = 0, std::size_t memory_limit = 0,
                        usearch_traversal_stats_t* stats = nullptr, usearch_progress_t progress = {},
-                       refine_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
+                       refine_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
         usearch_geospatial_refine_t arguments {};
         arguments.index = index, arguments.executor = executor, arguments.outcome = outcome, arguments.report = report;
         arguments.refine = {expansion, memory_limit};
@@ -1540,25 +1488,6 @@ struct geospatial_verbs_t {
         arguments.plan = plan, arguments.report = report;
         usearch_geospatial_refine_plan_finish(&arguments);
     }
-    using absorb_plan_t = usearch_geospatial_absorb_plan_t;
-    static void absorb(index_t index, usearch_executor_t executor, std::span<index_t> donors,
-                       usearch_outcome_t* outcome, usearch_refine_report_t* report = nullptr, std::size_t expansion = 0,
-                       std::size_t memory_limit = 0, usearch_progress_t progress = {}, absorb_plan_t* plan = nullptr,
-                       usearch_phase_t* phase = nullptr) noexcept {
-        usearch_geospatial_absorb_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = donors.size(), arguments.donors = donors.data();
-        arguments.report = report, arguments.progress = progress, arguments.plan = plan, arguments.phase = phase;
-        arguments.refine = {expansion, memory_limit};
-        usearch_geospatial_absorb(&arguments);
-    }
-    static void absorb_plan_finish(index_t index, usearch_executor_t executor, absorb_plan_t plan,
-                                   usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_geospatial_absorb_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.plan = plan, arguments.report = report;
-        usearch_geospatial_absorb_plan_finish(&arguments);
-    }
     static void health(index_t index, usearch_executor_t executor, usearch_reachability_t* reachability,
                        usearch_outcome_t* outcome) noexcept {
         usearch_geospatial_health_t arguments {};
@@ -1566,24 +1495,25 @@ struct geospatial_verbs_t {
         arguments.reachability = reachability;
         usearch_geospatial_health(&arguments);
     }
-    using split_plan_t = usearch_geospatial_split_plan_t;
-    static void split(index_t index, usearch_executor_t executor, index_t const* receivers, std::size_t count,
-                      std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
-                      std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
-                      split_plan_t* plan = nullptr, usearch_phase_t* phase = nullptr) noexcept {
-        usearch_geospatial_split_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
-        arguments.count = count, arguments.receivers = receivers, arguments.seed = seed, arguments.report = report;
+    using reshard_plan_t = usearch_geospatial_reshard_plan_t;
+    static void reshard(std::span<index_t const> sources, std::span<index_t const> targets, usearch_executor_t executor,
+                        std::uint64_t seed, usearch_refine_report_t* report, usearch_outcome_t* outcome,
+                        std::size_t expansion = 0, std::size_t memory_limit = 0, usearch_progress_t progress = {},
+                        reshard_plan_t* plan = nullptr, usearch_phase_progress_t* phase = nullptr) noexcept {
+        usearch_geospatial_reshard_t arguments {};
+        arguments.sources_count = sources.size(), arguments.sources = sources.data();
+        arguments.targets_count = targets.size(), arguments.targets = targets.data();
+        arguments.executor = executor, arguments.outcome = outcome, arguments.seed = seed, arguments.report = report;
         arguments.refine = {expansion, memory_limit}, arguments.progress = progress;
         arguments.plan = plan, arguments.phase = phase;
-        usearch_geospatial_split(&arguments);
+        usearch_geospatial_reshard(&arguments);
     }
-    static void split_plan_finish(index_t index, usearch_executor_t executor, split_plan_t plan,
-                                  usearch_refine_report_t* report, usearch_outcome_t* outcome) noexcept {
-        usearch_geospatial_split_plan_finish_t arguments {};
-        arguments.index = index, arguments.executor = executor, arguments.outcome = outcome;
+    static void reshard_plan_finish(usearch_executor_t executor, reshard_plan_t plan, usearch_refine_report_t* report,
+                                    usearch_outcome_t* outcome) noexcept {
+        usearch_geospatial_reshard_plan_finish_t arguments {};
+        arguments.executor = executor, arguments.outcome = outcome;
         arguments.plan = plan, arguments.report = report;
-        usearch_geospatial_split_plan_finish(&arguments);
+        usearch_geospatial_reshard_plan_finish(&arguments);
     }
     using cursor_t = usearch_geospatial_cursor_t;
     static void cursor_init(index_t index, std::span<usearch_key_t const> starts, cursor_t* cursor,
@@ -2416,11 +2346,12 @@ inline st::vector<usearch_scalar_t> compiled_scalars(usearch_residency_t residen
     return scalars;
 }
 
-/** The CPU classes the library accepts as pins on this machine, from the portable floor up; every
- *  class fits a byte, and a value naming no class spells "unknown". */
+/** The CPU classes the library accepts as pins on this machine, from the portable floor to the last
+ *  class the header declares, since a value past it is no @c usearch_cpu_class_t, and a gap in
+ *  between spells its name "unknown". */
 inline st::vector<usearch_cpu_class_t> admitted_classes() noexcept {
     st::vector<usearch_cpu_class_t> classes;
-    for (int code = usearch_cpu_class_serial_k; code <= (std::numeric_limits<std::uint8_t>::max)(); ++code) {
+    for (int code = usearch_cpu_class_serial_k; code <= usearch_cpu_class_wasm64_extended_k; ++code) {
         usearch_cpu_class_t const cpu_class = static_cast<usearch_cpu_class_t>(code);
         if (std::string_view(usearch_cpu_class_name(cpu_class)) != "unknown" &&
             dense_opens(usearch_residency_ram_k, usearch_scalar_bf16_k, cpu_class) &&

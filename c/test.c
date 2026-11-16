@@ -574,11 +574,13 @@ void test_add_progress(void) {
     printf("Test: Add Progress - PASSED\n");
 }
 
-/** A RAM index bounded at a quarter of its rows holds four shards, and compacts in place under a
- *  bound of half its rows: nothing is consumed, and every key still resolves to one entry. A fresh
- *  index then compacts two halves into itself, which frees and nulls both sources. */
-void test_compact(size_t const dimensions) {
-    printf("Test: Compact... %zu dimensions\n", dimensions);
+/** A RAM index bounded at a quarter of its rows holds four shards, and reshards in place, as its
+ *  own only source and target, under a bound of half its rows into two through a plan whose every
+ *  call is cancelled until its rounds end, each call naming the phase it stopped in: every key
+ *  still resolves to one entry, and every entry stays. A placement of another residency, one
+ *  naming memory domains, or a source named twice is refused before any entry moves anywhere. */
+void test_reshard(size_t const dimensions) {
+    printf("Test: Reshard... %zu dimensions\n", dimensions);
 
     enum { rows_count = 1200, quarter = rows_count / 4 };
     usearch_outcome_t outcome = {0};
@@ -590,26 +592,21 @@ void test_compact(size_t const dimensions) {
     expect(keys, "Failed to allocate keys");
     for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
 
-    usearch_dense_index_t indexes[3] = {NULL, NULL, NULL};
-    size_t const shard_capacities[3] = {quarter, 0, 0};
-    for (size_t which = 0; which != 3; ++which) {
-        usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &indexes[which],
-                                                            .outcome = &outcome,
-                                                            .metric = usearch_dense_metric_angular_k,
-                                                            .quantization = usearch_scalar_bf16_k,
-                                                            .dimensions = dimensions,
-                                                            .connectivity = 16,
-                                                            .ram = {.shard_capacity = shard_capacities[which]}});
-        expect(!outcome.message, outcome.message);
-    }
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions,
+                                                        .connectivity = 16,
+                                                        .ram = {.shard_capacity = quarter}});
+    expect(!outcome.message, outcome.message);
     // The bounded index takes every entry, one generation of shards per quarter.
-    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = indexes[0],
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .capacity = rows_count});
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
     expect(!outcome.message, outcome.message);
     usearch_dense_insert(
-        &(usearch_dense_insert_t) {.index = indexes[0],
+        &(usearch_dense_insert_t) {.index = index,
                                    .executor = executor,
                                    .outcome = &outcome,
                                    .count = rows_count,
@@ -617,70 +614,99 @@ void test_compact(size_t const dimensions) {
                                    .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
-    usearch_dense_compact(&(usearch_dense_compact_t) {.target = indexes[0],
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
+                                                      .sources = &index,
+                                                      .targets_count = 1,
+                                                      .targets = &index,
                                                       .executor = executor,
                                                       .outcome = &outcome,
-                                                      .count = 1,
-                                                      .sources = indexes,
-                                                      .shard_capacity = rows_count / 2});
+                                                      .vram = &(usearch_vram_options_t) {0}});
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "A VRAM placement names nothing a RAM index holds");
+    int32_t const domain = 0;
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {
+        .sources_count = 1,
+        .sources = &index,
+        .targets_count = 1,
+        .targets = &index,
+        .executor = executor,
+        .outcome = &outcome,
+        .ram = &(usearch_ram_options_t) {.memory_domains = &domain, .memory_domains_count = 1}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "Resharding places no shard on a named domain yet");
+    usearch_dense_index_t const twice[2] = {index, index};
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 2,
+                                                      .sources = twice,
+                                                      .targets_count = 1,
+                                                      .targets = &index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A source named twice must be refused");
+
+    usearch_dense_reshard_plan_t plan = NULL;
+    usearch_refine_report_t report = {0};
+    size_t calls = 0;
+    do {
+        usearch_phase_progress_t phase = {0};
+        usearch_dense_reshard(
+            &(usearch_dense_reshard_t) {.sources_count = 1,
+                                        .sources = &index,
+                                        .targets_count = 1,
+                                        .targets = &index,
+                                        .executor = executor,
+                                        .outcome = &outcome,
+                                        .ram = &(usearch_ram_options_t) {.shard_capacity = rows_count / 2},
+                                        .report = &report,
+                                        .progress = {cancel_progress},
+                                        .plan = &plan,
+                                        .phase = &phase});
+        bool const cancelled = outcome.status == usearch_status_cancelled_k;
+        expect(cancelled || !outcome.message, outcome.message);
+        expect(plan != NULL && phase.phase != usearch_phase_none_k,
+               "Every call through a plan must keep it live and name a phase");
+        if (!cancelled) break;
+        expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,
+               "A stopped round must stand in one of its phases");
+    } while (++calls != rows_count);
+    usearch_dense_reshard_plan_finish(&(usearch_dense_reshard_plan_finish_t) {.executor = executor,
+                                                                              .outcome = &outcome,
+                                                                              .plan = plan,
+                                                                              .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(indexes[0] != NULL, "Compacting in place consumes nothing");
+    expect_eq(report.reachability.reachable, report.reachability.audited,
+              "Every entry must stay reachable after resharding");
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, rows_count, "Resharding keeps every entry");
     for (size_t row = 0; row != rows_count; ++row) {
         size_t entries = 0;
-        usearch_dense_count(&(usearch_dense_count_t) {.index = indexes[0],
+        usearch_dense_count(&(usearch_dense_count_t) {.index = index,
                                                       .executor = executor,
                                                       .outcome = &outcome,
                                                       .key = keys[row],
                                                       .entries = &entries});
         expect(!outcome.message, outcome.message);
-        expect_eq(entries, 1, "Every key must resolve to one row after compacting in place");
+        expect_eq(entries, 1, "Every key must resolve to one row after resharding in place");
     }
-
-    // Out of place, both halves land in the fresh index, and their handles go.
-    usearch_dense_index_t const target = indexes[2];
-    usearch_dense_reserve(&(
-        usearch_dense_reserve_t) {.index = indexes[1], .executor = executor, .outcome = &outcome, .capacity = quarter});
-    expect(!outcome.message, outcome.message);
-    usearch_dense_insert(
-        &(usearch_dense_insert_t) {.index = indexes[1],
-                                   .executor = executor,
-                                   .outcome = &outcome,
-                                   .count = quarter,
-                                   .keys = {keys, sizeof(usearch_key_t)},
-                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
-    expect(!outcome.message, outcome.message);
-    usearch_dense_compact(&(usearch_dense_compact_t) {.target = target,
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .count = 2,
-                                                      .sources = indexes});
-    expect(!outcome.message, outcome.message);
-    expect(indexes[0] == NULL && indexes[1] == NULL, "Every consumed source must be freed and nulled");
-    usearch_dense_index_description_t description = {0};
-    usearch_dense_describe(&(usearch_dense_describe_t) {.index = target,
-                                                        .executor = executor,
-                                                        .outcome = &outcome,
-                                                        .description = &description});
-    expect(!outcome.message, outcome.message);
-    expect_eq(description.size, rows_count + quarter, "Every source row must land in the target");
 
     free(keys);
     free(data);
     usearch_executor_free(executor);
-    usearch_dense_free(target);
-    printf("Test: Compact - PASSED\n");
+    usearch_dense_free(index);
+    printf("Test: Reshard - PASSED\n");
 }
 
-/** The first of four indexes over the quarters of one dataset absorbs the rest: a handler
- *  cancelling the closing refine of a one-shot absorb still leaves both its donors consumed, the
- *  call answering @c usearch_status_cancelled_k, and the last donor lands through a refinement
- *  handle, whose pulls are each cancelled until the pass ends while the index refuses insertions,
- *  every pull continuing the count where the last stopped and reporting running totals that only
- *  grow, with no more nodes changed than visited. Every donor slot is nulled as it is consumed, the
- *  sizes add up, the reported audit matches a health call, and every key resolves to one reachable
- *  row. */
-void test_absorb(size_t const dimensions) {
-    printf("Test: Absorb... %zu dimensions\n", dimensions);
+/** The first of four indexes over the quarters of one dataset gathers the rest through reshards
+ *  naming it the one target: a handler cancelling the closing round of a one-shot reshard still
+ *  leaves both other sources empty, the call answering @c usearch_status_cancelled_k, and the last
+ *  source lands through a reshard plan, whose calls are each cancelled until the round ends, each
+ *  naming the phase it stopped in, while the target refuses insertions and the round so far never
+ *  shrinks. Every emptied source stays a live handle the caller frees, the sizes add up, the
+ *  reported audit matches a health call, and every key resolves to one reachable row. */
+void test_reshard_gather(size_t const dimensions) {
+    printf("Test: Reshard Gather... %zu dimensions\n", dimensions);
 
     enum { indexes_count = 4, rows_per_index = 300, rows_count = indexes_count * rows_per_index };
     usearch_outcome_t outcome = {0};
@@ -711,93 +737,88 @@ void test_absorb(size_t const dimensions) {
         expect(!outcome.message, outcome.message);
     }
 
-    usearch_dense_absorb(&(usearch_dense_absorb_t) {.index = indexes[0],
-                                                    .executor = executor,
-                                                    .outcome = &outcome,
-                                                    .count = indexes_count - 2,
-                                                    .donors = indexes + 1,
-                                                    .progress = {cancel_progress}});
-    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing refine");
-    expect(indexes[1] == NULL && indexes[2] == NULL && indexes[3] != NULL,
-           "Every donor of the call must be consumed and nulled, and no other");
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = indexes_count - 1,
+                                                      .sources = indexes,
+                                                      .targets_count = 1,
+                                                      .targets = indexes,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .progress = {cancel_progress}});
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing round");
+    size_t sizes[indexes_count] = {0};
+    for (size_t which = 0; which != indexes_count; ++which) {
+        usearch_dense_index_description_t described = {0};
+        usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[which],
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .description = &described});
+        expect(!outcome.message, outcome.message);
+        sizes[which] = described.size;
+    }
+    expect(sizes[0] == 3 * rows_per_index && sizes[1] == 0 && sizes[2] == 0 && sizes[3] == rows_per_index,
+           "Every other source of the call must end empty past the cancel, and no other index");
+
+    // Every call cancels at its first barrier, so the round ends over several calls, each naming
+    // where it stopped and reporting the round so far.
+    usearch_dense_index_t const last_sources[2] = {indexes[0], indexes[3]};
+    usearch_dense_reshard_plan_t plan = NULL;
+    progress_reports_t reports = {0, 0, 0, true};
+    usearch_refine_report_t running = {0};
+    size_t calls = 0;
+    do {
+        usearch_refine_report_t pulled = {0};
+        usearch_phase_progress_t phase = {0};
+        usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 2,
+                                                          .sources = last_sources,
+                                                          .targets_count = 1,
+                                                          .targets = indexes,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .report = &pulled,
+                                                          .progress = {record_and_cancel, &reports},
+                                                          .plan = &plan,
+                                                          .phase = &phase});
+        bool const cancelled = outcome.status == usearch_status_cancelled_k;
+        expect(cancelled || !outcome.message, outcome.message);
+        expect(plan != NULL, "The first call must open the plan");
+        expect(phase.phase != usearch_phase_none_k, "Every call through a plan must name a phase");
+        expect(pulled.changed <= rows_count && pulled.reselected >= running.reselected,
+               "The round so far must never shrink, nor change more rows than the index holds");
+        running = pulled;
+        if (!cancelled) break;
+        expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,
+               "A stopped round must stand in one of its phases");
+        if (++calls != 1) continue;
+        usearch_key_t const late_key = key_of(rows_count);
+        usearch_dense_insert(&(usearch_dense_insert_t) {
+            .index = indexes[0],
+            .executor = executor,
+            .outcome = &outcome,
+            .count = 1,
+            .keys = {&late_key, sizeof(usearch_key_t)},
+            .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+        expect_eq(outcome.status, usearch_status_contended_k, "A live plan must hold its index closed");
+    } while (calls != rows_count);
+    expect(calls >= 1 && outcome.status == usearch_status_success_k, "The round must end over several calls");
+    expect(reports.calls > 0 && reports.completed <= reports.total && reports.total >= rows_per_index,
+           "The handler must hear the round's phases over every source row");
+
+    usearch_refine_report_t finished = {0};
+    usearch_dense_reshard_plan_finish(&(usearch_dense_reshard_plan_finish_t) {.executor = executor,
+                                                                              .outcome = &outcome,
+                                                                              .plan = plan,
+                                                                              .report = &finished});
+    expect(!outcome.message, outcome.message);
+    expect(finished.changed >= running.changed && finished.changed > 0,
+           "The plan must report at least what its calls reported");
+
     usearch_dense_index_description_t description = {0};
     usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
                                                         .executor = executor,
                                                         .outcome = &outcome,
                                                         .description = &description});
     expect(!outcome.message, outcome.message);
-    expect_eq(description.size, 3 * rows_per_index, "The donors must stay absorbed past the cancel");
-
-    usearch_dense_refinement_t refinement = NULL;
-    usearch_dense_refinement_init(&(usearch_dense_refinement_init_t) {.index = indexes[0],
-                                                                      .executor = executor,
-                                                                      .outcome = &outcome,
-                                                                      .donors = indexes + 3,
-                                                                      .count = 1,
-                                                                      .refinement = &refinement});
-    expect(!outcome.message, outcome.message);
-    expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
-    usearch_key_t const late_key = key_of(rows_count);
-    usearch_dense_insert(
-        &(usearch_dense_insert_t) {.index = indexes[0],
-                                   .executor = executor,
-                                   .outcome = &outcome,
-                                   .count = 1,
-                                   .keys = {&late_key, sizeof(usearch_key_t)},
-                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
-    expect_eq(outcome.status, usearch_status_contended_k, "A refinement must hold its index closed");
-
-    // Every pull cancels at its first report, so the pass ends over several pulls, each reporting
-    // the running totals; the closing one may only heal, so its totals need not grow.
-    progress_reports_t reports = {0, 0, 0, true};
-    size_t visited = 0, changed = 0, pulls = 0;
-    usearch_traversal_stats_t stats = {0};
-    do {
-        size_t pulled_visited = 0, pulled_changed = 0;
-        usearch_traversal_stats_t pulled_stats = {0};
-        usearch_dense_refinement_next(&(usearch_dense_refinement_next_t) {.index = indexes[0],
-                                                                          .executor = executor,
-                                                                          .outcome = &outcome,
-                                                                          .refinement = refinement,
-                                                                          .progress = {record_and_cancel, &reports},
-                                                                          .reselected = &pulled_visited,
-                                                                          .changed = &pulled_changed,
-                                                                          .stats = &pulled_stats});
-        bool const cancelled = outcome.status == usearch_status_cancelled_k;
-        expect(cancelled || !outcome.message, outcome.message);
-        expect(indexes[3] == NULL, "Every consumed donor slot must be nulled");
-        expect(pulled_changed <= pulled_visited, "No more nodes may change than were re-selected");
-        expect(pulled_visited >= visited + cancelled && pulled_changed >= changed &&
-                   pulled_stats.computed_distances >= stats.computed_distances + cancelled,
-               "The running totals must grow from pull to pull");
-        visited = pulled_visited, changed = pulled_changed, stats = pulled_stats;
-        ++pulls;
-        if (!cancelled) break;
-    } while (pulls != rows_count);
-    expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total >= rows_per_index,
-           "The handler must hear the walks over every donor row");
-    expect(reports.ascending, "Every pull must count on from where the last stopped");
-
-    usearch_refine_report_t finished = {0};
-    usearch_traversal_stats_t finished_stats = {0};
-    usearch_dense_refinement_finish(&(usearch_dense_refinement_finish_t) {.index = indexes[0],
-                                                                          .executor = executor,
-                                                                          .outcome = &outcome,
-                                                                          .refinement = refinement,
-                                                                          .report = &finished,
-                                                                          .stats = &finished_stats});
-    expect(!outcome.message, outcome.message);
-    expect(finished.changed >= changed && finished.changed > 0 &&
-               finished_stats.computed_distances >= stats.computed_distances,
-           "The refinement must report at least the work its pulls reported");
-
-    usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
-                                                        .executor = executor,
-                                                        .outcome = &outcome,
-                                                        .description = &description});
-    expect(!outcome.message, outcome.message);
-    expect_eq(description.size, rows_count, "The absorbed sizes must add up");
+    expect_eq(description.size, rows_count, "The gathered sizes must add up");
     for (size_t row = 0; row != rows_count; ++row) {
         size_t entries = 0;
         usearch_dense_count(&(usearch_dense_count_t) {.index = indexes[0],
@@ -806,7 +827,7 @@ void test_absorb(size_t const dimensions) {
                                                       .key = keys[row],
                                                       .entries = &entries});
         expect(!outcome.message, outcome.message);
-        expect_eq(entries, 1, "Every key must resolve to one absorbed row");
+        expect_eq(entries, 1, "Every key must resolve to one gathered row");
     }
     usearch_reachability_t reachability = {0};
     usearch_dense_health(&(usearch_dense_health_t) {.index = indexes[0],
@@ -814,16 +835,287 @@ void test_absorb(size_t const dimensions) {
                                                     .outcome = &outcome,
                                                     .reachability = &reachability});
     expect(!outcome.message, outcome.message);
-    expect_eq(reachability.reachable, rows_count, "Every absorbed row must stay reachable");
+    expect_eq(reachability.reachable, rows_count, "Every gathered row must stay reachable");
     expect(finished.reachability.audited == reachability.audited &&
                finished.reachability.reachable == reachability.reachable,
-           "The closing audit must match a health call right after");
+           "The closing health check must match a health call right after");
 
     free(keys);
     free(data);
     usearch_executor_free(executor);
-    usearch_dense_free(indexes[0]);
-    printf("Test: Absorb - PASSED\n");
+    for (size_t which = 0; which != indexes_count; ++which) usearch_dense_free(indexes[which]);
+    printf("Test: Reshard Gather - PASSED\n");
+}
+
+/** A fresh index holding the first @p rows_count rows of @p data, inserted by @p executor: on one
+ *  thread, equal calls build equal graphs, so their rounds compare field by field. */
+static usearch_dense_index_t create_index_holding(float const* data, size_t const rows_count, size_t const dimensions,
+                                                  usearch_executor_t const executor) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(rows_count * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    free(keys);
+    return index;
+}
+
+/** Whether two rounds over equal graphs opened, gathered and re-stitched alike. */
+static bool same_round(usearch_refine_report_t const* first, usearch_refine_report_t const* second) {
+    return first->neighborhoods == second->neighborhoods && first->widest_neighborhood == second->widest_neighborhood &&
+           first->added_links == second->added_links && first->dropped_links == second->dropped_links &&
+           first->changed == second->changed &&
+           memcmp(&first->opening, &second->opening, sizeof(usearch_reachability_t)) == 0;
+}
+
+/** Rounds through a plan match the one-shot round on graphs one thread built. A round without a
+ *  plan names the closing phase, a round run to its end through a plan reports what a round without
+ *  one does, and a second round through the same plan opens where the first closed, from the same
+ *  root. A plan whose every call cancels at its first barrier stays live and keeps its index
+ *  closed, one of its calls stops in the gather, and its last call reaches the uninterrupted
+ *  round's neighborhoods, links and opening health check. A plan finished while stopped in the
+ *  gather reports a stopped verdict, and its index saves, loads and finds entries. */
+void test_refine_plan(size_t const dimensions, size_t const rows_count) {
+    printf("Test: Refine Plan... %zu dimensions, %zu rows\n", dimensions, rows_count);
+
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(1);
+    float* const data = create_vectors(rows_count, dimensions);
+    size_t const row_bytes = dimensions * sizeof(float);
+
+    usearch_dense_index_t const one_shot = create_index_holding(data, rows_count, dimensions, executor);
+    usearch_refine_report_t reference = {0};
+    usearch_phase_progress_t unplanned = {usearch_phase_gather_k, 1, 1, 1};
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = one_shot,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .report = &reference,
+                                                    .phase = &unplanned});
+    expect(!outcome.message, outcome.message);
+    expect_eq(unplanned.phase, usearch_phase_done_k, "A call without a plan must name the closing phase");
+    usearch_dense_free(one_shot);
+
+    usearch_dense_index_t const planned = create_index_holding(data, rows_count, dimensions, executor);
+    usearch_dense_refine_plan_t plan = NULL;
+    usearch_refine_report_t first = {0}, second = {0};
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = planned,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .report = &first,
+                                                    .plan = &plan});
+    expect(!outcome.message, outcome.message);
+    expect(plan != NULL, "A NULL pointee must open a plan");
+    expect(same_round(&reference, &first), "A plan's round must match the round without one");
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = planned,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .report = &second,
+                                                    .plan = &plan});
+    expect(!outcome.message, outcome.message);
+    expect(memcmp(&second.opening, &first.reachability, sizeof(usearch_reachability_t)) == 0,
+           "The second round must open where the first closed, from the same root");
+    usearch_dense_refine_plan_finish(&(usearch_dense_refine_plan_finish_t) {.index = planned,
+                                                                            .executor = executor,
+                                                                            .outcome = &outcome,
+                                                                            .plan = plan});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_free(planned);
+
+    usearch_dense_index_t const resumed_index = create_index_holding(data, rows_count, dimensions, executor);
+    usearch_refine_report_t resumed = {0};
+    bool gather_stopped = false;
+    size_t calls = 0;
+    plan = NULL;
+    do {
+        usearch_phase_progress_t phase = {0};
+        usearch_dense_refine(&(usearch_dense_refine_t) {.index = resumed_index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .report = &resumed,
+                                                        .progress = {cancel_progress},
+                                                        .plan = &plan,
+                                                        .phase = &phase});
+        ++calls;
+        expect(phase.phase != usearch_phase_none_k, "Every call through a plan must name a phase");
+        if (outcome.status != usearch_status_cancelled_k) break;
+        expect(plan != NULL, "A cancel must leave the plan live");
+        expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,
+               "A stopped round must stand in one of its phases");
+        gather_stopped = gather_stopped || phase.phase == usearch_phase_gather_k;
+        if (calls != 1) continue;
+        usearch_key_t const late_key = key_of(rows_count);
+        usearch_dense_insert(
+            &(usearch_dense_insert_t) {.index = resumed_index,
+                                       .executor = executor,
+                                       .outcome = &outcome,
+                                       .count = 1,
+                                       .keys = {&late_key, sizeof(usearch_key_t)},
+                                       .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+        expect_eq(outcome.status, usearch_status_contended_k, "A live plan must hold its index closed");
+    } while (calls != rows_count);
+    expect(!outcome.message, outcome.message);
+    expect(calls > 2, "Cancelling at every barrier must take several calls");
+    expect(gather_stopped, "Cancelling at every barrier must stop in the gather");
+    expect(resumed.reselected == rows_count && resumed.neighborhoods != 0,
+           "A round must re-stitch every entry in neighborhoods");
+    expect(same_round(&reference, &resumed), "A resumed round must match the uninterrupted one");
+    usearch_dense_refine_plan_finish(&(usearch_dense_refine_plan_finish_t) {.index = resumed_index,
+                                                                            .executor = executor,
+                                                                            .outcome = &outcome,
+                                                                            .plan = plan});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_free(resumed_index);
+
+    usearch_dense_index_t const stopped = create_index_holding(data, rows_count, dimensions, executor);
+    usearch_phase_progress_t phase = {0};
+    plan = NULL;
+    do {
+        usearch_dense_refine(&(usearch_dense_refine_t) {.index = stopped,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .progress = {cancel_progress},
+                                                        .plan = &plan,
+                                                        .phase = &phase});
+        expect_eq(outcome.status, usearch_status_cancelled_k, "A round must not end before its gather");
+    } while (phase.phase != usearch_phase_gather_k);
+    usearch_refine_report_t closing = {0};
+    usearch_dense_refine_plan_finish(&(usearch_dense_refine_plan_finish_t) {.index = stopped,
+                                                                            .executor = executor,
+                                                                            .outcome = &outcome,
+                                                                            .plan = plan,
+                                                                            .report = &closing});
+    expect(!outcome.message, outcome.message);
+    expect_eq(closing.verdict, usearch_refine_stopped_k, "A plan finished mid-round must report it stopped");
+
+    char const path[] = "usearch-test-c-refine-plan.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = stopped, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_free(stopped);
+    usearch_dense_index_t loaded = NULL;
+    usearch_dense_load_ram(
+        &(usearch_dense_load_ram_t) {.index = &loaded, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    remove(path);
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_view_t matches = {0};
+    enum { queries_count = 64 };
+    usearch_dense_search(&(usearch_dense_search_t) {.index = loaded,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = queries_count,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != queries_count; ++row)
+        expect(matches.counts[row] == 1, "Every query must find an entry after a stopped round");
+
+    usearch_arena_free(arena);
+    usearch_dense_free(loaded);
+    free(data);
+    usearch_executor_free(executor);
+    printf("Test: Refine Plan - PASSED\n");
+}
+
+/** An index reshards as the one source into two empty targets through a plan whose every call is
+ *  cancelled until the closing rounds end, each call naming the phase it stopped in, while a target
+ *  refuses insertions; the plan's finish audits every row, the source is left empty and live, and
+ *  every key resolves to one row in one target. */
+void test_reshard_cut_plan(size_t const dimensions) {
+    printf("Test: Reshard Cut Plan... %zu dimensions\n", dimensions);
+
+    enum { rows_count = 1200 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(2);
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_dense_index_t const index = create_index_holding(data, rows_count, dimensions, executor);
+    usearch_dense_index_t const targets[2] = {create_index(dimensions), create_index(dimensions)};
+
+    usearch_dense_reshard_plan_t plan = NULL;
+    usearch_refine_report_t report = {0};
+    size_t calls = 0;
+    do {
+        usearch_phase_progress_t phase = {0};
+        usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
+                                                          .sources = &index,
+                                                          .targets_count = 2,
+                                                          .targets = targets,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .report = &report,
+                                                          .progress = {cancel_progress},
+                                                          .plan = &plan,
+                                                          .phase = &phase});
+        bool const cancelled = outcome.status == usearch_status_cancelled_k;
+        expect(cancelled || !outcome.message, outcome.message);
+        expect(plan != NULL && phase.phase != usearch_phase_none_k,
+               "Every call through a plan must keep it live and name a phase");
+        if (!cancelled) break;
+        expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,
+               "A stopped round must stand in one of its phases");
+        if (++calls != 1) continue;
+        usearch_key_t const late_key = key_of(rows_count);
+        usearch_dense_insert(&(usearch_dense_insert_t) {
+            .index = targets[0],
+            .executor = executor,
+            .outcome = &outcome,
+            .count = 1,
+            .keys = {&late_key, sizeof(usearch_key_t)},
+            .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+        expect_eq(outcome.status, usearch_status_contended_k, "A live plan must hold its targets closed");
+    } while (calls != rows_count);
+    usearch_dense_reshard_plan_finish(&(usearch_dense_reshard_plan_finish_t) {.executor = executor,
+                                                                              .outcome = &outcome,
+                                                                              .plan = plan,
+                                                                              .report = &report});
+    expect(!outcome.message, outcome.message);
+    expect_eq(report.reachability.audited, rows_count, "The closing health checks must judge every row");
+
+    size_t sizes[3] = {0};
+    usearch_dense_index_t const parts[3] = {index, targets[0], targets[1]};
+    for (size_t part = 0; part != 3; ++part) {
+        usearch_dense_index_description_t description = {0};
+        usearch_dense_describe(&(usearch_dense_describe_t) {.index = parts[part],
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .description = &description});
+        expect(!outcome.message, outcome.message);
+        sizes[part] = description.size;
+    }
+    expect(sizes[0] == 0 && sizes[1] + sizes[2] == rows_count, "A cut must move every row out of its source");
+    for (size_t row = 0; row != rows_count; ++row) {
+        size_t found = 0;
+        for (size_t part = 1; part != 3; ++part) {
+            size_t entries = 0;
+            usearch_dense_count(&(usearch_dense_count_t) {.index = parts[part],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .key = key_of(row),
+                                                          .entries = &entries});
+            expect(!outcome.message, outcome.message);
+            found += entries;
+        }
+        expect_eq(found, 1, "Every key must resolve to one row in one target");
+    }
+
+    for (size_t part = 0; part != 3; ++part) usearch_dense_free(parts[part]);
+    free(data);
+    usearch_executor_free(executor);
+    printf("Test: Reshard Cut Plan - PASSED\n");
 }
 
 /** Draws @p count random reads of 100 to 199 nucleotides, end to end around @p count + 1
@@ -837,14 +1129,15 @@ char* create_reads(size_t const count, size_t* offsets) {
     return bytes;
 }
 
-/** The first of four sequence indexes over the quarters of one set of reads absorbs the rest, as
- *  @c test_absorb drives the dense ones: a one-shot absorb cancelled in its closing refine still
- *  consumes both its donors and answers @c usearch_status_cancelled_k, and the last donor lands
- *  through a refinement handle, whose pulls each cancel until the pass ends while the index
- *  refuses insertions, the running totals only growing. The finished report covers every read, a
- *  one-shot refine after it reaches every read, and every key resolves to one read. */
-void test_sequence_absorb(void) {
-    printf("Test: Sequence Absorb\n");
+/** The first of four sequence indexes over the quarters of one set of reads gathers the rest, as
+ *  @c test_reshard_gather drives the dense ones: a one-shot reshard cancelled in its closing round
+ *  still empties both other sources and answers @c usearch_status_cancelled_k, and the last source
+ *  lands through a reshard plan, whose calls each cancel until the round ends, each naming the
+ *  phase it stopped in, while the target refuses insertions and the round so far never shrinks.
+ *  The finished report covers every read, a one-shot refine after it reaches every read, and every
+ *  key resolves to one read. */
+void test_sequence_reshard(void) {
+    printf("Test: Sequence Reshard\n");
     enum { indexes_count = 4, reads_per_index = 60, reads_count = indexes_count * reads_per_index };
     usearch_outcome_t outcome = {0};
     usearch_executor_t executor = NULL;
@@ -861,7 +1154,7 @@ void test_sequence_absorb(void) {
                                                                   .metric = usearch_sequence_metric_levenshtein_bytes_k,
                                                                   .connectivity = 8});
         expect(!outcome.message, outcome.message);
-        // Eight candidates wire a deliberately weak graph, which the refinement then improves.
+        // Eight candidates wire a deliberately weak graph, which the rounds then improve.
         usearch_sequence_insert(&(usearch_sequence_insert_t) {
             .index = indexes[which],
             .executor = executor,
@@ -873,81 +1166,80 @@ void test_sequence_absorb(void) {
         expect(!outcome.message, outcome.message);
     }
 
-    usearch_sequence_absorb(&(usearch_sequence_absorb_t) {.index = indexes[0],
-                                                          .executor = executor,
-                                                          .outcome = &outcome,
-                                                          .count = indexes_count - 2,
-                                                          .donors = indexes + 1,
-                                                          .progress = {cancel_progress}});
-    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing refine");
-    expect(indexes[1] == NULL && indexes[2] == NULL && indexes[3] != NULL,
-           "Every donor of the call must be consumed and nulled, and no other");
-    usearch_sequence_index_description_t description = {0};
-    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = indexes[0],
-                                                              .executor = executor,
-                                                              .outcome = &outcome,
-                                                              .description = &description});
-    expect(!outcome.message, outcome.message);
-    expect_eq(description.size, 3 * reads_per_index, "The donors must stay absorbed past the cancel");
+    usearch_sequence_reshard(&(usearch_sequence_reshard_t) {.sources_count = indexes_count - 1,
+                                                            .sources = indexes,
+                                                            .targets_count = 1,
+                                                            .targets = indexes,
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .progress = {cancel_progress}});
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancel must stop only the closing round");
+    size_t sizes[indexes_count] = {0};
+    for (size_t which = 0; which != indexes_count; ++which) {
+        usearch_sequence_index_description_t described = {0};
+        usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = indexes[which],
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .description = &described});
+        expect(!outcome.message, outcome.message);
+        sizes[which] = described.size;
+    }
+    expect(sizes[0] == 3 * reads_per_index && sizes[1] == 0 && sizes[2] == 0 && sizes[3] == reads_per_index,
+           "Every other source of the call must end empty past the cancel, and no other index");
 
-    usearch_sequence_refinement_t refinement = NULL;
-    usearch_sequence_refinement_init(&(usearch_sequence_refinement_init_t) {.index = indexes[0],
-                                                                            .executor = executor,
-                                                                            .outcome = &outcome,
-                                                                            .donors = indexes + 3,
-                                                                            .count = 1,
-                                                                            .refinement = &refinement});
-    expect(!outcome.message, outcome.message);
-    expect(refinement && indexes[3] != NULL, "A donor lands at the first pull, not at the opening");
-    usearch_key_t const late_key = key_of(reads_count);
-    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = indexes[0],
-                                                          .executor = executor,
-                                                          .outcome = &outcome,
-                                                          .count = 1,
-                                                          .keys = {&late_key, sizeof(usearch_key_t)},
-                                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
-    expect_eq(outcome.status, usearch_status_contended_k, "A refinement must hold its index closed");
-
+    // Every call cancels at its first barrier, so the round ends over several calls, each naming
+    // where it stopped and reporting the round so far.
+    usearch_sequence_index_t const last_sources[2] = {indexes[0], indexes[3]};
+    usearch_sequence_reshard_plan_t plan = NULL;
     progress_reports_t reports = {0, 0, 0, true};
-    size_t visited = 0, changed = 0, pulls = 0;
-    usearch_traversal_stats_t stats = {0};
+    usearch_refine_report_t running = {0};
+    size_t calls = 0;
     do {
-        size_t pulled_visited = 0, pulled_changed = 0;
-        usearch_traversal_stats_t pulled_stats = {0};
-        usearch_sequence_refinement_next(
-            &(usearch_sequence_refinement_next_t) {.index = indexes[0],
-                                                   .executor = executor,
-                                                   .outcome = &outcome,
-                                                   .refinement = refinement,
-                                                   .progress = {record_and_cancel, &reports},
-                                                   .reselected = &pulled_visited,
-                                                   .changed = &pulled_changed,
-                                                   .stats = &pulled_stats});
+        usearch_refine_report_t pulled = {0};
+        usearch_phase_progress_t phase = {0};
+        usearch_sequence_reshard(&(usearch_sequence_reshard_t) {.sources_count = 2,
+                                                                .sources = last_sources,
+                                                                .targets_count = 1,
+                                                                .targets = indexes,
+                                                                .executor = executor,
+                                                                .outcome = &outcome,
+                                                                .report = &pulled,
+                                                                .progress = {record_and_cancel, &reports},
+                                                                .plan = &plan,
+                                                                .phase = &phase});
         bool const cancelled = outcome.status == usearch_status_cancelled_k;
         expect(cancelled || !outcome.message, outcome.message);
-        expect(indexes[3] == NULL, "Every consumed donor slot must be nulled");
-        expect(pulled_changed <= pulled_visited, "No more reads may change than were re-selected");
-        expect(pulled_visited >= visited + cancelled && pulled_changed >= changed &&
-                   pulled_stats.computed_distances >= stats.computed_distances + cancelled,
-               "The running totals must grow from pull to pull");
-        visited = pulled_visited, changed = pulled_changed, stats = pulled_stats;
-        ++pulls;
+        expect(plan != NULL, "The first call must open the plan");
+        expect(phase.phase != usearch_phase_none_k, "Every call through a plan must name a phase");
+        expect(pulled.changed <= reads_count && pulled.reselected >= running.reselected,
+               "The round so far must never shrink, nor change more reads than the index holds");
+        running = pulled;
         if (!cancelled) break;
-    } while (pulls != reads_count);
-    expect(pulls >= 2 && outcome.status == usearch_status_success_k, "The pass must end over several pulls");
-    expect(reports.calls > 0 && reports.total >= reads_per_index,
-           "The handler must hear the walks over every donor read");
-    expect(reports.ascending, "Every pull must count on from where the last stopped");
+        expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,
+               "A stopped round must stand in one of its phases");
+        if (++calls != 1) continue;
+        usearch_key_t const late_key = key_of(reads_count);
+        usearch_sequence_insert(
+            &(usearch_sequence_insert_t) {.index = indexes[0],
+                                          .executor = executor,
+                                          .outcome = &outcome,
+                                          .count = 1,
+                                          .keys = {&late_key, sizeof(usearch_key_t)},
+                                          .sequences = tape_of(bytes, offsets, usearch_scalar_u8_k)});
+        expect_eq(outcome.status, usearch_status_contended_k, "A live plan must hold its index closed");
+    } while (calls != reads_count);
+    expect(calls >= 1 && outcome.status == usearch_status_success_k, "The round must end over several calls");
+    expect(reports.calls > 0 && reports.completed <= reports.total && reports.total >= reads_per_index,
+           "The handler must hear the round's phases over every read");
 
     usearch_refine_report_t finished = {0};
-    usearch_sequence_refinement_finish(&(usearch_sequence_refinement_finish_t) {.index = indexes[0],
-                                                                                .executor = executor,
-                                                                                .outcome = &outcome,
-                                                                                .refinement = refinement,
-                                                                                .report = &finished});
+    usearch_sequence_reshard_plan_finish(&(usearch_sequence_reshard_plan_finish_t) {.executor = executor,
+                                                                                    .outcome = &outcome,
+                                                                                    .plan = plan,
+                                                                                    .report = &finished});
     expect(!outcome.message, outcome.message);
-    expect(finished.changed >= changed && finished.changed > 0, "The refinement must report what its pulls changed");
-    expect_eq(finished.reachability.audited, reads_count, "The closing audit must judge every read");
+    expect(finished.changed >= running.changed && finished.changed > 0, "The plan must report what its calls changed");
+    expect_eq(finished.reachability.audited, reads_count, "The closing health check must judge every read");
 
     // The index reopened: a one-shot refine runs to its end and leaves every read reachable.
     usearch_refine_report_t refined = {0};
@@ -966,13 +1258,13 @@ void test_sequence_absorb(void) {
                                                             .key = keys[read],
                                                             .key_stats = &key_stats});
         expect(!outcome.message, outcome.message);
-        expect_eq(key_stats.entries, 1, "Every key must resolve to one absorbed read");
+        expect_eq(key_stats.entries, 1, "Every key must resolve to one gathered read");
     }
 
     free(bytes);
-    usearch_sequence_free(indexes[0]);
+    for (size_t which = 0; which != indexes_count; ++which) usearch_sequence_free(indexes[which]);
     usearch_executor_free(executor);
-    printf("Test: Sequence Absorb - PASSED\n");
+    printf("Test: Sequence Reshard - PASSED\n");
 }
 
 /** Reads entries back by key. @c usearch_dense_get sizes its own output, writing every row under
@@ -1703,6 +1995,17 @@ void test_cursor_steps(void) {
         expect(!outcome.message, outcome.message);
         expect_eq(pull_to_end(index, executor, arena, cursor, yielded), 0, "An absent key must step nowhere");
     }
+
+    usearch_keys_view_t keys = {0};
+    size_t written = 0;
+    usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .keys = &keys,
+                                                              .written = &written,
+                                                              .arena = arena,
+                                                              .wanted = 1});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A pull from no cursor must be refused");
 
     usearch_dense_free(index);
     free(rows);
@@ -2486,6 +2789,16 @@ void test_shapes_round_trip(void) {
     }
     usearch_executor_free(storage);
     remove(path);
+    usearch_keys_view_t uncursored_keys = {0};
+    size_t uncursored = 0;
+    usearch_shapes_cursor_next(&(usearch_shapes_cursor_next_t) {.index = index,
+                                                                .executor = executor,
+                                                                .outcome = &outcome,
+                                                                .keys = &uncursored_keys,
+                                                                .written = &uncursored,
+                                                                .arena = arena,
+                                                                .wanted = 1});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A pull without a cursor is refused");
 
     usearch_shapes_free(index);
     usearch_arena_free(arena);
@@ -2843,6 +3156,16 @@ void test_geospatial_round_trip(void) {
     }
     usearch_executor_free(storage);
     remove(path);
+    usearch_keys_view_t uncursored_keys = {0};
+    size_t uncursored = 0;
+    usearch_geospatial_cursor_next(&(usearch_geospatial_cursor_next_t) {.index = index,
+                                                                        .executor = executor,
+                                                                        .outcome = &outcome,
+                                                                        .keys = &uncursored_keys,
+                                                                        .written = &uncursored,
+                                                                        .arena = arena,
+                                                                        .wanted = 1});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A pull without a cursor is refused");
 
     usearch_geospatial_free(index);
     usearch_arena_free(arena);
@@ -2850,10 +3173,11 @@ void test_geospatial_round_trip(void) {
     printf("Test: Geospatial Round Trip - PASSED\n");
 }
 
-/** Shapes and geospatial absorb and refine alike: one index absorbs another of its geometry and
- *  refuses one of another, and a one-shot refine after leaves every entry reachable. */
-void test_shapes_and_geospatial_absorb(void) {
-    printf("Test: Shapes & Geospatial Absorb\n");
+/** Shapes and geospatial reshard and refine alike: one index gathers another of its geometry, which
+ *  ends empty and live, and refuses one of another, and a one-shot refine after it leaves every
+ *  entry of the gathered index reachable. */
+void test_shapes_and_geospatial_reshard(void) {
+    printf("Test: Shapes & Geospatial Reshard\n");
     enum { entries_per_index = 120, points_per_shape = 8 };
     usearch_outcome_t outcome = {0};
     usearch_executor_t const executor = create_executor(0);
@@ -2884,35 +3208,43 @@ void test_shapes_and_geospatial_absorb(void) {
             .expansion_factor = 4});
         expect(!outcome.message, outcome.message);
     }
-    usearch_shapes_absorb(&(usearch_shapes_absorb_t) {.index = shapes[0],
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .count = 1,
-                                                      .donors = shapes + 2});
-    expect_eq(outcome.status, usearch_status_config_mismatch_k, "A donor of another point count is refused");
-    expect(shapes[2] != NULL, "A refused donor stays the caller's");
+    usearch_shapes_index_t const mismatched[2] = {shapes[0], shapes[2]};
+    usearch_shapes_reshard(&(usearch_shapes_reshard_t) {.sources_count = 2,
+                                                        .sources = mismatched,
+                                                        .targets_count = 1,
+                                                        .targets = shapes,
+                                                        .executor = executor,
+                                                        .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "A source of another point count is refused");
     usearch_refine_report_t report = {0};
-    usearch_shapes_absorb(&(usearch_shapes_absorb_t) {.index = shapes[0],
-                                                      .executor = executor,
-                                                      .outcome = &outcome,
-                                                      .count = 1,
-                                                      .donors = shapes + 1,
-                                                      .report = &report});
+    usearch_shapes_reshard(&(usearch_shapes_reshard_t) {.sources_count = 2,
+                                                        .sources = shapes,
+                                                        .targets_count = 1,
+                                                        .targets = shapes,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(shapes[1] == NULL && report.reachability.audited == 2 * entries_per_index, "The donor's shapes must land");
+    expect_eq(report.reachability.audited, 2 * entries_per_index, "The other source's shapes must land");
     usearch_shapes_refine(
         &(usearch_shapes_refine_t) {.index = shapes[0], .executor = executor, .outcome = &outcome, .report = &report});
     expect(!outcome.message, outcome.message);
-    expect(report.reachability.reachable == 2 * entries_per_index, "Every absorbed shape must stay reachable");
+    expect(report.reachability.reachable == 2 * entries_per_index, "Every gathered shape must stay reachable");
     usearch_shapes_index_description_t shapes_description = {0};
     usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = shapes[0],
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .description = &shapes_description});
     expect(!outcome.message, outcome.message);
-    expect_eq(shapes_description.size, 2 * entries_per_index, "The absorbed sizes must add up");
-    usearch_shapes_free(shapes[0]);
-    usearch_shapes_free(shapes[2]);
+    expect_eq(shapes_description.size, 2 * entries_per_index, "The gathered sizes must add up");
+    usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = shapes[1],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .description = &shapes_description});
+    expect(!outcome.message, outcome.message);
+    expect(shapes_description.size == 0 && shapes_description.total_points == 0,
+           "The other source must end empty, its points counted where they landed");
+    for (size_t which = 0; which != 3; ++which) usearch_shapes_free(shapes[which]);
 
     // Observations scattered over a city, a few hundred metres apart.
     usearch_geospatial_observation_t observations[2 * entries_per_index];
@@ -2932,13 +3264,13 @@ void test_shapes_and_geospatial_absorb(void) {
                                             .expansion_factor = 16});
         expect(!outcome.message, outcome.message);
     }
-    usearch_geospatial_absorb(&(usearch_geospatial_absorb_t) {.index = places[0],
-                                                              .executor = executor,
-                                                              .outcome = &outcome,
-                                                              .count = 1,
-                                                              .donors = places + 1});
+    usearch_geospatial_reshard(&(usearch_geospatial_reshard_t) {.sources_count = 2,
+                                                                .sources = places,
+                                                                .targets_count = 1,
+                                                                .targets = places,
+                                                                .executor = executor,
+                                                                .outcome = &outcome});
     expect(!outcome.message, outcome.message);
-    expect(places[1] == NULL, "The donor's observations must land");
     usearch_geospatial_refine(&(usearch_geospatial_refine_t) {.index = places[0],
                                                               .executor = executor,
                                                               .outcome = &outcome,
@@ -2946,10 +3278,309 @@ void test_shapes_and_geospatial_absorb(void) {
     expect(!outcome.message, outcome.message);
     expect(
         report.reachability.audited == 2 * entries_per_index && report.reachability.reachable == 2 * entries_per_index,
-        "Every absorbed observation must stay reachable");
+        "Every gathered observation must stay reachable");
     usearch_geospatial_free(places[0]);
+    usearch_geospatial_free(places[1]);
     usearch_executor_free(executor);
-    printf("Test: Shapes & Geospatial Absorb - PASSED\n");
+    printf("Test: Shapes & Geospatial Reshard - PASSED\n");
+}
+
+/**
+ *  @brief Defines @c expect_<family>_reshard_refusals, which drives one family's long verbs through
+ *      every refusal of lists, plans and executors its header documents.
+ *
+ *  @p full and @p also_full hold entries and @p empty and @p also_empty hold none, and no refused
+ *  call may change that. A plan opened with @p executor is refused by a call or a finish naming
+ *  @p other_executor, a finish still freeing it, and a refine plan is refused by another index. A
+ *  finish reopens every handle its plan held, so a slot set back to @c NULL refuses a second finish
+ *  and opens a new plan on the next call. The macro ends with the function's prototype, which the
+ *  semicolon at its use closes.
+ */
+#define define_reshard_refusals(family)                                                                                \
+    static size_t family##_size_of(usearch_##family##_index_t index, usearch_executor_t executor) {                    \
+        usearch_outcome_t outcome = {0};                                                                               \
+        usearch_##family##_index_description_t description = {0};                                                      \
+        usearch_##family##_describe(&(usearch_##family##_describe_t) {.index = index,                                  \
+                                                                      .executor = executor,                            \
+                                                                      .outcome = &outcome,                             \
+                                                                      .description = &description});                   \
+        expect(!outcome.message, outcome.message);                                                                     \
+        return description.size;                                                                                       \
+    }                                                                                                                  \
+    static void expect_##family##_reshard_refusals(                                                                    \
+        usearch_##family##_index_t full, usearch_##family##_index_t also_full, usearch_##family##_index_t empty,       \
+        usearch_##family##_index_t also_empty, usearch_executor_t executor, usearch_executor_t other_executor) {       \
+        printf("- Reshard refusals of " #family "\n");                                                                 \
+        typedef usearch_##family##_index_t index_t;                                                                    \
+        usearch_outcome_t outcome = {0};                                                                               \
+        size_t const full_size = family##_size_of(full, executor),                                                     \
+                     also_full_size = family##_size_of(also_full, executor);                                           \
+        index_t const fulls[2] = {full, also_full}, empties[2] = {empty, also_empty};                                  \
+        index_t const with_null[2] = {full, NULL}, full_twice[2] = {full, full}, empty_twice[2] = {empty, empty};      \
+        index_t const full_and_empty[2] = {full, empty};                                                               \
+        struct {                                                                                                       \
+            size_t sources_count;                                                                                      \
+            index_t const* sources;                                                                                    \
+            size_t targets_count;                                                                                      \
+            index_t const* targets;                                                                                    \
+            usearch_status_t status;                                                                                   \
+            char const* claim;                                                                                         \
+        } const refusals[] = {                                                                                         \
+            {0, fulls, 1, empties, usearch_status_invalid_argument_k, "No sources must be refused"},                   \
+            {1, fulls, 0, empties, usearch_status_invalid_argument_k, "No targets must be refused"},                   \
+            {1, NULL, 1, empties, usearch_status_invalid_argument_k, "A NULL source list must be refused"},            \
+            {1, fulls, 1, NULL, usearch_status_invalid_argument_k, "A NULL target list must be refused"},              \
+            {2, with_null, 1, empties, usearch_status_invalid_argument_k, "A NULL source must be refused"},            \
+            {2, full_twice, 1, fulls, usearch_status_invalid_argument_k, "A source named twice must be refused"},      \
+            {1, fulls, 2, empty_twice, usearch_status_invalid_argument_k, "A target named twice must be refused"},     \
+            {1, fulls, 1, &also_full, usearch_status_config_mismatch_k,                                                \
+             "A target neither a source nor empty must be refused"},                                                   \
+            {1, fulls, 2, full_and_empty, usearch_status_config_mismatch_k,                                            \
+             "A source cut into targets that include it must be refused"},                                             \
+            {2, fulls, 2, empties, usearch_status_unsupported_k, "Several sources into several targets are refused"},  \
+        };                                                                                                             \
+        for (size_t refusal = 0; refusal != sizeof(refusals) / sizeof(refusals[0]); ++refusal) {                       \
+            usearch_##family##_reshard(                                                                                \
+                &(usearch_##family##_reshard_t) {.sources_count = refusals[refusal].sources_count,                     \
+                                                 .sources = refusals[refusal].sources,                                 \
+                                                 .targets_count = refusals[refusal].targets_count,                     \
+                                                 .targets = refusals[refusal].targets,                                 \
+                                                 .executor = executor,                                                 \
+                                                 .outcome = &outcome});                                                \
+            expect_eq(outcome.status, refusals[refusal].status, refusals[refusal].claim);                              \
+        }                                                                                                              \
+                                                                                                                       \
+        usearch_##family##_reshard_plan_t plan = NULL;                                                                 \
+        usearch_##family##_reshard_t call = {.sources_count = 2,                                                       \
+                                             .sources = full_and_empty,                                                \
+                                             .targets_count = 1,                                                       \
+                                             .targets = fulls,                                                         \
+                                             .outcome = &outcome,                                                      \
+                                             .plan = &plan};                                                           \
+        usearch_##family##_reshard(&call);                                                                             \
+        expect(outcome.status == usearch_status_invalid_argument_k && !plan, "A plan without an executor is refused"); \
+        call.executor = executor;                                                                                      \
+        usearch_##family##_reshard(&call);                                                                             \
+        expect(!outcome.message, outcome.message);                                                                     \
+        expect(plan != NULL, "A NULL pointee must open a plan");                                                       \
+        call.executor = other_executor;                                                                                \
+        usearch_##family##_reshard(&call);                                                                             \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A live plan refuses another executor");          \
+        usearch_##family##_reshard_plan_finish(                                                                        \
+            &(usearch_##family##_reshard_plan_finish_t) {.executor = other_executor,                                   \
+                                                         .outcome = &outcome,                                          \
+                                                         .plan = plan});                                               \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A finish refuses another executor");             \
+        plan = NULL;                                                                                                   \
+        usearch_##family##_reshard_plan_finish(                                                                        \
+            &(usearch_##family##_reshard_plan_finish_t) {.executor = executor, .outcome = &outcome, .plan = plan});    \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A finish refuses a NULL plan");                  \
+        call.executor = executor;                                                                                      \
+        usearch_##family##_reshard(&call);                                                                             \
+        expect(!outcome.message, outcome.message);                                                                     \
+        expect(plan != NULL, "A finished plan must reopen its handles for the next");                                  \
+        usearch_##family##_reshard_plan_finish(                                                                        \
+            &(usearch_##family##_reshard_plan_finish_t) {.executor = executor, .outcome = &outcome, .plan = plan});    \
+        expect(!outcome.message, outcome.message);                                                                     \
+                                                                                                                       \
+        usearch_##family##_refine_plan_t refine_plan = NULL;                                                           \
+        usearch_##family##_refine(                                                                                     \
+            &(usearch_##family##_refine_t) {.index = full, .outcome = &outcome, .plan = &refine_plan});                \
+        expect(outcome.status == usearch_status_invalid_argument_k && !refine_plan,                                    \
+               "A refine plan without an executor is refused");                                                        \
+        usearch_##family##_refine(&(usearch_##family##_refine_t) {.index = full,                                       \
+                                                                  .executor = executor,                                \
+                                                                  .outcome = &outcome,                                 \
+                                                                  .plan = &refine_plan});                              \
+        expect(!outcome.message, outcome.message);                                                                     \
+        expect(refine_plan != NULL, "A NULL pointee must open a refine plan");                                         \
+        usearch_##family##_refine(&(usearch_##family##_refine_t) {.index = full,                                       \
+                                                                  .executor = other_executor,                          \
+                                                                  .outcome = &outcome,                                 \
+                                                                  .plan = &refine_plan});                              \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A live refine plan refuses another executor");   \
+        usearch_##family##_refine(&(usearch_##family##_refine_t) {.index = also_full,                                  \
+                                                                  .executor = executor,                                \
+                                                                  .outcome = &outcome,                                 \
+                                                                  .plan = &refine_plan});                              \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A live refine plan refuses another index");      \
+        usearch_##family##_refine_plan_finish(&(usearch_##family##_refine_plan_finish_t) {.index = also_full,          \
+                                                                                          .executor = executor,        \
+                                                                                          .outcome = &outcome,         \
+                                                                                          .plan = refine_plan});       \
+        expect_eq(outcome.status, usearch_status_invalid_argument_k, "A refine finish refuses another index");         \
+                                                                                                                       \
+        expect(family##_size_of(full, executor) == full_size &&                                                        \
+                   family##_size_of(also_full, executor) == also_full_size &&                                          \
+                   family##_size_of(empty, executor) == 0 && family##_size_of(also_empty, executor) == 0,              \
+               "A refused reshard must move nothing");                                                                 \
+    }                                                                                                                  \
+    static void expect_##family##_reshard_refusals(                                                                    \
+        usearch_##family##_index_t full, usearch_##family##_index_t also_full, usearch_##family##_index_t empty,       \
+        usearch_##family##_index_t also_empty, usearch_executor_t executor, usearch_executor_t other_executor)
+
+/**
+ *  @brief Defines @c expect_<family>_reshard_cut, which cuts one modality's @p source of @p entries
+ *      into @p first and @p second through a plan.
+ *
+ *  A handle as its only source and target is refused, having one shard to recut. Every call of the
+ *  plan is cancelled until the closing rounds end, each naming the phase it stopped in; the finish
+ *  audits every entry, and the source ends empty while the targets hold every entry between them.
+ *  The macro ends with the function's prototype, which the semicolon at its use closes.
+ */
+#define define_reshard_cut(family)                                                                                 \
+    static void expect_##family##_reshard_cut(usearch_##family##_index_t source, usearch_##family##_index_t first, \
+                                              usearch_##family##_index_t second, usearch_executor_t executor,      \
+                                              size_t entries) {                                                    \
+        usearch_outcome_t outcome = {0};                                                                           \
+        usearch_##family##_reshard(&(usearch_##family##_reshard_t) {.sources_count = 1,                            \
+                                                                    .sources = &source,                            \
+                                                                    .targets_count = 1,                            \
+                                                                    .targets = &source,                            \
+                                                                    .executor = executor,                          \
+                                                                    .outcome = &outcome});                         \
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A handle of one shard has nothing to recut");     \
+                                                                                                                   \
+        usearch_##family##_index_t const targets[2] = {first, second};                                             \
+        usearch_##family##_reshard_plan_t plan = NULL;                                                             \
+        size_t calls = 0;                                                                                          \
+        do {                                                                                                       \
+            usearch_phase_progress_t phase = {0};                                                                  \
+            usearch_##family##_reshard(&(usearch_##family##_reshard_t) {.sources_count = 1,                        \
+                                                                        .sources = &source,                        \
+                                                                        .targets_count = 2,                        \
+                                                                        .targets = targets,                        \
+                                                                        .executor = executor,                      \
+                                                                        .outcome = &outcome,                       \
+                                                                        .progress = {cancel_progress},             \
+                                                                        .plan = &plan,                             \
+                                                                        .phase = &phase});                         \
+            bool const cancelled = outcome.status == usearch_status_cancelled_k;                                   \
+            expect(cancelled || !outcome.message, outcome.message);                                                \
+            expect(plan != NULL && phase.phase != usearch_phase_none_k,                                            \
+                   "Every call through a plan must keep it live and name a phase");                                \
+            if (!cancelled) {                                                                                      \
+                expect_eq(phase.phase, usearch_phase_done_k, "A call whose rounds ended names the closing phase"); \
+                break;                                                                                             \
+            }                                                                                                      \
+            expect(phase.phase != usearch_phase_done_k && phase.completed <= phase.total,                          \
+                   "A stopped round must stand in one of its phases");                                             \
+        } while (++calls != entries);                                                                              \
+        usearch_refine_report_t report = {0};                                                                      \
+        usearch_##family##_reshard_plan_finish(&(usearch_##family##_reshard_plan_finish_t) {.executor = executor,  \
+                                                                                            .outcome = &outcome,   \
+                                                                                            .plan = plan,          \
+                                                                                            .report = &report});   \
+        expect(!outcome.message, outcome.message);                                                                 \
+        expect_eq(report.reachability.audited, entries, "The closing health checks must judge every entry");       \
+        expect(family##_size_of(source, executor) == 0 &&                                                          \
+                   family##_size_of(first, executor) + family##_size_of(second, executor) == entries,              \
+               "A cut must move every entry out of its source");                                                   \
+    }                                                                                                              \
+    static void expect_##family##_reshard_cut(usearch_##family##_index_t source, usearch_##family##_index_t first, \
+                                              usearch_##family##_index_t second, usearch_executor_t executor,      \
+                                              size_t entries)
+
+define_reshard_refusals(dense);
+define_reshard_refusals(sequence);
+define_reshard_refusals(shapes);
+define_reshard_refusals(geospatial);
+define_reshard_cut(sequence);
+define_reshard_cut(shapes);
+define_reshard_cut(geospatial);
+
+/** Every family refuses the reshard lists, plans and executors its header refuses, moving
+ *  nothing, and every modality cuts one index into two through a plan. */
+void test_reshard_refusals(void) {
+    printf("Test: Reshard Refusals\n");
+    enum { entries = 120, dimensions = 83, points_per_shape = 8 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(2), other_executor = create_executor(1);
+    usearch_key_t keys[entries];
+    for (size_t entry = 0; entry != entries; ++entry) keys[entry] = key_of(entry);
+
+    float* const rows = create_vectors(entries, dimensions);
+    usearch_dense_index_t const dense[4] = {create_index_holding(rows, entries, dimensions, executor),
+                                            create_index_holding(rows, entries, dimensions, executor),
+                                            create_index(dimensions), create_index(dimensions)};
+    expect_dense_reshard_refusals(dense[0], dense[1], dense[2], dense[3], executor, other_executor);
+    for (size_t which = 0; which != 4; ++which) usearch_dense_free(dense[which]);
+    free(rows);
+
+    size_t offsets[entries + 1];
+    char* const reads = create_reads(entries, offsets);
+    usearch_sequence_index_t sequences[4];
+    for (size_t which = 0; which != 4; ++which) {
+        usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &sequences[which],
+                                                                  .outcome = &outcome,
+                                                                  .metric = usearch_sequence_metric_levenshtein_bytes_k,
+                                                                  .connectivity = 8});
+        expect(!outcome.message, outcome.message);
+        if (which >= 2) continue;
+        usearch_sequence_insert(
+            &(usearch_sequence_insert_t) {.index = sequences[which],
+                                          .executor = executor,
+                                          .outcome = &outcome,
+                                          .count = entries,
+                                          .keys = {keys, sizeof(usearch_key_t)},
+                                          .sequences = tape_of(reads, offsets, usearch_scalar_u8_k)});
+        expect(!outcome.message, outcome.message);
+    }
+    expect_sequence_reshard_refusals(sequences[0], sequences[1], sequences[2], sequences[3], executor, other_executor);
+    expect_sequence_reshard_cut(sequences[0], sequences[2], sequences[3], executor, entries);
+    for (size_t which = 0; which != 4; ++which) usearch_sequence_free(sequences[which]);
+    free(reads);
+
+    float points[entries * points_per_shape * 3];
+    for (size_t coordinate = 0; coordinate != sizeof(points) / sizeof(points[0]); ++coordinate)
+        points[coordinate] = (float)rand() / (float)RAND_MAX;
+    for (size_t shape = 0; shape != entries + 1; ++shape) offsets[shape] = shape * points_per_shape;
+    usearch_shapes_index_t shapes[4];
+    for (size_t which = 0; which != 4; ++which) {
+        usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &shapes[which],
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_shapes_metric_chamfer_k,
+                                                              .quantization = usearch_scalar_f32_k,
+                                                              .points = points_per_shape});
+        expect(!outcome.message, outcome.message);
+        if (which >= 2) continue;
+        usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = shapes[which],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = entries,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .shapes = tape_of(points, offsets, usearch_scalar_f32_k),
+                                                          .expansion_factor = 4});
+        expect(!outcome.message, outcome.message);
+    }
+    expect_shapes_reshard_refusals(shapes[0], shapes[1], shapes[2], shapes[3], executor, other_executor);
+    expect_shapes_reshard_cut(shapes[0], shapes[2], shapes[3], executor, entries);
+    for (size_t which = 0; which != 4; ++which) usearch_shapes_free(shapes[which]);
+
+    usearch_geospatial_observation_t observations[entries];
+    for (size_t entry = 0; entry != entries; ++entry)
+        observations[entry] = observed_at(51.45 + 0.1 * rand() / RAND_MAX, -0.15 + 0.1 * rand() / RAND_MAX, NAN);
+    usearch_geospatial_index_t places[4];
+    for (size_t which = 0; which != 4; ++which) {
+        usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &places[which], .outcome = &outcome});
+        expect(!outcome.message, outcome.message);
+        if (which >= 2) continue;
+        usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = places[which],
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .count = entries,
+                                                                  .keys = {keys, sizeof(usearch_key_t)},
+                                                                  .observations = observations,
+                                                                  .expansion_factor = 16});
+        expect(!outcome.message, outcome.message);
+    }
+    expect_geospatial_reshard_refusals(places[0], places[1], places[2], places[3], executor, other_executor);
+    expect_geospatial_reshard_cut(places[0], places[2], places[3], executor, entries);
+    for (size_t which = 0; which != 4; ++which) usearch_geospatial_free(places[which]);
+
+    usearch_executor_free(other_executor);
+    usearch_executor_free(executor);
+    printf("Test: Reshard Refusals - PASSED\n");
 }
 
 /** Leaves every height of a terrain window unknown. */
@@ -3593,6 +4224,20 @@ void test_nvme_view(size_t const dimensions) {
     usearch_arena_free(arena);
     usearch_dense_free(view);
 
+    usearch_dense_index_t keyless_view = NULL;
+    usearch_dense_view_nvme(&(usearch_dense_view_nvme_t) {.index = &keyless_view,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_count(&(usearch_dense_count_t) {.index = keyless_view,
+                                                  .executor = storage,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(5),
+                                                  .entries = &entries});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A view without a key table must refuse to count keys");
+    usearch_dense_free(keyless_view);
+
     // A checkpoint cut inside its header holds no index in any format the library reads.
     FILE* const truncated = fopen(path, "wb");
     expect(truncated != NULL && fwrite(path, 1, 12, truncated) == 12, "Failed to truncate the checkpoint");
@@ -3611,6 +4256,213 @@ void test_nvme_view(size_t const dimensions) {
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: NVMe View - PASSED\n");
+}
+
+/** How many of @p count self-queries over @p rows find their own key first in @p index. */
+static size_t count_self_matches(usearch_dense_index_t const index, usearch_executor_t const executor,
+                                 usearch_arena_t const arena, float const* rows, size_t const count,
+                                 size_t const dimensions, usearch_key_t const* keys) {
+    usearch_outcome_t outcome = {0};
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(
+        &(usearch_dense_search_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = count,
+                                   .queries = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                   .matches = &matches,
+                                   .arena = arena,
+                                   .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    size_t found = 0;
+    for (size_t row = 0; row != count; ++row)
+        found += matches.counts[row] && memcmp(matches.keys[row].bytes, keys[row].bytes, sizeof(usearch_key_t)) == 0;
+    return found;
+}
+
+/** Whether the file at @p path exists. */
+static int file_exists(char const* path) {
+    FILE* const file = fopen(path, "rb");
+    if (file) fclose(file);
+    return file != NULL;
+}
+
+/** A RAM index of two shards saved as a manifest opens writable through @c usearch_dense_load_nvme:
+ *  a lone part refuses, a second load of the manifest is contended, insertions, saves and a reshard
+ *  naming drives answer @c usearch_status_unsupported_k while a view of the same manifest keeps
+ *  answering @c usearch_status_read_only_k. A refine plan finished after the first shard committed
+ *  leaves the second part in place and the handle searchable; a whole refine keeps or improves
+ *  self-recall, keeps every entry reachable, and leaves only the refined parts once the handle is
+ *  freed by its owner. */
+void test_nvme_load(size_t const dimensions) {
+    printf("Test: NVMe Load... %zu dimensions\n", dimensions);
+
+    enum { rows_count = 600 };
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions,
+                                                        .connectivity = 16,
+                                                        .ram = {.shard_capacity = rows_count / 2}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_key_t keys[rows_count];
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                   .expansion_factor = 4});
+    expect(!outcome.message, outcome.message);
+    char const manifest[] = "usearch-test-c-nvme-load.safegraphs.json";
+    char const* const old_parts[2] = {"usearch-test-c-nvme-load-00001-of-00002.safegraphs",
+                                      "usearch-test-c-nvme-load-00002-of-00002.safegraphs"};
+    // A replacement takes the first generation no file holds, so the twice-refined first shard
+    // ends at the second.
+    char const* const new_parts[3] = {"usearch-test-c-nvme-load.1-00001-of-00002.safegraphs",
+                                      "usearch-test-c-nvme-load.1-00002-of-00002.safegraphs",
+                                      "usearch-test-c-nvme-load.2-00001-of-00002.safegraphs"};
+    usearch_bytes_view_t const manifest_view = {(uint8_t const*)manifest, sizeof(manifest) - 1};
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = manifest_view});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_free(index);
+    expect(file_exists(old_parts[0]) && file_exists(old_parts[1]), "Two shards must save as two parts");
+
+    usearch_executor_t storage = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 2});
+    usearch_dense_index_t loaded = NULL;
+    if (outcome.status == usearch_status_success_k)
+        usearch_dense_load_nvme(&(usearch_dense_load_nvme_t) {.index = &loaded,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .path = manifest_view});
+    if (outcome.status == usearch_status_unsupported_k) {
+        printf("Test: NVMe Load - SKIPPED: %s\n", outcome.message);
+        usearch_executor_free(storage);
+        remove(manifest), remove(old_parts[0]), remove(old_parts[1]);
+        free(data);
+        usearch_executor_free(executor);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+
+    usearch_dense_index_t refused = NULL;
+    usearch_bytes_view_t const part_view = {(uint8_t const*)old_parts[0], strlen(old_parts[0])};
+    usearch_dense_load_nvme(
+        &(usearch_dense_load_nvme_t) {.index = &refused, .executor = storage, .outcome = &outcome, .path = part_view});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A lone part has no manifest to replace");
+    usearch_dense_load_nvme(&(usearch_dense_load_nvme_t) {.index = &refused,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .path = manifest_view});
+    expect(outcome.status == usearch_status_contended_k && refused == NULL,
+           "A second writer of one manifest must be refused");
+
+    usearch_dense_index_t view = NULL;
+    usearch_dense_view_nvme(
+        &(usearch_dense_view_nvme_t) {.index = &view, .executor = storage, .outcome = &outcome, .path = manifest_view});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = view, .executor = storage, .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_read_only_k, "A view must keep refusing refines");
+
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = loaded,
+                                   .executor = storage,
+                                   .outcome = &outcome,
+                                   .count = 1,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A loaded handle must refuse insertions");
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = loaded, .executor = storage, .outcome = &outcome, .path = manifest_view});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A loaded handle commits only through refines");
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
+                                                      .sources = &loaded,
+                                                      .targets_count = 1,
+                                                      .targets = &loaded,
+                                                      .executor = storage,
+                                                      .outcome = &outcome,
+                                                      .nvme = &(usearch_nvme_options_t) {&part_view, 1}});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A loaded handle's reshard must not place parts anew");
+    usearch_dense_reshard(&(usearch_dense_reshard_t) {.sources_count = 1,
+                                                      .sources = &view,
+                                                      .targets_count = 1,
+                                                      .targets = &view,
+                                                      .executor = storage,
+                                                      .outcome = &outcome});
+    expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse a reshard");
+
+    usearch_arena_t const arena = create_arena(storage);
+    size_t const viewed_matches = count_self_matches(view, storage, arena, data, rows_count, dimensions, keys);
+
+    // A plan stopped at every barrier reports a part only once the barrier closing its round
+    // committed it, and its finish drops the rewrite of the second shard in hand.
+    usearch_dense_refine_plan_t plan = NULL;
+    usearch_refine_report_t committed = {0};
+    do
+        usearch_dense_refine(&(usearch_dense_refine_t) {.index = loaded,
+                                                        .executor = storage,
+                                                        .outcome = &outcome,
+                                                        .report = &committed,
+                                                        .progress = {cancel_progress},
+                                                        .plan = &plan});
+    while (outcome.status == usearch_status_cancelled_k && !committed.reselected);
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancelled refine must say so");
+    usearch_dense_refine_plan_finish(&(
+        usearch_dense_refine_plan_finish_t) {.index = loaded, .executor = storage, .outcome = &outcome, .plan = plan});
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A pass finished before its end must say so");
+    expect(file_exists(new_parts[0]) && !file_exists(new_parts[1]), "Only the first shard may have been replaced");
+    expect(file_exists(old_parts[1]), "The shard after a cancel keeps its part");
+    expect(count_self_matches(loaded, storage, arena, data, rows_count, dimensions, keys) * 10 >= rows_count * 9,
+           "A handle a cancel stopped must stay searchable");
+
+    usearch_refine_report_t report = {0};
+    usearch_dense_refine(&(usearch_dense_refine_t) {.index = loaded,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .report = &report,
+                                                    .refine = {.expansion_factor = 64}});
+    expect(!outcome.message, outcome.message);
+    expect_eq(report.reachability.audited, rows_count, "A refine must audit every entry it committed");
+    expect_eq(report.reachability.reachable, rows_count, "A refine must leave every entry reachable");
+    size_t const refined_matches = count_self_matches(loaded, storage, arena, data, rows_count, dimensions, keys);
+    expect(refined_matches >= viewed_matches, "A refine must keep or improve self-recall");
+    // A view opened before the refine still reads its parts, which stay until the writer is freed.
+    expect_eq(count_self_matches(view, storage, arena, data, rows_count, dimensions, keys), viewed_matches,
+              "A view opened before the refine must keep answering as before");
+    usearch_dense_free(view);
+    usearch_dense_free(loaded);
+    expect(!file_exists(old_parts[0]) && !file_exists(old_parts[1]) && !file_exists(new_parts[0]),
+           "Freeing the writer removes superseded parts");
+    expect(file_exists(new_parts[1]) && file_exists(new_parts[2]), "The manifest must name the refined parts");
+
+    usearch_dense_index_t reopened = NULL;
+    usearch_dense_view_nvme(&(usearch_dense_view_nvme_t) {.index = &reopened,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .path = manifest_view});
+    expect(!outcome.message, outcome.message);
+    expect_eq(count_self_matches(reopened, storage, arena, data, rows_count, dimensions, keys), refined_matches,
+              "A view of the replaced manifest must answer as the refined handle did");
+    usearch_dense_free(reopened);
+
+    usearch_arena_free(arena);
+    usearch_executor_free(storage);
+    remove(manifest), remove(new_parts[1]), remove(new_parts[2]);
+    free(data);
+    usearch_executor_free(executor);
+    printf("Test: NVMe Load - PASSED\n");
 }
 
 /** A SafeGraphs monolith shaped like a benchmark's save - @c u32 keys, @c bf16 rows, 16 neighbors
@@ -3817,15 +4669,18 @@ static void expect_named(bool holds, char const* what, char const* spelling, cha
  *
  *  Every spelling names its value and reads back to it, and no two rows share a spelling. A near
  *  miss of a spelling - upper case, a trailing space or letter, the last letter dropped - and an
- *  empty or null view read back as @p unknown. Every value from @p unknown to eight past the
- *  largest row that no row lists spells @p fallback, which reads back as @p unknown.
+ *  empty or null view read back as @p unknown. Every value between the smallest and the largest
+ *  enumerator that no row lists spells @p fallback, which reads back as @p unknown; a value past
+ *  them would lie outside the range a C++ enumeration may hold.
  */
 static void expect_names(char const* what, named_value_t const* table, size_t count, int unknown, char const* fallback,
                          char const* (*name_of)(int), int (*from_name)(usearch_bytes_view_t)) {
-    int largest = unknown;
+    // A negative unknown is no enumerator but the refusal of a parser answering a status.
+    int smallest = unknown >= 0 ? unknown : table[0].value, largest = smallest;
     for (size_t row = 0; row != count; ++row) {
         char const* const spelling = table[row].spelling;
         size_t const length = strlen(spelling);
+        smallest = table[row].value < smallest ? table[row].value : smallest;
         largest = table[row].value > largest ? table[row].value : largest;
         expect_named(strcmp(name_of(table[row].value), spelling) == 0, what, spelling, "the value spells it");
         expect_named(from_name(text_view(spelling, length)) == table[row].value, what, spelling, "it reads back");
@@ -3851,7 +4706,7 @@ static void expect_names(char const* what, named_value_t const* table, size_t co
     }
     expect_named(from_name(text_view("", 0)) == unknown, what, "", "an empty view is unknown");
     expect_named(from_name(text_view(NULL, 0)) == unknown, what, "", "a null view is unknown");
-    for (int value = unknown; value <= largest + 8; ++value) {
+    for (int value = smallest; value <= largest; ++value) {
         bool listed = false;
         for (size_t row = 0; row != count; ++row) listed = listed || table[row].value == value;
         if (!listed) expect_named(strcmp(name_of(value), fallback) == 0, what, fallback, "an unlisted value spells it");
@@ -3880,6 +4735,16 @@ static char const* mood_name_of(int value) { return usearch_mood_name((usearch_m
 static int mood_from_name(usearch_bytes_view_t name) {
     usearch_mood_t mood = (usearch_mood_t)0;
     return usearch_mood_from_name(name, &mood) == usearch_status_success_k ? (int)mood : -1;
+}
+static char const* verdict_name_of(int value) { return usearch_refine_verdict_name((usearch_refine_verdict_t)value); }
+static int verdict_from_name(usearch_bytes_view_t name) {
+    usearch_refine_verdict_t verdict = (usearch_refine_verdict_t)0;
+    return usearch_refine_verdict_from_name(name, &verdict) == usearch_status_success_k ? (int)verdict : -1;
+}
+static char const* phase_name_of(int value) { return usearch_phase_name((usearch_phase_t)value); }
+static int phase_from_name(usearch_bytes_view_t name) {
+    usearch_phase_t phase = (usearch_phase_t)0;
+    return usearch_phase_from_name(name, &phase) == usearch_status_success_k ? (int)phase : -1;
 }
 static char const* cpu_class_name_of(int value) { return usearch_cpu_class_name((usearch_cpu_class_t)value); }
 static int cpu_class_from_name(usearch_bytes_view_t name) { return (int)usearch_cpu_class_from_name(name); }
@@ -3927,6 +4792,19 @@ void test_names(void) {
     };
     named_value_t const traversals[] = {{usearch_traversal_walk_k, "walk"}, {usearch_traversal_scan_k, "scan"}};
     named_value_t const moods[] = {{usearch_mood_parked_k, "parked"}, {usearch_mood_spinning_k, "spinning"}};
+    named_value_t const verdicts[] = {
+        {usearch_refine_none_k, "none"},           {usearch_refine_improved_k, "improved"},
+        {usearch_refine_converged_k, "converged"}, {usearch_refine_stalled_k, "stalled"},
+        {usearch_refine_stopped_k, "stopped"},
+    };
+    named_value_t const phases[] = {
+        {usearch_phase_none_k, "none"},       {usearch_phase_copy_k, "copy"},
+        {usearch_phase_build_k, "build"},     {usearch_phase_partition_k, "partition"},
+        {usearch_phase_scatter_k, "scatter"}, {usearch_phase_health_k, "health"},
+        {usearch_phase_heal_k, "heal"},       {usearch_phase_hubs_k, "hubs"},
+        {usearch_phase_gather_k, "gather"},   {usearch_phase_restitch_k, "restitch"},
+        {usearch_phase_write_k, "write"},     {usearch_phase_done_k, "done"},
+    };
     named_value_t const cpu_classes[] = {
         {usearch_cpu_class_serial_k, "serial"},
         {usearch_cpu_class_monoversioned_k, "monoversioned"},
@@ -3986,6 +4864,9 @@ void test_names(void) {
     expect_names("traversal", traversals, sizeof(traversals) / row_bytes, -1, "unknown", traversal_name_of,
                  traversal_from_name);
     expect_names("mood", moods, sizeof(moods) / row_bytes, -1, "unknown", mood_name_of, mood_from_name);
+    expect_names("refine verdict", verdicts, sizeof(verdicts) / row_bytes, -1, "unknown", verdict_name_of,
+                 verdict_from_name);
+    expect_names("phase", phases, sizeof(phases) / row_bytes, -1, "unknown", phase_name_of, phase_from_name);
     usearch_bytes_view_t const bogus = text_view("bogus", 5);
     usearch_status_t status = usearch_status_success_k;
     usearch_residency_t residency = usearch_residency_ram_k;
@@ -5041,9 +5922,11 @@ int main(int argc, char* argv[]) {
         }
     if (selected("empty_reads")) test_empty_reads(dimension_counts[0]);
     if (selected("add_progress")) test_add_progress();
-    if (selected("absorb")) test_absorb(dimension_counts[0]);
-    if (selected("compact")) test_compact(dimension_counts[0]);
-    if (selected("sequence_absorb")) test_sequence_absorb();
+    if (selected("reshard_gather")) test_reshard_gather(dimension_counts[0]);
+    if (selected("refine_plan")) test_refine_plan(1536, 4096);
+    if (selected("reshard_cut_plan")) test_reshard_cut_plan(dimension_counts[0]);
+    if (selected("reshard")) test_reshard(dimension_counts[0]);
+    if (selected("sequence_reshard")) test_sequence_reshard();
     if (selected("count_and_get")) test_count_and_get(dimension_counts[0]);
     if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);
     if (selected("arenas")) test_arenas(dimension_counts[0]);
@@ -5056,7 +5939,8 @@ int main(int argc, char* argv[]) {
     if (selected("shapes_round_trip")) test_shapes_round_trip();
     if (selected("shapes_vram")) test_shapes_vram();
     if (selected("geospatial_round_trip")) test_geospatial_round_trip();
-    if (selected("shapes_and_geospatial_absorb")) test_shapes_and_geospatial_absorb();
+    if (selected("shapes_and_geospatial_reshard")) test_shapes_and_geospatial_reshard();
+    if (selected("reshard_refusals")) test_reshard_refusals();
     if (selected("geospatial_vram")) test_geospatial_vram();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();
@@ -5066,6 +5950,7 @@ int main(int argc, char* argv[]) {
 #endif
     if (selected("maxsim")) test_maxsim();
     if (selected("nvme_view")) test_nvme_view(dimension_counts[0]);
+    if (selected("nvme_load")) test_nvme_load(dimension_counts[0]);
     if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
     if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
     if (selected("vram_scan")) test_vram_scan(collection_sizes[1], dimension_counts[1]);

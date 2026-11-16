@@ -11,15 +11,15 @@
  *  alignment metrics, which iterate over every pair of points, take fewer and smaller clouds. Each
  *  cell checks the verbs a caller reaches: the shapes land under their keys across the shards and
  *  each counts once, a walk keeps most of the exact scan's top ten, one RAM search's matches hint
- *  the next while other residencies refuse hints, a RAM index refines, through a handle too, and
- *  absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
- *  entry and a sample draws distinct ones, the index saves into memory and back and into every
- *  residency and as a view, an NVMe view answers, audits, walks and samples and refuses every
- *  write, a RAM index splits into two with every key in one part, a cleared index holds nothing and
- *  ends a cursor opened before it, and every metric's name reads back. Stored poses round twice,
- *  packed at insert and unpacked at save, so a RAM index's poses come back within that band of each
- *  cloud's extent after each of three save and load cycles, and a reloaded index ranks within the
- *  distance band it implies.
+ *  the next while other residencies refuse hints, a RAM index refines, through a plan too, and
+ *  gathers a second source through a reshard plan while a GPU one refuses all three, an audit
+ *  reaches every entry, cursors walk every entry and a sample draws distinct ones, the index saves
+ *  into memory and back and into every residency and as a view, an NVMe view answers, audits, walks
+ *  and samples and refuses every write, a RAM index reshards into two targets through a plan with
+ *  every key in one, a cleared index holds nothing and ends a cursor opened before it, and every
+ *  metric's name reads back. Stored poses round twice, packed at insert and unpacked at save, so a
+ *  RAM index's poses come back within that band of each cloud's extent after each of three save and
+ *  load cycles, and a reloaded index ranks within the distance band it implies.
  */
 #include <cmath> // `std::sqrt` - a point's move from its coordinates' bands
 
@@ -34,10 +34,10 @@
 
 namespace unum::usearch::test::abi {
 
-/** Shapes a cell builds, the queries held out past them, the donor's shapes, the points per
- *  template cloud, the fewest an entry keeps, and the graph degree, zero deriving it. */
+/** Shapes a cell builds, the queries held out past them, the shapes a second source holds, the
+ *  points per template cloud, the fewest an entry keeps, and the graph degree, zero deriving it. */
 struct shapes_sizes_t {
-    std::size_t shapes = 0, queries = 0, donor_shapes = 0, points = 0, fewest_points = 0, connectivity = 0;
+    std::size_t shapes = 0, queries = 0, packed_shapes = 0, points = 0, fewest_points = 0, connectivity = 0;
 };
 
 /** The sizes of the point-set metrics' cells, and the smaller ones of the alignments, whose every
@@ -144,7 +144,7 @@ static std::size_t expect_poses_round_trip(handle<shapes_verbs_t>& index, std::s
         usearch_outcome_t outcome {};
         shapes_verbs_t::save(source.get(), source.executor(), bytes_view(path), &outcome);
         failures += check(outcome);
-        std::vector<std::int32_t> placement;
+        st::vector<std::int32_t> placement;
         shapes_verbs_t::index_t loaded = nullptr;
         shapes_verbs_t::load_ram(&loaded, index.session->executor, bytes_view(path),
                                  index.session->ram_options(0, placement), index.geometry, &outcome);
@@ -155,7 +155,7 @@ static std::size_t expect_poses_round_trip(handle<shapes_verbs_t>& index, std::s
             failures += check(reloaded_offsets == offsets) +
                         expect_poses_within_rounding(original, reloaded, offsets, unit_roundoff);
         }
-        for (std::string const& file : files_starting_with(fmt::format("{}-cycle{}", stem, cycle)))
+        for (sz::string_t const& file : files_starting_with(fmt::format("{}-cycle{}", stem, cycle)))
             std::remove(file.c_str());
     }
     return failures;
@@ -171,7 +171,7 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
     handle<shapes_verbs_t> index = open_index<shapes_verbs_t>(session, geometry, cell.shards);
     if (!index) return 1;
     shapes_tape_t const shapes = generate_shapes(sizes.shapes + sizes.queries, sizes, seed);
-    shapes_tape_t const donated = generate_shapes(sizes.donor_shapes, sizes, ~seed);
+    shapes_tape_t const second_source = generate_shapes(sizes.packed_shapes, sizes, ~seed);
     usearch_tape_view_t const queries = shapes_verbs_t::slice(shapes.view(), sizes.shapes);
 
     std::size_t failures = expect_built(cell, index, shapes.view(), sizes.shapes);
@@ -193,10 +193,11 @@ static std::size_t check_shapes_metric(sweep_cell_t const& cell, session_t& sess
                                    saved_bytes_t::differing_k,
                                    shapes_score_band(shapes, unit_roundoff_of(geometry.quantization)));
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, shapes.view(), sizes.shapes, usearch_status_success_k);
-    failures += expect_absorbed(index, donated.view(), sizes.donor_shapes, sizes.shapes, usearch_status_success_k);
-    failures += check(describe(index).total_points == shapes.offsets[sizes.shapes] + donated.offsets.back());
-    failures += expect_split(index, usearch_status_success_k);
+    failures += expect_refine_plan(index, shapes.view(), sizes.shapes, usearch_status_success_k);
+    failures += expect_reshard_gather(index, second_source.view(), sizes.packed_shapes, sizes.shapes,
+                                      usearch_status_success_k);
+    failures += check(describe(index).total_points == shapes.offsets[sizes.shapes] + second_source.offsets.back());
+    failures += expect_reshard_cut(index, usearch_status_success_k);
     return failures + expect_cleared(index, shapes.view());
 }
 

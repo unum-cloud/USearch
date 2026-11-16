@@ -148,7 +148,8 @@ inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& al
     std::size_t total = 0;
     for (std::size_t row = 0; row != tape.size(); ++row)
         total += sequence::packed_codes_bytes(tape.offsets[row + 1] - tape.offsets[row], code_bits);
-    packed.bytes.resize(total);
+    if (packed.bytes.resize(total) != sz::status_t::success_k || st::failed(packed.offsets.push_back(0)))
+        exit_out_of_memory("the packed codes");
     std::vector<std::uint8_t> codes;
     for (std::size_t row = 0; row != tape.size(); ++row) {
         std::string_view const entry = std::string_view {tape.bytes}.substr(tape.offsets[row],
@@ -157,7 +158,7 @@ inline byte_tape_t packed_codes_of(byte_tape_t const& tape, alphabet_t const& al
         for (char const character : entry) codes.push_back(alphabet.codes[static_cast<std::uint8_t>(character)]);
         std::size_t const first = packed.offsets.back(), bytes = sequence::packed_codes_bytes(codes.size(), code_bits);
         sequence::pack_codes(codes, code_bits, bytes_of(packed.bytes.data() + first, bytes));
-        packed.offsets.push_back(first + bytes);
+        if (st::failed(packed.offsets.push_back(first + bytes))) exit_out_of_memory("the packed codes");
     }
     return packed;
 }
@@ -267,7 +268,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                    1;
     }
     auto const judge_task = [&](std::size_t expansion, copied_matches_t const& found) {
-        std::vector<std::size_t> const offsets = match_offsets(found);
+        st::vector<std::size_t> const offsets = match_offsets(found);
         if (!matches_output_path.empty()) {
             std::string rows;
             for (std::size_t query = 0; query + 1 < offsets.size(); ++query) {
@@ -312,7 +313,7 @@ int bench_sequence_index_search(int argc, char const* const* argv) {
                                                              sequence_verbs_t::slice(entries, query_first),
                                                              search.queries.value, checkpoint, judge_task);
     if (reloaded && settings.checkpoint.empty())
-        for (std::string const& stale : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
+        for (sz::string_t const& stale : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
             std::remove(stale.c_str());
     return exit_code;
 }

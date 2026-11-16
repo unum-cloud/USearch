@@ -13,12 +13,11 @@
  */
 #pragma once
 
-#include <memory>      // `std::unique_ptr` - a finished plan's handle
 #include <new>         // `std::nothrow`
 #include <span>        // `std::span` - the listed devices, a view's paths and entries
 #include <string_view> // `std::string_view` - checkpoint paths
 #include <type_traits> // `std::remove_pointer_t`
-#include <utility>     // `std::exchange` - a consumed donor's slot
+#include <utility>     // `std::move` - a geometry into its variant
 #include <variant>     // `std::variant`, `std::visit`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the cursors' busy bits
@@ -75,9 +74,10 @@ struct basic_cursor {
     }
 };
 
-/** The engine plan every plan handle of the modality @p index_handle_type_ serves owns. */
-template <typename index_handle_type_>
-using basic_punned_plan = punned_plan<index_handle_type_, basic_variant_tables<typename index_handle_type_::traits_t>>;
+/** What every plan handle of @p operation_ over the modality @p index_handle_type_ holds. */
+template <plan_operation_t operation_, typename index_handle_type_>
+using basic_held_plan =
+    held_plan<operation_, index_handle_type_, basic_variant_tables<typename index_handle_type_::traits_t>>;
 
 /** The handle a call's arguments name, as the index they act on or the slot a new one fills. */
 template <typename arguments_type_>
@@ -476,66 +476,51 @@ void basic_clear(arguments_type_* arguments) noexcept {
 
 #pragma region Plans
 
-/** Whether each of the @p count handles of @p others shares @p punned 's variant and geometry,
- *  waiting out the calls naming it first; false once @p outcome records why not. */
-template <typename handle_type_, typename traits_type_, vendored_residency_t residency_>
-bool accepts_basic_variants(handle_type_ const* index, punned_basic_index<traits_type_, residency_> const& punned,
-                            handle_type_* const* others, std::size_t count, char const* refusal,
-                            usearch_outcome_t* outcome) noexcept {
-    for (std::size_t position = 0; position != count; ++position) {
-        handle_type_* const other = others[position];
-        if (!other) return propagate_error(usearch_status_invalid_argument_k, outcome, "A handle must not be null");
-        if (other == index) return propagate_error(usearch_status_config_mismatch_k, outcome, refusal);
-        void* const typed = same_basic_variant(punned, *other);
+/** Whether every handle a reshard's @p arguments name holds the very variant @p punned is, shares
+ *  its geometry and takes writes, and every target not among the sources is empty, waiting out the
+ *  calls naming each first; false once @p outcome records why not. */
+template <typename handle_type_, typename traits_type_, vendored_residency_t residency_, typename arguments_type_>
+bool accepts_basic_reshard(punned_basic_index<traits_type_, residency_> const& punned, arguments_type_ const& arguments,
+                           usearch_outcome_t* outcome) noexcept {
+    auto const accepts = [&](handle_type_ const* handle) noexcept {
+        void* const typed = same_basic_variant(punned, *handle);
         if (!typed || !punned.verbs.matches(punned.variant, typed))
             return propagate_error(usearch_status_config_mismatch_k, outcome,
-                                   "Every handle must share the index's residency, class and geometry");
-        wait_named_calls(other->named_calls);
+                                   "Every handle must share the first source's residency, class and geometry");
+        if (status_t const served = punned.verbs.serves_writes(typed); failed(served))
+            return propagate_error(served, outcome);
+        // Calls already naming the handle end first; the caller keeps it alive past the plan's
+        // finish, as the headers require, so no count follows the plan.
+        wait_named_calls(handle->named_calls);
+        return true;
+    };
+    for (std::size_t source = 0; source != arguments.sources_count; ++source)
+        if (!accepts(arguments.sources[source])) return false;
+    for (std::size_t target = 0; target != arguments.targets_count; ++target) {
+        handle_type_ const* const handle = arguments.targets[target];
+        if (!accepts(handle)) return false;
+        bool sourced = false;
+        for (std::size_t source = 0; source != arguments.sources_count; ++source)
+            sourced |= arguments.sources[source] == handle;
+        typename traits_type_::description_t description {};
+        if (!sourced) punned.verbs.describe(handle->basic.variant, description);
+        if (description.size)
+            return propagate_error(usearch_status_config_mismatch_k, outcome, "A target must be a source or empty");
     }
     return true;
 }
 
-/** The variants behind the handles @p others names, read in place. */
+/** The variants behind the @p count handles @p others names, read in place. */
 template <typename handle_type_>
-variants_view_t view_basic_variants(std::span<handle_type_* const> others) noexcept {
-    return {others.data(), others.size(), [](void const* handles, std::size_t position) noexcept -> void* {
+variants_view_t view_basic_variants(handle_type_* const* others, std::size_t count) noexcept {
+    return {others, count, [](void const* handles, std::size_t position) noexcept -> void* {
                 handle_type_* const* const typed = static_cast<handle_type_* const*>(handles);
                 return typed[position]->basic.variant;
             }};
 }
 
-/** Hands each of @p receivers what @p punned 's variant counted of the part it took, once the split
- *  @p plan planned filled its parts. */
-template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
-void basic_count_split_receivers(punned_basic_index<traits_type_, residency_> const& punned, void const* plan,
-                                 std::span<handle_type_* const> receivers) noexcept {
-    for (handle_type_* const receiver : receivers)
-        punned.verbs.count_split_receiver(punned.variant, plan, receiver->basic.variant);
-}
-
-/** Frees the handles of the donors @p plan consumed, folding what their variants count into the
- *  variant's first, and nulls the caller's slots; the plan dropped its hold on each already. */
-template <typename traits_type_, vendored_residency_t residency_, typename handle_type_>
-void basic_free_consumed(punned_basic_index<traits_type_, residency_> const& punned, void const* plan,
-                         std::span<handle_type_*> donors) noexcept {
-    for (std::size_t position = 0; position != donors.size(); ++position) {
-        if (!donors[position] || !punned.verbs.plan_consumed(plan, position)) continue;
-        punned.verbs.count_absorbed_donor(punned.variant, donors[position]->basic.variant);
-        delete std::exchange(donors[position], nullptr);
-    }
-}
-
-/**
- *  @brief One call of @c refine, @c absorb or @c split through the plan slot @p planned: opens a
- *      plan with the call's @p donors or @p receivers, or continues a live one, then reports.
- *
- *  A call naming no plan closes the one it opened, so a cancel still heals, reports and answers
- *  @c cancelled_k; a call naming one leaves it live for its operation's finish.
- */
-template <auto verb_, typename arguments_type_, typename plan_handle_type_>
-void basic_refine_once(arguments_type_* arguments, plan_handle_type_** planned,
-                       std::span<handle_of<arguments_type_>*> donors,
-                       std::span<handle_of<arguments_type_>* const> receivers, u64_t seed) noexcept {
+template <auto verb_, typename arguments_type_>
+void basic_refine(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
     reset_refined(*arguments);
@@ -545,84 +530,54 @@ void basic_refine_once(arguments_type_* arguments, plan_handle_type_** planned,
         typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
                                                                         outcome);
         if (!executor) return;
-        plan_handle_type_* one_shot = nullptr;
-        plan_handle_type_*& plan = planned ? *planned : one_shot;
-        if (!plan) {
-            if (status_t const served = punned.verbs.serves_writes(punned.variant); failed(served))
-                return propagate_error(served, outcome), void();
-            if (!accepts_basic_variants(arguments->index, punned, donors.data(), donors.size(),
-                                        "An index cannot absorb itself", outcome) ||
-                !accepts_basic_variants(arguments->index, punned, receivers.data(), receivers.size(),
-                                        "An index cannot split into itself", outcome))
-                return;
-        }
-        split_config_t const config {refine_config_of(arguments->refine), seed};
+        refine_config_t const config = refine_config_of(arguments->refine);
         progress_ticks_t ticks {arguments->progress, 0};
-        expected<refine_report_t> refined = drive_plan(
-            plan, planned ? arguments->phase : nullptr, arguments->index, arguments->executor, punned.verbs,
-            punned.variant, *executor, ticks, [&](plan_handle_type_& opened) noexcept {
-                if constexpr (requires { opened.donors; }) opened.donors = donors;
-                if constexpr (requires { opened.receivers; }) opened.receivers = receivers;
-                return punned.verbs.plan_open(punned.variant, view_basic_variants<handle_of<arguments_type_>>(donors),
-                                              view_basic_variants(receivers), config, *executor);
-            });
-        if (!plan) return propagate_error(refined.status, outcome), void();
-        std::unique_ptr<plan_handle_type_> const closing {one_shot};
-        if constexpr (requires { plan->donors; }) basic_free_consumed(punned, plan->punned.engine_plan, plan->donors);
-        if (closing && (succeeded(refined.status) || refined.status == status_t::cancelled_k)) {
-            // A stopped round still closes and heals, so it reports alongside the cancel.
-            expected<refine_report_t> const finished = punned.verbs.plan_finish(punned.variant,
-                                                                                plan->punned.engine_plan, *executor);
-            refined = {finished.value, failed(finished.status) ? finished.status : refined.status};
-        }
-        if constexpr (requires { plan->receivers; })
-            if (closing) basic_count_split_receivers(punned, plan->punned.engine_plan, plan->receivers);
-        publish_refined(*arguments, refined, outcome);
+        auto const live = arguments->plan ? *arguments->plan : nullptr;
+        expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
+                                            : punned.verbs.refine_plan_open(punned.variant, config, *executor);
+        publish_refined(
+            *arguments,
+            drive_planned(arguments->plan, punned.verbs.refine_plan, arguments->index->basic.tables, arguments->index,
+                          arguments->executor, *executor, ticks, arguments->phase, opened),
+            outcome);
     });
 }
 
-template <auto verb_, typename arguments_type_>
-void basic_refine(arguments_type_* arguments) noexcept {
-    basic_refine_once<verb_>(arguments, arguments->plan, {}, {}, 0);
-}
-
-template <auto verb_, typename arguments_type_>
-void basic_absorb(arguments_type_* arguments) noexcept {
-    if (arguments->count && !arguments->donors) {
-        if (submitted<verb_>(arguments)) return;
-        call_outcome_t outcome(*arguments);
-        reset_refined(*arguments);
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
-    }
-    basic_refine_once<verb_>(arguments, arguments->plan, {arguments->donors, arguments->count}, {}, 0);
-}
-
-/** Closes the plan @p arguments name and frees it, whatever the call answers, reporting what the
- *  whole plan did; a split's receivers then hear what each part counted. */
-template <auto verb_, typename plan_handle_type_, typename arguments_type_>
-void finish_basic_plan(arguments_type_* arguments) noexcept {
+/** Moves the entries of a reshard's sources into its targets, then runs the rounds of every target
+ *  that took entries, through its plan slot or a one-shot plan. */
+template <auto verb_, typename handle_type_, typename arguments_type_>
+void basic_reshard(arguments_type_* arguments) noexcept {
+    using traits_t = typename handle_type_::traits_t;
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    if (arguments->report) *arguments->report = {};
-    // A plan dying unfinished reopens its index.
-    std::unique_ptr<plan_handle_type_> const plan {arguments->plan};
-    if (!plan) return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan must not be null"), void();
-    if (arguments->index != plan->punned.opened_on || arguments->executor != plan->punned.opened_with)
-        return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "The plan was opened on another index or executor"),
-               void();
-    visit_basic(*arguments->index, [&]<typename punned_type_>(punned_type_ punned) noexcept {
-        usearch_executor_handle_t call_executor;
-        typename punned_type_::executor_t* const executor = executor_of(punned, arguments->executor, call_executor,
-                                                                        outcome);
-        if (!executor) return;
-        auto const [refined, status] = punned.verbs.plan_finish(punned.variant, plan->punned.engine_plan, *executor);
-        if constexpr (requires { plan->receivers; })
-            basic_count_split_receivers(punned, plan->punned.engine_plan, plan->receivers);
-        if (failed(status)) return propagate_error(status, outcome), void();
-        write_refine_report(arguments->report, refined);
-        propagate_error(usearch_status_success_k, outcome, nullptr);
-    });
+    reset_refined(*arguments);
+    if (!accepts_plan(*arguments, outcome) || !accepts_reshard_lists(*arguments, outcome)) return;
+    // A live plan reads its own lists and keeps the table it was opened with.
+    auto const live = arguments->plan ? *arguments->plan : nullptr;
+    handle_type_ const* const first = live ? nullptr : arguments->sources[0];
+    std::visit(
+        [&]<vendored_residency_t residency_>(basic_verbs<traits_t, residency_> const* verbs) noexcept {
+            punned_basic_index<traits_t, residency_> const punned {*verbs, first ? first->basic.variant : nullptr};
+            if (first && !accepts_basic_reshard<handle_type_>(punned, *arguments, outcome)) return;
+            usearch_executor_handle_t call_executor;
+            typename punned_basic_index<traits_t, residency_>::executor_t* const executor = executor_of(
+                punned, arguments->executor, call_executor, outcome);
+            if (!executor) return;
+            reshard_options_t const options {nullptr, nullptr, nullptr, refine_config_of(arguments->refine),
+                                             arguments->seed};
+            progress_ticks_t ticks {arguments->progress, 0};
+            expected<void*> const opened = live ? expected<void*> {live->held.engine_plan, status_t::success_k}
+                                                : verbs->reshard_plan_open(
+                                                      view_basic_variants(arguments->sources, arguments->sources_count),
+                                                      view_basic_variants(arguments->targets, arguments->targets_count),
+                                                      options, *executor);
+            publish_refined(*arguments,
+                            drive_planned(arguments->plan, verbs->reshard_plan, basic_variant_tables<traits_t> {verbs},
+                                          static_cast<handle_type_ const*>(nullptr), arguments->executor, *executor,
+                                          ticks, arguments->phase, opened),
+                            outcome);
+        },
+        first ? first->basic.tables : live->held.tables);
 }
 
 #pragma endregion Plans
@@ -965,20 +920,6 @@ void basic_sample(arguments_type_* arguments) noexcept {
         publish_sample(*arguments, staging, sampled);
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
-}
-
-/** Splits the index into its receivers, one graph-local part each, then re-links their picked
- *  nodes. */
-template <auto verb_, typename arguments_type_>
-void basic_split(arguments_type_* arguments) noexcept {
-    if ((arguments->plan && *arguments->plan) || (arguments->count >= 2 && arguments->receivers))
-        return basic_refine_once<verb_>(arguments, arguments->plan, {},
-                                        {arguments->receivers, arguments->receivers ? arguments->count : 0},
-                                        arguments->seed);
-    if (submitted<verb_>(arguments)) return;
-    call_outcome_t outcome(*arguments);
-    reset_refined(*arguments);
-    propagate_error(usearch_status_invalid_argument_k, outcome, "A split needs two receivers or more");
 }
 
 /** Reads the geometry @p checkpoint, a path or the bytes of one in memory, recorded without loading

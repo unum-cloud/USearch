@@ -175,11 +175,11 @@ static std::size_t expect_matches_round_trip(std::string const& stem, copied_mat
     for (std::string_view const extension : {"arrow", "arrows"}) {
         std::string const path = fmt::format("{}-matches.{}", stem, extension);
         arrow_matches_t read;
-        std::string failure = arrow_matches_write(path, queries, found);
+        sz::string_t failure = arrow_matches_write(path, queries, found);
         if (failure.empty()) failure = arrow_matches_read(path, read);
         if (!failure.empty()) fmt::println(stderr, "  {}", failure);
-        failures += check(failure.empty() && read.matches == found && read.queries.size() == queries.size() &&
-                          read.queries.back() == uuid_of(queries.size() - 1));
+        failures += check(failure.empty() && same_matches(read.matches, found) &&
+                          read.queries.size() == queries.size() && read.queries.back() == uuid_of(queries.size() - 1));
     }
     return failures;
 }
@@ -204,8 +204,8 @@ static std::size_t check_arrow_round_trip(settings_t const& settings) {
     failures += check(outcome);
 
     arrow_summary_t exported, imported;
-    std::string checkpoint;
-    std::string failure = arrow_export(saved, arrow_path, exported);
+    st::vector<byte_t> checkpoint;
+    sz::string_t failure = arrow_export(saved, arrow_path, exported);
     if (failure.empty()) failure = arrow_import(arrow_path, "", checkpoint, imported);
     if (!failure.empty()) fmt::println(stderr, "  {}", failure);
     failures += check(failure.empty() && exported.parts == arrow_parts_k && exported.nodes == arrow_entries_k);
@@ -213,7 +213,7 @@ static std::size_t check_arrow_round_trip(settings_t const& settings) {
                       imported.metric == exported.metric);
     failures += expect_arrow_schema<verbs_type_>(arrow_path);
 
-    std::vector<std::int32_t> placement;
+    st::vector<std::int32_t> placement;
     typename verbs_type_::index_t copy = nullptr;
     verbs_type_::load_ram_buffer(&copy, session.executor, bytes_view(checkpoint), session.ram_options(0, placement),
                                  fixture.geometry, &outcome);
@@ -253,7 +253,7 @@ static std::size_t check_arrow_round_trip(settings_t const& settings) {
         }
     }
     else failures += 1;
-    for (std::string const& file : files_starting_with(stem)) std::remove(file.c_str());
+    for (sz::string_t const& file : files_starting_with(stem)) std::remove(file.c_str());
     return failures;
 }
 
@@ -294,19 +294,20 @@ static std::size_t check_slots_skip_foreign(settings_t const& settings) {
     failures += check(!sized);
 
     slot_drive_t drive;
-    std::vector<slot_file_t> files;
+    st::vector<slot_file_t> files;
     failures += check(slot_open(location, drive) && slot_map(drive, location, files));
     failures += check(files.size() == 2);
     if (files.size() == 2) {
-        failures += check(files[0].first_slot == 0 && files[0].owner != slot_foreign_k);
-        failures += check(files[1].first_slot == 2 && files[1].owner == slot_foreign_k);
+        failures += check(files[0].first_slot == 0 && std::string_view {files[0].owner} != slot_foreign_k);
+        failures += check(files[1].first_slot == 2 && std::string_view {files[1].owner} == slot_foreign_k);
         failures += check(slot_overlap(files, 0, 1) == &files[0] && !slot_overlap(files, 1, 1) &&
                           slot_overlap(files, 1, 2) == &files[1]);
         failures += check(slot_free_run(files, 3, 1) == 1 && slot_free_run(files, 3, 2) == 3);
     }
     std::string const address = fmt::format("{}@1GiB", location);
-    failures += check(checkpoints_admit_save(address) == address);
-    for (std::string const& file : files_starting_with(stem)) std::remove(file.c_str());
+    std::optional<sz::string_t> const admitted = checkpoints_admit_save(address);
+    failures += check(admitted && std::string_view {*admitted} == address);
+    for (sz::string_t const& file : files_starting_with(stem)) std::remove(file.c_str());
     return failures;
 }
 
@@ -405,7 +406,7 @@ struct arrow_table_t {
         for (f32_t& value : embeddings) value = std::bit_cast<f32_t>(std::bit_cast<std::uint32_t>(value) & 0xFFFF0000u);
     }
 
-    std::string write(std::string_view path) const {
+    sz::string_t write(std::string_view path) const {
         std::int64_t const rows = static_cast<std::int64_t>(identifiers.size());
         ipc_field_t const element {.name = arrow_child_name_k, .type = ipc_type_t::floating_point_k, .width = 32};
         std::array<ipc_field_t, 2> const fields {{
@@ -437,7 +438,7 @@ static std::size_t expect_arrow_table(arrow_input_t& input, arrow_table_t const&
     if (failures) return failures;
     usearch_rows_view_t rows {};
     usearch_keys_view_t keys {};
-    std::vector<usearch_key_t> widened;
+    st::vector<usearch_key_t> widened;
     failures += check(arrow_rows_of(input, vectors, rows).empty() &&
                       arrow_keys_of(input, identifiers, widened, keys).empty());
     if (failures) return failures;
@@ -464,9 +465,11 @@ static std::size_t check_arrow_pipes(settings_t const& settings) {
     }
 
     copied_matches_t found;
-    found.counts = {1, 0};
-    found.keys = {uuid_of(5)};
-    found.scores = {0.25};
+    std::array<std::size_t, 2> const counts {1, 0};
+    uuid128_t const key = uuid_of(5);
+    usearch_distance_t const score = 0.25;
+    failures += check(!st::failed(found.counts.assign(counts)) && !st::failed(found.keys.assign({&key, 1})) &&
+                      !st::failed(found.scores.assign({&score, 1})));
     std::array<usearch_key_t, 2> const queries {std::bit_cast<usearch_key_t>(uuid_of(0)),
                                                 std::bit_cast<usearch_key_t>(uuid_of(1))};
     std::string const piped_path = fmt::format("{}-piped.arrows", stem);
@@ -475,7 +478,7 @@ static std::size_t check_arrow_pipes(settings_t const& settings) {
         failures += check(arrow_matches_write("-", queries, found).empty());
     }
     arrow_matches_t read;
-    failures += check(arrow_matches_read(piped_path, read).empty() && read.matches == found);
+    failures += check(arrow_matches_read(piped_path, read).empty() && same_matches(read.matches, found));
 
     std::string const cut = fmt::format("{}-cut.arrows", stem);
     failures += check(table.write(cut).empty());
@@ -490,15 +493,16 @@ static std::size_t check_arrow_pipes(settings_t const& settings) {
     std::FILE* const file = std::fopen(parquet.c_str(), "wb");
     failures += check(file && std::fputs("PAR1 and no more", file) >= 0 && std::fclose(file) == 0);
     arrow_input_t refused;
-    failures += check(refused.open(parquet).find("Parquet") != std::string::npos);
-    for (std::string const& leftover : files_starting_with(stem)) std::remove(leftover.c_str());
+    failures += check(std::string_view {refused.open(parquet)}.find("Parquet") != std::string_view::npos);
+    for (sz::string_t const& leftover : files_starting_with(stem)) std::remove(leftover.c_str());
     return failures;
 }
 
 /** The built @p binary chains through pipes as a shell would: an insert from a stream into a pipe,
- *  whose status lines leave standard output to the checkpoint, the metadata of that checkpoint, an
- *  exact search reading it off a pipe and answering every row's own key, and a get answering rows
- *  byte for byte. */
+ *  whose status lines leave standard output to the checkpoint, the metadata of that checkpoint, two
+ *  refinement rounds through one plan closed before their save, a reshard cutting it into a
+ *  manifest of two parts and another gathering that manifest back into one, an exact search reading
+ *  it off a pipe and answering every row's own key, and a get answering its rows byte for byte. */
 static std::size_t check_tool_pipes(settings_t const& settings, std::string_view binary) {
     arrow_table_t const table {settings.seed};
     std::string const stem = tools_stem("tool", settings.seed);
@@ -512,12 +516,21 @@ static std::size_t check_tool_pipes(settings_t const& settings, std::string_view
         fmt::format("cat '{}' | '{}' dense insert --input - --keys-column id --stored-dtype bf16 --save - > '{}'",
                     stream, binary, index));
     failures += run_shell(fmt::format("'{}' metadata - < '{}' > /dev/null", binary, index));
+    std::string const refined = fmt::format("{}-refined.safegraphs", stem);
+    failures += run_shell(
+        fmt::format("'{}' dense refine '{}' --max-refines 2 --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
+                    binary, index, refined, binary, refined));
+    std::string const cut = fmt::format("{}-cut.json", stem), gathered = fmt::format("{}-gathered.safegraphs", stem);
+    failures += run_shell(
+        fmt::format("'{}' dense reshard '{}' --parts 2 --save '{}' > /dev/null && " //
+                    "'{}' dense reshard '{}' --save '{}' > /dev/null && '{}' metadata '{}' > /dev/null",
+                    binary, refined, cut, binary, cut, gathered, binary, gathered));
     failures += run_shell(fmt::format("cat '{}' | '{}' dense search --index - --input '{}' --keys-column id " //
                                       "--traversal scan --wanted 1 --output - > '{}'",                        //
                                       index, binary, stream, run));
     arrow_matches_t searched;
     failures += check(arrow_matches_read(run, searched).empty() && searched.queries.size() == arrow_entries_k);
-    if (!failures) failures += check(searched.matches.keys == searched.queries);
+    if (!failures) failures += check(std::ranges::equal(searched.matches.keys, searched.queries));
 
     failures += run_shell(
         fmt::format("'{}' dense get --index '{}' --input '{}' --keys-column id --outputs-dtype f32 --output '{}'",
@@ -531,7 +544,19 @@ static std::size_t check_tool_pipes(settings_t const& settings, std::string_view
     if (!failures)
         failures += check(std::memcmp(rows.data, table.embeddings.data(), table.embeddings.size() * sizeof(f32_t)) ==
                           0);
-    for (std::string const& leftover : files_starting_with(stem)) std::remove(leftover.c_str());
+
+    // Batches of a RetriEval file overlap their reads with the previous insert, never two inserts.
+    std::string const retrieval = fmt::format("{}.fbin", stem), batched = fmt::format("{}-batched.safegraphs", stem);
+    std::array<std::uint32_t, 2> const header {static_cast<std::uint32_t>(arrow_entries_k),
+                                               static_cast<std::uint32_t>(arrow_dimensions_k)};
+    std::FILE* const file = std::fopen(retrieval.c_str(), "wb");
+    failures += check(file && std::fwrite(header.data(), sizeof(header), 1, file) == 1 &&
+                      std::fwrite(table.embeddings.data(), sizeof(f32_t), table.embeddings.size(), file) ==
+                          table.embeddings.size() &&
+                      std::fclose(file) == 0);
+    failures += run_shell(fmt::format("'{}' dense insert '{}' --stored-dtype bf16 --batch 7 --save '{}' > /dev/null",
+                                      binary, retrieval, batched));
+    for (sz::string_t const& leftover : files_starting_with(stem)) std::remove(leftover.c_str());
     return failures;
 }
 

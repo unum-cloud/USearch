@@ -899,28 +899,72 @@ typedef struct usearch_reachability_t {
     size_t components;
 } usearch_reachability_t;
 
-/** Where a plan stands: its phase, and that phase's own count. */
-typedef struct usearch_phase_t {
+/** The kind of work a plan is doing, shared by refine and reshard in every residency: a reshard's
+ *  moves first, then a round's phases in their order, then the closing write. */
+typedef enum usearch_phase_t {
 
-    /** Static name: "health", "heal", "hubs", "gather" or "restitch" inside a round, "partition" or
-     *  "scatter" while a split moves entries, and "done" once the round ended. */
-    char const* name;
+    /** No plan, or one that has not started. */
+    usearch_phase_none_k = 0,
 
-    /** This phase's position, and how many the round planned. */
-    size_t ordinal;
-    size_t count;
+    /** A reshard copying source entries into their target with their links shifted. */
+    usearch_phase_copy_k,
 
-    /** Units of this phase done and in all, and their name: "entries" or "islands". */
-    size_t completed;
-    size_t total;
-    char const* unit;
+    /** A reshard building graphs over entries that arrived with no links, as NVMe parts do. */
+    usearch_phase_build_k,
+
+    /** A reshard cutting a source into one part per target. */
+    usearch_phase_partition_k,
+
+    /** A reshard moving each part into its target. */
+    usearch_phase_scatter_k,
+
+    /** A round's health check, opening or closing it. */
+    usearch_phase_health_k,
+
+    /** A round linking each island with the root's component. */
+    usearch_phase_heal_k,
+
+    /** A round drawing the hubs its gather streams entries past. */
+    usearch_phase_hubs_k,
+
+    /** A round gathering every entry into a neighborhood. */
+    usearch_phase_gather_k,
+
+    /** A round re-stitching each neighborhood. */
+    usearch_phase_restitch_k,
+
+    /** A plan filing what its moves or rounds produced where it lands: a cut's keys, or NVMe
+     *  parts. */
+    usearch_phase_write_k,
+
+    /** The plan ended its round, and nothing is pending. */
+    usearch_phase_done_k,
 } usearch_phase_t;
+
+/** Where a plan stands: its phase, that phase's position in the plan, and its own count. */
+typedef struct usearch_phase_progress_t {
+
+    /** The kind of work in hand. */
+    usearch_phase_t phase;
+
+    /** This phase's position among the ones the plan runs. */
+    size_t ordinal;
+
+    /** Units of this phase done, entries or islands. */
+    size_t completed;
+
+    /** Units of this phase in all. */
+    size_t total;
+} usearch_phase_progress_t;
 
 /** What a round concluded, so no caller picks a change rate. */
 typedef enum usearch_refine_verdict_t {
 
+    /** No round concluded: a report no round filled yet. */
+    usearch_refine_none_k = 0,
+
     /** The round changed some entry's link set, so another round can help. */
-    usearch_refine_improved_k = 0,
+    usearch_refine_improved_k,
 
     /** The round changed no entry's link set. */
     usearch_refine_converged_k,
@@ -934,8 +978,8 @@ typedef enum usearch_refine_verdict_t {
 
 /**
  *  @brief What one refining call did to the graph, counted alike in every modality and residency:
- *      @c refine, @c absorb, @c reshard and @c split land it, so far when their plan stays live,
- *      and each operation's @c plan_finish lands the whole plan's.
+ *      @c refine and @c reshard land it, so far when their plan stays live, and each operation's
+ *      @c plan_finish lands the whole plan's.
  *
  *  Every one of those verbs ends in rounds, each a health check, a heal, a draw of hubs, a gather
  *  and a restitch, closed by a second health check, and the report counts them. @c changed never
@@ -1628,6 +1672,20 @@ USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood);
 
 /** Reads a mood back into @p mood, or fails with @c usearch_status_invalid_argument_k. */
 USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name, usearch_mood_t* mood);
+
+/** The canonical spelling of a refine verdict, as @c usearch_refine_stalled_k spells "stalled". */
+USEARCH_EXPORT char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict);
+
+/** Reads a refine verdict back into @p verdict, or fails with
+ *  @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_refine_verdict_from_name(usearch_bytes_view_t name,
+                                                                 usearch_refine_verdict_t* verdict);
+
+/** The canonical spelling of a plan's phase, as @c usearch_phase_restitch_k spells "restitch". */
+USEARCH_EXPORT char const* usearch_phase_name(usearch_phase_t phase);
+
+/** Reads a plan's phase back into @p phase, or fails with @c usearch_status_invalid_argument_k. */
+USEARCH_EXPORT usearch_status_t usearch_phase_from_name(usearch_bytes_view_t name, usearch_phase_t* phase);
 
 /** The canonical spelling of a load path, as @c usearch_load_path_cufile_k spells "cufile". */
 USEARCH_EXPORT char const* usearch_load_path_name(usearch_load_path_t load_path);

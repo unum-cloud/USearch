@@ -58,15 +58,6 @@ struct maxsim_queries_view_t {
     ranked_hints_view_t hints;
 };
 
-/** The placements a reshard names, each @c NULL to keep the handle's own, and its passes'
- *  budget; only the residency's own placement can apply. */
-struct reshard_placements_t {
-    usearch_ram_options_t const* ram = nullptr;
-    usearch_vram_options_t const* vram = nullptr;
-    usearch_nvme_options_t const* nvme = nullptr;
-    refine_config_t refine {};
-};
-
 /** What an attention reads besides its queries and where it writes: the heads each token's rows
  *  hold, the values a kept key weighs, the logits' scale, the outputs, and the carried softmax
  *  states, empty for none. */
@@ -91,7 +82,7 @@ struct attention_arguments_t {
  *  answering @c unsupported_k or @c read_only_k where it serves none, so the dispatch unit visits
  *  five residencies and never a variant. Each walking verb answers the traversal telemetry the C
  *  stats report, and a plan or a cursor lives behind a @c void* that its own table entries open,
- *  step and free.
+ *  step and free, one opening entry and one set of plan entries per operation.
  */
 template <vendored_residency_t residency_>
 struct dense_verbs {
@@ -152,45 +143,19 @@ struct dense_verbs {
                                           executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     // Refining
-    expected<refine_report_t> (*refine)(void* index, refine_config_t config, executor_t& executor,
-                                        progress_ticks_t& ticks) noexcept;
-
-    /** Moves every node of each of @p donors in, nulling each slot whose index it consumed. */
-    expected<refine_report_t> (*absorb)(void* index, std::span<void*> donors, refine_config_t config,
-                                        executor_t& executor, progress_ticks_t& ticks) noexcept;
-
-    /** Recuts the index's own shards in place under its placement's capacity, keeping every entry;
-     *  only a RAM index packs yet. */
-    expected<dense::compact_result_t> (*reshard)(void* index, reshard_placements_t placements, executor_t& executor,
-                                                 progress_ticks_t& ticks) noexcept;
-
-    /** Moves every node into one graph-local part per receiver of @p receivers, seeded by the
-     *  config's seed. */
-    expected<refine_report_t> (*split)(void* index, variants_view_t receivers, split_config_t config,
-                                       executor_t& executor, progress_ticks_t& ticks) noexcept;
     expected<reachability_t> (*health)(void* index, executor_t& executor) noexcept;
 
     // Plans
 
-    /** Opens a refine plan, absorbing @p donors first, or splitting into @p receivers first. */
-    expected<void*> (*plan_open)(void* index, variants_view_t donors, variants_view_t receivers, split_config_t config,
-                                 executor_t& executor) noexcept;
+    /** Opens a refine plan of rounds over the index's shards. */
+    expected<void*> (*refine_plan_open)(void* index, refine_config_t config, executor_t& executor) noexcept;
 
-    /** Opens a reshard plan recutting the index's own shards in place; only a RAM index packs. */
-    expected<void*> (*reshard_plan_open)(void* index, reshard_placements_t placements, executor_t& executor) noexcept;
-    status_t (*plan_next)(void* index, void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
-    refine_report_t (*plan_running)(void const* plan) noexcept;
-
-    /** Whether the plan consumed its donor at @p donor. */
-    bool (*plan_consumed)(void const* plan, std::size_t donor) noexcept;
-    expected<refine_report_t> (*plan_finish)(void* index, void* plan, executor_t& executor) noexcept;
-    void (*plan_free)(void* plan) noexcept;
-
-    /** Where a plan's round stands; one that runs no round names no phase. */
-    usearch_phase_t (*plan_phase)(void const* plan) noexcept;
-
-    /** Opens a plan's next round, from the same root, once its last one ended. */
-    void (*plan_next_round)(void* plan) noexcept;
+    /** Opens a reshard plan moving the entries of @p sources into @p targets, then running the
+     *  rounds of every target that took entries; the plan keeps its own lists. */
+    expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets, reshard_options_t options,
+                                         executor_t& executor) noexcept;
+    plan_verbs<executor_t> refine_plan;
+    plan_verbs<executor_t> reshard_plan;
 
     // Lookups
     status_t (*count)(void* index, std::span<key_t const> keys, std::span<std::size_t> entries,

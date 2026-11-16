@@ -299,8 +299,9 @@ expected<thread_scratch<shard_type_, made_metric<make_metric_type_>>> prepare_re
  *
  *  Every task of a phase runs before the barrier, and every barrier of a round hears the phase it
  *  closed in that phase's own units, so a cancel leaves the plan at the next phase, where the next
- *  call starts; a move no stop skips runs to its end first, and a task's failure ends the call. The
- *  scratch is this call's, from @ref prepare_refinement, and the plan holds what later calls need.
+ *  call starts; a move no stop skips runs to its end first, and a task's failure ends the call.
+ *  The scratch is this call's, from @ref prepare_refinement, while the plan keeps whatever the
+ *  later calls need.
  */
 template <typename plan_type_, typename shard_type_, typename metric_type_, typename selector_type_>
 status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_type_>& scratch,
@@ -324,8 +325,9 @@ status_t drive_refinement(plan_type_& plan, thread_scratch<shard_type_, metric_t
         plan.taken = taken = 0;
         std::size_t const completed = plan.completed(), total = plan.total();
         bool const following = plan.advance();
-        if (total && ticks(completed, total) == continuation_t::cancel_k && !plan.moving())
-            return status_t::cancelled_k;
+        bool moving = false;
+        if constexpr (requires { plan.moving(); }) moving = plan.moving();
+        if (total && ticks(completed, total) == continuation_t::cancel_k && !moving) return status_t::cancelled_k;
         if (!following) return status_t::success_k;
     }
 }
@@ -994,12 +996,31 @@ expected<std::size_t> get_entries(variant_type_& variant, usearch_key_t key,
 
 #pragma region Variant Bodies
 
-/** A plan in flight: each donor's or receiver's index, which the engine plan nulls as it consumes
- *  it whole, and the engine plan itself, which also says where the calls stand. */
-template <typename variant_type_>
-struct basic_plan {
-    growing_buffer<typename variant_type_::index_t*, forkunion_allocator_t> others;
-    typename variant_type_::refine_plan_t plan;
+/** What a basic reshard moves before its rounds: other sources packed into one target, or one
+ *  source split into several targets. */
+enum class reshard_shape_t : u8_t { pack_k, split_k };
+
+/** A refine plan in flight: the variant whose rounds it drives, and the engine plan, which also
+ *  says where the calls stand. */
+template <typename variant_type_, typename plan_type_>
+struct basic_refine_plan {
+    variant_type_* driven = nullptr;
+    plan_type_ plan;
+};
+
+/**
+ *  @brief A reshard plan in flight: the variant whose rounds it drives, the variants whose entries
+ *      move into it or out of it, and the engine plan, which also says where the calls stand.
+ *
+ *  A pack moves every other source into the driven target, and a split moves the driven source into
+ *  every target; once the plan closes, every variant's own counts follow the entries it holds.
+ */
+template <typename variant_type_, typename plan_type_>
+struct basic_reshard_plan {
+    variant_type_* driven = nullptr;
+    growing_buffer<variant_type_*, forkunion_allocator_t> moved_variants;
+    reshard_shape_t shape = reshard_shape_t::pack_k;
+    plan_type_ plan;
 };
 
 /**
@@ -1177,110 +1198,188 @@ struct specialized_variant {
         return of(variant).sample(inputs, outputs, config, executor);
     }
 
-    /** Whether the variant at @p donor shares this one's geometry, so its nodes land here. */
-    static bool matches(void const* variant, void const* donor) noexcept {
-        return bodies_t::matches(of(variant), of(donor));
+    /** Whether the variant at @p source shares this one's geometry, so its nodes land here. */
+    static bool matches(void const* variant, void const* source) noexcept {
+        return bodies_t::matches(of(variant), of(source));
     }
 
-    /** Opens a refine plan of the variant, an absorb of @p donors or a split into @p receivers: a
-     *  RAM variant's own plan, or a GPU one's sharded index's on the streams of @p executor. */
-    static expected<void*> plan_open(void* variant, variants_view_t donors, variants_view_t receivers,
-                                     split_config_t config, executor_t& executor) noexcept {
+    /** Opens one round over every shard of @p driven: a RAM variant's own plan, or a GPU one's
+     *  sharded index's on the streams of @p executor. */
+    static expected<void*> open_refine(variant_t& driven, refine_config_t config, executor_t& executor) noexcept {
+        using index_t = typename variant_t::index_t;
+        using held_t = basic_refine_plan<variant_t, typename index_t::refine_plan_t>;
+        auto [plan, status] = [&]() noexcept -> expected<typename index_t::refine_plan_t> {
+            if constexpr (is_vram_index<variant_t>) {
+                typename index_t::refine_config_t const refine_config {config.cache_bytes};
+                return driven.index.plan_refine(refine_config, executor);
+            }
+            else {
+                // A round's tiles follow the cores it runs on unless the caller overrides them.
+                if (!config.cache_bytes) config.cache_bytes = executor.cache_bytes_per_core();
+                return driven.plan_refine(config);
+            }
+        }();
+        if (failed(status)) return {nullptr, status};
+        held_t* const opened = new (std::nothrow) held_t {&driven, std::move(plan)};
+        if (!opened) return {nullptr, status_t::bad_alloc_k};
+        return {opened, status_t::success_k};
+    }
+
+    /** Opens the engine reshard of @p shape over @p driven, moving the variants of @p moved in or
+     *  out of it: a RAM variant's own plan over the whole lists @p sources and @p targets, or a GPU
+     *  one's sharded index's on the streams of @p executor. */
+    static expected<void*> open_reshard(variant_t& driven, std::span<variant_t* const> moved,
+                                        std::span<variant_t* const> sources, std::span<variant_t* const> targets,
+                                        reshard_shape_t shape, reshard_options_t options,
+                                        executor_t& executor) noexcept {
+        using index_t = typename variant_t::index_t;
+        using held_t = basic_reshard_plan<variant_t, typename index_t::reshard_plan_t>;
+        forkunion_allocator_t const allocator {no_memory_domain_k};
+        growing_buffer<variant_t*, forkunion_allocator_t> moved_variants {allocator};
+        growing_buffer<index_t*, forkunion_allocator_t> source_indexes {allocator};
+        growing_buffer<index_t*, forkunion_allocator_t> target_indexes {allocator};
+        if (failed(moved_variants.reserve_exactly(moved.size())) ||
+            failed(source_indexes.reserve_exactly(sources.size())) ||
+            failed(target_indexes.reserve_exactly(targets.size())))
+            return {nullptr, status_t::bad_alloc_k};
+        for (variant_t* const variant : moved) moved_variants.push_back_reserved(variant);
+        for (variant_t* const variant : sources) source_indexes.push_back_reserved(&variant->index);
+        for (variant_t* const variant : targets) target_indexes.push_back_reserved(&variant->index);
+        auto [plan, status] = [&]() noexcept -> expected<typename index_t::reshard_plan_t> {
+            if constexpr (is_vram_index<variant_t>) {
+                typename index_t::refine_config_t const refine_config {options.refine.cache_bytes};
+                return driven.index.plan_reshard(to_span(source_indexes), to_span(target_indexes),
+                                                 {refine_config, 0, options.seed}, executor);
+            }
+            else {
+                // A round's tiles follow the cores it runs on unless the caller overrides them.
+                refine_config_t sized = options.refine;
+                if (!sized.cache_bytes) sized.cache_bytes = executor.cache_bytes_per_core();
+                return driven.plan_reshard(to_span(source_indexes), to_span(target_indexes), sized, options.seed);
+            }
+        }();
+        if (failed(status)) return {nullptr, status};
+        held_t* const opened = new (std::nothrow) held_t {&driven, std::move(moved_variants), shape, std::move(plan)};
+        if (!opened) return {nullptr, status_t::bad_alloc_k};
+        return {opened, status_t::success_k};
+    }
+
+    /** Opens one round over every shard of the variant. */
+    static expected<void*> refine_plan_open(void* variant, refine_config_t config, executor_t& executor) noexcept {
+        if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
+        else return open_refine(of(variant), config, executor);
+    }
+
+    /** Opens a pack of every other source into the one target, or a split of the one source into
+     *  every target, and hands several of both to the engine, which refuses them; a handle of one
+     *  shard has nothing to recut in place. */
+    static expected<void*> reshard_plan_open(variants_view_t sources, variants_view_t targets,
+                                             reshard_options_t options, executor_t& executor) noexcept {
         if constexpr (viewed_k) return {nullptr, status_t::read_only_k};
         else {
-            using refining_t = basic_plan<variant_t>;
-            using index_t = typename variant_t::index_t;
-            using refine_plan_t = typename variant_t::refine_plan_t;
-            variants_view_t const others = receivers.empty() ? donors : receivers;
-            growing_buffer<index_t*, forkunion_allocator_t> typed_indexes {forkunion_allocator_t {no_memory_domain_k}};
-            if (failed(typed_indexes.reserve_exactly(others.size()))) return {nullptr, status_t::bad_alloc_k};
-            for (std::size_t position = 0; position != others.size(); ++position)
-                typed_indexes.push_back_reserved(&of(others[position]).index);
-            std::span<index_t*> const typed = to_writable_span(typed_indexes);
-            variant_t& refined = of(variant);
-            // A RAM plan borrows these slots, whose storage moves along with the buffer.
-            auto [plan, status] = [&]() noexcept -> expected<refine_plan_t> {
-                if constexpr (is_vram_index<variant_t>) {
-                    typename index_t::refine_config_t const refine_config {config.refine.expansion_factor,
-                                                                           config.refine.memory_limit};
-                    if (!receivers.empty())
-                        return refined.index.plan_split(typed, {refine_config, config.seed}, executor);
-                    if (!donors.empty()) return refined.index.plan_absorb(typed, refine_config, executor);
-                    return refined.index.plan_refine(refine_config, executor);
-                }
-                else {
-                    // A round's tiles follow the cores it runs on unless the caller overrides them.
-                    split_config_t sized = config;
-                    if (!sized.refine.cache_bytes) sized.refine.cache_bytes = executor.cache_bytes_per_core();
-                    if (!receivers.empty()) return refined.plan_split(typed, sized);
-                    if (!donors.empty()) return refined.plan_absorb(typed, sized.refine);
-                    return refined.plan_refine(sized.refine);
-                }
-            }();
-            if (failed(status)) return {nullptr, status};
-            refining_t* const opened = new (std::nothrow) refining_t {std::move(typed_indexes), std::move(plan)};
-            if (!opened) return {nullptr, status_t::bad_alloc_k};
-            return {opened, status_t::success_k};
-        }
-    }
-    static status_t plan_next(void* variant, void* opened, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
-        else {
-            typename variant_t::refine_plan_t& plan = static_cast<basic_plan<variant_t>*>(opened)->plan;
-            if constexpr (is_vram_index<variant_t>) return plan.run(executor, ticks);
-            else return of(variant).refine(plan, executor, ticks);
-        }
-    }
-    static bool plan_consumed(void const* opened, std::size_t donor) noexcept {
-        if constexpr (viewed_k) return false;
-        else return static_cast<basic_plan<variant_t> const*>(opened)->plan.consumed(donor);
-    }
-
-    /** Folds what a consumed @p donor counts into the variant, as the points of the clouds it
-     *  held. */
-    static void count_absorbed_donor(void* variant, void const* donor) noexcept {
-        if constexpr (requires(variant_t& typed) { typed.count_absorbed_donor(typed); })
-            of(variant).count_absorbed_donor(of(donor));
-    }
-    static void count_split_receiver(void* variant, void const* opened, void* receiver) noexcept {
-        if constexpr (requires(variant_t& typed) { typed.count_split_receiver(typed); })
-            if (!static_cast<basic_plan<variant_t> const*>(opened)->plan.moving())
-                of(variant).count_split_receiver(of(receiver));
-    }
-    static refine_report_t plan_running(void* opened) noexcept {
-        if constexpr (viewed_k) return {};
-        else if constexpr (is_vram_index<variant_t>)
-            return static_cast<basic_plan<variant_t> const*>(opened)->plan.running();
-        else return static_cast<basic_plan<variant_t>*>(opened)->plan.finish().value;
-    }
-
-    /** Stops a refine's round at the barrier it stands at, runs the closing health check, or a
-     *  round after moves to its end, and reports; a refine whose donors have not all moved in
-     *  reports zero in every count. */
-    static expected<refine_report_t> plan_finish(void* variant, void* opened, executor_t& executor) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
-        else {
-            typename variant_t::refine_plan_t& plan = static_cast<basic_plan<variant_t>*>(opened)->plan;
-            if (plan.moving()) return {{}, status_t::success_k};
-            if constexpr (is_vram_index<variant_t>) return plan.finish(executor);
-            else {
-                plan.stop();
-                progress_ticks_t closing_alone {{}, 0};
-                status_t const closed = of(variant).refine(plan, executor, closing_alone);
-                return {plan.finish().value, closed};
+            forkunion_allocator_t const allocator {no_memory_domain_k};
+            growing_buffer<variant_t*, forkunion_allocator_t> listed_sources {allocator};
+            growing_buffer<variant_t*, forkunion_allocator_t> listed_targets {allocator};
+            growing_buffer<variant_t*, forkunion_allocator_t> moved {allocator};
+            if (failed(listed_sources.reserve_exactly(sources.size())) ||
+                failed(listed_targets.reserve_exactly(targets.size())) ||
+                failed(moved.reserve_exactly(sources.size() + targets.size())))
+                return {nullptr, status_t::bad_alloc_k};
+            for (std::size_t source = 0; source != sources.size(); ++source)
+                listed_sources.push_back_reserved(&of(sources[source]));
+            for (std::size_t target = 0; target != targets.size(); ++target)
+                listed_targets.push_back_reserved(&of(targets[target]));
+            if (targets.size() == 1) {
+                variant_t& target = *listed_targets[0];
+                for (variant_t* const source : listed_sources)
+                    if (source != &target) moved.push_back_reserved(source);
+                if (moved.empty()) return {nullptr, status_t::unsupported_k};
+                return open_reshard(target, to_span(moved), to_span(listed_sources), to_span(listed_targets),
+                                    reshard_shape_t::pack_k, options, executor);
             }
+            variant_t& source = *listed_sources[0];
+            for (variant_t* const target : listed_targets) {
+                if (listed_sources.size() == 1 && target == &source) return {nullptr, status_t::config_mismatch_k};
+                moved.push_back_reserved(target);
+            }
+            return open_reshard(source, to_span(moved), to_span(listed_sources), to_span(listed_targets),
+                                reshard_shape_t::split_k, options, executor);
         }
     }
-    static void plan_free(void* opened) noexcept {
-        if constexpr (!viewed_k) delete static_cast<basic_plan<variant_t>*>(opened);
+
+    template <typename held_type_>
+    static status_t run_plan(void* opened, executor_t& executor, progress_ticks_t& ticks) noexcept {
+        held_type_& held = *static_cast<held_type_*>(opened);
+        if constexpr (is_vram_index<variant_t>) return held.plan.run(executor, ticks);
+        else return held.driven->drive(held.plan, executor, ticks);
     }
-    static usearch_phase_t plan_phase(void const* opened) noexcept {
+
+    /** Hands each variant a reshard moved in or out what its entries count: the driven target folds
+     *  every emptied source's, and every target of a split counts its part. */
+    template <typename plan_type_>
+    static void count_moved(basic_reshard_plan<variant_t, plan_type_>& held) noexcept {
+        for (variant_t* const moved : held.moved_variants) {
+            if (held.shape == reshard_shape_t::pack_k) {
+                if constexpr (requires {
+                                  held.plan.moved(&moved->index);
+                                  held.driven->count_packed_source(*moved);
+                              })
+                    if (held.plan.moved(&moved->index)) held.driven->count_packed_source(*moved);
+            }
+            else if constexpr (requires { held.driven->count_split_target(*moved); })
+                held.driven->count_split_target(*moved);
+        }
+    }
+
+    /** Stops the round at the barrier it stands at, runs the closing health check, or a round after
+     *  moves to its end, counts what a reshard moved, and reports; a reshard whose entries have not
+     *  all moved reports zero in every count. */
+    template <typename held_type_>
+    static expected<refine_report_t> finish_plan(void* opened, executor_t& executor) noexcept {
+        held_type_& held = *static_cast<held_type_*>(opened);
+        if constexpr (requires { held.plan.moving(); })
+            if (held.plan.moving()) return {{}, status_t::success_k};
+        if constexpr (requires { held.moved_variants; }) count_moved(held);
+        if constexpr (is_vram_index<variant_t>) return held.plan.finish(executor);
+        else {
+            held.plan.stop();
+            progress_ticks_t closing_alone {{}, 0};
+            status_t const closed = held.driven->drive(held.plan, executor, closing_alone);
+            return {held.plan.finish().value, closed};
+        }
+    }
+    template <typename held_type_>
+    static void next_round(void* opened) noexcept {
+        static_cast<held_type_*>(opened)->plan.next_round();
+    }
+    template <typename held_type_>
+    static usearch_phase_progress_t plan_phase(void const* opened) noexcept {
+        return phase_of(static_cast<held_type_ const*>(opened)->plan);
+    }
+    template <typename held_type_>
+    static refine_report_t plan_running(void const* opened) noexcept {
+        held_type_ const& held = *static_cast<held_type_ const*>(opened);
+        if constexpr (is_vram_index<variant_t>) return held.plan.running();
+        else return held.plan.finish().value;
+    }
+    template <typename held_type_>
+    static void free_plan(void* opened) noexcept {
+        delete static_cast<held_type_*>(opened);
+    }
+
+    /** The entries every plan of @p operation_ runs through; none on a view, whose openings refuse
+     *  first. */
+    template <plan_operation_t operation_>
+    static constexpr plan_verbs<executor_t> plan_verbs_for() noexcept {
         if constexpr (viewed_k) return {};
-        else return phase_of(static_cast<basic_plan<variant_t> const*>(opened)->plan);
-    }
-    static void plan_next_round(void* opened) noexcept {
-        if constexpr (requires(typename variant_t::refine_plan_t& plan) { plan.next_round(); })
-            static_cast<basic_plan<variant_t>*>(opened)->plan.next_round();
+        else {
+            using index_t = typename variant_t::index_t;
+            using held_t = std::conditional_t<operation_ == plan_operation_t::refine_k,
+                                              basic_refine_plan<variant_t, typename index_t::refine_plan_t>,
+                                              basic_reshard_plan<variant_t, typename index_t::reshard_plan_t>>;
+            return {&run_plan<held_t>,     &next_round<held_t>,  &plan_phase<held_t>,
+                    &plan_running<held_t>, &finish_plan<held_t>, &free_plan<held_t>};
+        }
     }
 
     /** Audits every shard of the variant: a RAM one on the calling thread, a GPU one on its
@@ -1350,16 +1449,10 @@ struct specialized_variant {
             // Refining
             .health = &health,
             // Plans
-            .plan_open = &plan_open,
-            .plan_next = &plan_next,
-            .plan_consumed = &plan_consumed,
-            .count_absorbed_donor = &count_absorbed_donor,
-            .count_split_receiver = &count_split_receiver,
-            .plan_running = &plan_running,
-            .plan_finish = &plan_finish,
-            .plan_free = &plan_free,
-            .plan_phase = &plan_phase,
-            .plan_next_round = &plan_next_round,
+            .refine_plan_open = &refine_plan_open,
+            .reshard_plan_open = &reshard_plan_open,
+            .refine_plan = plan_verbs_for<plan_operation_t::refine_k>(),
+            .reshard_plan = plan_verbs_for<plan_operation_t::reshard_k>(),
             // Lookups
             .count = &count,
             .get = &get,

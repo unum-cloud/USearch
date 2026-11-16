@@ -81,30 +81,22 @@ typedef struct usearch_sequence_cursor_handle_t* usearch_sequence_cursor_t;
  *  A @c usearch_sequence_refine holding it continues the round a cancel stopped, or starts the next
  *  round from the same root once the last one ended; @c usearch_sequence_refine_plan_finish closes
  *  the round in hand and frees it. The index admits no insertion and no save while the plan lives,
- *  and each call names the index and executor the plan was opened with.
+ *  and each call names the index and executor the plan was opened with; both must outlive the call
+ *  and the plan's finish.
  */
 typedef struct usearch_sequence_refine_plan_handle_t* usearch_sequence_refine_plan_t;
 
 /**
- *  @brief One absorb in flight: the donors still to move, then the rounds that link them in.
+ *  @brief One reshard in flight: its own lists of sources and targets, the entries still to move,
+ *      then the rounds of every target that took entries.
  *
- *  A @c usearch_sequence_absorb holding it moves the donors still pending and continues the rounds
- *  where a cancel stopped them; @c usearch_sequence_absorb_plan_finish closes them and frees it.
- *  The plan keeps the donor array it was opened with, which must outlive it, and nulls each slot it
- *  consumes. The index admits no insertion and no save while the plan lives, and each call names
- *  the index and executor the plan was opened with.
+ *  A @c usearch_sequence_reshard holding it moves what is still pending and continues the rounds
+ *  where a cancel stopped them; @c usearch_sequence_reshard_plan_finish closes them and frees it.
+ *  Every handle it names admits no insertion and no save while the plan lives, and each call names
+ *  the executor the plan was opened with. Every handle a call or the plan names, and that executor,
+ *  must outlive the call and the plan's finish.
  */
-typedef struct usearch_sequence_absorb_plan_handle_t* usearch_sequence_absorb_plan_t;
-
-/**
- *  @brief One split in flight: the partition and moves, then the rounds each receiver runs.
- *
- *  A @c usearch_sequence_split holding it continues the rounds where a cancel stopped them;
- *  @c usearch_sequence_split_plan_finish closes them and frees it. The plan keeps the receiver
- *  array it was opened with, which must outlive it. The index and every receiver admit no insertion
- *  and no save while the plan lives; each call names the index and executor it was opened with.
- */
-typedef struct usearch_sequence_split_plan_handle_t* usearch_sequence_split_plan_t;
+typedef struct usearch_sequence_reshard_plan_handle_t* usearch_sequence_reshard_plan_t;
 
 /**
  *  @brief The sequence scoring kinds supported out of the box.
@@ -777,9 +769,9 @@ typedef struct usearch_sequence_refine_t {
      *  leaves live; a live one continues its round where it stopped, or starts the next. */
     usearch_sequence_refine_plan_t* plan;
 
-    /** The @b optional output for the phase this call stopped in, or the closing one; a call
-     *  without a @c plan writes zeros. */
-    usearch_phase_t* phase;
+    /** The @b optional output for where this call stopped, @c usearch_phase_done_k once its round
+     *  ended. */
+    usearch_phase_progress_t* phase;
 } usearch_sequence_refine_t;
 
 /**
@@ -809,11 +801,11 @@ typedef struct usearch_sequence_refine_t {
  *  is refused the same way, as is a save.
  *
  *  @par Statuses:
+ *  - @c usearch_status_invalid_argument_k A @c plan without an executor, or a live @c plan opened
+ *    on another index or executor.
  *  - @c usearch_status_read_only_k The handle is an NVMe view.
  *  - @c usearch_status_unsupported_k An AMD or Apple GPU handle, which no basic tower serves.
  *  - @c usearch_status_contended_k An insertion or another refinement holds the handle.
- *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
- *    @c plan without an executor.
  */
 USEARCH_EXPORT void usearch_sequence_refine(usearch_sequence_refine_t* arguments);
 
@@ -1054,13 +1046,24 @@ typedef struct usearch_sequence_get_t {
  */
 USEARCH_EXPORT void usearch_sequence_get(usearch_sequence_get_t* arguments);
 
-/** The arguments of @c usearch_sequence_absorb. */
-typedef struct usearch_sequence_absorb_t {
+/** The arguments of @c usearch_sequence_reshard. Every handle @c sources and @c targets name must
+ *  outlive the call and, with a @c plan, the plan's finish. */
+typedef struct usearch_sequence_reshard_t {
 
-    /** The handle absorbing the donors. */
-    usearch_sequence_index_t index;
+    /** Source handles whose entries move, each named once. */
+    size_t sources_count;
 
-    /** The executor each donor's move and the closing refinement fan out over. */
+    /** Array of @c sources_count handles; a source the targets do not name ends empty and live. */
+    usearch_sequence_index_t const* sources;
+
+    /** Target handles the entries move into, each named once. */
+    size_t targets_count;
+
+    /** Array of @c targets_count handles of the sources' residency, class, scalar, kind and
+     *  geometry, each a source itself or empty. */
+    usearch_sequence_index_t const* targets;
+
+    /** The executor every move and the closing rounds fan out over. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -1068,140 +1071,19 @@ typedef struct usearch_sequence_absorb_t {
 
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
-
-    /** Donor handles to absorb. */
-    size_t count;
-
-    /** Array of @c count handles, each consumed and nulled once its entries are published here. */
-    usearch_sequence_index_t* donors;
 
     /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
      *  counts it; @c NULL skips reporting. */
     usearch_refine_report_t* report;
 
-    /** The @b optional breadth and bytes of the closing refine. */
+    /** The @b optional spending of the closing rounds, as @c usearch_refine_options_t names it. */
     usearch_refine_options_t refine;
 
-    /** The @b optional handler, called with donor entries stitched so far and their total; a cancel
-     *  stops the stitching walks as it stops @c usearch_sequence_refine, never a move. */
-    usearch_progress_t progress;
-
-    /** The @b optional traversal telemetry; @c NULL skips reporting. */
-    usearch_traversal_stats_t* stats;
-
-    /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
-     *  cancel leaves live, a live one continues where it stopped. */
-    usearch_sequence_absorb_plan_t* plan;
-
-    /** The @b optional output for the phase this call stopped in, or the closing one; a call
-     *  without a @c plan writes zeros. */
-    usearch_phase_t* phase;
-} usearch_sequence_absorb_t;
-
-/**
- *  @brief Absorbs every handle in @c donors into @c index, one after another, keeping their graphs
- *      rather than re-inserting their sequences, and links each in by walks across. Donor handles
- *      are consumed and must not be used afterwards, not even for @c usearch_sequence_free.
- *
- *  Every donor is checked and held before the first one enters, so a refusal consumes none. The
- *  donors then enter one after another, each all-or-nothing: its entries append to @c index with
- *  their edges rebased, publish at once, and the donor is consumed, so at most one donor's entries
- *  are ever held twice. One refinement then walks every entry across the parts the donors appended,
- *  round by round, so a group of donors costs one refinement rather than one per donor. Readers of
- *  @c index may keep searching throughout, since unpublished entries hide behind the watermark,
- *  while nothing may search a donor. Insertions into @c index arriving meanwhile are refused with
- *  @c usearch_status_contended_k.
- *
- *  The handler reports and cancels the closing refinement alone, exactly as in
- *  @c usearch_sequence_refine: a cancel skips the rest of the walks across, still re-links, and
- *  answers @c usearch_status_cancelled_k with every donor consumed. A caller wanting to continue
- *  later passes a @c plan: a cancel then leaves it live, the next call naming it moves any donor
- *  still pending and continues, and @c usearch_sequence_absorb_plan_finish closes it. A live plan
- *  reads its own donors, never the call's @c count and @c donors.
- *
- *  @par Statuses:
- *  - @c usearch_status_read_only_k @c index is an NVMe view.
- *  - @c usearch_status_unsupported_k @c index on an AMD or Apple GPU, which no basic tower serves.
- *  - @c usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
- *    for a nonzero @c count.
- *  - @c usearch_status_config_mismatch_k A donor of another residency, class, kind or geometry,
- *    or @c index itself.
- *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
- *    donor; every donor stays a live handle.
- *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
- *    @c plan without an executor.
- */
-USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments);
-
-/** The arguments of @c usearch_sequence_absorb_plan_finish. */
-typedef struct usearch_sequence_absorb_plan_finish_t {
-
-    /** The handle the plan was opened on. */
-    usearch_sequence_index_t index;
-
-    /** The executor the plan was opened with. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** The plan to close; freed by the call, whatever it answers. */
-    usearch_sequence_absorb_plan_t plan;
-
-    /** The @b optional output for what the whole plan did to the graph. */
-    usearch_refine_report_t* report;
-} usearch_sequence_absorb_plan_finish_t;
-
-/**
- *  @brief Closes and frees @c plan whatever the call answers, reopening the index.
- *
- *  Donors still pending stay live handles the caller owns. The round a cancel stopped closes as a
- *  stop at that barrier would, its verdict reading stopped; a plan whose donors have not all moved
- *  runs no round and reports zeros.
- *
- *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
- *    executor; the plan is still freed.
- */
-USEARCH_EXPORT void usearch_sequence_absorb_plan_finish(usearch_sequence_absorb_plan_finish_t* arguments);
-
-/** The arguments of @c usearch_sequence_split. */
-typedef struct usearch_sequence_split_t {
-
-    /** The handle split into the receivers, left empty and live. */
-    usearch_sequence_index_t index;
-
-    /** The executor the partition, each part's move and the closing refinements fan out over. */
-    usearch_executor_t executor;
-
-    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
-    usearch_outcome_t* outcome;
-
-    /** Blocking, the default, or deferred. */
-    usearch_completion_t completion;
-
-    /** Receiver handles to split into, at least two. */
-    size_t count;
-
-    /** Array of @c count empty handles of the source's residency, class, kind and geometry, each
-     *  receiving one part. */
-    usearch_sequence_index_t const* receivers;
-
-    /** The @b optional output for what the call did to the graph, as @c usearch_refine_report_t
-     *  counts it; @c NULL skips reporting. */
-    usearch_refine_report_t* report;
-
-    /** The @b optional breadth and bytes of the closing refines. */
-    usearch_refine_options_t refine;
-
-    /** Picks the part roots: equal seeds over an unchanged index split equally. */
+    /** Picks the part roots of a cut: equal seeds over an unchanged source cut it equally. */
     uint64_t seed;
 
-    /** The @b optional handler, called with entries the closing refines re-selected; a cancel stops
-     *  them as it stops @c usearch_sequence_refine, never a move. */
+    /** The @b optional handler, called at every barrier of the closing rounds' phases with that
+     *  phase's units; a cancel stops them as it stops @c usearch_sequence_refine, never a move. */
     usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
@@ -1209,56 +1091,60 @@ typedef struct usearch_sequence_split_t {
 
     /** The @b optional plan: @c NULL moves and runs to the end, a @c NULL pointee opens one that a
      *  cancel leaves live, a live one continues where it stopped. */
-    usearch_sequence_split_plan_t* plan;
+    usearch_sequence_reshard_plan_t* plan;
 
-    /** The @b optional output for the phase this call stopped in, or the closing one; a call
-     *  without a @c plan writes zeros. */
-    usearch_phase_t* phase;
-} usearch_sequence_split_t;
+    /** The @b optional output for where this call stopped, @c usearch_phase_done_k once its rounds
+     *  ended. */
+    usearch_phase_progress_t* phase;
+} usearch_sequence_reshard_t;
 
 /**
- *  @brief Splits @c index into the handles in @c receivers, the inverse of
- *      @c usearch_sequence_absorb: graph-local parts keeping their edges rather than re-inserting
- *      their sequences, one part per receiver, and @c index left empty but live.
+ *  @brief Moves the entries of @c sources into @c targets, keeping their links rather than
+ *      re-inserting their sequences, then runs a round on every target that took entries.
  *
- *  Every receiver is checked and held before the first part moves, so a refusal moves nothing. The
- *  part roots are drawn from @c seed without a scan, and each part grows breadth-first over the
- *  links from its root, capped at an equal share of the entries, while entries no root reaches
- *  enter the smallest part. Each part then enters its receiver all-or-nothing, its edges rebased,
- *  its edges into other parts dropped, and the entries that lost one placed first; @c index clears
- *  once every part moved. Each receiver closes by re-selecting the entries that lost an edge and
- *  re-linking the islands that leaves, as @c usearch_sequence_refine does. Insertions into @c index
- *  or a receiver arriving meanwhile are refused with @c usearch_status_contended_k, and nothing may
- *  search either until the call is final.
+ *  Gathering names several sources and one target, itself a source or empty. Each other source
+ *  lands all-or-nothing, its entries appending to the target with their edges rebased, so at most
+ *  one source's entries are ever held twice.
  *
- *  The handler reports and cancels the closing refinements alone, exactly as in
- *  @c usearch_sequence_refine: a cancel skips the rest of the re-selection, still re-links, and
- *  answers @c usearch_status_cancelled_k with every part moved. A caller wanting to continue later
- *  passes a @c plan: a cancel then leaves it live, the next call naming it continues, and
- *  @c usearch_sequence_split_plan_finish closes it. A live plan reads its own receivers, never the
- *  call's @c count and @c receivers.
+ *  Cutting names one source and several targets, one graph-local part each. The part roots are
+ *  drawn from @c seed without a scan, each part grows breadth-first over the links from its root,
+ *  capped at an equal share of the entries, and entries no root reaches enter the smallest part.
+ *  Each part enters its target with its edges into other parts dropped and the entries that lost
+ *  one placed first.
+ *
+ *  No walk links a moved entry in: each target then runs a round, as @c usearch_sequence_refine
+ *  does, healing what arrived as an island and re-stitching the neighborhoods it shares with the
+ *  entries already there. Every handle is checked and held before the first entry moves, so a
+ *  refusal moves nothing, and every handle stays the caller's: a source the targets do not name
+ *  ends empty and live, and @c usearch_sequence_free frees it as any other. Readers of a target may
+ *  keep searching throughout, since unpublished entries hide behind the watermark, and insertions
+ *  into any handle named arriving meanwhile are refused with @c usearch_status_contended_k.
+ *
+ *  The handler reports and cancels the closing rounds alone, exactly as in
+ *  @c usearch_sequence_refine, and answers @c usearch_status_cancelled_k with every entry moved. A
+ *  caller wanting to continue later passes a @c plan: a cancel then leaves it live, the next call
+ *  naming it moves what is still pending and continues, and @c usearch_sequence_reshard_plan_finish
+ *  closes it. A live plan reads its own sources and targets, never the call's.
  *
  *  @par Statuses:
- *  - @c usearch_status_read_only_k @c index is a view.
- *  - @c usearch_status_invalid_argument_k Fewer than two receivers, @c NULL @c receivers, or a
- *    @c NULL slot in them.
- *  - @c usearch_status_config_mismatch_k A receiver of another residency, class, kind or
- *    geometry, one holding entries or another shard count, one named twice, or @c index
- *    itself.
- *  - @c usearch_status_contended_k An insertion or refinement in flight on @c index or on a
- *    receiver; nothing moves.
- *  - @c usearch_status_overflow_k A part passes a receiver shard's ceiling.
- *  - @c usearch_status_unsupported_k @c index on an AMD or Apple GPU, which no basic tower serves.
- *  - @c usearch_status_invalid_argument_k A live @c plan opened on another index or executor, or a
- *    @c plan without an executor.
+ *  - @c usearch_status_invalid_argument_k No sources or no targets, a @c NULL list or slot, a
+ *    handle named twice among the sources or among the targets, a @c plan without an executor, or a
+ *    live @c plan opened with another executor.
+ *  - @c usearch_status_read_only_k A handle is an NVMe view.
+ *  - @c usearch_status_config_mismatch_k A handle of another residency, class, scalar, kind or
+ *    geometry than the first source, a target neither a source nor empty, or a source cut into
+ *    targets that include it.
+ *  - @c usearch_status_unsupported_k Several sources into several targets, one handle as its only
+ *    source and target, since a handle of one shard has nothing to recut, or a handle on an AMD or
+ *    Apple GPU, which no basic tower serves.
+ *  - @c usearch_status_contended_k An insertion or refinement in flight on a handle named; nothing
+ *    moves.
+ *  - @c usearch_status_overflow_k A part passes a target shard's ceiling.
  */
-USEARCH_EXPORT void usearch_sequence_split(usearch_sequence_split_t* arguments);
+USEARCH_EXPORT void usearch_sequence_reshard(usearch_sequence_reshard_t* arguments);
 
-/** The arguments of @c usearch_sequence_split_plan_finish. */
-typedef struct usearch_sequence_split_plan_finish_t {
-
-    /** The handle the plan was opened on. */
-    usearch_sequence_index_t index;
+/** The arguments of @c usearch_sequence_reshard_plan_finish. */
+typedef struct usearch_sequence_reshard_plan_finish_t {
 
     /** The executor the plan was opened with. */
     usearch_executor_t executor;
@@ -1270,23 +1156,24 @@ typedef struct usearch_sequence_split_plan_finish_t {
     usearch_completion_t completion;
 
     /** The plan to close; freed by the call, whatever it answers. */
-    usearch_sequence_split_plan_t plan;
+    usearch_sequence_reshard_plan_t plan;
 
     /** The @b optional output for what the whole plan did to the graph. */
     usearch_refine_report_t* report;
-} usearch_sequence_split_plan_finish_t;
+} usearch_sequence_reshard_plan_finish_t;
 
 /**
- *  @brief Closes and frees @c plan whatever the call answers, reopening the index and receivers.
+ *  @brief Closes and frees @c plan whatever the call answers, reopening every handle it names.
  *
  *  The rounds a cancel stopped close as a stop at that barrier would, their verdict reading
- *  stopped; a plan whose parts have not all moved runs no round and reports zeros.
+ *  stopped; a plan whose entries have not all moved runs no round and reports zeros, every handle
+ *  holding what it held when the plan stopped.
  *
  *  @par Statuses:
- *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened on another index or
- *    executor; the plan is still freed.
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c plan, or one opened with another executor;
+ *    the plan is still freed.
  */
-USEARCH_EXPORT void usearch_sequence_split_plan_finish(usearch_sequence_split_plan_finish_t* arguments);
+USEARCH_EXPORT void usearch_sequence_reshard_plan_finish(usearch_sequence_reshard_plan_finish_t* arguments);
 
 /** The arguments of @c usearch_sequence_cursor_init. */
 typedef struct usearch_sequence_cursor_init_t {
@@ -1369,7 +1256,8 @@ typedef struct usearch_sequence_cursor_next_t {
  *
  *  @par Statuses:
  *  - @c usearch_status_io_k A read from an NVMe view's drives failed.
- *  - @c usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
+ *  - @c usearch_status_invalid_argument_k A @c NULL @c cursor, or @c index not the handle the
+ *    cursor was opened on.
  */
 USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments);
 

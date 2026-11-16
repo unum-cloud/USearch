@@ -218,6 +218,61 @@ USEARCH_EXPORT usearch_status_t usearch_mood_from_name(usearch_bytes_view_t name
     return usearch_status_invalid_argument_k;
 }
 
+USEARCH_EXPORT char const* usearch_refine_verdict_name(usearch_refine_verdict_t verdict) {
+    switch (verdict) {
+    case usearch_refine_none_k: return "none";
+    case usearch_refine_improved_k: return "improved";
+    case usearch_refine_converged_k: return "converged";
+    case usearch_refine_stalled_k: return "stalled";
+    case usearch_refine_stopped_k: return "stopped";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_status_t usearch_refine_verdict_from_name(usearch_bytes_view_t name,
+                                                                 usearch_refine_verdict_t* verdict) {
+    if (named(name, "none")) return *verdict = usearch_refine_none_k, usearch_status_success_k;
+    if (named(name, "improved")) return *verdict = usearch_refine_improved_k, usearch_status_success_k;
+    if (named(name, "converged")) return *verdict = usearch_refine_converged_k, usearch_status_success_k;
+    if (named(name, "stalled")) return *verdict = usearch_refine_stalled_k, usearch_status_success_k;
+    if (named(name, "stopped")) return *verdict = usearch_refine_stopped_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
+}
+
+USEARCH_EXPORT char const* usearch_phase_name(usearch_phase_t phase) {
+    switch (phase) {
+    case usearch_phase_none_k: return "none";
+    case usearch_phase_copy_k: return "copy";
+    case usearch_phase_build_k: return "build";
+    case usearch_phase_partition_k: return "partition";
+    case usearch_phase_scatter_k: return "scatter";
+    case usearch_phase_health_k: return "health";
+    case usearch_phase_heal_k: return "heal";
+    case usearch_phase_hubs_k: return "hubs";
+    case usearch_phase_gather_k: return "gather";
+    case usearch_phase_restitch_k: return "restitch";
+    case usearch_phase_write_k: return "write";
+    case usearch_phase_done_k: return "done";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_status_t usearch_phase_from_name(usearch_bytes_view_t name, usearch_phase_t* phase) {
+    if (named(name, "none")) return *phase = usearch_phase_none_k, usearch_status_success_k;
+    if (named(name, "copy")) return *phase = usearch_phase_copy_k, usearch_status_success_k;
+    if (named(name, "build")) return *phase = usearch_phase_build_k, usearch_status_success_k;
+    if (named(name, "partition")) return *phase = usearch_phase_partition_k, usearch_status_success_k;
+    if (named(name, "scatter")) return *phase = usearch_phase_scatter_k, usearch_status_success_k;
+    if (named(name, "health")) return *phase = usearch_phase_health_k, usearch_status_success_k;
+    if (named(name, "heal")) return *phase = usearch_phase_heal_k, usearch_status_success_k;
+    if (named(name, "hubs")) return *phase = usearch_phase_hubs_k, usearch_status_success_k;
+    if (named(name, "gather")) return *phase = usearch_phase_gather_k, usearch_status_success_k;
+    if (named(name, "restitch")) return *phase = usearch_phase_restitch_k, usearch_status_success_k;
+    if (named(name, "write")) return *phase = usearch_phase_write_k, usearch_status_success_k;
+    if (named(name, "done")) return *phase = usearch_phase_done_k, usearch_status_success_k;
+    return usearch_status_invalid_argument_k;
+}
+
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {
     switch (cpu_class) {
     case usearch_cpu_class_serial_k: return "serial";

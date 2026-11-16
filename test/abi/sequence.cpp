@@ -10,12 +10,13 @@
  *  neighbors cluster by template while the bytes differ; Needleman-Wunsch aligns them packed two
  *  bits apiece under transition and transversion costs. Each cell checks the verbs a caller
  *  reaches: the sequences land under their keys across the shards and each counts once and reads
- *  back, a walk keeps most of the exact scan's top ten, a RAM index refines, through a handle too,
- *  and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
- *  entry and a sample draws distinct ones, the index saves into memory and back and into every
- *  residency and as a view byte for byte, an NVMe view answers, audits, walks and samples and
- *  refuses every write, a RAM index splits into two with every key in one part, a cleared index
- *  holds nothing and ends a cursor opened before it, and every metric's name reads back.
+ *  back, a walk keeps most of the exact scan's top ten, a RAM index refines, through a plan too,
+ *  and gathers a second source through a reshard plan while a GPU one refuses all three, an audit
+ *  reaches every entry, cursors walk every entry and a sample draws distinct ones, the index saves
+ *  into memory and back and into every residency and as a view byte for byte, an NVMe view answers,
+ *  audits, walks and samples and refuses every write, a RAM index reshards into two targets through
+ *  a plan, every key in one, a cleared index holds nothing and ends a cursor opened before it, and
+ *  every metric's name reads back.
  */
 #include <array>  // `std::array` - the templates, the window widths
 #include <string> // `std::string` - the strings, the cells' names
@@ -31,10 +32,10 @@ using us::sequence::pack_codes;
 using us::sequence::packed_code_bits;
 using us::sequence::packed_codes_bytes;
 
-/** Sequences a cell builds, the queries held out past them, the donor's sequences, and the
- *  nucleotides per template. */
+/** Sequences a cell builds, the queries held out past them, the sequences a second source holds,
+ *  and the nucleotides per template. */
 struct sequence_sizes_t {
-    std::size_t sequences = 0, queries = 0, donor_sequences = 0, length = 0;
+    std::size_t sequences = 0, queries = 0, packed_sequences = 0, length = 0;
 };
 
 /** The sizes of the bit-parallel metrics' cells, and the smaller ones of Needleman-Wunsch, whose
@@ -152,8 +153,8 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     nucleotides_layout_t const layout = aligned ? nucleotides_layout_t::packed_k : nucleotides_layout_t::bytes_k;
     sequence_tape_t const sequences = generate_sequences(
         generate_nucleotides(sizes.sequences + sizes.queries, sizes.length, seed), layout);
-    sequence_tape_t const donated = generate_sequences(generate_nucleotides(sizes.donor_sequences, sizes.length, ~seed),
-                                                       layout);
+    sequence_tape_t const second_source = generate_sequences(
+        generate_nucleotides(sizes.packed_sequences, sizes.length, ~seed), layout);
     usearch_tape_view_t const queries = sequence_verbs_t::slice(sequences.view(), sizes.sequences);
 
     std::size_t failures = expect_built(cell, index, sequences.view(), sizes.sequences);
@@ -170,10 +171,10 @@ static std::size_t check_sequence_metric(sweep_cell_t const& cell, session_t& se
     failures += expect_persistence(cell, index, sequences.view(), queries, sizes.queries, sequence_expansion_k, 0.8,
                                    stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, sequences.view(), sizes.sequences, usearch_status_success_k);
-    failures += expect_absorbed(index, donated.view(), sizes.donor_sequences, sizes.sequences,
-                                usearch_status_success_k);
-    failures += expect_split(index, usearch_status_success_k);
+    failures += expect_refine_plan(index, sequences.view(), sizes.sequences, usearch_status_success_k);
+    failures += expect_reshard_gather(index, second_source.view(), sizes.packed_sequences, sizes.sequences,
+                                      usearch_status_success_k);
+    failures += expect_reshard_cut(index, usearch_status_success_k);
     return failures + expect_cleared(index, sequences.view());
 }
 

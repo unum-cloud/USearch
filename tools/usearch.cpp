@@ -74,7 +74,7 @@ static int run_verb(world_t& world, int argc, char** argv) {
     std::FILE* const stream = asked ? stdout : stderr;
     if (world.rank == 0)
         fmt::println(stream, "Usage: usearch <dense|sequence|shapes|geospatial> " //
-                             "<insert|absorb|refine|split|health|search|metadata> --help");
+                             "<insert|refine|reshard|health|search|metadata> --help");
     if (world.rank == 0) fmt::println(stream, "       usearch dense get --help");
     if (world.rank == 0) fmt::println(stream, "       usearch <metadata|copy|export|import|recall> --help");
     return asked ? EXIT_SUCCESS : EXIT_FAILURE;

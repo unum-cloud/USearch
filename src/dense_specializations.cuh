@@ -12,13 +12,12 @@
  */
 #pragma once
 
-#include <array>       // `std::array` - a class unit's variants
-#include <new>         // `std::nothrow`
-#include <type_traits> // `std::conditional_t` - the engine plans a plan may hold
-#include <variant>     // `std::variant`, `std::in_place_type` - a reshard's plan beside a refine's
+#include <array>   // `std::array` - a class unit's variants
+#include <new>     // `std::nothrow`
+#include <utility> // `std::move` - an opened engine plan onto the heap
 
-#include "usearch/dense/nvme_reshard.hpp" // `refine_parts` - a loaded NVMe index's refine
-#include "usearch/dense/ram_reshard.hpp"
+#include "usearch/dense/nvme_reshard.hpp" // `plan_refine`, `plan_reshard` - a loaded NVMe index's plans
+#include "usearch/dense/ram_reshard.hpp"  // `plan_reshard` - RAM indexes' reshard
 #include "usearch/dense/ram_indexes.hpp"
 #if USEARCH_ARCH_CUDA_
 #include "usearch/dense/vram_nvidia_indexes.hpp"
@@ -211,41 +210,41 @@ inline static expected<typename index_type_::search_result_t> search_with_expens
     return search_if(walked);
 }
 
-/** A plan in flight: the typed donors it absorbs, each nulled once consumed, the receivers it
- *  splits into, or the index a reshard packs in place, which the engine plan reads in place; a RAM
- *  index's reshard holds a compaction plan, every other operation a refine plan. */
+/** The engine plan a refine of @p index_type_ opens: the tower's own, or a loaded NVMe index's
+ *  part by part rewrite. */
 template <typename index_type_>
-struct dense_plan {
-    using refine_plan_t = typename index_type_::refine_plan_t;
-    using engine_plan_t =
-        std::conditional_t<is_ram_index<index_type_>, std::variant<refine_plan_t, dense::ram_compact_plan<index_type_>>,
-                           std::variant<refine_plan_t>>;
-    growing_buffer<index_type_*> others;
-    engine_plan_t plan;
+struct refine_plan_of {
+    using type = typename index_type_::refine_plan_t;
+};
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+struct refine_plan_of<index_type_> {
+    using type = dense::nvme_refine_plan<index_type_>;
 };
 
-/** The refine plan whose rounds @p plan runs: its own, or the one a compaction moves into. */
-template <typename refine_plan_type_>
-refine_plan_type_& rounds_of(refine_plan_type_& plan) noexcept {
-    return plan;
-}
-template <typename indexes_type_>
-typename dense::ram_compact_plan<indexes_type_>::refine_plan_t& rounds_of(
-    dense::ram_compact_plan<indexes_type_>& plan) noexcept {
-    return plan.refining();
-}
-template <typename indexes_type_>
-typename dense::ram_compact_plan<indexes_type_>::refine_plan_t const& rounds_of(
-    dense::ram_compact_plan<indexes_type_> const& plan) noexcept {
-    return plan.refining();
-}
+/** The engine plan a reshard of @p index_type_ opens: a device tower's own, or the freestanding
+ *  RAM and NVMe ones. */
+template <typename index_type_>
+struct reshard_plan_of {
+    using type = typename index_type_::reshard_plan_t;
+};
+template <typename index_type_>
+    requires is_ram_index<index_type_>
+struct reshard_plan_of<index_type_> {
+    using type = dense::ram_reshard_plan<index_type_>;
+};
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+struct reshard_plan_of<index_type_> {
+    using type = dense::nvme_reshard_plan<index_type_>;
+};
 
 /**
  *  @brief One variant's bodies, every one a static member its verb table points at, taking the
  *      index as @c void* and casting it back to @p index_type_.
  *
  *  An NVMe view serves its checkpoint in place, so its mutating bodies answer
- *  @c usearch_status_read_only_k, and a loaded NVMe index, whose parts change only by a refine,
+ *  @c usearch_status_read_only_k, and a loaded NVMe index, whose parts change only by its plans,
  *  @c unsupported_k; a device index answers @c unsupported_k for what only a host walk takes, as
  *  host predicates and cursors.
  */
@@ -260,6 +259,8 @@ struct specialized_index {
     using rows_span_t = dense::rows_span_t;
     using scratch_t = dense_scratch<index_type_>;
     using search_config_t = typename index_type_::search_config_t;
+    using refine_plan_t = typename refine_plan_of<index_type_>::type;
+    using reshard_plan_t = typename reshard_plan_of<index_type_>::type;
 
     static constexpr bool viewed_k = is_nvme_index<index_type_>;
 
@@ -307,12 +308,6 @@ struct specialized_index {
         config.memory_limit = refine.memory_limit;
         if constexpr (requires { config.cache_bytes; }) config.cache_bytes = refine.cache_bytes;
         return config;
-    }
-
-    /** The engine's split config of the call's @p split. */
-    template <typename engine_type_ = index_type_>
-    static typename engine_type_::split_config_t split_config_of(::split_config_t split) noexcept {
-        return {refine_config_of<engine_type_>(split.refine), split.seed};
     }
 
     /** Hands @p walk the alternative @p predicate holds, as <tt>walk(narrowing)</tt>; a device walk
@@ -463,101 +458,54 @@ struct specialized_index {
         }
     }
 
-    /** Refines a loaded NVMe index part by part, replacing each; a view holds no writer, so it
-     *  answers @c read_only_k. */
-    static expected<refine_report_t> refine(void* index, ::refine_config_t config, executor_t& executor,
-                                            progress_ticks_t& ticks) noexcept
-        requires is_nvme_index<index_type_>
-    {
-        return dense::refine_parts(of(index), refine_config_of(config), executor, ticks);
-    }
-    static expected<refine_report_t> refine(void* index, ::refine_config_t config, executor_t& executor,
-                                            progress_ticks_t& ticks) noexcept {
-        if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
-        return of(index).refine(
-            refine_config_of(config), executor,
-            [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+    /** Opens one round over every shard, or a loaded NVMe index's pass over its parts; a view holds
+     *  no writer, so it answers @c read_only_k. */
+    static expected<void*> refine_plan_open(void* index, ::refine_config_t config, executor_t& executor) noexcept {
+        if (!limits_memory_k && config.memory_limit) return {nullptr, status_t::unsupported_k};
+        auto [plan, status] = [&]() noexcept -> expected<refine_plan_t> {
+            if constexpr (is_nvme_index<index_type_>)
+                return dense::plan_refine(of(index), refine_config_of(config), executor);
+            else return of(index).plan_refine(refine_config_of(config), executor);
+        }();
+        if (failed(status)) return {nullptr, status};
+        refine_plan_t* const opened = new (std::nothrow) refine_plan_t(std::move(plan));
+        if (!opened) return {nullptr, status_t::bad_alloc_k};
+        return {opened, status_t::success_k};
     }
 
-    /** Absorbs NVMe donors into a loaded NVMe index, their parts and its own repacked beside its
-     *  manifest, every donor consumed once the manifest names the new parts; a view refuses. */
-    static expected<refine_report_t> absorb(void* index, std::span<void*> donors, ::refine_config_t config,
-                                            executor_t& executor, progress_ticks_t& ticks) noexcept
-        requires is_nvme_index<index_type_>
-    {
-        growing_buffer<index_t*> typed {global_allocator};
-        if (failed(typed.reserve_exactly(donors.size()))) return {{}, status_t::bad_alloc_k};
-        for (void* const donor : donors) typed.push_back_reserved(static_cast<index_t*>(donor));
-        expected<refine_report_t> const absorbed = dense::absorb_parts(of(index), to_span(typed),
-                                                                       refine_config_of(config), executor, ticks);
-        if (succeeded(absorbed.status))
-            for (void*& donor : donors) donor = nullptr;
-        return absorbed;
-    }
-    static expected<refine_report_t> absorb(void* index, std::span<void*> donors, ::refine_config_t config,
-                                            executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, refuses_writes(index)};
-        else if (!limits_memory_k && config.memory_limit) return {{}, status_t::unsupported_k};
-        else {
-            growing_buffer<index_t*> typed {global_allocator};
-            if (failed(typed.reserve_exactly(donors.size()))) return {{}, status_t::bad_alloc_k};
-            for (void* const donor : donors) typed.push_back_reserved(static_cast<index_t*>(donor));
-            expected<refine_report_t> const refined = of(index).absorb(
-                to_writable_span(typed), refine_config_of(config), executor,
-                [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
-            for (std::size_t position = 0; position != donors.size(); ++position)
-                if (!typed[position]) donors[position] = nullptr;
-            return refined;
+    /** What a reshard refuses of @p options: another residency's placement, which names nothing the
+     *  handles hold, or named domains, devices or drives, which would place shards anew, or a class
+     *  or memory limit, which a reshard keeping the handles' variant cannot honour. */
+    static status_t refuses_placements(reshard_options_t options) noexcept {
+        if constexpr (is_ram_index<index_type_>) {
+            if (options.vram || options.nvme) return status_t::config_mismatch_k;
+            if (options.ram && (options.ram->memory_domains_count || options.ram->memory_limit ||
+                                options.ram->cpu_class != usearch_cpu_class_unknown_k))
+                return status_t::unsupported_k;
         }
-    }
-
-    /** Packs a RAM index's own shards in place under its RAM placement's capacity, the index being
-     *  its only source; a placement of another residency names nothing it holds, and named domains
-     *  would place shards anew, which no RAM reshard does yet. */
-    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t placements, executor_t& executor,
-                                                     progress_ticks_t& ticks) noexcept
-        requires is_ram_index<index_type_>
-    {
-        if (status_t const refused = refuses_placements(placements); failed(refused)) return {{}, refused};
-        std::array<index_t*, 1> const sources {&of(index)};
-        return dense::compact(
-            std::span<index_t* const> {sources}, of(index), executor, compact_config_of(placements),
-            [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
-    }
-
-    /** What a RAM reshard refuses of @p placements: another residency's, which names nothing the
-     *  index holds, or named domains, which would place shards anew. */
-    static status_t refuses_placements(reshard_placements_t placements) noexcept {
-        if (placements.vram || placements.nvme) return status_t::config_mismatch_k;
-        if (placements.ram && placements.ram->memory_domains_count) return status_t::unsupported_k;
+        else if constexpr (is_nvme_index<index_type_>) {
+            if (options.ram || options.vram) return status_t::config_mismatch_k;
+            if (options.nvme && (options.nvme->paths_count || options.nvme->cpu_class != usearch_cpu_class_unknown_k))
+                return status_t::unsupported_k;
+        }
+        else {
+            if (options.ram || options.nvme) return status_t::config_mismatch_k;
+            if (options.vram && (options.vram->devices_count || options.vram->gpu_class != usearch_gpu_class_unknown_k))
+                return status_t::unsupported_k;
+        }
         return status_t::success_k;
     }
 
-    /** The compaction a RAM reshard under @p placements runs. */
-    static dense::compact_config_t compact_config_of(reshard_placements_t placements) noexcept {
-        dense::compact_config_t config;
-        config.shard_capacity = placements.ram ? placements.ram->shard_capacity : 0;
-        config.expansion_factor = static_cast<u32_t>(placements.refine.expansion_factor);
-        config.memory_limit = placements.refine.memory_limit;
+    /** The engine's reshard config of the call's @p options: its rounds, the capacity its own
+     *  residency's placement names, and the seed of a split's part roots. */
+    static dense::reshard_config_t reshard_config_of(reshard_options_t options) noexcept {
+        dense::reshard_config_t config;
+        config.refine = refine_config_of(options.refine);
+        if constexpr (is_ram_index<index_type_>) config.shard_capacity = options.ram ? options.ram->shard_capacity : 0;
+        else if constexpr (is_vram_index<index_type_>)
+            config.shard_capacity = options.vram ? options.vram->shard_capacity : 0;
+        config.seed = options.seed;
         return config;
-    }
-
-    /** Repacks a loaded NVMe index's parts in place into as few parts as address their entries; a
-     *  placement of another residency names nothing it holds, and named drives would place parts
-     *  anew, which no NVMe reshard does yet. A view answers @c read_only_k. */
-    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t placements, executor_t& executor,
-                                                     progress_ticks_t& ticks) noexcept
-        requires is_nvme_index<index_type_>
-    {
-        if (placements.ram || placements.vram) return {{}, status_t::config_mismatch_k};
-        if (placements.nvme && placements.nvme->paths_count) return {{}, status_t::unsupported_k};
-        return dense::reshard_parts(of(index), 0, refine_config_of(placements.refine), executor, ticks);
-    }
-
-    /** Every other index refuses a reshard as it refuses a write. */
-    static expected<dense::compact_result_t> reshard(void* index, reshard_placements_t, executor_t&,
-                                                     progress_ticks_t&) noexcept {
-        return {{}, refuses_writes(index)};
     }
 
     /** The typed indexes behind @p indexes, or an empty buffer when it found no memory. */
@@ -569,145 +517,92 @@ struct specialized_index {
         return typed;
     }
 
-    /** Splits a loaded NVMe index into empty NVMe receivers, each loading a manifest of its own
-     *  beside the source's; a view answers @c read_only_k. */
-    static expected<refine_report_t> split(void* index, variants_view_t receivers, ::split_config_t config,
-                                           executor_t& executor, progress_ticks_t& ticks) noexcept
-        requires is_nvme_index<index_type_>
-    {
-        growing_buffer<index_t*> typed = indexes_of(receivers);
-        if (typed.size() != receivers.size()) return {{}, status_t::bad_alloc_k};
-        return dense::split_parts(of(index), to_span(typed), refine_config_of(config.refine), executor, ticks);
-    }
-    static expected<refine_report_t> split(void* index, variants_view_t receivers, ::split_config_t config,
-                                           executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return {{}, refuses_writes(index)};
-        else if (!limits_memory_k && config.refine.memory_limit) return {{}, status_t::unsupported_k};
-        else {
-            growing_buffer<index_t*> typed = indexes_of(receivers);
-            if (typed.size() != receivers.size()) return {{}, status_t::bad_alloc_k};
-            return of(index).split(
-                to_writable_span(typed), split_config_of(config), executor,
-                [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
-        }
-    }
-
-    static expected<void*> plan_open(void* index, variants_view_t donors, variants_view_t receivers,
-                                     ::split_config_t config, executor_t& executor) noexcept {
-        if constexpr (viewed_k) return {nullptr, refuses_writes(index)};
-        else if (!limits_memory_k && config.refine.memory_limit) return {nullptr, status_t::unsupported_k};
-        else {
-            using plan_t = dense_plan<index_t>;
-            using refine_plan_t = typename index_t::refine_plan_t;
-            variants_view_t const others = receivers.empty() ? donors : receivers;
-            growing_buffer<index_t*> typed = indexes_of(others);
-            if (typed.size() != others.size()) return {nullptr, status_t::bad_alloc_k};
-            // The plan borrows the receiver slots, whose storage moves along with the buffer.
-            auto [plan, status] =
-                receivers.empty()
-                    ? of(index).plan_absorb(to_writable_span(typed), refine_config_of(config.refine), executor)
-                    : of(index).plan_split(to_writable_span(typed), split_config_of(config), executor);
-            if (failed(status)) return {nullptr, status};
-            plan_t* const opened = new (std::nothrow) plan_t {
-                std::move(typed), typename plan_t::engine_plan_t {std::in_place_type<refine_plan_t>, std::move(plan)}};
-            if (!opened) return {nullptr, status_t::bad_alloc_k};
-            return {opened, status_t::success_k};
-        }
-    }
-
-    /** Opens a RAM index's reshard in place under its placement's capacity, as @ref reshard runs
-     *  it; every other index refuses as it refuses a write. */
-    static expected<void*> reshard_plan_open(void* index, reshard_placements_t placements,
-                                             executor_t& executor) noexcept
-        requires is_ram_index<index_type_>
-    {
-        using plan_t = dense_plan<index_t>;
-        using compact_plan_t = dense::ram_compact_plan<index_t>;
-        if (status_t const refused = refuses_placements(placements); failed(refused)) return {nullptr, refused};
-        growing_buffer<index_t*> sources {global_allocator};
-        if (failed(sources.reserve_exactly(1))) return {nullptr, status_t::bad_alloc_k};
-        sources.push_back_reserved(&of(index));
-        // The plan borrows the source slot, whose storage moves along with the buffer.
-        auto [plan, status] = dense::plan_compact(to_span(sources), of(index), executor, compact_config_of(placements));
+    /** Opens a reshard of @p sources into @p targets, which copies both lists. */
+    static expected<void*> reshard_plan_open(variants_view_t sources, variants_view_t targets,
+                                             reshard_options_t options, executor_t& executor) noexcept {
+        if (status_t const refused = refuses_placements(options); failed(refused)) return {nullptr, refused};
+        growing_buffer<index_t*> const typed_sources = indexes_of(sources);
+        growing_buffer<index_t*> const typed_targets = indexes_of(targets);
+        if (typed_sources.size() != sources.size() || typed_targets.size() != targets.size())
+            return {nullptr, status_t::bad_alloc_k};
+        auto [plan, status] = dense::plan_reshard(to_span(typed_sources), to_span(typed_targets), executor,
+                                                  reshard_config_of(options));
         if (failed(status)) return {nullptr, status};
-        plan_t* const opened = new (std::nothrow) plan_t {
-            std::move(sources), typename plan_t::engine_plan_t {std::in_place_type<compact_plan_t>, std::move(plan)}};
+        reshard_plan_t* const opened = new (std::nothrow) reshard_plan_t(std::move(plan));
         if (!opened) return {nullptr, status_t::bad_alloc_k};
         return {opened, status_t::success_k};
     }
-    static expected<void*> reshard_plan_open(void* index, reshard_placements_t, executor_t&) noexcept {
-        return {nullptr, refuses_writes(index)};
-    }
 
-    static status_t plan_next(void*, void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept {
-        if constexpr (viewed_k) return status_t::read_only_k;
-        else {
-            dense_plan<index_t>& opened = *static_cast<dense_plan<index_t>*>(plan);
+    /** Runs @p plan 's pending phases until its round ends or @p ticks cancels: a RAM plan over one
+     *  traversal context per thread, an NVMe plan task by task with a tick at every barrier, and a
+     *  device plan on its streams. */
+    template <typename plan_type_>
+    static status_t run_plan(void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept {
+        plan_type_& typed = *static_cast<plan_type_*>(plan);
+        auto const report = [&](std::size_t swept, std::size_t population) noexcept {
+            return ticks(swept, population);
+        };
+        if constexpr (is_ram_index<index_type_>) {
             scratch_t scratch {executor};
             if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return prepared;
-            auto const report = [&](std::size_t swept, std::size_t population) noexcept {
-                return ticks(swept, population);
-            };
-            return std::visit(
-                [&](auto& engine_plan) noexcept -> status_t {
-                    if constexpr (is_ram_index<index_type_>)
-                        return engine_plan.run(executor, to_writable_span(scratch.traversals), report);
-                    else return engine_plan.run(executor, report);
-                },
-                opened.plan);
+            return typed.run(executor, to_writable_span(scratch.traversals), report);
         }
-    }
-    static refine_report_t plan_running(void const* plan) noexcept {
-        if constexpr (viewed_k) return {};
-        else
-            return std::visit([](auto const& engine_plan) noexcept { return rounds_of(engine_plan).running(); },
-                              static_cast<dense_plan<index_t> const*>(plan)->plan);
-    }
-    static bool plan_consumed(void const* plan, std::size_t donor) noexcept {
-        if constexpr (viewed_k) return false;
-        else return !static_cast<dense_plan<index_t> const*>(plan)->others[donor];
-    }
-    static expected<refine_report_t> plan_finish(void*, void* plan, executor_t& executor) noexcept {
-        if constexpr (viewed_k) return {{}, status_t::read_only_k};
-        else {
-            dense_plan<index_t>& opened = *static_cast<dense_plan<index_t>*>(plan);
-            scratch_t scratch {executor};
-            if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
-            if constexpr (!is_ram_index<index_type_>)
-                return std::visit([&](auto& engine_plan) noexcept { return engine_plan.finish(executor); },
-                                  opened.plan);
-            else {
-                std::span<typename scratch_t::traversal_context_t> const traversals = to_writable_span(
-                    scratch.traversals);
-                return std::visit(
-                    [&](auto& engine_plan) noexcept -> expected<refine_report_t> {
-                        if constexpr (requires { engine_plan.refining(); }) {
-                            auto const [compacted, status] = engine_plan.finish(executor, traversals);
-                            return {compacted.graph, status};
-                        }
-                        else return engine_plan.finish(executor, traversals);
-                    },
-                    opened.plan);
+        else if constexpr (is_nvme_index<index_type_>) {
+            while (true) {
+                for (typename plan_type_::task_t const& task : typed.tasks())
+                    if (status_t const ran = typed.run(task, executor); failed(ran)) return ran;
+                std::size_t const completed = typed.completed(), total = typed.total();
+                bool const following = typed.advance();
+                if (total && report(completed, total) == continuation_t::cancel_k) return status_t::cancelled_k;
+                if (!following) return status_t::success_k;
             }
         }
+        else return typed.run(executor, report);
     }
-    static void plan_free(void* plan) noexcept {
-        if constexpr (!viewed_k) delete static_cast<dense_plan<index_t>*>(plan);
+
+    /** What a plan's closing @p finished result did to the graph: a reshard's rounds, or a refine's
+     *  whole report. */
+    template <typename result_type_>
+    static expected<refine_report_t> graph_of(expected<result_type_> const& finished) noexcept {
+        if constexpr (requires { finished.value.graph; }) return {finished.value.graph, finished.status};
+        else return {finished.value, finished.status};
     }
-    static usearch_phase_t plan_phase(void const* plan) noexcept {
-        if constexpr (viewed_k) return {};
-        else
-            return std::visit([](auto const& engine_plan) noexcept { return phase_of(rounds_of(engine_plan)); },
-                              static_cast<dense_plan<index_t> const*>(plan)->plan);
+
+    /** Closes @p plan as its operation's finish does, a RAM one over one traversal context per
+     *  thread, and reports what it did to the graph. */
+    template <typename plan_type_>
+    static expected<refine_report_t> finish_plan(void* plan, executor_t& executor) noexcept {
+        plan_type_& typed = *static_cast<plan_type_*>(plan);
+        if constexpr (is_ram_index<index_type_>) {
+            scratch_t scratch {executor};
+            if (status_t const prepared = scratch.prepare(executor); failed(prepared)) return {{}, prepared};
+            return graph_of(typed.finish(executor, to_writable_span(scratch.traversals)));
+        }
+        else return graph_of(typed.finish(executor));
     }
-    static void plan_next_round(void* plan) noexcept {
-        if constexpr (!viewed_k)
-            std::visit(
-                [](auto& engine_plan) noexcept {
-                    if constexpr (requires { rounds_of(engine_plan).next_round(); })
-                        rounds_of(engine_plan).next_round();
-                },
-                static_cast<dense_plan<index_t>*>(plan)->plan);
+
+    template <typename plan_type_>
+    static void next_round(void* plan) noexcept {
+        static_cast<plan_type_*>(plan)->next_round();
+    }
+    template <typename plan_type_>
+    static usearch_phase_progress_t plan_phase(void const* plan) noexcept {
+        return phase_of(*static_cast<plan_type_ const*>(plan));
+    }
+    template <typename plan_type_>
+    static refine_report_t plan_running(void const* plan) noexcept {
+        return static_cast<plan_type_ const*>(plan)->running();
+    }
+    template <typename plan_type_>
+    static void free_plan(void* plan) noexcept {
+        delete static_cast<plan_type_*>(plan);
+    }
+
+    /** The entries every plan of @p plan_type_ runs through. */
+    template <typename plan_type_>
+    static constexpr plan_verbs<executor_t> plan_verbs_for() noexcept {
+        return {&run_plan<plan_type_>,     &next_round<plan_type_>,  &plan_phase<plan_type_>,
+                &plan_running<plan_type_>, &finish_plan<plan_type_>, &free_plan<plan_type_>};
     }
 
     static expected<reachability_t> health(void* index, executor_t& executor) noexcept {
@@ -960,21 +855,12 @@ struct specialized_index {
             .clear = &clear,
             .insert = &insert,
             // Refining
-            .refine = &refine,
-            .absorb = &absorb,
-            .reshard = &reshard,
-            .split = &split,
             .health = &health,
             // Plans
-            .plan_open = &plan_open,
+            .refine_plan_open = &refine_plan_open,
             .reshard_plan_open = &reshard_plan_open,
-            .plan_next = &plan_next,
-            .plan_running = &plan_running,
-            .plan_consumed = &plan_consumed,
-            .plan_finish = &plan_finish,
-            .plan_free = &plan_free,
-            .plan_phase = &plan_phase,
-            .plan_next_round = &plan_next_round,
+            .refine_plan = plan_verbs_for<refine_plan_t>(),
+            .reshard_plan = plan_verbs_for<reshard_plan_t>(),
             // Lookups
             .count = &count,
             .get = &get,

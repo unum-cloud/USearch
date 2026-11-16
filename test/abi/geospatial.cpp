@@ -9,12 +9,13 @@
  *  Observations are points spread over a city's square kilometre on flat ground. Each cell checks
  *  the verbs a caller reaches: the points land under their keys across the shards and each counts
  *  once and reads back, a walk keeps most of the exact scan's top ten, a containment walk reports
- *  every entry of the scan's top ten inside its radius, a RAM index refines, through a handle too,
- *  and absorbs while a GPU one refuses all three, an audit reaches every entry, cursors walk every
- *  entry and a sample draws distinct ones, the index saves into memory and back and into every
- *  residency and as a view byte for byte, an NVMe view answers, audits, walks and samples and
- *  refuses every write, a RAM index splits into two with every key in one part, and a cleared index
- *  holds nothing and ends a cursor opened before it.
+ *  every entry of the scan's top ten inside its radius, a RAM index refines, through a plan too,
+ *  and gathers a second source through a reshard plan while a GPU one refuses all three, an audit
+ *  reaches every entry, cursors walk every entry and a sample draws distinct ones, the index saves
+ *  into memory and back and into every residency and as a view byte for byte, an NVMe view answers,
+ *  audits, walks and samples and refuses every write, a RAM index reshards into two targets through
+ *  a plan with every key in one, and a cleared index holds nothing and ends any cursor it opened
+ *  before the clear.
  */
 #include <algorithm> // `std::find`, `std::nth_element` - the contained keys, the radius
 #include <limits>    // `std::numeric_limits` - unrecorded fields
@@ -27,8 +28,9 @@
 
 namespace unum::usearch::test::abi {
 
-/** Observations each cell builds, the queries held out past them, and the donor's observations. */
-static constexpr std::size_t geospatial_entries_k = 2048, geospatial_queries_k = 128, geospatial_donor_entries_k = 256;
+/** Observations each cell builds, the queries held out past them, and the observations a second
+ *  source holds. */
+static constexpr std::size_t geospatial_entries_k = 2048, geospatial_queries_k = 128, geospatial_packed_entries_k = 256;
 
 /** The breadth every walk takes. */
 static constexpr std::size_t geospatial_expansion_k = 64;
@@ -81,7 +83,7 @@ static std::size_t expect_within(handle<geospatial_verbs_t>& index, geospatial_q
     if (scanned.status == usearch_status_unsupported_k) return 0;
     std::size_t failures = check(scanned);
     if (failures) return failures;
-    std::vector<std::size_t> const offsets = match_offsets(oracle);
+    st::vector<std::size_t> const offsets = match_offsets(oracle);
     std::vector<f64_t> tenth;
     for (std::size_t query = 0; query != geospatial_queries_k; ++query)
         if (oracle.counts[query]) tenth.push_back(oracle.scores[offsets[query + 1] - 1]);
@@ -133,7 +135,8 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     if (!index) return 1;
     std::vector<usearch_geospatial_observation_t> const points = generate_points(
         geospatial_entries_k + geospatial_queries_k, seed);
-    std::vector<usearch_geospatial_observation_t> const donated = generate_points(geospatial_donor_entries_k, ~seed);
+    std::vector<usearch_geospatial_observation_t> const second_source = generate_points(geospatial_packed_entries_k,
+                                                                                        ~seed);
     geospatial_queries_t const queries {points.data() + geospatial_entries_k, usearch_geospatial_relation_near_k, {}};
 
     std::size_t failures = expect_built(cell, index, points.data(), geospatial_entries_k);
@@ -151,10 +154,10 @@ static std::size_t check_geospatial_behaviors(sweep_cell_t const& cell, session_
     failures += expect_persistence(cell, index, points.data(), queries, geospatial_queries_k, geospatial_expansion_k,
                                    0.8, stem, saved_bytes_t::identical_k, 0.0);
     if (cell.residency == usearch_residency_nvme_k) return failures;
-    failures += expect_refinement(index, points.data(), geospatial_entries_k, usearch_status_success_k);
-    failures += expect_absorbed(index, donated.data(), geospatial_donor_entries_k, geospatial_entries_k,
-                                usearch_status_success_k);
-    failures += expect_split(index, usearch_status_success_k);
+    failures += expect_refine_plan(index, points.data(), geospatial_entries_k, usearch_status_success_k);
+    failures += expect_reshard_gather(index, second_source.data(), geospatial_packed_entries_k, geospatial_entries_k,
+                                      usearch_status_success_k);
+    failures += expect_reshard_cut(index, usearch_status_success_k);
     return failures + expect_cleared(index, points.data());
 }
 

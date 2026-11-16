@@ -28,9 +28,9 @@
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
- *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
- *  each receiver keeping the source's storage order, and a sample walks them as the library's plan
- *  walks its graph, placing its draws as the library does.
+ *  cursor walks those lists breadth-first from its start keys, a reshard's split grows its parts
+ *  over them, each target keeping the source's storage order, and a sample walks them as the
+ *  library's plan walks its graph, placing its draws as the library does.
  */
 #include <cmath> // `std::sqrt`
 
@@ -84,11 +84,11 @@ using shapes_index_t = handle<shapes_payload_t, shapes_index_options_t>;
 
 using shapes_cursor_t = graph_cursor<shapes_index_t>;
 
-/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+/** Whether a handle frozen at @p other takes entries of an index frozen at @p index: the same
  *  kind, quantization, point count and connectivity. */
-static bool same_kind(shapes_index_options_t const& index, shapes_index_options_t const& receiver) {
-    return index.metric == receiver.metric && index.quantization == receiver.quantization &&
-           index.points == receiver.points && index.connectivity == receiver.connectivity;
+static bool same_kind(shapes_index_options_t const& index, shapes_index_options_t const& other) {
+    return index.metric == other.metric && index.quantization == other.quantization && index.points == other.points &&
+           index.connectivity == other.connectivity;
 }
 
 /** Whether this stand-in scores the kind, or rejects it rather than approximating it. */
@@ -380,8 +380,7 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcom
 struct usearch_shapes_index_handle_t : shapes_index_t {};
 struct usearch_shapes_cursor_handle_t : shapes_cursor_t {};
 struct usearch_shapes_refine_plan_handle_t : long_verb_plan<usearch_shapes_index_handle_t> {};
-struct usearch_shapes_absorb_plan_handle_t : long_verb_plan<usearch_shapes_index_handle_t> {};
-struct usearch_shapes_split_plan_handle_t : long_verb_plan<usearch_shapes_index_handle_t> {};
+struct usearch_shapes_reshard_plan_handle_t : long_verb_plan<usearch_shapes_index_handle_t> {};
 
 extern "C" {
 
@@ -589,17 +588,19 @@ void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
     }
 }
 
-void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
-    if (through_executor<usearch_shapes_refine>(arguments)) return;
+/** The body of @c usearch_shapes_refine, which @ref through_plan_executor runs. */
+static void refine_body(usearch_shapes_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
     refine_and_report<usearch_shapes_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
 }
 
+void usearch_shapes_refine(usearch_shapes_refine_t* arguments) { through_plan_executor<refine_body>(arguments); }
+
 void usearch_shapes_refine_plan_finish(usearch_shapes_refine_plan_finish_t* arguments) {
-    if (through_executor<usearch_shapes_refine_plan_finish>(arguments)) return;
-    finish_plan<usearch_shapes_refine_plan_handle_t>(*arguments);
+    through_plan_executor<finish_plan<usearch_shapes_refine_plan_handle_t, usearch_shapes_refine_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_shapes_health(usearch_shapes_health_t* arguments) {
@@ -669,17 +670,28 @@ void usearch_shapes_get(usearch_shapes_get_t* arguments) {
     if (arguments->written) *arguments->written = entries.size();
 }
 
-void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
-    if (through_executor<usearch_shapes_absorb>(arguments)) return;
+/** The body of @c usearch_shapes_reshard, which @ref through_plan_executor runs. */
+static void reshard_body(usearch_shapes_reshard_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    absorb_and_report<usearch_shapes_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
+    bool const splitting = !(arguments->plan && *arguments->plan) && arguments->targets_count > 1 &&
+                           arguments->sources_count && arguments->sources && arguments->sources[0];
+    if (splitting && reject_metric(*arguments->sources[0], outcome)) return;
+    auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
+        return distance(*arguments->sources[0], first, second);
+    };
+    auto const recut = [](usearch_shapes_index_handle_t&, usearch_outcome_t* refusal) {
+        return !reject_if(true, usearch_status_unsupported_k, "A handle of one shard has nothing to recut", refusal);
+    };
+    reshard_and_report<usearch_shapes_reshard_plan_handle_t>(*arguments, score, same_kind, recut, outcome);
 }
 
-void usearch_shapes_absorb_plan_finish(usearch_shapes_absorb_plan_finish_t* arguments) {
-    if (through_executor<usearch_shapes_absorb_plan_finish>(arguments)) return;
-    finish_plan<usearch_shapes_absorb_plan_handle_t>(*arguments);
+void usearch_shapes_reshard(usearch_shapes_reshard_t* arguments) { through_plan_executor<reshard_body>(arguments); }
+
+void usearch_shapes_reshard_plan_finish(usearch_shapes_reshard_plan_finish_t* arguments) {
+    through_plan_executor<finish_plan<usearch_shapes_reshard_plan_handle_t, usearch_shapes_reshard_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments) {
@@ -703,6 +715,8 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
     *arguments->written = 0;
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
+    if (reject_if(!arguments->cursor, usearch_status_invalid_argument_k, "The cursor must not be null", outcome))
+        return;
     usearch_shapes_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -736,24 +750,6 @@ void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
         return distance(index, first, second);
     };
     draw_sample(*arguments, index, score, no_fixed_coordinates_t {}, outcome);
-}
-
-void usearch_shapes_split(usearch_shapes_split_t* arguments) {
-    if (through_executor<usearch_shapes_split>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    usearch_shapes_index_handle_t& index = *arguments->index;
-    if (reject_metric(index, outcome)) return;
-    auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
-        return distance(index, first, second);
-    };
-    split_and_report<usearch_shapes_split_plan_handle_t>(*arguments, index, score, same_kind, outcome);
-}
-
-void usearch_shapes_split_plan_finish(usearch_shapes_split_plan_finish_t* arguments) {
-    if (through_executor<usearch_shapes_split_plan_finish>(arguments)) return;
-    finish_plan<usearch_shapes_split_plan_handle_t>(*arguments);
 }
 
 void usearch_shapes_save(usearch_shapes_save_t* arguments) {

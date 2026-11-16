@@ -238,8 +238,8 @@ struct basic_verbs {
     std::size_t (*devices)(void const* variant, std::span<arena_residency_t> listed) noexcept;
     void (*describe)(void const* variant, typename traits_type_::description_t& description) noexcept;
 
-    /** Whether the variant at @p donor shares the geometry of the one at @p variant. */
-    bool (*matches)(void const* variant, void const* donor) noexcept;
+    /** Whether the variant at @p source shares the geometry of the one at @p variant. */
+    bool (*matches)(void const* variant, void const* source) noexcept;
 
     // Writes
 
@@ -258,28 +258,15 @@ struct basic_verbs {
 
     // Plans
 
-    /** Opens a refine plan absorbing @p donors first, or splitting into @p receivers first, its
-     *  part roots drawn from the config's seed. */
-    expected<void*> (*plan_open)(void* variant, variants_view_t donors, variants_view_t receivers,
-                                 split_config_t config, executor_t& executor) noexcept;
-    status_t (*plan_next)(void* variant, void* plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    /** Opens a refine plan of rounds over the variant's shards. */
+    expected<void*> (*refine_plan_open)(void* variant, refine_config_t config, executor_t& executor) noexcept;
 
-    /** Whether the plan consumed its donor at @p donor, which its owner may then free. */
-    bool (*plan_consumed)(void const* plan, std::size_t donor) noexcept;
-    void (*count_absorbed_donor)(void* variant, void const* donor) noexcept;
-
-    /** Hands @p receiver what the variant counted of the part it took, once the split's parts
-     *  are filled. */
-    void (*count_split_receiver)(void* variant, void const* plan, void* receiver) noexcept;
-    refine_report_t (*plan_running)(void* plan) noexcept;
-    expected<refine_report_t> (*plan_finish)(void* variant, void* plan, executor_t& executor) noexcept;
-    void (*plan_free)(void* plan) noexcept;
-
-    /** Where a plan's round stands; one that runs no round names no phase. */
-    usearch_phase_t (*plan_phase)(void const* plan) noexcept;
-
-    /** Opens a plan's next round, from the same root, once its last one ended. */
-    void (*plan_next_round)(void* plan) noexcept;
+    /** Opens a reshard plan moving the entries of @p sources into @p targets, then running the
+     *  rounds of every target that took entries; the plan keeps its own lists. */
+    expected<void*> (*reshard_plan_open)(variants_view_t sources, variants_view_t targets, reshard_options_t options,
+                                         executor_t& executor) noexcept;
+    plan_verbs<executor_t> refine_plan;
+    plan_verbs<executor_t> reshard_plan;
 
     // Lookups
     status_t (*count)(void* variant, usearch_key_t key, typename traits_type_::key_stats_t& stats,

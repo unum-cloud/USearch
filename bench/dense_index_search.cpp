@@ -26,7 +26,7 @@
  *  --expansion-add     derived                      Insertion breadth
  *  --expansion-search  96                           Search breadths, like 32,64,128
  *  --max-refines       0                            Refinement passes, stopping once one changes nothing
- *  --compact-capacity  none                         Entries per shard after compacting in place
+ *  --reshard-capacity  none                         Entries per shard after resharding in place
  *  --top-k             10                           Matches per query to judge
  *  --first-vector      0                            First dataset row viewed, keyed by its global row
  *  --max-base-vectors  the whole file               Cap on ingested rows
@@ -57,7 +57,7 @@ struct search_settings_t {
     count_t expansion_add {.minimum = 0};
     counts_t expansion_search {.values = {96}, .size = 1};
     count_t max_refines {.minimum = 0};
-    count_t compact_capacity {.minimum = 0};
+    count_t reshard_capacity {.minimum = 0};
     count_t top_k {.value = 10};
     count_t first_vector {.minimum = 0};
     count_t max_base_vectors {.minimum = 0};
@@ -80,8 +80,8 @@ inline std::array<flag_t, 16> search_flags(search_settings_t& search) noexcept {
         {"--expansion-search", "breadths", "search breadths, like 32,64,128; 96 by default", &search.expansion_search},
         {"--max-refines", "passes", "refinement passes, stopping once one changes nothing; 0 by default",
          &search.max_refines},
-        {"--compact-capacity", "entries", "entries per shard after compacting in place; no compaction by default",
-         &search.compact_capacity},
+        {"--reshard-capacity", "entries", "entries per shard after resharding in place; no reshard by default",
+         &search.reshard_capacity},
         {"--top-k", "count", "matches per query to judge; 10 by default", &search.top_k},
         {"--first-vector", "row", "first dataset row viewed, keyed by its global row; 0 by default",
          &search.first_vector},
@@ -115,19 +115,21 @@ inline bool refine_passes(handle<dense_verbs_t>& index, std::size_t passes) {
     return true;
 }
 
-/** Compacts @p index in place under @p capacity entries per shard; false after printing a
+/** Reshards @p index in place under @p capacity entries per shard; false after printing a
  *  failure. */
-inline bool compact_in_place(handle<dense_verbs_t>& index, std::size_t capacity) {
+inline bool reshard_in_place(handle<dense_verbs_t>& index, std::size_t capacity) {
     std::chrono::steady_clock::time_point const started = std::chrono::steady_clock::now();
     usearch_outcome_t outcome {};
     usearch_traversal_stats_t stats {};
-    usearch_dense_index_t sources[1] = {index.get()};
-    usearch_dense_compact_t compact {};
-    compact.target = index.get(), compact.executor = index.executor(), compact.outcome = &outcome;
-    compact.count = 1, compact.sources = sources, compact.shard_capacity = capacity, compact.stats = &stats;
-    usearch_dense_compact(&compact);
-    if (report_failure(outcome, "Compacting")) return false;
-    fmt::println("- Compact: {} distances in {:.2f} s", humanized(stats.computed_distances), seconds_since(started));
+    usearch_ram_options_t ram {};
+    ram.shard_capacity = capacity;
+    usearch_dense_index_t const self[1] = {index.get()};
+    usearch_dense_reshard_t reshard {};
+    reshard.sources_count = reshard.targets_count = 1, reshard.sources = reshard.targets = self;
+    reshard.executor = index.executor(), reshard.outcome = &outcome, reshard.ram = &ram, reshard.stats = &stats;
+    usearch_dense_reshard(&reshard);
+    if (report_failure(outcome, "Resharding")) return false;
+    fmt::println("- Reshard: {} distances in {:.2f} s", humanized(stats.computed_distances), seconds_since(started));
     return true;
 }
 
@@ -221,7 +223,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
                      humanized(rows / build_seconds),
                      static_cast<double>(built.computed_distances) / static_cast<double>(rows));
         if (!refine_passes(index, search.max_refines.value)) return 1;
-        if (search.compact_capacity.value && !compact_in_place(index, search.compact_capacity.value)) return 1;
+        if (search.reshard_capacity.value && !reshard_in_place(index, search.reshard_capacity.value)) return 1;
         print_fill(index);
         if (!checkpoint.empty()) {
             std::chrono::steady_clock::time_point const reopen_start = std::chrono::steady_clock::now();
@@ -252,19 +254,22 @@ int bench_dense_index_search(int argc, char const* const* argv) {
     copied_matches_t oracle;
     std::size_t const top_k = search.top_k.value;
     if (search.self_search == switch_t::present_k) {
-        // Every stored row is its own nearest neighbor.
-        oracle.counts.assign(rows, 1);
+        // Every stored row is its own nearest neighbor, at distance zero.
+        if (st::failed(oracle.counts.resize(rows, 1)) || st::failed(oracle.scores.resize(rows, 0)))
+            exit_out_of_memory("the oracle");
         for (std::size_t row = 0; row != rows; ++row)
-            oracle.keys.push_back(std::bit_cast<uuid128_t>(key_of_offset(settings.seed, first_row + row)));
+            if (st::failed(
+                    oracle.keys.push_back(std::bit_cast<uuid128_t>(key_of_offset(settings.seed, first_row + row)))))
+                exit_out_of_memory("the oracle");
     }
     else if (!search.query_neighbors.empty() && !first_row && !search.max_base_vectors.value) {
         auto [truth, truth_status] = mapped_rows_t::open(search.query_neighbors);
         if (failed(truth_status) || truth.rows() < queries_count)
             return fmt::println(stderr, "--query-neighbors=\"{}\" holds no row per query", search.query_neighbors), 1;
-        usearch_rows_view_t const truth_rows = truth.view(0, queries_count);
-        oracle = truth_oracle(settings.seed,
-                              {static_cast<std::uint32_t const*>(truth_rows.data), queries_count * truth.columns()},
-                              truth.columns());
+        if (!truth_oracle(settings.seed, truth, queries_count, oracle))
+            return fmt::println(stderr, "--query-neighbors=\"{}\" stores no distances past its neighbors",
+                                search.query_neighbors),
+                   1;
     }
     else {
         if (!search.query_neighbors.empty())
@@ -279,7 +284,7 @@ int bench_dense_index_search(int argc, char const* const* argv) {
                                                  top_k, search.batch.value);
     if (report_failure(swept, "Searching")) return 1;
     if (settings.residency == usearch_residency_nvme_k && settings.checkpoint.empty())
-        for (std::string const& file : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
+        for (sz::string_t const& file : files_starting_with(checkpoint.substr(0, checkpoint.rfind(".safegraphs"))))
             std::remove(file.c_str());
     return 0;
 }

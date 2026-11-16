@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include <cstring> // `std::memcmp` - a donor's costs
+#include <cstring> // `std::memcmp` - a source's costs
 
 #include <array>       // `std::array` - the checkpoint's recorded fields
 #include <limits>      // `std::numeric_limits` - a window width past 32 bits
@@ -97,6 +97,7 @@ struct sequence_ram_variant {
     using index_t = basic::ram_indexes<shard_t>;
     using value_t = typename shard_t::value_t;
     using refine_plan_t = typename index_t::refine_plan_t;
+    using reshard_plan_t = typename index_t::reshard_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
     static constexpr sz_capability_t capability_k = stringzilla_capabilities_of(cpu_class_);
 
@@ -117,29 +118,27 @@ struct sequence_ram_variant {
                                        predicate_t const& predicate, executor_t& executor,
                                        progress_ticks_t& ticks) noexcept;
 
-    /** Opens a refinement that first moves every shard of each of @p donors into this index, then
-     *  runs one round per shard under the config's cache. */
-    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
-        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, {config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
-                                 us::sequence::codec_t {}, planning);
-    }
-
     /** Opens one round of every live shard in place under the config's cache. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_round({config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
-                                us::sequence::codec_t {}, planning);
+        return index.plan_refine({config.cache_bytes}, basic::keep_diverse_t {geometry.connectivity},
+                                 us::sequence::codec_t {}, planning);
     }
 
-    /** Opens a split of every live shard into the same shard of each of @p receivers, its part
-     *  roots drawn from the config's seed, then one round per receiver shard. */
-    expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
+    /** Opens a reshard of @p sources into @p targets driven by this index, the one target of a
+     *  pack or the one source of a split, a split's part roots drawn from @p seed, then one round
+     *  per shard that took entries. */
+    expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
+                                          refine_config_t config, u64_t seed) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_split(receivers, {{config.refine.cache_bytes}, config.seed},
-                                basic::keep_diverse_t {geometry.connectivity}, us::sequence::codec_t {}, planning);
+        return index.plan_reshard(sources, targets, {{config.cache_bytes}, 0, seed},
+                                  basic::keep_diverse_t {geometry.connectivity}, us::sequence::codec_t {}, planning);
     }
-    status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Drives @p plan 's pending phases on the executor's threads until its round ends or @p ticks
+     *  cancels. */
+    template <typename plan_type_>
+    status_t drive(plan_type_& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** Writes the checkpoint under a path, or into a buffer of @ref storage_requirements bytes. */
     template <typename checkpoint_type_>
@@ -200,8 +199,9 @@ expected<sample_result_t> sequence_ram_variant<cpu_class_>::sample(basic_sample_
 }
 
 template <cpu_class_t cpu_class_>
-status_t sequence_ram_variant<cpu_class_>::refine(refine_plan_t& plan, executor_t& executor,
-                                                  progress_ticks_t& ticks) noexcept {
+template <typename plan_type_>
+status_t sequence_ram_variant<cpu_class_>::drive(plan_type_& plan, executor_t& executor,
+                                                 progress_ticks_t& ticks) noexcept {
     auto with_metric = [&](auto make_metric) noexcept {
         auto [scratch, prepare_status] = prepare_refinement<shard_t>(plan, geometry.connectivity, make_metric,
                                                                      executor);
@@ -538,14 +538,14 @@ struct variant_bodies<sequence_traits_t> {
     /** What a view keeps of a string it read, copied into its thread's arena. */
     using kept_t = bytes_view_t;
 
-    /** Whether @p donor enters @p variant: the same kind, window widths, costs and
+    /** Whether @p source enters @p variant: the same kind, window widths, costs and
      *  connectivity. */
-    template <typename variant_type_, typename donor_type_>
-    static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
-        geometry_t const &index = variant.geometry, &other = donor.geometry;
+    template <typename variant_type_, typename source_type_>
+    static bool matches(variant_type_ const& variant, source_type_ const& source) noexcept {
+        geometry_t const &index = variant.geometry, &other = source.geometry;
         if (index.metric != other.metric || index.connectivity != other.connectivity ||
             index.window_widths.size() != other.window_widths.size() ||
-            std::memcmp(&variant.costs, &donor.costs, sizeof(costs_t)) != 0)
+            std::memcmp(&variant.costs, &source.costs, sizeof(costs_t)) != 0)
             return false;
         for (std::size_t window = 0; window != index.window_widths.size(); ++window)
             if (index.window_widths[window] != other.window_widths[window]) return false;

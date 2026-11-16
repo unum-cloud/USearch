@@ -2,16 +2,16 @@
  *  @file tools/dense.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The dense verbs: insert, absorb, refine, split, health, search and get, each over
- *      SafeGraphs checkpoints at any address.
+ *  @brief The dense verbs: insert, refine, reshard, health, search and get, each over SafeGraphs
+ *      checkpoints at any address.
  *
  *  @c insert indexes a contiguous slice of one RetriEval file or Arrow input on a GPU or in RAM and
- *  saves it, @c absorb merges checkpoints into one, donor by donor, @c refine re-selects a
- *  checkpoint's neighbors, @c split cuts one into the parts of a manifest, @c health audits how
- *  much of one a search reaches, @c search queries one with the rows of another RetriEval or Arrow
- *  input, and @c get retrieves the vectors of an Arrow column of keys. Keys come row-aligned from
- *  @c --keys or @c --keys-column, or are the dataset row numbers, so slices built apart keep
- *  distinct keys when merged.
+ *  saves it, @c refine runs rounds over a checkpoint's graph, @c reshard packs checkpoints into one
+ *  or splits one into the parts of a manifest, @c health audits how much of one a search reaches,
+ *  @c search queries one with the rows of another RetriEval or Arrow input, and @c get retrieves
+ *  the vectors of an Arrow column of keys. Keys come row-aligned from @c --keys or
+ *  @c --keys-column, or are the dataset row numbers, so slices built apart keep distinct keys once
+ *  they are merged.
  *
  *  An Arrow input reads a path or standard input, sniffed by its first bytes, and its columns reach
  *  the library through the converters of @c usearch/arrow.h. A checkpoint or an Arrow output may
@@ -44,7 +44,7 @@
 #include "usearch/dense_index.h"
 
 #include "abi.hpp"   // `count_t`, `devices_from_environment`, `session_t`, `handle`
-#include "world.hpp" // `world_t`, `parse_verb`, `checkpoint_save`, `checkpoint_split`
+#include "world.hpp" // `world_t`, `parse_verb`, `checkpoint_save`, `checkpoint_reshard`
 
 namespace unum::usearch::tools {
 
@@ -600,9 +600,9 @@ int modality_insert(dense_verbs_t, world_t& world, int argc, char const* const* 
     return EXIT_SUCCESS;
 }
 
-int modality_split(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
-    return checkpoint_split<dense_verbs_t>(world, argc, argv, {},
-                                           [](usearch_dense_metadata_t const& metadata) { return metadata; });
+int modality_reshard(dense_verbs_t, world_t& world, int argc, char const* const* argv) {
+    return checkpoint_reshard<dense_verbs_t>(world, argc, argv, {},
+                                             [](usearch_dense_metadata_t const& metadata) { return metadata; });
 }
 
 /** Gathers the rows of the Arrow @p input into @p rows, and its keys when @p keys_column names a

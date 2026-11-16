@@ -247,9 +247,10 @@ struct arguments_t {
     return counts.size < counts.minimum_size ? argument_status_t::too_few_items_k : argument_status_t::parsed_k;
 }
 
-/** Parses a byte count into @p bytes: digits, then an optional K, M, G or T. */
+/** Parses a byte count into @p bytes: digits, then an optional K, M, G or T and an optional B. */
 [[nodiscard]] inline argument_status_t parse_bytes(std::string_view text, bytes_t& bytes) noexcept {
     std::size_t shift = 0;
+    if (text.ends_with('B')) text.remove_suffix(1);
     if (!text.empty()) switch (text.back()) {
         case 'K': shift = 10; break;
         case 'M': shift = 20; break;

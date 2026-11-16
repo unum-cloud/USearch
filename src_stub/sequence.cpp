@@ -26,9 +26,9 @@
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
- *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
- *  each receiver keeping the source's storage order, and a sample walks them as the library's plan
- *  walks its graph, placing its draws as the library does.
+ *  cursor walks those lists breadth-first from its start keys, a reshard's split grows its parts
+ *  over them, each target keeping the source's storage order, and a sample walks them as the
+ *  library's plan walks its graph, placing its draws as the library does.
  */
 
 #include <algorithm> // `std::stable_sort`
@@ -87,12 +87,12 @@ using sequence_index_t = handle<sequence_payload_t, sequence_index_options_t>;
 
 using sequence_cursor_t = graph_cursor<sequence_index_t>;
 
-/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+/** Whether a handle frozen at @p other takes entries of an index frozen at @p index: the same
  *  kind, weights, window widths and connectivity. */
-static bool same_kind(sequence_index_options_t const& index, sequence_index_options_t const& receiver) {
-    return index.metric == receiver.metric && index.connectivity == receiver.connectivity &&
-           index.substitution == receiver.substitution && index.gap == receiver.gap &&
-           index.window_widths == receiver.window_widths;
+static bool same_kind(sequence_index_options_t const& index, sequence_index_options_t const& other) {
+    return index.metric == other.metric && index.connectivity == other.connectivity &&
+           index.substitution == other.substitution && index.gap == other.gap &&
+           index.window_widths == other.window_widths;
 }
 
 /** Whether the kind scores without scoring parameters, and so refuses any weights. */
@@ -502,8 +502,7 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_sequence_weights_
 struct usearch_sequence_index_handle_t : sequence_index_t {};
 struct usearch_sequence_cursor_handle_t : sequence_cursor_t {};
 struct usearch_sequence_refine_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
-struct usearch_sequence_absorb_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
-struct usearch_sequence_split_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
+struct usearch_sequence_reshard_plan_handle_t : long_verb_plan<usearch_sequence_index_handle_t> {};
 
 extern "C" {
 
@@ -727,17 +726,19 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
     }
 }
 
-void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
-    if (through_executor<usearch_sequence_refine>(arguments)) return;
+/** The body of @c usearch_sequence_refine, which @ref through_plan_executor runs. */
+static void refine_body(usearch_sequence_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
     refine_and_report<usearch_sequence_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
 }
 
+void usearch_sequence_refine(usearch_sequence_refine_t* arguments) { through_plan_executor<refine_body>(arguments); }
+
 void usearch_sequence_refine_plan_finish(usearch_sequence_refine_plan_finish_t* arguments) {
-    if (through_executor<usearch_sequence_refine_plan_finish>(arguments)) return;
-    finish_plan<usearch_sequence_refine_plan_handle_t>(*arguments);
+    through_plan_executor<finish_plan<usearch_sequence_refine_plan_handle_t, usearch_sequence_refine_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_sequence_health(usearch_sequence_health_t* arguments) {
@@ -805,17 +806,26 @@ void usearch_sequence_get(usearch_sequence_get_t* arguments) {
     if (arguments->written) *arguments->written = entries.size();
 }
 
-void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments) {
-    if (through_executor<usearch_sequence_absorb>(arguments)) return;
+/** The body of @c usearch_sequence_reshard, which @ref through_plan_executor runs. */
+static void reshard_body(usearch_sequence_reshard_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    absorb_and_report<usearch_sequence_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
+    sequence_search_scratch_t scratch;
+    auto const score = [&](bytes_view_t first, bytes_view_t second) {
+        return distance(*arguments->sources[0], first, second, scratch);
+    };
+    auto const recut = [](usearch_sequence_index_handle_t&, usearch_outcome_t* refusal) {
+        return !reject_if(true, usearch_status_unsupported_k, "A handle of one shard has nothing to recut", refusal);
+    };
+    reshard_and_report<usearch_sequence_reshard_plan_handle_t>(*arguments, score, same_kind, recut, outcome);
 }
 
-void usearch_sequence_absorb_plan_finish(usearch_sequence_absorb_plan_finish_t* arguments) {
-    if (through_executor<usearch_sequence_absorb_plan_finish>(arguments)) return;
-    finish_plan<usearch_sequence_absorb_plan_handle_t>(*arguments);
+void usearch_sequence_reshard(usearch_sequence_reshard_t* arguments) { through_plan_executor<reshard_body>(arguments); }
+
+void usearch_sequence_reshard_plan_finish(usearch_sequence_reshard_plan_finish_t* arguments) {
+    through_plan_executor<finish_plan<usearch_sequence_reshard_plan_handle_t, usearch_sequence_reshard_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
@@ -838,6 +848,8 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     *arguments->written = 0;
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
+    if (reject_if(!arguments->cursor, usearch_status_invalid_argument_k, "The cursor must not be null", outcome))
+        return;
     usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -867,22 +879,6 @@ void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
     sequence_search_scratch_t scratch;
     auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
     draw_sample(*arguments, index, score, no_fixed_coordinates_t {}, outcome);
-}
-
-void usearch_sequence_split(usearch_sequence_split_t* arguments) {
-    if (through_executor<usearch_sequence_split>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    usearch_sequence_index_handle_t& index = *arguments->index;
-    sequence_search_scratch_t scratch;
-    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
-    split_and_report<usearch_sequence_split_plan_handle_t>(*arguments, index, score, same_kind, outcome);
-}
-
-void usearch_sequence_split_plan_finish(usearch_sequence_split_plan_finish_t* arguments) {
-    if (through_executor<usearch_sequence_split_plan_finish>(arguments)) return;
-    finish_plan<usearch_sequence_split_plan_handle_t>(*arguments);
 }
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {

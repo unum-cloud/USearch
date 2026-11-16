@@ -43,9 +43,9 @@
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
- *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
- *  each receiver keeping the source's storage order, and a sample walks them as the library's plan
- *  walks its graph, placing its draws as the library does.
+ *  cursor walks those lists breadth-first from its start keys, a reshard's split grows its parts
+ *  over them, each target keeping the source's storage order, and a sample walks them as the
+ *  library's plan walks its graph, placing its draws as the library does.
  */
 #include <cmath> // `std::sqrt`, `std::exp`
 
@@ -130,6 +130,12 @@ static bool reject_vector_scalar(usearch_scalar_t kind, std::size_t dimensions, 
                      "A sub-byte row must fill whole bytes", outcome);
 }
 
+/** Refuses a key lookup on an NVMe view opened without a key table, as the engine's view does. */
+static bool reject_keyless(dense_index_t const& index, usearch_outcome_t* outcome) {
+    return reject_if(index.keyless, usearch_status_unsupported_k, "An NVMe view without a key table looks up no key",
+                     outcome);
+}
+
 /**
  *  @brief Checks a run of input rows against the frozen geometry, answering whether to refuse it.
  *
@@ -163,11 +169,11 @@ static bool reject_unstored(usearch_scalar_t quantization, usearch_outcome_t* ou
     return reject_if(true, usearch_status_unknown_kind_k, "Unsupported quantization", outcome);
 }
 
-/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+/** Whether a handle frozen at @p other takes entries of an index frozen at @p index: the same
  *  metric, quantization, width and connectivity. */
-static bool same_kind(dense_index_options_t const& index, dense_index_options_t const& receiver) {
-    return index.metric == receiver.metric && index.quantization == receiver.quantization &&
-           index.dimensions == receiver.dimensions && index.connectivity == receiver.connectivity;
+static bool same_kind(dense_index_options_t const& index, dense_index_options_t const& other) {
+    return index.metric == other.metric && index.quantization == other.quantization &&
+           index.dimensions == other.dimensions && index.connectivity == other.connectivity;
 }
 
 #pragma endregion Storage
@@ -398,8 +404,6 @@ struct usearch_dense_index_handle_t : dense_index_t {};
 struct usearch_dense_cursor_handle_t : dense_cursor_t {};
 struct usearch_dense_search_stream_handle_t : dense_search_stream_t {};
 struct usearch_dense_refine_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
-struct usearch_dense_absorb_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
-struct usearch_dense_split_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
 struct usearch_dense_reshard_plan_handle_t : long_verb_plan<usearch_dense_index_handle_t> {};
 
 extern "C" {
@@ -513,6 +517,7 @@ void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
     if (!index) return;
     index->served = std::move(served);
     index->residency = usearch_residency_nvme_k;
+    index->keyless = !arguments->ram;
     *arguments->index = index;
 }
 
@@ -605,17 +610,19 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     }
 }
 
-void usearch_dense_refine(usearch_dense_refine_t* arguments) {
-    if (through_executor<usearch_dense_refine>(arguments)) return;
+/** The body of @c usearch_dense_refine, which @ref through_plan_executor runs. */
+static void refine_body(usearch_dense_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
     refine_and_report<usearch_dense_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
 }
 
+void usearch_dense_refine(usearch_dense_refine_t* arguments) { through_plan_executor<refine_body>(arguments); }
+
 void usearch_dense_refine_plan_finish(usearch_dense_refine_plan_finish_t* arguments) {
-    if (through_executor<usearch_dense_refine_plan_finish>(arguments)) return;
-    finish_plan<usearch_dense_refine_plan_handle_t>(*arguments);
+    through_plan_executor<finish_plan<usearch_dense_refine_plan_handle_t, usearch_dense_refine_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_dense_health(usearch_dense_health_t* arguments) {
@@ -637,6 +644,7 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
     if (reject_view(arguments->queries, count, index, outcome)) return;
+    if (arguments->hints && reject_keyless(index, outcome)) return;
     usearch_traversal_t const traversal = arguments->traversal;
     if (reject_traversal(traversal, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries.data},
@@ -656,6 +664,7 @@ void usearch_dense_count(usearch_dense_count_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->entries = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
+    if (reject_keyless(index, outcome)) return;
     std::shared_lock readers(index.mutex);
     *arguments->entries = index.by_key.count(uuid_of(arguments->key));
 }
@@ -667,7 +676,7 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (arguments->written) *arguments->written = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
     usearch_scalar_t const scalar = arguments->outputs_scalar;
-    if (reject_vector_scalar(scalar, index.options.dimensions, outcome)) return;
+    if (reject_keyless(index, outcome) || reject_vector_scalar(scalar, index.options.dimensions, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
@@ -684,49 +693,32 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (arguments->written) *arguments->written = entries.size();
 }
 
-void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
-    if (through_executor<usearch_dense_absorb>(arguments)) return;
+/** The body of @c usearch_dense_reshard, which @ref through_plan_executor runs. */
+static void reshard_body(usearch_dense_reshard_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    absorb_and_report<usearch_dense_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
-}
-
-void usearch_dense_absorb_plan_finish(usearch_dense_absorb_plan_finish_t* arguments) {
-    if (through_executor<usearch_dense_absorb_plan_finish>(arguments)) return;
-    finish_plan<usearch_dense_absorb_plan_handle_t>(*arguments);
-}
-
-void usearch_dense_reshard(usearch_dense_reshard_t* arguments) {
-    if (through_executor<usearch_dense_reshard>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    if (arguments->phase) *arguments->phase = {};
-    usearch_dense_index_handle_t& index = *arguments->index;
-    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments->plan, outcome)) return;
-    bool const opening = !arguments->plan || !*arguments->plan;
-    if (opening && (reject_if(arguments->vram || arguments->nvme, usearch_status_config_mismatch_k,
-                              "The placement names another residency than the handle's", outcome) ||
-                    reject_if(arguments->ram && arguments->ram->memory_domains_count, usearch_status_unsupported_k,
-                              "Resharding places no shard on a named domain yet", outcome)))
-        return;
-    std::unique_lock writers(index.mutex);
-    long_verb_plan<usearch_dense_index_handle_t> one_shot {.opened_on = &index};
-    long_verb_plan<usearch_dense_index_handle_t>* const resharding = plan_of_call<usearch_dense_reshard_plan_handle_t>(
-        index, arguments->plan, one_shot, outcome);
-    if (!resharding) return;
+    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
+        return distance(arguments->sources[0]->options.metric, first, second);
+    };
     // One flat list holds no shards, so nothing moves and only the capacity counts them anew.
-    if (opening) {
+    auto const recut = [&](usearch_dense_index_handle_t& index, usearch_outcome_t* refusal) {
+        if (reject_if(arguments->vram || arguments->nvme, usearch_status_config_mismatch_k,
+                      "The placement names another residency than the handle's", refusal) ||
+            reject_if(arguments->ram && arguments->ram->memory_domains_count, usearch_status_unsupported_k,
+                      "Resharding places no shard on a named domain yet", refusal))
+            return false;
         if (arguments->ram && arguments->ram->shard_capacity) index.shard_capacity = arguments->ram->shard_capacity;
-        resharding->entries = index.entries.size();
-    }
-    sweep_round(*arguments, *resharding, outcome);
+        return true;
+    };
+    reshard_and_report<usearch_dense_reshard_plan_handle_t>(*arguments, score, same_kind, recut, outcome);
 }
+
+void usearch_dense_reshard(usearch_dense_reshard_t* arguments) { through_plan_executor<reshard_body>(arguments); }
 
 void usearch_dense_reshard_plan_finish(usearch_dense_reshard_plan_finish_t* arguments) {
-    if (through_executor<usearch_dense_reshard_plan_finish>(arguments)) return;
-    finish_plan<usearch_dense_reshard_plan_handle_t>(*arguments);
+    through_plan_executor<finish_plan<usearch_dense_reshard_plan_handle_t, usearch_dense_reshard_plan_finish_t>>(
+        arguments);
 }
 
 void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
@@ -749,6 +741,8 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     *arguments->written = 0;
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
+    if (reject_if(!arguments->cursor, usearch_status_invalid_argument_k, "The cursor must not be null", outcome))
+        return;
     usearch_dense_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -783,27 +777,11 @@ void usearch_dense_sample(usearch_dense_sample_t* arguments) {
     if (through_executor<usearch_dense_sample>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     usearch_dense_index_handle_t& index = *arguments->index;
+    if (reject_keyless(index, outcome)) return;
     auto const score = [&](std::span<double const> first, std::span<double const> second) {
         return distance(index.options.metric, first, second);
     };
     draw_sample(*arguments, index, score, projected_coordinates_t {}, outcome);
-}
-
-void usearch_dense_split(usearch_dense_split_t* arguments) {
-    if (through_executor<usearch_dense_split>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    usearch_dense_index_handle_t& index = *arguments->index;
-    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
-        return distance(index.options.metric, first, second);
-    };
-    split_and_report<usearch_dense_split_plan_handle_t>(*arguments, index, score, same_kind, outcome);
-}
-
-void usearch_dense_split_plan_finish(usearch_dense_split_plan_finish_t* arguments) {
-    if (through_executor<usearch_dense_split_plan_finish>(arguments)) return;
-    finish_plan<usearch_dense_split_plan_handle_t>(*arguments);
 }
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
@@ -1026,6 +1004,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (arguments->written) *arguments->written = 0;
     if (arguments->required) *arguments->required = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
+    if (reject_keyless(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
                   "Late interaction sums maxima over logits, so the kind must be inner product", outcome))
         return;
@@ -1039,6 +1018,9 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     for (std::size_t query = 0; query_offsets && query != queries_count; ++query)
         hollow |= query_offsets[query + 1] <= query_offsets[query];
     if (reject_if(hollow, usearch_status_shape_mismatch_k, "A query must hold at least one row", outcome)) return;
+    if (reject_if(arguments->wanted && queries_count > (std::numeric_limits<std::size_t>::max)() / arguments->wanted,
+                  usearch_status_overflow_k, "Room for every query's wanted pairs would wrap", outcome))
+        return;
     if (reject_view(queries, first_row(queries_count), index, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {queries.data}, outcome);
     if (!arena) return;

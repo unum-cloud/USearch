@@ -165,6 +165,7 @@ struct geospatial_ram_variant {
     using metric_t = us::geospatial::chord_metric<kit_t, thread_allocator_t>;
     using relation_t = us::geospatial::relation_t;
     using refine_plan_t = typename index_t::refine_plan_t;
+    using reshard_plan_t = typename index_t::reshard_plan_t;
     static constexpr cpu_class_t cpu_class_k = cpu_class_;
 
     index_t index;
@@ -209,44 +210,37 @@ struct geospatial_ram_variant {
                                        search_config_t search, predicate_t const& predicate, executor_t& executor,
                                        progress_ticks_t& ticks) noexcept;
 
-    /** Opens a refinement that first moves every shard of each of @p donors into this index, then
-     *  runs one round per shard under the config's cache; the cone selector keeps the connectivity,
-     *  its longest links among them. */
-    expected<refine_plan_t> plan_absorb(std::span<index_t*> donors, refine_config_t config) noexcept {
-        typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_absorb(donors, {config.cache_bytes},
-                                 us::geospatial::surface_keep_octants_t {geometry.connectivity},
-                                 us::geospatial::earth_observation_codec_t {}, planning);
-    }
-
     /** Opens one round of every live shard in place under the config's cache. */
     expected<refine_plan_t> plan_refine(refine_config_t config) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_round({config.cache_bytes}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
-                                us::geospatial::earth_observation_codec_t {}, planning);
+        return index.plan_refine({config.cache_bytes}, us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                 us::geospatial::earth_observation_codec_t {}, planning);
     }
 
-    /** Opens a split of every live shard into the same shard of each of @p receivers, its part
-     *  roots drawn from the config's seed, then one round per receiver shard. */
-    expected<refine_plan_t> plan_split(std::span<index_t*> receivers, split_config_t config) noexcept {
+    /** Opens a reshard of @p sources into @p targets driven by this index, the one target of a
+     *  pack or the one source of a split, a split's part roots drawn from @p seed, then one round
+     *  per shard that took entries. */
+    expected<reshard_plan_t> plan_reshard(std::span<index_t* const> sources, std::span<index_t* const> targets,
+                                          refine_config_t config, u64_t seed) noexcept {
         typename shard_t::traversal_context_t planning {index.size(), index.get_allocator()};
-        return index.plan_split(receivers, {{config.refine.cache_bytes}, config.seed},
-                                us::geospatial::surface_keep_octants_t {geometry.connectivity},
-                                us::geospatial::earth_observation_codec_t {}, planning);
+        return index.plan_reshard(sources, targets, {{config.cache_bytes}, 0, seed},
+                                  us::geospatial::surface_keep_octants_t {geometry.connectivity},
+                                  us::geospatial::earth_observation_codec_t {}, planning);
     }
 
     /** Drives @p plan, then draws every node's long links again by the insertion's rule and seeds,
      *  since the cone selector keeps only the longest of the drawn and selected links together. */
-    status_t refine(refine_plan_t& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    template <typename plan_type_>
+    status_t drive(plan_type_& plan, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
-    /** Widens the largest deviation to a consumed @p donor 's, whose nodes this index now holds. */
-    void count_absorbed_donor(geospatial_ram_variant const& donor) noexcept {
+    /** Widens the largest deviation to an emptied @p source 's, whose nodes this index holds. */
+    void count_packed_source(geospatial_ram_variant const& source) noexcept {
         raise_to<atomic_ref>(largest_deviation_metres,
-                             atomic_ref<u32_t const>(donor.largest_deviation_metres).load(std::memory_order_relaxed));
+                             atomic_ref<u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
     }
 
-    /** Bounds the deviation of the part @p receiver now holds by this index's, which held it. */
-    void count_split_receiver(geospatial_ram_variant& receiver) const noexcept { receiver.count_absorbed_donor(*this); }
+    /** Bounds the deviation of the part @p target now holds by this index's, which held it. */
+    void count_split_target(geospatial_ram_variant& target) const noexcept { target.count_packed_source(*this); }
 
     expected<traversal_stats_t> within(geospatial_queries_t query_batch, within_outputs_t& outputs,
                                        search_config_t search, predicate_t const& predicate,
@@ -621,8 +615,9 @@ status_t geospatial_ram_variant<cpu_class_>::draw_long_links_(shard_t& shard, io
 }
 
 template <cpu_class_t cpu_class_>
-status_t geospatial_ram_variant<cpu_class_>::refine(refine_plan_t& plan, executor_t& executor,
-                                                    progress_ticks_t& ticks) noexcept {
+template <typename plan_type_>
+status_t geospatial_ram_variant<cpu_class_>::drive(plan_type_& plan, executor_t& executor,
+                                                   progress_ticks_t& ticks) noexcept {
     auto [scratch, prepare_status] = prepare_refinement<shard_t>(plan, widest_list(), terrain.metric_factory(),
                                                                  executor);
     if (failed(prepare_status)) return prepare_status;
@@ -1347,16 +1342,16 @@ struct geospatial_vram_nvidia_variant {
         return cleared;
     }
 
-    /** Widens the largest deviation to a consumed @p donor 's, whose nodes this index now holds. */
-    void count_absorbed_donor(geospatial_vram_nvidia_variant const& donor) noexcept {
+    /** Widens the largest deviation to an emptied @p source 's, whose nodes this index holds. */
+    void count_packed_source(geospatial_vram_nvidia_variant const& source) noexcept {
         raise_to<fu::standard_atomic_ref>(
             largest_deviation_metres,
-            fu::standard_atomic_ref<u32_t const>(donor.largest_deviation_metres).load(std::memory_order_relaxed));
+            fu::standard_atomic_ref<u32_t const>(source.largest_deviation_metres).load(std::memory_order_relaxed));
     }
 
-    /** Bounds the deviation of the part @p receiver now holds by this index's, which held it. */
-    void count_split_receiver(geospatial_vram_nvidia_variant& receiver) const noexcept {
-        receiver.count_absorbed_donor(*this);
+    /** Bounds the deviation of the part @p target now holds by this index's, which held it. */
+    void count_split_target(geospatial_vram_nvidia_variant& target) const noexcept {
+        target.count_packed_source(*this);
     }
 
     /** Sampling answers @c unsupported_k until the shards sample on their devices. */
@@ -1724,11 +1719,11 @@ struct variant_bodies<geospatial_traits_t> {
      *  view. */
     using kept_t = us::geospatial::earth_observation_t;
 
-    /** Whether @p donor enters @p variant: the same connectivity, since every observation is
+    /** Whether @p source enters @p variant: the same connectivity, since every observation is
      *  scored alike. */
-    template <typename variant_type_, typename donor_type_>
-    static bool matches(variant_type_ const& variant, donor_type_ const& donor) noexcept {
-        return variant.geometry.connectivity == donor.geometry.connectivity;
+    template <typename variant_type_, typename source_type_>
+    static bool matches(variant_type_ const& variant, source_type_ const& source) noexcept {
+        return variant.geometry.connectivity == source.geometry.connectivity;
     }
 
     /** The connectivity @p geometry freezes, a zero taking the cone winners and long links of the

@@ -2,13 +2,13 @@
  *  @file tools/sequence.cpp
  *  @author Ash Vardanian
  *  @date November 1, 2026
- *  @brief The sequence verbs: insert, absorb, refine, split, health and search, each over
- *      SafeGraphs checkpoints at any address.
+ *  @brief The sequence verbs: insert, refine, reshard, health and search, each over SafeGraphs
+ *      checkpoints at any address.
  *
  *  Entries and queries are text files, one entry per line, as the sequence benchmark reads them,
  *  each newline dropped with a carriage return before it. Keys are the entries' line numbers, so
  *  slices built apart keep distinct keys when merged. Byte and UTF-8 Levenshtein take no settings,
- *  and window overlap takes its window widths at insert and at split.
+ *  and window overlap takes its window widths at insert and at a reshard splitting one.
  */
 #include <cstdio> // `stderr`
 
@@ -60,16 +60,16 @@ int modality_insert(sequence_verbs_t, world_t& world, int argc, char const* cons
         });
 }
 
-int modality_split(sequence_verbs_t, world_t& world, int argc, char const* const* argv) {
+int modality_reshard(sequence_verbs_t, world_t& world, int argc, char const* const* argv) {
     counts_t window_widths {.minimum_size = 0};
     std::array<flag_t, 1> const flags {{
         {"--window-widths", "bytes", "the overlap kind's window widths, as the checkpoint was built with",
          &window_widths},
     }};
-    return checkpoint_split<sequence_verbs_t>(world, argc, argv, flags,
-                                              [&](usearch_sequence_metadata_t const& metadata) {
-                                                  return sequence_geometry_t {metadata, nullptr, window_widths.view()};
-                                              });
+    return checkpoint_reshard<sequence_verbs_t>(
+        world, argc, argv, flags, [&](usearch_sequence_metadata_t const& metadata) {
+            return sequence_geometry_t {metadata, nullptr, window_widths.view()};
+        });
 }
 
 int modality_search(sequence_verbs_t, world_t& world, int argc, char const* const* argv) {

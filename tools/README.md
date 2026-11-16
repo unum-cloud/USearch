@@ -13,7 +13,7 @@ A command names a modality and its verb, like `usearch dense insert`, or a verb 
 - `sequence.cpp`, `shapes.cpp` and `geospatial.cpp` read their modality's entries and queries, and run the checkpoint verbs `world.hpp` writes once for every modality.
 - `checkpoints.cpp` implements the verbs over checkpoints of every modality, at the header and at the byte level.
 - `arrow_checkpoints.hpp` turns a checkpoint's columns into Apache Arrow fields and back, and reads and writes Arrow files and streams on paths and pipes, over the codec in `arrow_ipc.hpp`.
-- `world.hpp` declares the process group a verb runs on: its rank, its size, a barrier and a gather, and the insert, absorb, refine, split, health and search steps every modality shares.
+- `world.hpp` declares the process group a verb runs on: its rank, its size, a barrier and a gather, and the insert, refine, reshard, health and search steps every modality shares.
 - `world_local.cpp` is a world of one process, which `usearch` links.
 - `world_mpi.cpp` is the MPI world, which `usearch-mpi` links, and the only file including `<mpi.h>`.
 
@@ -24,19 +24,21 @@ The verbs are named after the C interface they call:
 - `usearch dense insert <vectors> --save <address>` creates an index, inserts a slice of one RetriEval file on a GPU or in RAM, and saves it.
   Each row is keyed by the same row of `--keys`, or by its dataset row number without one, so slices built apart keep distinct keys when merged.
   `--input` reads an Arrow file or stream in place of the RetriEval file, as [Arrow Pipes](#arrow-pipes) describes.
-- `usearch dense absorb <base> <donors>... --save <address>` loads the base, then loads and absorbs its donors one at a time, keeping their graphs rather than re-inserting their vectors, and saves the merged index.
-  Each donor reports its entries and absorb time, the nodes the closing refinement changed and how many entries a search reaches.
-- `usearch dense refine <address> --save <address>` re-selects every node's neighbors against the finished graph, pass after pass until one changes nothing or `--max-refines` passes ran.
-  With a `--connectivity` wider than the checkpoint's, the load keeps every node's stored neighbors and leaves the new slots empty, and the first pass fills them as it re-selects, so an M=32 graph becomes an M=64 one without a rebuild.
-- `usearch dense split <address> --parts N --save <manifest>` cuts one checkpoint into `N` graph-local parts and commits them as a manifest at `<manifest>`, the parts beside it.
-  The library refuses every split today with `unsupported`, and the verb reports that status and exits.
-- `usearch dense health <address>` views a checkpoint from storage and audits how many of its entries a search reaches.
+- `usearch dense refine <address> --save <address>` runs refinement rounds, each one a health check, a heal, a draw of hubs, a gather into neighborhoods and a restitch of every neighborhood, until one answers other than improved or `--max-refines` rounds ran.
+  The rounds share one plan, so every health check starts from the same root, and a loaded NVMe checkpoint's round is one pass over its parts.
+  Each round prints its neighborhoods and the widest, the links it added and dropped, the entries it changed, and the unreached and stranded islands it closed and opened with.
+  With a `--connectivity` wider than the checkpoint's, the load keeps every node's stored neighbors and leaves the new slots empty, and a round gives an entry the diverse links that lead somewhere new, so an M=32 graph widens toward an M=64 one without a rebuild.
+- `usearch dense reshard <first> <others>... --save <address>` loads every checkpoint and packs them all into the first in one call, keeping their graphs rather than re-inserting their vectors, and saves the packed index.
+  A manifest stands for its parts, so `usearch dense reshard <manifest> --save <address>` packs a split checkpoint back into one, its first part the target.
+  `usearch dense reshard <address> --parts N --save <manifest>` splits one checkpoint into `N` graph-local parts instead and commits them as a manifest at `<manifest>`, the parts beside it.
+  No walk links a moved entry in: graphs move whole, and every target closes with a round that heals what arrived or what the split left unreached; the verb reports the entries, the time, the entries those rounds changed and how many a search reaches.
+- `usearch dense health <address>` views a checkpoint from storage and checks how many of its entries a search reaches, the depths its walk took, and the entries beyond the most populated depth.
 - `usearch dense search <address> --query-vectors <path>` views a checkpoint from storage under `--residency nvme`, and loads it into RAM otherwise, then searches every row of a RetriEval file and prints each query's keys and distances, then the queries per second.
   `--traversal scan` scores every entry for the exact matches, and `--output` keeps the matches as Arrow instead of printing them.
   `--input` reads the queries from an Arrow file or stream, and `--index` names the checkpoint in place of the positional.
 - `usearch dense get --index <address> --input <path> --keys-column <name> --output <path>` retrieves every vector stored under each key of an Arrow column, and writes one `key`, `vector` row per entry, in the scalar `--outputs-dtype` names or the stored one.
   It counts the keys the index does not hold on its status line, and refuses an input none of whose keys it holds, as no row then names the column's type.
-- `usearch sequence`, `usearch shapes` and `usearch geospatial` take the same `insert`, `absorb`, `refine`, `split`, `health` and `search` verbs over texts, point clouds and observations, on one process.
+- `usearch sequence`, `usearch shapes` and `usearch geospatial` take the same `insert`, `refine`, `reshard`, `health` and `search` verbs over texts, point clouds and observations, on one process.
   `usearch <modality> metadata <address>` is `usearch metadata <address>`.
 - `usearch metadata <address>` prints a monolith's or a manifest's nodes, parts, metric and keys, then reads its modality's metadata, picked by the metric its header names.
   `usearch metadata -` reads the checkpoint off standard input.
@@ -47,14 +49,18 @@ The verbs are named after the C interface they call:
 - `usearch import <file.arrow> <address>` lays every record batch out as one part of a checkpoint in memory, loads it into RAM through the modality its metric names, and saves it at the address.
   `--metric` refuses a file recording another metric, and names one for a file recording none.
 - `usearch recall <truth.arrow> <run.arrow> --wanted 1,10` compares two searches' `--output` files over the same queries, on any modality.
-  An entry holding a query's own key at distance zero leaves both, a run's matches stop at the largest `--wanted`, and a match within the true distance at each depth counts, so ties at the cut count either way.
+  An entry holding a query's own key at distance zero leaves both, a run's matches stop at the largest `--wanted`, and each depth d prints d-recall at the largest: the share of the true d nearest the run's matches reach within the true d-th distance, so ties at the cut count either way.
   It refuses queries that differ, and a truth shallower than the largest `--wanted`, so a self-search asks for one match more.
 
 A RAM index lives in the machine's first memory domain, and a VRAM one on device 0, or on the first ordinal `USEARCH_DEVICES` lists.
 Either way the index is one shard, so its monolith is one graph.
 
-Absorbing donors one at a time peaks at the base plus one donor, and pays one closing refinement per donor.
-One grouped `usearch_dense_absorb` naming all `k` donors refines in ⌈log₂ k⌉ rounds over every node instead, but holds every donor at once.
+One reshard naming all `k` checkpoints runs one closing round over every entry, rather than one per checkpoint, and holds every checkpoint at once.
+
+The first Ctrl-C, or a SIGTERM, stops a long command at its next barrier: `insert` and `search` between their batches, `refine` and `reshard` at the next barrier of their round, and `import` before it writes.
+The command then prints `stopped in <phase>`, saves what stands where it saves, and exits with 130; a stopped `search` writes none of its outputs, and a stopped `import` writes nothing.
+`copy` and `export` finish the file in hand and `health` runs to its end, then each exits with 130.
+A second Ctrl-C ends the process at once.
 
 ## Addresses
 
@@ -117,7 +123,7 @@ for k in $(seq 0 9); do
         --save /scratch/sift100m-$k.safegraphs
 done
 
-usearch dense absorb /scratch/sift100m-0.safegraphs $(seq -f /scratch/sift100m-%g.safegraphs 1 9) \
+usearch dense reshard /scratch/sift100m-0.safegraphs $(seq -f /scratch/sift100m-%g.safegraphs 1 9) \
     --save /scratch/sift100m.safegraphs
 usearch dense refine /scratch/sift100m.safegraphs --save /scratch/sift100m-refined.safegraphs
 usearch metadata /scratch/sift100m-refined.safegraphs
@@ -177,7 +183,7 @@ That manifest is the commit record: a run that fails anywhere leaves parts and n
 
 The result is indistinguishable from what `usearch_dense_save` writes for a sharded index, so `usearch_dense_load_ram`, `usearch_dense_load_vram` and `usearch_dense_view_nvme` all open it.
 A view and a VRAM load keep one shard per part, while a RAM load wants one memory domain named per part, as parts loaded into one domain share a shard with no links between their graphs.
-Every query walks every shard, so fewer and larger shards serve faster; a rank per GPU is the starting point that later merges compact.
+Every query walks every shard, so fewer and larger shards serve faster; a rank per GPU is the starting point that a later reshard gathers into fewer shards.
 
 GPUs are assigned to the ranks of a node in turn.
 A launcher that hands each task its own GPU, like Slurm's `--gpus-per-task 1`, leaves every rank its device 0, and the `USEARCH_DEVICES` environment variable lists the ordinals a node's ranks take otherwise.
@@ -249,8 +255,8 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 - `--metric` defaults to `angular`: `inner`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1x8`.
 - `--residency` defaults to `vram` when a GPU is listed, and `ram` otherwise.
 - `--connectivity`, `--expansion-add` and `--expansion-refine` default to the library's derivations.
-- `--max-refines` defaults to `0`: refinement passes after ingestion, stopping early once no neighbors change.
-- `--memory-limit` defaults to one storage chunk per tile: the bytes each refine may hold beyond the index, like `40G`.
+- `--max-refines` defaults to `0`: refinement rounds after ingestion, stopping early once one answers other than improved.
+- `--memory-limit` defaults to the library's derivation: the bytes a loaded NVMe checkpoint's refine holds for the one part it rewrites, like `40G`, a smaller one streaming that part's rounds from the drives; RAM and VRAM rounds size themselves from each core's cache.
 - `--batch` defaults to `65536`: entries per insertion, with two batches staged at once, so one is read while the other is indexed.
 - `--threads` defaults to what the memory domains or the devices' queues allow: executor threads.
 - `--nvme-class` and `--nvme-ram` configure a view, as for `search` below, and an insert passes them by.
@@ -259,14 +265,14 @@ Object storage joins at the edges: parts are written on a filesystem that admits
 Every verb over a checkpoint opens the same session, so it takes `--residency`, `--nvme-class`, `--threads` and `--nvme-ram` alike, and every verb that refines takes `--expansion-refine` and `--memory-limit`.
 Beyond those, the other verbs take only what they move:
 
-- `absorb` and `refine` take `--save`, and `refine` also `--max-refines`, defaulting to `1`, and `--connectivity`, defaulting to the checkpoint's and only ever widening a dense one.
+- `reshard` and `refine` take `--save`, and `refine` also `--max-refines`, defaulting to `1`, and `--connectivity`, defaulting to the checkpoint's and only ever widening a dense one.
   Both default to `--residency ram`, and a residency that cannot refine refuses.
-- `split` takes `--parts` of at least `2` and `--save` naming the manifest.
+- `reshard` also takes `--parts` of at least `2`, cutting its one checkpoint, and `--save` then names the manifest.
 - `health` defaults to `--residency nvme`, viewing the checkpoint from storage.
 - `search` takes `--wanted`, defaulting to `10`, `--expansion-search`, `--traversal`, `walk` by default or `scan`, `--batch`, and the queries in the format its modality's insert reads.
   A view also takes `--nvme-ram`, the bytes its key table may take, like `24G`: with it, key lookups and hints probe the table, and without it, the default, they refuse; the open line then counts the table's rows and bytes.
   `--matches` writes every query's top keys as a `.u128bin`: `u32` rows, `u32` columns, then one little-endian 128-bit key per column, the byte order `--keys` reads, a query matching fewer than `--wanted` repeating its last, then one `u32` count per row, so a query matching none hints none.
-  `--hints` reads such a file, one row per query, and every walk starts from the entries under its row's keys ahead of its random landmarks, so one index's matches seed another's over the same keys; a walk takes as many keys as it draws landmarks, the connectivity rounded up to whole quads, a view needs a key table for them, and sequence and geospatial refuse them; the throughput line then counts the hint keys no entry holds.
+  `--hints` reads such a file, one row per query, and every walk starts from the entries under its row's keys ahead of its random draws, so one index's matches seed another's over the same keys; a walk takes as many keys as it makes draws, the connectivity rounded up to whole quads, a view needs a key table for them, and sequence and geospatial refuse them; the throughput line then counts the hint keys no entry holds.
   Dense indexes take hints on every residency but VRAM, and shapes indexes in RAM alone.
   `--output` writes the matches as Arrow in place of printing them: one row per query, its key as `query` and its matches as `matches`, a `LargeList<Struct<key, distance>>`, the keys as `arrow.uuid` and the distances as `float64`.
   A path ending in `.arrows` and `-`, standard output, take the stream framing, and any other path the file framing; under `-` every step prints to standard error, so standard output carries only Arrow.
@@ -276,9 +282,10 @@ Beyond those, the other verbs take only what they move:
 
 The other modalities' `insert` takes the flags `dense insert` does but `--keys`, `--stored-dtype` and `--metric`, keys every entry by its number in the file, and reads its entries as the modality's benchmark does:
 
-- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under `--metric` `levenshtein`, `levenshtein-utf8` or `overlap` with its `--window-widths`; `sequence search` takes `--query-texts`, and `sequence split` takes the `--window-widths` an overlap checkpoint was built with.
+- `sequence insert <texts>` reads one entry per line, a carriage return before a newline dropped, under `--metric` `levenshtein`, `levenshtein-utf8` or `overlap` with its `--window-widths`; `sequence search` takes `--query-texts`, and `sequence reshard --parts` takes the `--window-widths` an overlap checkpoint was built with.
 - `shapes insert <points> --counts <path>` reads every cloud's points end to end, an `.fbin` or `.f16bin` of 3 columns, and the points per cloud, an `.ibin` of 1 column, under `--metric` `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`; `shapes search` takes `--query-points` and `--query-counts`.
 - `geospatial insert <observations>` reads an `.f64bin` of eleven columns per observation, and builds without a terrain; `geospatial search` takes `--query-observations`, `--relation` `near`, `sees` or `seen`, and `--radius` in metres.
 
 Every flag also reads its default from a `RETRIEVAL_` variable named after it, as the benchmarks do, so `--entries` defaults to `RETRIEVAL_ENTRIES`.
+Byte counts take `K`, `M`, `G` or `T` and an optional `B`, so `24G` and RetriEval's `24GB` read alike.
 A bad value prints one line from rank 0, like `--metric="cosine" names no metric`, and every rank exits with status 1.

@@ -2,7 +2,7 @@
  *  @file tools/shapes.cpp
  *  @author Ash Vardanian
  *  @date November 1, 2026
- *  @brief The shapes verbs: insert, absorb, refine, split, health and search, each over SafeGraphs
+ *  @brief The shapes verbs: insert, refine, reshard, health and search, each over SafeGraphs
  *      checkpoints at any address.
  *
  *  Point clouds come as the shapes benchmark reads them: the points of every cloud end to end, 3
@@ -52,9 +52,9 @@ int modality_insert(shapes_verbs_t, world_t& world, int argc, char const* const*
         });
 }
 
-int modality_split(shapes_verbs_t, world_t& world, int argc, char const* const* argv) {
-    return checkpoint_split<shapes_verbs_t>(world, argc, argv, {},
-                                            [](usearch_shapes_metadata_t const& metadata) { return metadata; });
+int modality_reshard(shapes_verbs_t, world_t& world, int argc, char const* const* argv) {
+    return checkpoint_reshard<shapes_verbs_t>(world, argc, argv, {},
+                                              [](usearch_shapes_metadata_t const& metadata) { return metadata; });
 }
 
 int modality_search(shapes_verbs_t, world_t& world, int argc, char const* const* argv) {

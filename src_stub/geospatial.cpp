@@ -23,9 +23,9 @@
  *
  *  Keeping no edges, the stand-in links every one of its entries to its exact nearest at the frozen
  *  connectivity, the lists a perfect graph would hold where the engine's are the ones it stored. A
- *  cursor walks those lists breadth-first from its start keys, a split grows its parts over them,
- *  each receiver keeping the source's storage order, and a sample walks them as the library's plan
- *  walks its graph, placing its draws as the library does.
+ *  cursor walks those lists breadth-first from its start keys, a reshard's split grows its parts
+ *  over them, each target keeping the source's storage order, and a sample walks them as the
+ *  library's plan walks its graph, placing its draws as the library does.
  */
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
 
@@ -98,10 +98,10 @@ using geospatial_index_t = handle<geospatial_payload_t, geospatial_index_options
 
 using geospatial_cursor_t = graph_cursor<geospatial_index_t>;
 
-/** Whether a receiver frozen at @p receiver takes a part of an index frozen at @p index: the same
+/** Whether a handle frozen at @p other takes entries of an index frozen at @p index: the same
  *  connectivity, since every observation is scored alike. */
-static bool same_kind(geospatial_index_options_t const& index, geospatial_index_options_t const& receiver) {
-    return index.connectivity == receiver.connectivity;
+static bool same_kind(geospatial_index_options_t const& index, geospatial_index_options_t const& other) {
+    return index.connectivity == other.connectivity;
 }
 
 /** Copies the terrain @p given into @p terrain, or fills it once through the caller's handler;
@@ -442,8 +442,7 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcom
 struct usearch_geospatial_index_handle_t : geospatial_index_t {};
 struct usearch_geospatial_cursor_handle_t : geospatial_cursor_t {};
 struct usearch_geospatial_refine_plan_handle_t : long_verb_plan<usearch_geospatial_index_handle_t> {};
-struct usearch_geospatial_absorb_plan_handle_t : long_verb_plan<usearch_geospatial_index_handle_t> {};
-struct usearch_geospatial_split_plan_handle_t : long_verb_plan<usearch_geospatial_index_handle_t> {};
+struct usearch_geospatial_reshard_plan_handle_t : long_verb_plan<usearch_geospatial_index_handle_t> {};
 
 extern "C" {
 
@@ -632,17 +631,21 @@ void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
     }
 }
 
-void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
-    if (through_executor<usearch_geospatial_refine>(arguments)) return;
+/** The body of @c usearch_geospatial_refine, which @ref through_plan_executor runs. */
+static void refine_body(usearch_geospatial_refine_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
     refine_and_report<usearch_geospatial_refine_plan_handle_t>(*arguments, *arguments->index, outcome);
 }
 
+void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
+    through_plan_executor<refine_body>(arguments);
+}
+
 void usearch_geospatial_refine_plan_finish(usearch_geospatial_refine_plan_finish_t* arguments) {
-    if (through_executor<usearch_geospatial_refine_plan_finish>(arguments)) return;
-    finish_plan<usearch_geospatial_refine_plan_handle_t>(*arguments);
+    through_plan_executor<
+        finish_plan<usearch_geospatial_refine_plan_handle_t, usearch_geospatial_refine_plan_finish_t>>(arguments);
 }
 
 void usearch_geospatial_health(usearch_geospatial_health_t* arguments) {
@@ -773,17 +776,24 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
     if (arguments->written) *arguments->written = entries.size();
 }
 
-void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
-    if (through_executor<usearch_geospatial_absorb>(arguments)) return;
+/** The body of @c usearch_geospatial_reshard, which @ref through_plan_executor runs. */
+static void reshard_body(usearch_geospatial_reshard_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->report) *arguments->report = {};
-    absorb_and_report<usearch_geospatial_absorb_plan_handle_t>(*arguments, *arguments->index, same_kind, outcome);
+    auto const recut = [](usearch_geospatial_index_handle_t&, usearch_outcome_t* refusal) {
+        return !reject_if(true, usearch_status_unsupported_k, "A handle of one shard has nothing to recut", refusal);
+    };
+    reshard_and_report<usearch_geospatial_reshard_plan_handle_t>(*arguments, chord_between, same_kind, recut, outcome);
 }
 
-void usearch_geospatial_absorb_plan_finish(usearch_geospatial_absorb_plan_finish_t* arguments) {
-    if (through_executor<usearch_geospatial_absorb_plan_finish>(arguments)) return;
-    finish_plan<usearch_geospatial_absorb_plan_handle_t>(*arguments);
+void usearch_geospatial_reshard(usearch_geospatial_reshard_t* arguments) {
+    through_plan_executor<reshard_body>(arguments);
+}
+
+void usearch_geospatial_reshard_plan_finish(usearch_geospatial_reshard_plan_finish_t* arguments) {
+    through_plan_executor<
+        finish_plan<usearch_geospatial_reshard_plan_handle_t, usearch_geospatial_reshard_plan_finish_t>>(arguments);
 }
 
 void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
@@ -806,6 +816,8 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     *arguments->written = 0;
     *arguments->keys = {};
     if (arguments->links) *arguments->links = {};
+    if (reject_if(!arguments->cursor, usearch_status_invalid_argument_k, "The cursor must not be null", outcome))
+        return;
     usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
@@ -842,20 +854,6 @@ void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
     if (through_executor<usearch_geospatial_sample>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     draw_sample(*arguments, *arguments->index, chord_between, earth_fixed_coordinates_t {}, outcome);
-}
-
-void usearch_geospatial_split(usearch_geospatial_split_t* arguments) {
-    if (through_executor<usearch_geospatial_split>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    reset(arguments->stats);
-    if (arguments->report) *arguments->report = {};
-    usearch_geospatial_index_handle_t& index = *arguments->index;
-    split_and_report<usearch_geospatial_split_plan_handle_t>(*arguments, index, chord_between, same_kind, outcome);
-}
-
-void usearch_geospatial_split_plan_finish(usearch_geospatial_split_plan_finish_t* arguments) {
-    if (through_executor<usearch_geospatial_split_plan_finish>(arguments)) return;
-    finish_plan<usearch_geospatial_split_plan_handle_t>(*arguments);
 }
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {

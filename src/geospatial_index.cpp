@@ -27,21 +27,11 @@ struct usearch_geospatial_cursor_handle_t {
 };
 
 struct usearch_geospatial_refine_plan_handle_t {
-    basic_punned_plan<usearch_geospatial_index_handle_t> punned;
+    basic_held_plan<plan_operation_t::refine_k, usearch_geospatial_index_handle_t> held;
 };
 
-struct usearch_geospatial_absorb_plan_handle_t {
-    basic_punned_plan<usearch_geospatial_index_handle_t> punned;
-
-    /** The caller's donor slots, each nulled once the plan consumed its handle. */
-    std::span<usearch_geospatial_index_t> donors;
-};
-
-struct usearch_geospatial_split_plan_handle_t {
-    basic_punned_plan<usearch_geospatial_index_handle_t> punned;
-
-    /** The caller's receivers, which the finish hands what each part counted. */
-    std::span<usearch_geospatial_index_t const> receivers;
+struct usearch_geospatial_reshard_plan_handle_t {
+    basic_held_plan<plan_operation_t::reshard_k, usearch_geospatial_index_handle_t> held;
 };
 
 extern "C" {
@@ -109,20 +99,16 @@ USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t c
 USEARCH_EXPORT void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
     basic_sample<usearch_geospatial_sample>(arguments);
 }
-USEARCH_EXPORT void usearch_geospatial_absorb(usearch_geospatial_absorb_t* arguments) {
-    basic_absorb<usearch_geospatial_absorb>(arguments);
-}
-USEARCH_EXPORT void usearch_geospatial_split(usearch_geospatial_split_t* arguments) {
-    basic_split<usearch_geospatial_split>(arguments);
+USEARCH_EXPORT void usearch_geospatial_reshard(usearch_geospatial_reshard_t* arguments) {
+    basic_reshard<usearch_geospatial_reshard, usearch_geospatial_index_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_refine_plan_finish(usearch_geospatial_refine_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_geospatial_refine_plan_finish, usearch_geospatial_refine_plan_handle_t>(arguments);
+    finish_planned<usearch_geospatial_refine_plan_finish, plan_operation_t::refine_k,
+                   usearch_geospatial_refine_plan_handle_t>(arguments);
 }
-USEARCH_EXPORT void usearch_geospatial_absorb_plan_finish(usearch_geospatial_absorb_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_geospatial_absorb_plan_finish, usearch_geospatial_absorb_plan_handle_t>(arguments);
-}
-USEARCH_EXPORT void usearch_geospatial_split_plan_finish(usearch_geospatial_split_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_geospatial_split_plan_finish, usearch_geospatial_split_plan_handle_t>(arguments);
+USEARCH_EXPORT void usearch_geospatial_reshard_plan_finish(usearch_geospatial_reshard_plan_finish_t* arguments) {
+    finish_planned<usearch_geospatial_reshard_plan_finish, plan_operation_t::reshard_k,
+                   usearch_geospatial_reshard_plan_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
     basic_save<usearch_geospatial_save>(arguments);

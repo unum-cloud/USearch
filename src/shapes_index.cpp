@@ -26,21 +26,11 @@ struct usearch_shapes_cursor_handle_t {
 };
 
 struct usearch_shapes_refine_plan_handle_t {
-    basic_punned_plan<usearch_shapes_index_handle_t> punned;
+    basic_held_plan<plan_operation_t::refine_k, usearch_shapes_index_handle_t> held;
 };
 
-struct usearch_shapes_absorb_plan_handle_t {
-    basic_punned_plan<usearch_shapes_index_handle_t> punned;
-
-    /** The caller's donor slots, each nulled once the plan consumed its handle. */
-    std::span<usearch_shapes_index_t> donors;
-};
-
-struct usearch_shapes_split_plan_handle_t {
-    basic_punned_plan<usearch_shapes_index_handle_t> punned;
-
-    /** The caller's receivers, which the finish hands what each part counted. */
-    std::span<usearch_shapes_index_t const> receivers;
+struct usearch_shapes_reshard_plan_handle_t {
+    basic_held_plan<plan_operation_t::reshard_k, usearch_shapes_index_handle_t> held;
 };
 
 extern "C" {
@@ -107,20 +97,16 @@ USEARCH_EXPORT void usearch_shapes_cursor_free(usearch_shapes_cursor_t cursor) {
 USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
     basic_sample<usearch_shapes_sample>(arguments);
 }
-USEARCH_EXPORT void usearch_shapes_absorb(usearch_shapes_absorb_t* arguments) {
-    basic_absorb<usearch_shapes_absorb>(arguments);
-}
-USEARCH_EXPORT void usearch_shapes_split(usearch_shapes_split_t* arguments) {
-    basic_split<usearch_shapes_split>(arguments);
+USEARCH_EXPORT void usearch_shapes_reshard(usearch_shapes_reshard_t* arguments) {
+    basic_reshard<usearch_shapes_reshard, usearch_shapes_index_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_refine_plan_finish(usearch_shapes_refine_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_shapes_refine_plan_finish, usearch_shapes_refine_plan_handle_t>(arguments);
+    finish_planned<usearch_shapes_refine_plan_finish, plan_operation_t::refine_k, usearch_shapes_refine_plan_handle_t>(
+        arguments);
 }
-USEARCH_EXPORT void usearch_shapes_absorb_plan_finish(usearch_shapes_absorb_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_shapes_absorb_plan_finish, usearch_shapes_absorb_plan_handle_t>(arguments);
-}
-USEARCH_EXPORT void usearch_shapes_split_plan_finish(usearch_shapes_split_plan_finish_t* arguments) {
-    finish_basic_plan<usearch_shapes_split_plan_finish, usearch_shapes_split_plan_handle_t>(arguments);
+USEARCH_EXPORT void usearch_shapes_reshard_plan_finish(usearch_shapes_reshard_plan_finish_t* arguments) {
+    finish_planned<usearch_shapes_reshard_plan_finish, plan_operation_t::reshard_k,
+                   usearch_shapes_reshard_plan_handle_t>(arguments);
 }
 USEARCH_EXPORT void usearch_shapes_save(usearch_shapes_save_t* arguments) {
     basic_save<usearch_shapes_save>(arguments);

@@ -30,7 +30,7 @@
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfe_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
-#include <numkong/capabilities.h>     // `nk_capability_t`, `nk_cpu_configure_thread` - compute masks, AMX grant
+#include <numkong/capabilities.h>     // `nk_capability_t`, `nk_configure_thread_cpu` - compute masks, AMX grant
 #include <stringzilla/capabilities.h> // `sz_capability_t` - the basic modalities' kit masks
 #include <numkong/vector.hpp>         // `nk::vector_view` - the rows a value lookup resolves
 
@@ -451,8 +451,13 @@ using dense::insert_config_t;
 using dense::refine_config_t;
 using dense::search_config_t;
 
-/** A split's knobs as the C layer lowers them: its refine's, and the seed ordering the parts. */
-struct split_config_t {
+/** What a reshard asks beside its handles, as the C layer lowers it: the placement a handle recut
+ *  in place takes, each @c NULL to keep its own, the closing rounds' spending, and the seed a
+ *  split draws its part roots from. */
+struct reshard_options_t {
+    usearch_ram_options_t const* ram = nullptr;
+    usearch_vram_options_t const* vram = nullptr;
+    usearch_nvme_options_t const* nvme = nullptr;
     refine_config_t refine {};
     u64_t seed = 0;
 };
@@ -462,8 +467,8 @@ inline refine_config_t refine_config_of(usearch_refine_options_t options) noexce
     return {static_cast<candidates_count_t>(options.expansion_factor), options.memory_limit};
 }
 
-/** The variants behind a call's other handles, a split's receivers or an absorb's donors, read
- *  through the caller's own array, so a verb builds its one typed list straight from them. */
+/** The variants behind a reshard's sources or targets, read through the caller's own array, so a
+ *  verb builds its one typed list straight from them. */
 struct variants_view_t {
     void const* handles = nullptr;
     std::size_t count = 0;
@@ -519,6 +524,12 @@ inline usearch_reachability_t reachability_of(audit_type_ const& audit) noexcept
 /** Writes what a refinement @p refined counts into the caller's @p report, if it names one. */
 template <typename refined_type_>
 inline void write_refine_report(usearch_refine_report_t* report, refined_type_ const& refined) noexcept {
+    // Every engine verdict is valued as its C spelling, as the phases are.
+    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::none_k) == usearch_refine_none_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::improved_k) == usearch_refine_improved_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::converged_k) == usearch_refine_converged_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::stalled_k) == usearch_refine_stalled_k);
+    static_assert(static_cast<usearch_refine_verdict_t>(refine_verdict_t::stopped_k) == usearch_refine_stopped_k);
     if (!report) return;
     report->reselected = refined.reselected_nodes;
     report->changed = refined.changed_nodes;
@@ -801,7 +812,7 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
     case cpu_class_t::apple_m4_k:
         return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_sme_k | nk_cap_smebi32_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_neonfp8_k;
-    case cpu_class_t::monoversioned_k: return nk_cpu_capabilities_compiled_();
+    case cpu_class_t::monoversioned_k: return nk_capabilities_compiled_cpu_mask();
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
     case cpu_class_t::ibm_power10_k: return nk_cap_serial_k | nk_cap_powervsx_k | nk_cap_powermma_k;
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
@@ -1297,7 +1308,7 @@ using cpu_ladder_t = cpu_ladder<cpu_class_t::serial_k>;
  *  under a pin below its one class. */
 inline expected<cpu_ceiling_t> pick_cpu_ceiling(usearch_cpu_class_t pinned) noexcept {
     cpu_ceiling_t ceiling;
-    if (nk_cpu_capabilities_enabled(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
+    if (nk_capabilities_enabled_cpu(&ceiling.compute) != nk_success_k) ceiling.compute = nk_cap_serial_k;
     if (sz_capabilities_enabled_cpu(&ceiling.strings) != sz_success_k) ceiling.strings = sz_cap_serial_k;
     ceiling.sync = fu::cpu_capabilities();
     if (pinned != usearch_cpu_class_unknown_k && !listed(cpu_classes_k, pinned))
@@ -1804,20 +1815,16 @@ using deferred_arguments_t = std::variant< //
     usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t, //
 
     /* Refining */
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,             //
-    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
-    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
-    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
-    usearch_geospatial_split_t, usearch_dense_reshard_t,                                                       //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_reshard_t,                //
+    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_reshard_t,       //
+    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_reshard_t,             //
+    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_reshard_t, //
 
     /* Plans */
-    usearch_dense_refine_plan_finish_t, usearch_dense_absorb_plan_finish_t, usearch_dense_split_plan_finish_t,    //
-    usearch_dense_reshard_plan_finish_t,                                                                          //
-    usearch_sequence_refine_plan_finish_t, usearch_sequence_absorb_plan_finish_t,                                 //
-    usearch_sequence_split_plan_finish_t,                                                                         //
-    usearch_shapes_refine_plan_finish_t, usearch_shapes_absorb_plan_finish_t, usearch_shapes_split_plan_finish_t, //
-    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_absorb_plan_finish_t,                             //
-    usearch_geospatial_split_plan_finish_t,                                                                       //
+    usearch_dense_refine_plan_finish_t, usearch_dense_reshard_plan_finish_t,           //
+    usearch_sequence_refine_plan_finish_t, usearch_sequence_reshard_plan_finish_t,     //
+    usearch_shapes_refine_plan_finish_t, usearch_shapes_reshard_plan_finish_t,         //
+    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_reshard_plan_finish_t, //
 
     /* Reading */
     usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
@@ -1862,8 +1869,8 @@ inline named_calls_t raise_named_calls(arguments_type_ const& arguments) noexcep
     if constexpr (requires { arguments.target->named_calls; }) name(arguments.target);
     if constexpr (requires { arguments.cursor->named_calls; }) name(arguments.cursor);
     // A finish frees its plan mid-call, so only a verb continuing a live one names it.
-    if constexpr (requires { (*arguments.plan)->punned.named_calls; })
-        if (arguments.plan && *arguments.plan) name(&(*arguments.plan)->punned);
+    if constexpr (requires { (*arguments.plan)->held.named_calls; })
+        if (arguments.plan && *arguments.plan) name(&(*arguments.plan)->held);
     if constexpr (requires { arguments.arena->named_calls; }) name(arguments.arena);
     return named;
 }
@@ -1917,7 +1924,7 @@ struct usearch_executor_handle_t {
  *  would rewrite FPCR. */
 inline void request_tile_state(cpu_ceiling_t ceiling) noexcept {
     if (!(ceiling.compute & nk_cap_sapphireamx_k)) return;
-    [[maybe_unused]] nk_status_t const requested = nk_cpu_configure_thread(nk_cap_sapphireamx_k);
+    [[maybe_unused]] nk_status_t const requested = nk_configure_thread_cpu(nk_cap_sapphireamx_k);
 }
 
 /** Discovers the topology and spawns @p threads over it into @p handle under @p ceiling, near the
@@ -2585,7 +2592,7 @@ inline void await_delegated_call(usearch_executor_handle_t& executor) noexcept {
 }
 
 /** Returns once no call naming the handle that owns @p named_calls is left: what every free and
- *  every consumed donor waits for. */
+ *  every reshard accepting the handle waits for. */
 inline void wait_named_calls(u32_t const& named_calls) noexcept { host_outcome_verbs().wait_named(&named_calls); }
 
 /** Ends the call holding @p executor: its handle counts, the executor claim, then its status. A
@@ -2660,107 +2667,172 @@ inline void wait_while_claimed(usearch_executor_handle_t& executor) noexcept {
 
 #pragma region Plans
 
-/** The unit each phase of a round counts, by its ordinal: none past the round, then the opening
- *  health check, the heal, hubs, gather, restitch and the closing health check. */
-inline constexpr std::array<char const*, 7> round_phase_units_k {"",        "entries", "islands", "entries",
-                                                                 "entries", "entries", "entries"};
-
-/** Where an engine's resumable @p plan stands; one that names no phase of a round reports none. */
+/** The C spelling of where an engine's @p plan stands. */
 template <typename plan_type_>
-usearch_phase_t phase_of(plan_type_ const& plan) noexcept {
-    if constexpr (!requires { plan.ordinal(); }) return {};
-    else {
-        std::size_t const ordinal = plan.ordinal();
-        return {plan.phase_name(), ordinal,      round_phase_units_k.size() - 1,
-                plan.completed(),  plan.total(), round_phase_units_k[ordinal]};
-    }
+usearch_phase_progress_t phase_of(plan_type_ const& plan) noexcept {
+    // Every engine phase is valued as its C spelling, so a reorder on either side fails to compile.
+    static_assert(static_cast<usearch_phase_t>(phase_t::none_k) == usearch_phase_none_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::copy_k) == usearch_phase_copy_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::build_k) == usearch_phase_build_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::partition_k) == usearch_phase_partition_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::scatter_k) == usearch_phase_scatter_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::health_k) == usearch_phase_health_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::heal_k) == usearch_phase_heal_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::hubs_k) == usearch_phase_hubs_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::gather_k) == usearch_phase_gather_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::restitch_k) == usearch_phase_restitch_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::write_k) == usearch_phase_write_k);
+    static_assert(static_cast<usearch_phase_t>(phase_t::done_k) == usearch_phase_done_k);
+    return {static_cast<usearch_phase_t>(plan.phase()), plan.ordinal(), plan.completed(), plan.total()};
 }
 
-/** Whether @p phase names a plan whose round ended, and nothing more is pending. */
-inline bool round_ended(usearch_phase_t const& phase) noexcept {
-    return phase.name && std::string_view {phase.name} == "done";
+/** The entries one residency's tables give every plan of one operation, over its engine plan
+ *  behind a @c void*. */
+template <typename executor_type_>
+struct plan_verbs {
+
+    /** Runs the plan's phases until its round ends or @p ticks cancels. */
+    status_t (*run)(void* plan, executor_type_& executor, progress_ticks_t& ticks) noexcept;
+
+    /** Opens the next round, from the same root, once the last one ended. */
+    void (*next_round)(void* plan) noexcept;
+    usearch_phase_progress_t (*phase)(void const* plan) noexcept;
+
+    /** What the plan did to the graph so far. */
+    refine_report_t (*running)(void const* plan) noexcept;
+
+    /** Closes the round a cancel stopped as a stop at that barrier would, and reports the whole
+     *  plan; a plan still moving entries runs no round and reports zeros. */
+    expected<refine_report_t> (*finish)(void* plan, executor_type_& executor) noexcept;
+    void (*free)(void* plan) noexcept;
+};
+
+/** One opened engine plan as one call drives it: its operation's entries, and the plan they
+ *  serve. */
+template <typename executor_type_>
+struct punned_plan {
+    plan_verbs<executor_type_> const& verbs;
+    void* plan;
+};
+
+/**
+ *  @brief Runs one call of a long verb on @p plan: starts a live one's next round once its last one
+ *      ended, then runs it until it ends or @p ticks cancels, and answers its report so far beside
+ *      how the call ended.
+ *
+ *  @p phase, when named, hears where the plan stopped; a cancel heard at the barrier closing a
+ *  round answers success, since the round had ended.
+ */
+template <typename executor_type_>
+expected<refine_report_t> drive_plan(punned_plan<executor_type_> plan, executor_type_& executor,
+                                     progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
+    if (plan.verbs.phase(plan.plan).phase == usearch_phase_done_k) plan.verbs.next_round(plan.plan);
+    status_t ran = plan.verbs.run(plan.plan, executor, ticks);
+    usearch_phase_progress_t const reached = plan.verbs.phase(plan.plan);
+    if (ran == status_t::cancelled_k && reached.phase == usearch_phase_done_k) ran = status_t::success_k;
+    if (phase) *phase = reached;
+    return {plan.verbs.running(plan.plan), ran};
+}
+
+/** Drives @p plan once through @ref drive_plan, then closes and frees it, so a cancel still closes
+ *  its round and reports beside @c cancelled_k; the path every call naming no plan takes. */
+template <typename executor_type_>
+expected<refine_report_t> drive_plan_once(punned_plan<executor_type_> plan, executor_type_& executor,
+                                          progress_ticks_t& ticks, usearch_phase_progress_t* phase) noexcept {
+    expected<refine_report_t> const driven = drive_plan(plan, executor, ticks, phase);
+    expected<refine_report_t> const finished = succeeded(driven.status) || driven.status == status_t::cancelled_k
+                                                   ? plan.verbs.finish(plan.plan, executor)
+                                                   : driven;
+    plan.verbs.free(plan.plan);
+    return {finished.value, failed(finished.status) ? finished.status : driven.status};
+}
+
+/** The two operations a plan handle serves, each through its own table entries. */
+enum class plan_operation_t : u8_t { refine_k, reshard_k };
+
+/** The entries of @p verbs serving plans of @p operation_. */
+template <plan_operation_t operation_, typename verbs_type_>
+plan_verbs<typename verbs_type_::executor_t> const& plan_verbs_of(verbs_type_ const& verbs) noexcept {
+    if constexpr (operation_ == plan_operation_t::refine_k) return verbs.refine_plan;
+    else return verbs.reshard_plan;
 }
 
 /**
- *  @brief One variant's engine plan behind a C plan handle, the table whose entries step, read and
- *      free it, and the index and executor it was opened with.
+ *  @brief What a C plan handle of @p operation_ holds: the table of the variant it was opened on,
+ *      its engine plan, and the index and executor it was opened with.
  *
- *  The engine plan keeps its index closed until it is freed, which waits out the executor calls
+ *  The engine plan keeps its handles closed until it is freed, which waits out the executor calls
  *  naming the handle first.
  */
-template <typename index_handle_type_, typename tables_type_>
-struct punned_plan {
+template <plan_operation_t operation_, typename index_handle_type_, typename tables_type_>
+struct held_plan {
     tables_type_ tables;
 
     /** The variant's engine plan, opened by the call that made the handle and freed with it. */
     void* engine_plan = nullptr;
 
-    /** The handle and executor the plan was opened with, only ever compared with the ones each call
-     *  passes. */
+    /** The handle a refine plan was opened on and the executor any plan was opened with, only ever
+     *  compared with the ones each call passes; a reshard names no one handle. */
     index_handle_type_ const* opened_on = nullptr;
     usearch_executor_t opened_with = nullptr;
 
     /** Executor calls naming the plan that have not ended. */
     u32_t named_calls = 0;
 
-    punned_plan() noexcept = default;
-    punned_plan(punned_plan const&) = delete;
-    punned_plan& operator=(punned_plan const&) = delete;
-    ~punned_plan() noexcept {
+    held_plan() noexcept = default;
+    held_plan(held_plan const&) = delete;
+    held_plan& operator=(held_plan const&) = delete;
+    ~held_plan() noexcept {
         wait_named_calls(named_calls);
-        if (engine_plan) std::visit([&](auto const* verbs) noexcept { verbs->plan_free(engine_plan); }, tables);
+        if (engine_plan)
+            std::visit([&](auto const* verbs) noexcept { plan_verbs_of<operation_>(*verbs).free(engine_plan); },
+                       tables);
     }
 };
 
 /** Whether the call @p arguments describe may take the plan it names: none, a null one with an
- *  executor to outlive it, or a live one opened on the same index and executor; false once
- *  @p outcome records why not. */
+ *  executor to outlive it, or a live one opened with the same executor and, for a refine, on the
+ *  same index; false once @p outcome records why not. */
 template <typename arguments_type_>
 bool accepts_plan(arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
     if (!arguments.plan) return true;
     if (!arguments.executor)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "A plan needs an executor that outlives it");
-    if (*arguments.plan && (arguments.index != (*arguments.plan)->punned.opened_on ||
-                            arguments.executor != (*arguments.plan)->punned.opened_with))
-        return propagate_error(usearch_status_invalid_argument_k, outcome,
-                               "The plan was opened on another index or executor");
+    if (!*arguments.plan) return true;
+    if (arguments.executor != (*arguments.plan)->held.opened_with)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan was opened with another executor");
+    if constexpr (requires { arguments.index; })
+        if (arguments.index != (*arguments.plan)->held.opened_on)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan was opened on another index");
     return true;
 }
 
 /**
- *  @brief Runs one call of a long verb on @p plan: opens one through @p open while it is null, or
- *      starts a live one's next round once its last one ended, then runs it until it ends or
- *      @p ticks cancels, and answers its report so far beside how the call ended.
+ *  @brief Runs one call of a long verb through the plan slot @p planned on @p opened, and answers
+ *      the report beside how the call ended.
  *
- *  @p open fills the handle it is handed with what its operation keeps beside the engine plan, and
- *  answers that plan's state or why none opened, leaving @p plan null and nothing allocated. A plan
- *  stays live whatever the call answers, until its operation's finish frees it. @p phase, when
- *  named, hears where the plan stopped; a cancel heard at the barrier closing a round answers
- *  success, since the round had ended.
+ *  @p opened is the slot's live engine plan or the one this call opened: a live one continues, a
+ *  fresh one is adopted into a null slot, and a call naming no slot drives a one-shot plan. A
+ *  failed @p opened answers its status, leaving the slot null. A plan in a slot stays live
+ *  whatever the call answers, until its operation's finish frees it.
  */
-template <typename handle_type_, typename index_handle_type_, typename verbs_type_, typename executor_type_,
-          typename open_type_>
-expected<refine_report_t> drive_plan(handle_type_*& plan, usearch_phase_t* phase, index_handle_type_ const* index,
-                                     usearch_executor_t executor_handle, verbs_type_ const& verbs, void* variant,
-                                     executor_type_& executor, progress_ticks_t& ticks, open_type_&& open) noexcept {
-    if (!plan) {
-        handle_type_* const opened = new (std::nothrow) handle_type_ {};
-        if (!opened) return {{}, status_t::bad_alloc_k};
-        opened->punned.tables = &verbs;
-        opened->punned.opened_on = index;
-        opened->punned.opened_with = executor_handle;
-        expected<void*> const state = open(*opened);
-        if (failed(state.status)) return delete opened, expected<refine_report_t> {{}, state.status};
-        opened->punned.engine_plan = state.value;
-        plan = opened;
-    }
-    void* const state = plan->punned.engine_plan;
-    if (round_ended(verbs.plan_phase(state))) verbs.plan_next_round(state);
-    status_t ran = verbs.plan_next(variant, state, executor, ticks);
-    usearch_phase_t const reached = verbs.plan_phase(state);
-    if (ran == status_t::cancelled_k && round_ended(reached)) ran = status_t::success_k;
-    if (phase) *phase = reached;
-    return {verbs.plan_running(state), ran};
+template <typename handle_type_, typename executor_type_, typename tables_type_, typename index_handle_type_>
+expected<refine_report_t> drive_planned(handle_type_** planned, plan_verbs<executor_type_> const& verbs,
+                                        tables_type_ tables, index_handle_type_ const* index,
+                                        usearch_executor_t executor_handle, executor_type_& executor,
+                                        progress_ticks_t& ticks, usearch_phase_progress_t* phase,
+                                        expected<void*> opened) noexcept {
+    if (failed(opened.status)) return {{}, opened.status};
+    if (planned && *planned) return drive_plan({verbs, opened.value}, executor, ticks, phase);
+    if (!planned) return drive_plan_once({verbs, opened.value}, executor, ticks, phase);
+    handle_type_* const held = new (std::nothrow) handle_type_ {};
+    if (!held) return verbs.free(opened.value), expected<refine_report_t> {{}, status_t::bad_alloc_k};
+    held->held.tables = tables;
+    held->held.engine_plan = opened.value;
+    held->held.opened_on = index;
+    held->held.opened_with = executor_handle;
+    *planned = held;
+    return drive_plan({verbs, opened.value}, executor, ticks, phase);
 }
 
 /** Writes what a long verb's @p refined result counts into the outputs @p arguments name, and
@@ -2782,6 +2854,71 @@ inline void reset_refined(arguments_type_ const& arguments) noexcept {
     if (arguments.stats) *arguments.stats = {};
     if (arguments.report) *arguments.report = {};
     if (arguments.phase) *arguments.phase = {};
+}
+
+/** Whether the @p count handles of @p handles name each one once; false once @p outcome records
+ *  which list named one twice. */
+template <typename handle_type_>
+bool names_each_once(handle_type_ const* handles, std::size_t count, char const* refusal,
+                     usearch_outcome_t* outcome) noexcept {
+    for (std::size_t position = 1; position < count; ++position)
+        for (std::size_t earlier = 0; earlier != position; ++earlier)
+            if (handles[earlier] == handles[position])
+                return propagate_error(usearch_status_invalid_argument_k, outcome, refusal);
+    return true;
+}
+
+/** Whether a reshard's @p arguments name its lists well enough to open a plan: some sources and
+ *  some targets, none null, and none named twice in one list; false once @p outcome records why
+ *  not. A call continuing a live plan passes unread, since the plan holds its own handles. */
+template <typename arguments_type_>
+bool accepts_reshard_lists(arguments_type_ const& arguments, usearch_outcome_t* outcome) noexcept {
+    if (arguments.plan && *arguments.plan) return true;
+    if (!arguments.sources_count || !arguments.sources || !arguments.targets_count || !arguments.targets)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "A reshard needs sources and targets");
+    for (std::size_t position = 0; position != arguments.sources_count; ++position)
+        if (!arguments.sources[position])
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "A source must not be null");
+    for (std::size_t position = 0; position != arguments.targets_count; ++position)
+        if (!arguments.targets[position])
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "A target must not be null");
+    if (!names_each_once(arguments.sources, arguments.sources_count, "A source is named twice", outcome) ||
+        !names_each_once(arguments.targets, arguments.targets_count, "A target is named twice", outcome))
+        return false;
+    return true;
+}
+
+/** Closes the plan @p arguments name and frees it, whatever the call answers, reporting what the
+ *  whole plan did; one finish per long verb, each over its own plan handle. */
+template <auto verb_, plan_operation_t operation_, typename plan_handle_type_, typename arguments_type_>
+void finish_planned(arguments_type_* arguments) noexcept {
+    if (submitted<verb_>(arguments)) return;
+    call_outcome_t outcome(*arguments);
+    if (arguments->report) *arguments->report = {};
+    // A plan dying unfinished reopens its handles.
+    std::unique_ptr<plan_handle_type_> const plan {arguments->plan};
+    if (!plan) return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan must not be null"), void();
+    if (arguments->executor != plan->held.opened_with)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan was opened with another executor"),
+               void();
+    if constexpr (requires { arguments->index; })
+        if (arguments->index != plan->held.opened_on)
+            return propagate_error(usearch_status_invalid_argument_k, outcome, "The plan was opened on another index"),
+                   void();
+    std::visit(
+        [&]<typename verbs_type_>(verbs_type_ const* verbs) noexcept {
+            using executor_t = typename verbs_type_::executor_t;
+            executor_t* const executor = residency_executor<executor_t>(*arguments->executor);
+            if (!executor)
+                return propagate_error(usearch_status_device_k, outcome,
+                                       "The executor's kind must match the handle's residency"),
+                       void();
+            auto const [refined, status] = plan_verbs_of<operation_>(*verbs).finish(plan->held.engine_plan, *executor);
+            if (failed(status)) return propagate_error(status, outcome), void();
+            write_refine_report(arguments->report, refined);
+            propagate_error(usearch_status_success_k, outcome, nullptr);
+        },
+        plan->held.tables);
 }
 
 #pragma endregion Plans

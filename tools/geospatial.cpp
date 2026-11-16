@@ -2,8 +2,8 @@
  *  @file tools/geospatial.cpp
  *  @author Ash Vardanian
  *  @date November 1, 2026
- *  @brief The geospatial verbs: insert, absorb, refine, split, health and search, each over
- *      SafeGraphs checkpoints at any address.
+ *  @brief The geospatial verbs: insert, refine, reshard, health and search, each over SafeGraphs
+ *      checkpoints at any address.
  *
  *  Observations and queries come as the geospatial benchmark reads them: an <tt>.f64bin</tt> of
  *  eleven columns per observation, in the field order of @c usearch_geospatial_observation_t.
@@ -56,8 +56,8 @@ int modality_insert(geospatial_verbs_t, world_t& world, int argc, char const* co
         });
 }
 
-int modality_split(geospatial_verbs_t, world_t& world, int argc, char const* const* argv) {
-    return checkpoint_split<geospatial_verbs_t>(
+int modality_reshard(geospatial_verbs_t, world_t& world, int argc, char const* const* argv) {
+    return checkpoint_reshard<geospatial_verbs_t>(
         world, argc, argv, {},
         [](usearch_geospatial_metadata_t const& metadata) { return geospatial_geometry_t {metadata, {}}; });
 }

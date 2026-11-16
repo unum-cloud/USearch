@@ -47,7 +47,7 @@
 #include <type_traits>      // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
 #include <unordered_map>    // `std::unordered_map`, `std::unordered_multimap`
 #include <unordered_set>    // `std::unordered_set` - a sample region's visits
-#include <utility>          // `std::exchange` - a consumed donor's slot
+#include <utility>          // `std::move`
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
 
@@ -265,21 +265,16 @@ using call_arguments_t = std::variant< //
     usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_insert_t, //
 
     /* Refining */
-    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_absorb_t, usearch_dense_split_t,             //
-    usearch_dense_reshard_t,                                                                                   //
-    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_absorb_t, usearch_sequence_split_t, //
-    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_absorb_t, usearch_shapes_split_t,         //
-    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_absorb_t,                     //
-    usearch_geospatial_split_t,                                                                                //
+    usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_reshard_t,                //
+    usearch_sequence_refine_t, usearch_sequence_health_t, usearch_sequence_reshard_t,       //
+    usearch_shapes_refine_t, usearch_shapes_health_t, usearch_shapes_reshard_t,             //
+    usearch_geospatial_refine_t, usearch_geospatial_health_t, usearch_geospatial_reshard_t, //
 
     /* Plans */
-    usearch_dense_refine_plan_finish_t, usearch_dense_absorb_plan_finish_t, usearch_dense_split_plan_finish_t,    //
-    usearch_dense_reshard_plan_finish_t,                                                                          //
-    usearch_sequence_refine_plan_finish_t, usearch_sequence_absorb_plan_finish_t,                                 //
-    usearch_sequence_split_plan_finish_t,                                                                         //
-    usearch_shapes_refine_plan_finish_t, usearch_shapes_absorb_plan_finish_t, usearch_shapes_split_plan_finish_t, //
-    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_absorb_plan_finish_t,                             //
-    usearch_geospatial_split_plan_finish_t,                                                                       //
+    usearch_dense_refine_plan_finish_t, usearch_dense_reshard_plan_finish_t,           //
+    usearch_sequence_refine_plan_finish_t, usearch_sequence_reshard_plan_finish_t,     //
+    usearch_shapes_refine_plan_finish_t, usearch_shapes_reshard_plan_finish_t,         //
+    usearch_geospatial_refine_plan_finish_t, usearch_geospatial_reshard_plan_finish_t, //
 
     /* Reading */
     usearch_dense_search_t, usearch_dense_search_stream_next_t, usearch_dense_count_t, usearch_dense_get_t,      //
@@ -373,6 +368,17 @@ bool through_executor(arguments_* arguments) {
     call_t call {executor, copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); },
                  handles_used_by(*arguments)};
     return run_holding(std::move(call), arguments->outcome), true;
+}
+
+/** A long verb's @ref through_executor: its copy keeps the executor, so @p body_, which never
+ *  routes again, checks it against a live plan's and records it in a plan it opens. */
+template <auto body_, typename arguments_>
+void through_plan_executor(arguments_* arguments) {
+    executor_t* const executor = arguments->executor;
+    if (!executor) return body_(arguments);
+    call_t call {executor, *arguments, [](void* erased) { body_(static_cast<arguments_*>(erased)); },
+                 handles_used_by(*arguments)};
+    run_holding(std::move(call), arguments->outcome);
 }
 
 /** Claims @p arena for the call whose outcome is @p call and rewinds it, which frees the previous
@@ -764,6 +770,9 @@ struct handle {
     /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
     usearch_residency_t residency = usearch_residency_ram_k;
 
+    /** Whether an NVMe view holds no key table, refusing key lookups as the engine's does. */
+    bool keyless = false;
+
     /** The plan holding the handle closed to insertions, saves and other long verbs until it
      *  finishes, or null; read and written under @c mutex. */
     void const* plan = nullptr;
@@ -802,11 +811,11 @@ struct handle {
         entries.push_back({key, std::move(payload)});
     }
 
-    /** Appends a copy of every entry of @p donor, answering whether the memory came; nothing lands
+    /** Appends a copy of every entry of @p source, answering whether the memory came; nothing lands
      *  when it did not. */
-    bool append_entries_of(handle const& donor) {
-        if (!accommodate(entries.size() + donor.entries.size())) return false;
-        for (entry<payload_> const& moved : donor.entries) append(moved.key, moved.payload);
+    bool append_entries_of(handle const& source) {
+        if (!accommodate(entries.size() + source.entries.size())) return false;
+        for (entry<payload_> const& moved : source.entries) append(moved.key, moved.payload);
         return true;
     }
 
@@ -826,7 +835,7 @@ struct handle {
 
 /**
  *  @brief Refuses a batch that would carry any key past @p values_per_key entries, as the tape
- *      modalities' headers promise. A zeroed bound derives to one, so keys stay unique.
+ *      modalities' headers promise. A zeroed bound is none.
  *
  *  The whole batch is refused rather than the offending entry, since a smaller retry cannot help,
  *  and the count spans both the entries already stored and the duplicates the batch itself brings.
@@ -834,13 +843,13 @@ struct handle {
 template <typename handle_>
 bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::size_t count,
                            std::size_t values_per_key, usearch_outcome_t* outcome) {
-    std::size_t const bound = values_per_key ? values_per_key : 1;
+    if (!values_per_key) return false;
     std::unordered_map<uuid128_t, std::size_t> admitted;
     for (std::size_t offset = 0; offset != count; ++offset) {
         uuid128_t const key = uuid_of(key_at(keys, offset));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
-        if (reject_if(held > bound, usearch_status_overflow_k, "A key would hold more entries than the index admits",
-                      outcome))
+        if (reject_if(held > values_per_key, usearch_status_overflow_k,
+                      "A key would hold more entries than the index admits", outcome))
             return true;
     }
     return false;
@@ -937,6 +946,9 @@ struct matches_outputs_t {
 inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
                          matches_outputs_t& outputs, usearch_outcome_t* outcome) {
     outputs.wanted = wanted;
+    if (reject_if(wanted && count > (std::numeric_limits<std::size_t>::max)() / wanted, usearch_status_overflow_k,
+                  "Room for every query's wanted matches would wrap", outcome))
+        return false;
     return (outputs.keys = carve<usearch_key_t>(arena, count * wanted, outcome)) &&
            (outputs.scores = carve<usearch_distance_t>(arena, count * wanted, outcome)) &&
            (outputs.counts = carve<std::size_t>(arena, count, outcome));
@@ -1691,28 +1703,27 @@ void draw_sample(arguments_ const& arguments, handle_& index, score_ const& scor
 #pragma region Plans
 
 /**
- *  @brief The stand-in's plan of one long verb: the donors it still moves or the receivers it
- *      moved into, and how far its round got.
+ *  @brief The stand-in's plan of one long verb: the handles it holds closed, and how far the
+ *      round it runs has gone.
  *
- *  Its index, and a split's receivers, admit no insertion, save or other long verb until it
- *  finishes. The stand-in's round is one sweep over every entry, standing in the gather, the fourth
- *  of six phases, until it ends. An exact scan keeps no edges, so the round re-stitches nothing and
- *  the graph is always settled.
+ *  Every handle it names admits no insertion, save or other long verb until it finishes. The
+ *  stand-in's round is one sweep over every entry, standing in the gather, the fourth of six
+ *  phases, until it ends. An exact scan keeps no edges, so the round re-stitches nothing and the
+ *  graph is always settled.
  */
 template <typename handle_>
 struct long_verb_plan {
+    using handle_t = handle_;
 
-    /** The handle the plan was opened on, which a finish reopens. */
+    /** The handle a refine plan was opened on, which each call and its finish name again; a
+     *  reshard names none. */
     handle_* opened_on = nullptr;
 
-    /** The caller's donor slots, each nulled once consumed, and how many of them were. */
-    handle_** donors = nullptr;
-    std::size_t donors_count = 0;
-    std::size_t consumed = 0;
+    /** The executor the plan was opened with, which each call and its finish name again. */
+    executor_t const* opened_with = nullptr;
 
-    /** The receivers a split moved into, which a finish reopens. */
-    handle_* const* receivers = nullptr;
-    std::size_t receivers_count = 0;
+    /** Every handle the plan holds closed, which a finish reopens. */
+    std::vector<handle_*> closed;
 
     /** Entries the round's sweep visited so far, and the entries it sweeps. */
     std::size_t swept = 0;
@@ -1738,33 +1749,37 @@ inline void report_round(usearch_refine_report_t* report, std::size_t entries, s
                                        : usearch_refine_converged_k;
 }
 
-/** Refuses a call naming a live @p plan opened on another index than @p index. */
-template <typename handle_, typename plan_handle_>
-bool reject_foreign_plan(handle_ const& index, plan_handle_* const* plan, usearch_outcome_t* outcome) {
-    return plan && *plan &&
-           reject_if((*plan)->opened_on != &index, usearch_status_invalid_argument_k,
-                     "The plan was opened on another index", outcome);
-}
-
-/** The plan a long verb's call drives on @p index, the caller holding its mutex: the live one
- *  @p plan names, a copy of @p one_shot opened into its null pointee and holding @p index closed,
- *  or @p one_shot itself without a @p plan; null after refusing, as while a plan holds the index
- *  closed to a call opening one or running without one, or when the memory did not come. */
+/** The plan a long verb's call drives: the live one @p plan names, a copy of @p one_shot opened
+ *  into its null pointee and holding every handle it closes, or @p one_shot itself without a
+ *  @p plan; null after refusing, as while a plan holds one of those handles, or when the memory did
+ *  not come. The caller holds the mutex of every handle @p one_shot closes. */
 template <typename plan_handle_, typename handle_>
-long_verb_plan<handle_>* plan_of_call(handle_& index, plan_handle_** plan, long_verb_plan<handle_>& one_shot,
+long_verb_plan<handle_>* plan_of_call(plan_handle_** plan, long_verb_plan<handle_>& one_shot,
                                       usearch_outcome_t* outcome) {
     if (plan && *plan) return *plan;
-    if (reject_refining(index, outcome)) return nullptr;
+    for (handle_* closing : one_shot.closed)
+        if (reject_refining(*closing, outcome)) return nullptr;
     if (!plan) return &one_shot;
     plan_handle_* const opened = new (std::nothrow) plan_handle_ {one_shot};
     if (reject_if(!opened, usearch_status_out_of_memory_k, "The plan could not be allocated", outcome)) return nullptr;
-    index.plan = opened;
+    for (handle_* closing : one_shot.closed) closing->plan = opened;
     return *plan = opened;
 }
 
-/** Sweeps the round of @p plan on from where its last call stopped, then reports it, and for a
- *  call naming a plan writes the phase it stopped in. The handler stops a plan's round only short
- *  of its end, while a one-shot round answers any cancel. */
+/** Refuses a @c plan that the executor of @p arguments cannot drive: any plan without an
+ *  executor, or a live one opened with another. */
+template <typename arguments_>
+bool reject_plan_executor(arguments_ const& arguments, usearch_outcome_t* outcome) {
+    if (!arguments.plan) return false;
+    return reject_if(!arguments.executor, usearch_status_invalid_argument_k,
+                     "A plan needs an executor that outlives it", outcome) ||
+           reject_if(*arguments.plan && (*arguments.plan)->opened_with != arguments.executor,
+                     usearch_status_invalid_argument_k, "The plan was opened with another executor", outcome);
+}
+
+/** Sweeps the round of @p plan on from where its last call stopped, then reports it and writes
+ *  the phase it stopped in. The handler stops a plan's round only short of its end, while a
+ *  one-shot round answers any cancel. */
 template <typename arguments_, typename handle_>
 void sweep_round(arguments_ const& arguments, long_verb_plan<handle_>& plan, usearch_outcome_t* outcome) {
     bool cancelled = false;
@@ -1772,8 +1787,9 @@ void sweep_round(arguments_ const& arguments, long_verb_plan<handle_>& plan, use
         cancelled = !keep_going(arguments.progress, ++plan.swept, plan.entries);
     bool const ended = plan.swept == plan.entries;
     if (arguments.stats) arguments.stats->visited_members = plan.entries;
-    if (arguments.plan && arguments.phase)
-        *arguments.phase = {ended ? "done" : "gather", ended ? 0u : 4u, 6, plan.swept, plan.entries, "entries"};
+    if (arguments.phase)
+        *arguments.phase = {ended ? usearch_phase_done_k : usearch_phase_gather_k, ended ? 0u : 4u, plan.swept,
+                            plan.entries};
     report_round(arguments.report, plan.entries, plan.swept, min_of(plan.moved, plan.swept));
     reject_if(cancelled && (!arguments.plan || !ended), usearch_status_cancelled_k,
               "The caller's handler stopped the round", outcome);
@@ -1785,78 +1801,32 @@ void sweep_round(arguments_ const& arguments, long_verb_plan<handle_>& plan, use
 template <typename plan_handle_, typename arguments_, typename handle_>
 void refine_and_report(arguments_ const& arguments, handle_& index, usearch_outcome_t* outcome) {
     if (arguments.phase) *arguments.phase = {};
-    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments.plan, outcome)) return;
+    if (reject_plan_executor(arguments, outcome) || reject_read_only(index, outcome)) return;
+    if (arguments.plan && *arguments.plan &&
+        reject_if((*arguments.plan)->opened_on != &index, usearch_status_invalid_argument_k,
+                  "The plan was opened on another index", outcome))
+        return;
     std::unique_lock writers(index.mutex);
-    long_verb_plan<handle_> one_shot {.opened_on = &index};
-    long_verb_plan<handle_>* const refining = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
+    long_verb_plan<handle_> one_shot {.opened_on = &index, .opened_with = arguments.executor, .closed = {&index}};
+    long_verb_plan<handle_>* const refining = plan_of_call(arguments.plan, one_shot, outcome);
     if (!refining) return;
     if (refining->swept == refining->entries) refining->swept = 0, refining->entries = index.entries.size();
     sweep_round(arguments, *refining, outcome);
 }
 
-/** The body of every modality's @c absorb: moves each donor still pending in whole, consuming its
- *  slot, then sweeps the closing round, each moved entry one whose links changed. A live plan reads
- *  its own donors, never the call's. */
-template <typename plan_handle_, typename arguments_, typename handle_, typename same_kind_>
-void absorb_and_report(arguments_ const& arguments, handle_& index, same_kind_ const& same_kind,
-                       usearch_outcome_t* outcome) {
-    if (arguments.phase) *arguments.phase = {};
-    if (reject_read_only(index, outcome) || reject_foreign_plan(index, arguments.plan, outcome)) return;
-    bool const opening = !arguments.plan || !*arguments.plan;
-    if (opening && reject_if(arguments.count && !arguments.donors, usearch_status_invalid_argument_k,
-                             "The donors must name handles", outcome))
-        return;
-    for (std::size_t position = 0; opening && position != arguments.count; ++position)
-        if (reject_if(!arguments.donors[position], usearch_status_invalid_argument_k, "A donor must not be null",
-                      outcome) ||
-            reject_if(arguments.donors[position] == &index, usearch_status_config_mismatch_k,
-                      "An index cannot absorb itself", outcome) ||
-            reject_if(!same_kind(index.options, arguments.donors[position]->options), usearch_status_config_mismatch_k,
-                      "A donor of another kind or geometry is refused", outcome))
-            return;
-    std::unique_lock writers(index.mutex);
-    long_verb_plan<handle_> one_shot {.opened_on = &index, .donors = arguments.donors, .donors_count = arguments.count};
-    long_verb_plan<handle_>* const absorbing = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
-    if (!absorbing) return;
-    // Each donor moves in whole and is consumed at once, its slot nulled, so a failure leaves it
-    // and every later one live handles the caller still owns and must free.
-    for (; absorbing->consumed != absorbing->donors_count; ++absorbing->consumed) {
-        handle_& donor = *absorbing->donors[absorbing->consumed];
-        if (reject_if(!index.append_entries_of(donor), usearch_status_out_of_memory_k,
-                      "The donor's entries could not be accommodated", outcome))
-            return;
-        absorbing->moved += donor.entries.size();
-        delete std::exchange(absorbing->donors[absorbing->consumed], nullptr);
-    }
-    absorbing->entries = index.entries.size();
-    sweep_round(arguments, *absorbing, outcome);
+/** Whether every one of @p handles is a distinct, non-null handle; false once @p outcome records
+ *  the refusal of a null one or of one named twice. */
+template <typename handle_>
+bool names_each_once(std::span<handle_* const> handles, char const* null_refusal, char const* twice_refusal,
+                     usearch_outcome_t* outcome) {
+    for (std::size_t position = 0; position != handles.size(); ++position)
+        if (reject_if(!handles[position], usearch_status_invalid_argument_k, null_refusal, outcome) ||
+            reject_if(std::find(handles.begin(), handles.begin() + static_cast<std::ptrdiff_t>(position),
+                                handles[position]) != handles.begin() + static_cast<std::ptrdiff_t>(position),
+                      usearch_status_invalid_argument_k, twice_refusal, outcome))
+            return false;
+    return true;
 }
-
-/** The body of every @c <operation>_plan_finish: reopens the plan's index and receivers and
- *  reports its round as it stands, or zeros while donors are still pending; the plan is freed
- *  whatever the call answers. */
-template <typename plan_handle_, typename arguments_>
-void finish_plan(arguments_ const& arguments) {
-    deferred_outcome_t outcome(arguments.outcome);
-    if (arguments.report) *arguments.report = {};
-    std::unique_ptr<plan_handle_> const plan {arguments.plan};
-    if (reject_if(!plan, usearch_status_invalid_argument_k, "The plan must not be null", outcome)) return;
-    for (std::size_t position = 0; position != plan->receivers_count; ++position) {
-        std::unique_lock receiving(plan->receivers[position]->mutex);
-        if (plan->receivers[position]->plan == plan.get()) plan->receivers[position]->plan = nullptr;
-    }
-    std::unique_lock writers(plan->opened_on->mutex);
-    plan->opened_on->plan = nullptr;
-    if (reject_if(arguments.index != plan->opened_on, usearch_status_invalid_argument_k,
-                  "The plan was opened on another index", outcome) ||
-        plan->consumed != plan->donors_count)
-        return;
-    report_round(arguments.report, plan->entries, plan->swept, min_of(plan->moved, plan->swept));
-}
-
-#pragma endregion Plans
-
-#pragma region Splitting
 
 /** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
  *  seed's stream, so equal seeds draw split roots in one order and distinct seeds in others. */
@@ -1914,88 +1884,129 @@ std::vector<std::size_t> partition_nodes(handle_ const& index, std::size_t parts
     return part_of;
 }
 
-/**
- *  @brief Moves every entry of @p index into @p receivers, part @c p of @ref partition_nodes
- *      moving to receiver @c p in storage order, and empties @p index; false once @p outcome
- *      records why not, having moved nothing.
- *
- *  Every receiver must be a distinct, empty handle other than @p index whose options
- *  @p same_kind accepts beside the source's. Keeping no edges, a part loses none to rebase.
- */
-template <typename handle_, typename receiver_, typename score_, typename same_kind_>
-bool split_into(handle_& index, std::span<receiver_* const> receivers, u64_t seed, score_ const& score,
-                same_kind_ const& same_kind, usearch_outcome_t* outcome) {
-    if (reject_read_only(index, outcome)) return false;
-    if (reject_if(receivers.size() < 2, usearch_status_invalid_argument_k, "A split needs two receivers or more",
-                  outcome))
-        return false;
-    for (std::size_t position = 0; position != receivers.size(); ++position) {
-        receiver_* const receiver = receivers[position];
-        if (reject_if(!receiver, usearch_status_invalid_argument_k, "A receiver must not be null", outcome) ||
-            reject_if(static_cast<handle_ const*>(receiver) == &index, usearch_status_config_mismatch_k,
-                      "An index cannot split into itself", outcome) ||
-            reject_if(std::find(receivers.begin(), receivers.begin() + static_cast<std::ptrdiff_t>(position),
-                                receiver) != receivers.begin() + static_cast<std::ptrdiff_t>(position),
-                      usearch_status_config_mismatch_k, "A receiver is named twice", outcome))
-            return false;
-    }
-    std::unique_lock source(index.mutex);
-    if (reject_refining(index, outcome)) return false;
-    std::vector<std::unique_lock<std::shared_mutex>> held;
-    for (receiver_* receiver : receivers) {
-        held.emplace_back(receiver->mutex);
-        if (reject_refining(*receiver, outcome)) return false;
-        if (reject_if(!receiver->entries.empty() || static_cast<bool>(receiver->served),
-                      usearch_status_config_mismatch_k, "A receiver must be an empty, mutable handle", outcome) ||
-            reject_if(!same_kind(index.options, receiver->options), usearch_status_config_mismatch_k,
-                      "A receiver must share the index's kind and geometry", outcome))
-            return false;
-    }
-    std::vector<std::size_t> const part_of = partition_nodes(index, receivers.size(), seed, score);
-    std::vector<std::size_t> sizes(receivers.size(), 0);
+/** Moves every entry of @p source into @p targets, part @c p of @ref partition_nodes moving to
+ *  target @c p in storage order, and empties @p source; false once @p outcome records why not,
+ *  having moved nothing. Keeping no edges, a part loses none to rebase. */
+template <typename handle_, typename score_>
+bool cut_into(handle_& source, std::span<handle_* const> targets, u64_t seed, score_ const& score,
+              usearch_outcome_t* outcome) {
+    std::vector<std::size_t> const part_of = partition_nodes(source, targets.size(), seed, score);
+    std::vector<std::size_t> sizes(targets.size(), 0);
     for (std::size_t part : part_of) ++sizes[part];
-    for (std::size_t part = 0; part != receivers.size(); ++part)
-        if (reject_if(!receivers[part]->accommodate(sizes[part]), usearch_status_out_of_memory_k,
-                      "A receiver could not accommodate its part", outcome))
+    for (std::size_t part = 0; part != targets.size(); ++part)
+        if (reject_if(!targets[part]->accommodate(sizes[part]), usearch_status_out_of_memory_k,
+                      "A target could not accommodate its part", outcome))
             return false;
     for (std::size_t entry = 0; entry != part_of.size(); ++entry)
-        receivers[part_of[entry]]->append(index.entries[entry].key, std::move(index.entries[entry].payload));
-    index.reset();
+        targets[part_of[entry]]->append(source.entries[entry].key, std::move(source.entries[entry].payload));
+    source.reset();
     return true;
 }
 
-/** The body of every modality's @c split: moves the entries as @ref split_into does, then sweeps
- *  the closing round over every receiver, each entry one whose links moved; a live plan moves
- *  nothing more and sweeps on where its last call stopped. */
-template <typename plan_handle_, typename arguments_, typename handle_, typename score_, typename same_kind_>
-void split_and_report(arguments_ const& arguments, handle_& index, score_ const& score, same_kind_ const& same_kind,
-                      usearch_outcome_t* outcome) {
+/**
+ *  @brief The body of every modality's @c reshard: moves the entries of the sources into the
+ *      targets, then sweeps the closing round over every target, each moved entry one whose links
+ *      changed; a live plan moves nothing more and sweeps on where its last call stopped.
+ *
+ *  Several sources pack into the one target among them or into an empty one, one source splits
+ *  among several empty targets as @ref partition_nodes parts it, and one handle as its only source
+ *  and target recuts in place through @p recut, which answers false once it refused. Every handle
+ *  stays the caller's; a source the targets do not name ends empty.
+ */
+template <typename plan_handle_, typename arguments_, typename score_, typename same_kind_, typename recut_>
+void reshard_and_report(arguments_ const& arguments, score_ const& score, same_kind_ const& same_kind,
+                        recut_ const& recut, usearch_outcome_t* outcome) {
+    using handle_t = typename plan_handle_::handle_t;
     if (arguments.phase) *arguments.phase = {};
-    if (reject_foreign_plan(index, arguments.plan, outcome)) return;
-    bool const opening = !arguments.plan || !*arguments.plan;
-    std::span<handle_* const> const receivers {arguments.receivers, arguments.receivers ? arguments.count : 0};
-    if (opening && (reject_if(arguments.count && !arguments.receivers, usearch_status_invalid_argument_k,
-                              "The receivers must name handles", outcome) ||
-                    !split_into(index, receivers, arguments.seed, score, same_kind, outcome)))
+    if (reject_plan_executor(arguments, outcome)) return;
+    if (arguments.plan && *arguments.plan) return sweep_round(arguments, **arguments.plan, outcome);
+    std::span<handle_t* const> const sources {arguments.sources, arguments.sources ? arguments.sources_count : 0};
+    std::span<handle_t* const> const targets {arguments.targets, arguments.targets ? arguments.targets_count : 0};
+    if (reject_if(sources.empty() || targets.empty(), usearch_status_invalid_argument_k,
+                  "A reshard needs sources and targets", outcome) ||
+        !names_each_once(sources, "A source must not be null", "A source is named twice", outcome) ||
+        !names_each_once(targets, "A target must not be null", "A target is named twice", outcome))
         return;
-    std::unique_lock writers(index.mutex);
-    long_verb_plan<handle_> one_shot {.opened_on = &index,
-                                      .receivers = receivers.data(),
-                                      .receivers_count = receivers.size()};
-    long_verb_plan<handle_>* const splitting = plan_of_call<plan_handle_>(index, arguments.plan, one_shot, outcome);
-    if (!splitting) return;
-    if (opening) {
-        for (handle_* receiver : receivers) {
-            std::unique_lock receiving(receiver->mutex);
-            splitting->entries += receiver->entries.size();
-            if (arguments.plan) receiver->plan = splitting;
-        }
-        splitting->moved = splitting->entries;
+    std::vector<handle_t*> named {sources.begin(), sources.end()};
+    for (handle_t* target : targets)
+        if (std::find(sources.begin(), sources.end(), target) == sources.end()) named.push_back(target);
+    for (handle_t* handle : named)
+        if (reject_read_only(*handle, outcome) ||
+            reject_if(!same_kind(sources.front()->options, handle->options), usearch_status_config_mismatch_k,
+                      "Every handle must share the first source's kind and geometry", outcome))
+            return;
+    if (reject_if(sources.size() > 1 && targets.size() > 1, usearch_status_unsupported_k,
+                  "Several sources pack into one target only", outcome))
+        return;
+    // Locking in address order keeps two reshards over the same handles from deadlocking.
+    std::vector<handle_t*> ordered = named;
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<std::unique_lock<std::shared_mutex>> writers;
+    for (handle_t* handle : ordered) writers.emplace_back(handle->mutex);
+    for (handle_t* handle : named)
+        if (reject_refining(*handle, outcome)) return;
+    long_verb_plan<handle_t> one_shot {.opened_with = arguments.executor, .closed = named};
+    if (sources.size() == 1 && targets.size() == 1 && sources.front() == targets.front()) {
+        if (!recut(*sources.front(), outcome)) return;
+        one_shot.entries = sources.front()->entries.size();
     }
-    sweep_round(arguments, *splitting, outcome);
+    else if (targets.size() == 1) {
+        handle_t& target = *targets.front();
+        bool const sourced = std::find(sources.begin(), sources.end(), &target) != sources.end();
+        if (reject_if(!sourced && !target.entries.empty(), usearch_status_config_mismatch_k,
+                      "A target must be a source or empty", outcome))
+            return;
+        for (handle_t* source : sources) {
+            if (source == &target) continue;
+            if (reject_if(!target.append_entries_of(*source), usearch_status_out_of_memory_k,
+                          "A source's entries could not be accommodated", outcome))
+                return;
+            one_shot.moved += source->entries.size();
+            source->reset();
+        }
+        one_shot.entries = target.entries.size();
+    }
+    else {
+        if (reject_if(std::find(targets.begin(), targets.end(), sources.front()) != targets.end(),
+                      usearch_status_config_mismatch_k, "A source split into several targets cannot be one of them",
+                      outcome))
+            return;
+        for (handle_t* target : targets)
+            if (reject_if(!target->entries.empty(), usearch_status_config_mismatch_k,
+                          "A target must be a source or empty", outcome))
+                return;
+        if (!cut_into(*sources.front(), targets, arguments.seed, score, outcome)) return;
+        for (handle_t* target : targets) one_shot.entries += target->entries.size();
+        one_shot.moved = one_shot.entries;
+    }
+    long_verb_plan<handle_t>* const resharding = plan_of_call(arguments.plan, one_shot, outcome);
+    if (!resharding) return;
+    sweep_round(arguments, *resharding, outcome);
 }
 
-#pragma endregion Splitting
+/** The body of every @c <operation>_plan_finish: reopens every handle the plan holds closed and
+ *  reports its round as it stands; the plan is freed whatever the call answers. */
+template <typename plan_handle_, typename arguments_>
+void finish_plan(arguments_* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (arguments->report) *arguments->report = {};
+    std::unique_ptr<plan_handle_> const plan {arguments->plan};
+    if (reject_if(!plan, usearch_status_invalid_argument_k, "The plan must not be null", outcome)) return;
+    for (typename plan_handle_::handle_t* closed : plan->closed) {
+        std::unique_lock writers(closed->mutex);
+        if (closed->plan == plan.get()) closed->plan = nullptr;
+    }
+    if (reject_if(arguments->executor != plan->opened_with, usearch_status_invalid_argument_k,
+                  "The plan was opened with another executor", outcome))
+        return;
+    if constexpr (requires { arguments->index; })
+        if (reject_if(arguments->index != plan->opened_on, usearch_status_invalid_argument_k,
+                      "The plan was opened on another index", outcome))
+            return;
+    report_round(arguments->report, plan->entries, plan->swept, min_of(plan->moved, plan->swept));
+}
+
+#pragma endregion Plans
 
 #pragma region Files
 
